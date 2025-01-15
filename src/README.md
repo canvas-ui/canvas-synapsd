@@ -1,10 +1,10 @@
-# SynapsD
+# SynapsDB
 
 Naive implementation of a bitmap-centered context-based indexing engine.  
-Main function is to:
+Main functions are to:
 
-- index all user-related events and data regardless of the source or location  
-- provide relevant data to the context user is working in(user, global/system) 
+- Index all user-related events and data regardless of the source or location  
+- Provide relevant data to the context user is working in (user, global/system) 
 - Optimize RAG workloads with contextual information
 - (At some point) Integrate into the inference engine
 
@@ -12,7 +12,7 @@ Main function is to:
 
 - LMDB
 - Roaring bitmaps
-- flexsearch for full-text-search
+- FlexSearch for full-text search
 - LanceDB
 
 ### Data pillar
@@ -23,8 +23,8 @@ Main function is to:
 - identities
 - roles
 - services
-- StoreD dataSources
-- EventD eventSources
+- stored dataSources
+- eventD eventSources
 
 ### Hashmaps
 
@@ -47,7 +47,7 @@ Main function is to:
   - `custom/<category>/<tag>` | bitmap; (custom/browser/chrome or custom/tag/work; **implicit OR**, NOT support via ! prefix)  
 - Filters
   - `date/YYYYmmdd` | bitmap; AND, OR
-  - `name/<bitmap-based-fts-test :)>` | bitmap
+  - `name/<bitmap-based-fts-test>` | bitmap
 - Nested
   - `nested/<abstraction>/<id>` | bitmap
     `data/abstraction/contact/<uuid>` | bitmap

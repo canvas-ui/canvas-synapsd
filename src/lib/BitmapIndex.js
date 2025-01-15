@@ -134,7 +134,7 @@ class BitmapIndex {
         // Load from store
         if (this.hasBitmap(key)) { return this.loadBitmap(key); }
 
-        log(`Bitmap at key ${key} found in the persistent store`);
+        log(`Bitmap at key ${key} not found in the persistent store`);
         if (!autoCreateBitmap) { return null; }
 
         let bitmap = this.createBitmap(key);
