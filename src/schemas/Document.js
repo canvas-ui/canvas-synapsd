@@ -369,4 +369,37 @@ export default class Document {
         return path.split('.').reduce((acc, part) => acc && acc[part], obj);
     }
 
+    /**
+     * Common document operations
+     */
+
+    async save() {
+        // Implement save logic here
+    }
+
+    async delete() {
+        // Implement delete logic here
+    }
+
+    async load(id) {
+        // Implement load logic here
+    }
+
+    async updateData(newData) {
+        this.data = { ...this.data, ...newData };
+        this.updated_at = new Date().toISOString();
+    }
+
+    async addPath(path) {
+        this.paths.push(path);
+    }
+
+    async removePath(path) {
+        this.paths = this.paths.filter(p => p !== path);
+    }
+
+    async clearPaths() {
+        this.paths = [];
+    }
+
 }
