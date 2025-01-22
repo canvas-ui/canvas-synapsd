@@ -7,10 +7,10 @@
   "author": "me@idnc.sk",
   "license": "AGPL-3.0-or-later",
   "dependencies": {
+    "@lancedb/lancedb": "^0.15.0",
     "date-fns": "^4.1.0",
     "debug": "^4.4.0",
     "eventemitter2": "^6.4.9",
-    "lancedb": "^0.0.1",
     "lmdb": "^3.2.2",
     "mime-types": "^2.1.35",
     "mkdirp": "^3.0.1",

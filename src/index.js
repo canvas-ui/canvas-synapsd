@@ -12,6 +12,9 @@ import Db from './backends/lmdb/index.js';
 import BitmapIndex from './lib/BitmapIndex.js';
 import VectorIndex from '@lancedb/lancedb';
 
+// Constants
+const INTERNAL_BITMAP_ID_MAX = 128*1024; // 128KB
+
 /**
  * SynapsDB
  *

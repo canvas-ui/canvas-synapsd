@@ -3,7 +3,7 @@ const require = createRequire(import.meta.url);
 const { RoaringBitmap32 } = require('roaring/RoaringBitmap32'); // Adjust the path as necessary
 
 import debug from 'debug';
-const log = debug('canvas:synapsd:bitmap');
+const log = debug('canvas:synapsdb:bitmap');
 
 class Bitmap extends RoaringBitmap32 {
     constructor(oidArrayOrBitmap = [], options = {}) {

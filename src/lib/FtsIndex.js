@@ -2,7 +2,7 @@ import { Index } from "flexsearch";
 import { promises as fs } from 'fs';
 import debug from 'debug';
 
-const log = debug('canvas:synapsd:fts');
+const log = debug('canvas:synapsdb:fts');
 
 class Fts {
 
