@@ -19,7 +19,7 @@ import VectorIndex from '@lancedb/lancedb';
  *  - Simple bitmap index with explicit AND
  * Feature index:
  *  - Simple bitmap with explicit OR, supports AND
- *  - builtin features:
+ *  - built-in features:
  *        'data/abstraction/<abstraction>'
  *        'mime/<mime>'
  *        'extension/<ext>'
@@ -54,7 +54,7 @@ class SynapsDB extends EventEmitter {
             this.#rootPath = options.path;
         }
 
-        // Support for custom caching backend(assuming it implements a Map interface)
+        // Support for custom caching backend (assuming it implements a Map interface)
         this.cache = options.cache ?? new Map();
 
         // Initialize datasets
@@ -242,7 +242,7 @@ class SynapsDB extends EventEmitter {
             res = contextBitmap.toArray();
         }
 
-        // if (filterArray.length > 0) {} // TOD
+        // if (filterArray.length > 0) {} // TODO
         if (res.length === 0) { return []; }
 
         if (options.returnMetadata) {

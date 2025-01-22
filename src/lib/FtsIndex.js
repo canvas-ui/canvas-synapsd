@@ -62,7 +62,7 @@ class Fts {
     async loadIndex() {
         const data = await this.#store.get('index');
         if (!data) {
-            console.log('No existing index found. Starting with an empty index.');
+            log('No existing index found. Starting with an empty index.');
             return;
         }
         this.index.import(data);
@@ -73,12 +73,12 @@ class Fts {
             const data = await fs.readFile(this.indexPath, 'utf8');
             const dump = JSON.parse(data);
             await this.index.import(dump);
-            console.log('Index loaded successfully');
+            log('Index loaded successfully');
         } catch (error) {
             if (error.code === 'ENOENT') {
-                console.log('No existing index found. Starting with an empty index.');
+                log('No existing index found. Starting with an empty index.');
             } else {
-                console.error('Error loading index:', error);
+                log('Error loading index:', error);
             }
         }
     }
@@ -92,9 +92,9 @@ class Fts {
         try {
             const dump = await this.index.export();
             await fs.writeFile(this.indexPath, JSON.stringify(dump));
-            console.log('Index saved successfully');
+            log('Index saved successfully');
         } catch (error) {
-            console.error('Error saving index:', error);
+            log('Error saving index:', error);
         }
     }
 }

@@ -25,7 +25,7 @@ class Db {
 
         // Parse input arguments
         if (options.open === undefined) {
-            // Lets make path a required option
+            // Let's make path a required option
             if (!options.path) { throw new Error('LMDB database path not provided'); }
 
             options = {
@@ -345,7 +345,7 @@ class Db {
             mkdirp.sync(backupPath);
             debug(`Created backup folder "${backupPath}"`);
         } catch (error) {
-            console.error(`Error occured while creating backup folder: ${error.message}`);
+            debug(`Error occurred while creating backup folder: ${error.message}`);
             throw error;
         }
 
