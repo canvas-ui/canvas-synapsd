@@ -5,7 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import { mkdirp } from 'mkdirp'
 import debugMessage from 'debug';
-const debug = debugMessage('canvas-synapsdb:backend:lmdb');
+const debug = debugMessage('canvas-synapsd:backend:lmdb');
 
 // Database backend
 import { open } from 'lmdb';

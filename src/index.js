@@ -4,7 +4,7 @@
 import EventEmitter from 'eventemitter2';
 import path from 'path';
 import debugMessage from 'debug';
-const debug = debugMessage('canvas-synapsdb');
+const debug = debugMessage('canvas-synapsd');
 
 // Includes
 import Db from './backends/lmdb/index.js';
@@ -16,7 +16,7 @@ import VectorIndex from '@lancedb/lancedb';
 const INTERNAL_BITMAP_ID_MAX = 128*1024; // 128KB
 
 /**
- * SynapsDB
+ * SynapsD
  *
  * Context index:
  *  - Simple bitmap index with explicit AND
@@ -31,7 +31,7 @@ const INTERNAL_BITMAP_ID_MAX = 128*1024; // 128KB
  *
  */
 
-class SynapsDB extends EventEmitter {
+class SynapsD extends EventEmitter {
 
     #db;
     #rootPath;
@@ -44,7 +44,7 @@ class SynapsDB extends EventEmitter {
         // TODO: Add per dataset versioning support to the underlying db backend!
     }) {
         super(options.eventEmitter);
-        debug('Initializing Canvas SynapsDB');
+        debug('Initializing Canvas SynapsD');
         debug('Options:', options);
 
         // Initialize database backend, or use provided instance
@@ -436,4 +436,4 @@ class SynapsDB extends EventEmitter {
 
 }
 
-export default SynapsDB;
+export default SynapsD;
