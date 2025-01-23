@@ -1,32 +1,9 @@
-## App config
-/server/config/**
-!/server/config/example-*.json
-!/server/config/default-*.json
-!/server/config/.keep
-
-## Portable runtimes
-/runtime/**
-!/runtime/.keep
-
-## Data directories
-/server/data/**
-/data/**
-!data/.keep
-/user/**
-!user/.keep
-
 ## Dev
 /.vscode
 /.fossil-settings
 /_SCRATCH_
 /_TODO_
 /_OLD_
-
-## Documentation
-/docs/**
-!/docs/.keep
-!/docs/ui
-!/docs/ui/*
 
 ## Logs
 *.log

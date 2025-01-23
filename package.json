@@ -1,9 +1,9 @@
 {
-  "name": "canvas-synapsdb",
-  "version": "1.0.0",
+  "name": "canvas-synapsd",
+  "version": "1.0.1",
   "main": "./src/index.js",
   "type": "module",
-  "repository": "git@github.com:canvas-ai/canvas-synapsdb.git",
+  "repository": "git@github.com:canvas-ai/canvas-synapsd.git",
   "author": "me@idnc.sk",
   "license": "AGPL-3.0-or-later",
   "dependencies": {
@@ -11,6 +11,7 @@
     "date-fns": "^4.1.0",
     "debug": "^4.4.0",
     "eventemitter2": "^6.4.9",
+    "llamaindex": "^0.8.31",
     "lmdb": "^3.2.2",
     "mime-types": "^2.1.35",
     "mkdirp": "^3.0.1",
