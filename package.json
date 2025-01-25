@@ -1,20 +1,25 @@
 {
   "name": "canvas-synapsd",
-  "version": "1.0.1",
-  "main": "./src/index.js",
+  "version": "1.0.0",
+  "description": "Canvas SynapsD - Context-based document indexing engine",
   "type": "module",
-  "repository": "git@github.com:canvas-ai/canvas-synapsd.git",
-  "author": "me@idnc.sk",
-  "license": "AGPL-3.0-or-later",
+  "main": "src/index.js",
   "dependencies": {
-    "@lancedb/lancedb": "^0.15.0",
-    "date-fns": "^4.1.0",
-    "debug": "^4.4.0",
-    "eventemitter2": "^6.4.9",
-    "llamaindex": "^0.8.31",
-    "lmdb": "^3.2.2",
-    "mime-types": "^2.1.35",
+    "date-fns": "^2.30.0",
+    "debug": "^4.3.4",
+    "flexsearch": "^0.7.31",
+    "llamaindex": "^0.0.40",
+    "lmdb": "^2.9.2",
     "mkdirp": "^3.0.1",
-    "roaring": "^2.4.0"
-  }
+    "roaring": "^3.0.4",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "scripts": {
+    "test": "jest"
+  },
+  "author": "me@idnc.sk",
+  "license": "AGPL-3.0-or-later"
 }

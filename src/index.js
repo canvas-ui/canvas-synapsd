@@ -6,29 +6,43 @@ import path from 'path';
 import debugMessage from 'debug';
 const debug = debugMessage('canvas-synapsd');
 
-// Includes
+// DB Backend
 import Db from './backends/lmdb/index.js';
+
+// Schemas
+import schemaRegistry from './schemas/SchemaRegistry.js';
+
+// Indexes
 //import FtsIndex from './lib/FtsIndex.js';
 import BitmapIndex from './lib/BitmapIndex.js';
 import VectorIndex from '@lancedb/lancedb';
 
 // Constants
-const INTERNAL_BITMAP_ID_MAX = 128*1024; // 128KB
+const INTERNAL_BITMAP_ID_MAX = 128 * 1024; // 128KB
 
 /**
  * SynapsD
  *
- * Context index:
- *  - Simple bitmap index with explicit AND
- * Feature index:
- *  - Simple bitmap with explicit OR, supports AND
- *  - built-in features:
- *        'data/abstraction/<abstraction>'
- *        'mime/<mime>'
- *        'extension/<ext>'
- *        ''
- *  - custom features: 'custom/foo/bar'
+ * ** Simple ** indexing engine for Canvas
  *
+ * Context index:
+ *  - Bitmaps with explicit AND
+ * Feature index:
+ *  - Bitmaps with explicit OR, supports AND
+ *  - built-in (validated) features:
+ *          'data/abstraction/<abstraction>'
+ *          'mime/<mime>'
+ *          'tag/<tag>'
+ *          'system/os/<os>'
+ *          'system/device/<device>'
+ *          'system/user/<user>'
+ *          'action/<action>'
+ *  - custom features:
+ *          'custom/<your/custom/feature/structure>'
+ * Filters:
+ *  - Time range
+ *  - Regexp
+ *  - Fulltext search
  */
 
 class SynapsD extends EventEmitter {
@@ -40,12 +54,12 @@ class SynapsD extends EventEmitter {
         backupOnOpen: false,
         backupOnClose: true,
         compression: true,
-        eventEmitter: {},
+        eventEmitterOptions: {},
         // TODO: Add per dataset versioning support to the underlying db backend!
     }) {
-        super(options.eventEmitter);
+        super(options.eventEmitterOptions);
         debug('Initializing Canvas SynapsD');
-        debug('Options:', options);
+        debug('DB Options:', options);
 
         // Initialize database backend, or use provided instance
         if (options.db && options.db instanceof Db) {
@@ -61,11 +75,16 @@ class SynapsD extends EventEmitter {
         this.cache = options.cache ?? new Map();
 
         // Initialize datasets
+        this.documents = this.#db.createDataset('documents');
         this.metadata = this.#db.createDataset('metadata');
         this.bitmaps = this.#db.createDataset('bitmaps');
 
         // Initialize inverted checksum index
-        this.hash2id = this.#db.createDataset('checksums');
+        this.hash2id = this.#db.createDataset('checksums'); // sha256/checksum -> id
+
+        /**
+         * Indexes
+         */
 
         // FTS index (until we move to something better)
         // For flexsearch, we should switch to Document instead of Index
@@ -106,19 +125,17 @@ class SynapsD extends EventEmitter {
         this.dChunks = this.#db.createDataset('chunks'); // Useless for now
         this.vEmbeddings = VectorIndex.connect(path.join(options.path, 'embeddings'));
 
-        // Timestamps
         this.timestamps = this.#db.createDataset('timestamps');
 
-        // Actions
     }
 
     get path() { return this.#rootPath; }
 
     /**
-     * Core index operations
+     * CRUD operations
      */
 
-    async insert(obj, contextArray = [], featureArray = []) {
+    async insertDocument(obj, contextArray = [], featureArray = []) {
         debug('Inserting object to index');
 
         // Validate and parse object
@@ -149,7 +166,29 @@ class SynapsD extends EventEmitter {
         return document.id;
     }
 
-    async update(obj, contextArray = [], featureArray = []) {
+    async hasDocument(id, contextArray = [], featureArray = []) {
+        debug(`Checking if object ID "${id}" exists in index`);
+
+        // Validate ID
+        if (!id) { throw new Error('Object ID required'); }
+
+        // Check metadata store
+        if (!this.metadata.has(id)) { return false; }
+
+        // Calculate bitmaps
+        let contextBitmap = this.bContexts.AND(contextArray);
+        let featureBitmap = this.bFeatures.OR(featureArray);
+        contextBitmap.andInPlace(featureBitmap);
+
+        // Return result
+        return !contextBitmap.isEmpty;
+    }
+
+    async getDocument(id) { }
+
+    async getDocumentMetadata(id) {}
+
+    async updateDocument(obj, contextArray = [], featureArray = []) {
         debug('Updating object in index', obj);
 
         // Validate and parse object
@@ -178,7 +217,7 @@ class SynapsD extends EventEmitter {
         return document.id;
     }
 
-    async remove(id, contextArray = [], featureArray = []) {
+    async removeDocument(id, contextArray = [], featureArray = []) {
         debug(`Removing object ${id} from bitmap indexes; Context: ${contextArray} Features: ${featureArray}`);
         let document = await this.metadata.get(id);
         if (!document) {
@@ -197,40 +236,14 @@ class SynapsD extends EventEmitter {
         return document.id;
     }
 
-    async delete(id) {
-        debug(`Deleting object ID "${id}" from index`);
-
-        const document = await this.metadata.get(id);
-        if (!document) { return false; }
-
-        // Remove checksums
-        for (const [algo, checksum] of document.checksums) {
-            await this.hash2id.del(`${algo}/${checksum}`);
-        }
-
-        // Remove bitmaps (expensive, should be optimized)
-        this.bContexts.deleteSync(id);
-        this.bFeatures.deleteSync(id);
-
-        // Remove FTS index
-        await this.fts.remove(id);
-
-        // Remove from metadata
-        await this.metadata.del(id);
-
-        // Emit event
-        this.emit('index:delete', id);
-
-        // Return document.id
-        return document.id;
-    }
+    async deleteDocument(docId) {}
 
     /**
      * Query operations
      */
 
     // timeRange query can be done using the filterArray
-    async list(contextArray = [], featureArray = [], filterArray = [], options = {}) {
+    async listDocuments(contextArray = [], featureArray = [], filterArray = [], options = {}) {
         debug(`Listing objects contextArray: ${contextArray} featureArray: ${featureArray} filterArray: ${filterArray}`);
         // Bitmap ops always return a bitmap
         let contextBitmap = this.bContexts.AND(contextArray);
@@ -257,7 +270,7 @@ class SynapsD extends EventEmitter {
             res;
     }
 
-    async find(query, contextArray = [], featureArray = [], filterArray = [], options = {}) {
+    async findDocuments(query, contextArray = [], featureArray = [], filterArray = [], options = {}) {
         debug(`Finding objects with query: ${query}`);
         let ids = await this.fts.search(query);
         if (!ids) { return []; }
@@ -298,91 +311,18 @@ class SynapsD extends EventEmitter {
         return this.getMetadata(id);
     }
 
-    async has(id, contextArray = [], featureArray = []) {
-        debug(`Checking if object ID "${id}" exists in index`);
-
-        // Validate ID
-        if (!id) { throw new Error('Object ID required'); }
-
-        // Check metadata store
-        if (!this.metadata.has(id)) { return false; }
-
-        // Calculate bitmaps
-        let contextBitmap = this.bContexts.AND(contextArray);
-        let featureBitmap = this.bFeatures.OR(featureArray);
-        contextBitmap.andInPlace(featureBitmap);
-
-        // Return result
-        return !contextBitmap.isEmpty;
+    listSchemas() {
+        return schemaRegistry.listSchemas();
     }
 
-    /**
-     * Context
-     */
-
-    async listContexts() {
-        return this.bContexts.listBitmaps();
-    }
-    async addContext(id, objectIDs) {
-        return this.bContexts.createBitmap(id, objectIDs);
+    getSchema(schemaId) {
+        return schemaRegistry.getSchema(schemaId);
     }
 
-    async getContext(id, asArray = false) {
-        let bitmap = this.bContexts.getBitmap(id);
-        if (!bitmap) { return null; }
-        return asArray ? bitmap.toArray() : bitmap;
-    }
-    async renameContext(id, newId) {
-        return this.bContexts.renameBitmap(id, newId);
-    }
-
-    async removeContext(id) {
-        return this.bContexts.deleteBitmap(id);
-    }
-
-    /**
-     * Features
-     */
-
-    async listFeatures() {
-        return this.bFeatures.listBitmaps();
-    }
-
-    async addFeature(id, objectIDs) {
-        return this.bFeatures.createBitmap(id, objectIDs);
-    }
-
-    async getFeature(id, asArray = false) {
-        let bitmap = this.bContexts.getBitmap(id);
-        if (!bitmap) { return null; }
-        return asArray ? bitmap.toArray() : bitmap;
-    }
-
-    async renameFeature(id, newId) {
-        return this.bFeatures.renameBitmap(id, newId);
-    }
-
-    async removeFeature(id) {
-        return this.bFeatures.deleteBitmap(id);
-    }
 
     /**
      * Utils
      */
-
-    get schema() { return Index.schema; }
-
-    static get schema() {
-        return {
-            id: 'integer',
-            created_at: 'string',
-            updated_at: 'string',
-            action: 'string',
-            checksums: 'map',
-            embeddings: 'array',
-            searchArray: 'array',
-        };
-    }
 
     generateObjectID() {
         let count = this.objectCount();

@@ -1,10 +1,10 @@
-# SynapsDB
+# SynapsD
 
 Naive implementation of a bitmap-centered context-based indexing engine.  
 Main functions are to:
 
 - Index all user-related events and data regardless of the source or location  
-- Provide relevant data to the context user is working in (user, global/system) 
+- Provide relevant data to the context user is working in (user, global/system)
 - Optimize RAG workloads with contextual information
 - (At some point) Integrate into the inference engine
 
@@ -44,7 +44,7 @@ Main functions are to:
   - `data/abstraction/{tab,note,file,email,...}` | bitmap
   - `mime/application/json` | bitmap
   - `data/abstraction/email/attachment` | bitmap  
-  - `custom/<category>/<tag>` | bitmap; (custom/browser/chrome or custom/tag/work; **implicit OR**, NOT support via ! prefix)  
+  - `custom/<category>/<tag>` | bitmap; (custom/browser/chrome or custom/tag/work; **implicit OR**, NOT support with ! prefix)  
 - Filters
   - `date/YYYYmmdd` | bitmap; AND, OR
   - `name/<bitmap-based-fts-test>` | bitmap

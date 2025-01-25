@@ -1,5 +1,7 @@
 'use strict';
 
+// Utils
+import { z } from 'zod';
 import {
     parseISO,
     isToday,
@@ -11,11 +13,54 @@ import {
     isThisYear,
 } from 'date-fns';
 
+import SchemaRegistry from './SchemaRegistry.js';
+
 const DOCUMENT_SCHEMA = 'data/abstraction/document';
 const DOCUMENT_SCHEMA_VERSION = '2.0';
 const DEFAULT_DOCUMENT_DATA_CHECKSUM_ALGO = 'sha1';
 const DEFAULT_DOCUMENT_DATA_TYPE = 'application/json';
 const DEFAULT_DOCUMENT_DATA_ENCODING = 'utf8';
+
+// Base document schema definition
+const documentSchema = z.object({
+    // Base
+    id: z.string().nullable(),
+    schema: z.string(),
+    schemaVersion: z.string(),
+
+    // Timestamps
+    created_at: z.string().datetime(),
+    updated_at: z.string().datetime(),
+
+    // Internal index configuration
+    index: z.object({
+        checksumAlgorithms: z.array(z.string()),
+        primaryChecksumAlgorithm: z.string(),
+        checksumFields: z.array(z.string()),
+        searchFields: z.array(z.string()),
+        embeddingFields: z.array(z.string())
+    }),
+
+    // Metadata section
+    metadata: z.object({
+        dataContentType: z.string(),
+        dataContentEncoding: z.string()
+    }).and(z.record(z.any())), // Allow additional metadata fields
+
+    checksums: z.instanceof(Map),
+    embeddings: z.array(z.any()),
+    features: z.instanceof(Map),
+    paths: z.array(z.string()),
+
+    // Document data/payload
+    data: z.record(z.any()),
+
+    // Versioning
+    parent_id: z.string().nullable(),
+    versions: z.array(z.any()),
+    version_number: z.number().int().positive(),
+    latest_version: z.number().int().positive()
+});
 
 export default class Document {
 
@@ -71,6 +116,9 @@ export default class Document {
         this.versions = options.versions ?? []; // Stored in the parent document
         this.version_number = options.version_number ?? 1;
         this.latest_version = options.latest_version ?? 1; // Stored in the parent document
+
+        // Validate the constructed document
+        this.validate();
     }
 
     update(document) {
@@ -131,75 +179,7 @@ export default class Document {
         return fieldValues;
     }
 
-    /**
-     * Checksum helpers
-     */
-
-    getChecksumAlgorithms() {
-        return this.index.checksumAlgorithms;
-    }
-
-    addChecksum(algorithm, value) {
-        if (!algorithm) { throw new Error('Checksum algorithm is not defined'); }
-        if (!value) { throw new Error('Checksum value is not defined'); }
-        this.checksums.set(algorithm, value);
-    }
-
-    getChecksum(algorithm = DEFAULT_DOCUMENT_DATA_CHECKSUM_ALGO) {
-        return this.checksums.get(algorithm);
-    }
-
-    getPrimaryChecksum() {
-        return this.checksums.get(DEFAULT_DOCUMENT_DATA_CHECKSUM_ALGO);
-    }
-
-    getPrimaryChecksumAlgorithm() {
-        return this.index.primaryChecksumAlgorithm;
-    }
-
-    removeChecksum(algorithm) {
-        this.checksums.delete(algorithm);
-    }
-
-    hasChecksum(algorithm) {
-        return this.checksums.has(algorithm);
-    }
-
-    getChecksums() {
-        return Array.from(this.checksums);
-    }
-
-    /**
-     * Feature helpers
-     */
-
-    addFeature(type, feature) {
-        this.features.set(type, feature);
-    }
-
-    addFeatureArray(features) {
-        features.forEach((type, feature) => this.features.set(type, feature));
-    }
-
-    removeFeature(feature) {
-        this.features.delete(feature);
-    }
-
-    hasFeature(feature) {
-        return this.features.has(feature);
-    }
-
-    getFeatures() {
-        return Array.from(this.features);
-    }
-
-    getFeatureArray() {
-        return Array.from(this.features).map(([type, feature]) => `${type}/${feature}`);
-    }
-
-    clearFeatures() {
-        this.features.clear();
-    }
+    
 
     /**
      * Versioning helpers
@@ -274,46 +254,12 @@ export default class Document {
     }
 
     validate() {
-        if (!this.id) { throw new Error('Document ID is not defined'); }
-        if (!Number.isInteger(this.id)) { throw new Error('Document id has to be INT32'); }
-        if (!this.schema) { throw new Error('Document schema is not defined'); }
-        if (!this.schemaVersion) { throw new Error('Document schema version is not defined'); }
-
-        if (!this.metadata) { throw new Error('Document metadata is not defined'); }
-        if (!this.metadata.dataContentType) { throw new Error('Document must have a dataContentType'); }
-        if (!this.metadata.dataContentEncoding) { throw new Error('Document must have a dataContentEncoding'); }
-
-        if (!(this.checksums instanceof Map)) { throw new Error('Document checksums must be a Map'); }
-        if (!this.checksums.has(this.index.primaryChecksumAlgorithm)) {
-            throw new Error(`Document must have a checksum for the primary algorithm: ${this.index.primaryChecksumAlgorithm}`);
-        }
-
-        if (!this.embeddings) { throw new Error('Document embeddings is not defined'); }
-        if (!this.features) { throw new Error('Document features is not defined'); }
-        if (!this.paths) { throw new Error('Document paths is not defined'); }
-
-        if (!this.data) { throw new Error('Document data is not defined'); }
-        return true; // Maybe we should stop throwing errors like this
+        return SchemaRegistry.validateDocument(this);
     }
 
     static validate(document) {
         if (!document) { throw new Error('Document is not defined'); }
-        return  document.id &&
-            Number.isInteger(document.id) &&
-            document.schema &&
-            document.schemaVersion &&
-            document.created_at &&
-            document.updated_at &&
-            document.index &&
-            document.metadata &&
-            document.metadata.dataContentType &&
-            document.metadata.dataContentEncoding &&
-            document.checksums &&
-            document.embeddings &&
-            document.features &&
-            document.paths &&
-            document.data &&
-            true || false;
+        return SchemaRegistry.validateDocument(document);
     }
 
     validateData() {
@@ -323,44 +269,19 @@ export default class Document {
         return this.isBlob();
     }
 
-
-    get schemaDefinition() {
-        return this.toJSON();
+    static get schemaDefinition() {
+        return documentSchema;
     }
 
-    // We should use a proper schema library for this
-    static get schemaDefinition() {
-        return {
-            id: 'number',
-            schema: 'string',
-            schemaVersion: 'string',
-
-            created_at: 'string',
-            updated_at: 'string',
-
-            index: 'object',
-
-            metadata: 'object',
-            checksums: 'map',
-            embeddings: 'array',
-            features: 'map',
-            paths: 'array',
-
-            data: 'object',
-
-            parent_id: 'number',
-            versions: 'array',
-            version_number: 'number',
-            latest_version: 'number',
-        };
+    get schemaDefinition() {
+        return Document.schemaDefinition;
     }
 
     isJsonDocument() {
         return this.metadata.dataContentType === 'application/json';
     }
 
-    // TODO: Fixme, this assumes everything other than a blob is stored as JSON
-    // which may not be the case
+    // TODO: Fixme, this assumes everything other than a blob is stored as JSON which may not be the case
     isBlob() {
         return this.metadata.dataContentType !== 'application/json';
     }
@@ -369,37 +290,11 @@ export default class Document {
         return path.split('.').reduce((acc, part) => acc && acc[part], obj);
     }
 
-    /**
-     * Common document operations
-     */
-
-    async save() {
-        // Implement save logic here
-    }
-
-    async delete() {
-        // Implement delete logic here
-    }
-
-    async load(id) {
-        // Implement load logic here
-    }
 
     async updateData(newData) {
         this.data = { ...this.data, ...newData };
         this.updated_at = new Date().toISOString();
     }
 
-    async addPath(path) {
-        this.paths.push(path);
-    }
-
-    async removePath(path) {
-        this.paths = this.paths.filter(p => p !== path);
-    }
-
-    async clearPaths() {
-        this.paths = [];
-    }
 
 }
