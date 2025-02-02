@@ -1,4 +1,18 @@
-import Document from '../Document.js';
+'use strict';
+
+import Document from '../BaseDocument.js';
+import { z } from 'zod';
+
+const DOCUMENT_SCHEMA = 'data/abstraction/todo';
+const schemaDefinition = Document.schemaDefinition.extend({
+    schema: z.literal(DOCUMENT_SCHEMA),
+    data: z.object({
+        title: z.string(),
+        description: z.string(),
+        dueDate: z.string().nullable(),
+        completed: z.boolean()
+    })
+});
 
 class Todo extends Document {
     constructor(options = {}) {

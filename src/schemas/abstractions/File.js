@@ -1,53 +1,19 @@
-import Document from '../Document.js';
+'use strict';
+
+import Document from '../BaseDocument.js';
 import { z } from 'zod';
 
-const FILE_SCHEMA = 'data/abstraction/file';
-
-// File-specific schema definition
-const fileSchema = Document.schemaDefinition.extend({
-    type: z.literal('file'),
+const DOCUMENT_SCHEMA = 'data/abstraction/file';
+const schemaDefinition = Document.schemaDefinition.extend({
+    schema: z.literal(DOCUMENT_SCHEMA),
     data: z.object({
+        name: z.string(),
         size: z.number().nonnegative(),
         extension: z.string(),
         path: z.string().optional()
     })
 });
 
-class File extends Document {
-    constructor(options = {}) {
-        super({
-            ...options,
-            schema: FILE_SCHEMA,
-            data: {
-                size: options.size || 0,
-                extension: options.extension || '',
-                path: options.path,
-                ...options.data
-            }
-        });
-    }
-
-    static get schemaDefinition() {
-        return fileSchema;
-    }
-
-    get schemaDefinition() {
-        return File.schemaDefinition;
-    }
-
-    updateSize(newSize) {
-        this.data.size = newSize;
-        this.updated_at = new Date().toISOString();
-    }
-
-    updateExtension(newExtension) {
-        this.data.extension = newExtension;
-        this.updated_at = new Date().toISOString();
-    }
-
-    get size() { return this.data.size; }
-    get extension() { return this.data.extension; }
-    get path() { return this.data.path; }
+export default class File extends Document {
+    constructor(options = {}) {}
 }
-
-export default File;

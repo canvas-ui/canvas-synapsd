@@ -3,17 +3,17 @@
 Naive implementation of a bitmap-centered context-based indexing engine.  
 Main functions are to:
 
-- Index all user-related events and data regardless of the source or location  
+- Index all user-related events and data
 - Provide relevant data to the context user is working in (user, global/system)
 - Optimize RAG workloads with contextual information
-- (At some point) Integrate into the inference engine
+- (At some point) Integrate into an inference engine
 
 ## Architecture
 
 - LMDB
 - Roaring bitmaps
 - FlexSearch for full-text search
-- LanceDB
+- LanceDB as the vector store
 
 ### Data pillar
 
@@ -26,10 +26,11 @@ Main functions are to:
 - stored dataSources
 - eventD eventSources
 
-### Hashmaps
+### Hashmaps / inverted indexes
 
 - KV in LMDB
 - `checksum/<algo>/<checksum>` | objectID
+- `timestamp` | objectID
 
 ### Bitmap indexes
 

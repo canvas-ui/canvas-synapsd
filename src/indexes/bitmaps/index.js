@@ -1,22 +1,31 @@
+'use strict';
+
+// Utils
 import RoaringBitmap32 from 'roaring';
-import Bitmap from './Bitmap.js';
-import { uuid12 } from './utils.js';
 import debug from 'debug';
-const log = debug('canvas:synapsdb:BitmapCollection');
+const log = debug('canvas:synapsd:bitmapIndex');
+
+// Includes
+import Bitmap from './lib/Bitmap.js';
+import BitmapCollection from './lib/BitmapCollection.js';
 
 class BitmapIndex {
 
-    constructor(store = new Map(), cache = new Map(), options = {
-        tag: uuid12(),
-        rangeMin: 0,
-        rangeMax: 4294967296, // 2^32
-    }) {
-        this.store = store;
+    constructor(backingStore = new Map(), cache = new Map(), options = {}) {
+        this.store = backingStore;
         this.cache = cache;
-        this.rangeMin = options.rangeMin;
-        this.rangeMax = options.rangeMax || 4294967296; // 2^32
-        this.tag = options.tag;
-        log(`BitmapIndex "${this.tag}" initialized with rangeMin: ${this.rangeMin}, rangeMax: ${this.rangeMax}`);
+        log(`BitmapIndex initialized`);
+    }
+
+    /**
+     * Collections
+     */
+
+    createCollection(collectionName, options = {}) {
+        if (!collectionName) { throw new Error('Collection name required'); }
+        if (!options.backingStore) { options.backingStore = this.store; }
+        if (!options.cache) { options.cache = this.cache; }
+        return new BitmapCollection(collectionName, options);
     }
 
     /**

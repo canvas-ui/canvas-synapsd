@@ -1,3 +1,5 @@
+'use strict';
+
 import {
     parseISO,
     isToday,
@@ -9,12 +11,17 @@ import {
     isThisYear,
 } from 'date-fns';
 
-// TODO
-class TimestampIndex {
+export default class TimestampIndex {
 
-    static isWithinTimeframe(dateString, timeframe) {
+    constructor(store, cache = new Map()) {
+        if (!store) { throw new Error('A Map() like store reference required'); }
+        this.store = store;
+        this.cache = cache;
+    }
+
+    static isWithinTimeFrame(dateString, timeFrameIdentifier) {
         const date = parseISO(dateString);
-        const timeframeChecks = {
+        const timeFrameChecks = {
             today: isToday,
             yesterday: isYesterday,
             thisWeek: isThisWeek,
@@ -24,9 +31,7 @@ class TimestampIndex {
             thisYear: isThisYear,
         };
 
-        return timeframeChecks[timeframe]?.(date) ?? false;
+        return timeFrameChecks[timeFrameIdentifier]?.(date) ?? false;
     }
 
 }
-
-export default TimestampIndex;

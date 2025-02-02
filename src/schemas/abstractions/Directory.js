@@ -1,25 +1,18 @@
-import Document from '../Document.js';
+'use strict';
 
-class Directory extends Document {
-    constructor(options = {}) {
-        super(options);
-        this.type = 'directory';
-        this.children = options.children || [];
-    }
+import Document from '../BaseDocument.js';
+import { z } from 'zod';
 
-    addChild(child) {
-        this.children.push(child);
-        this.updated_at = new Date().toISOString();
-    }
+const DOCUMENT_SCHEMA = 'data/abstraction/directory';
+const schemaDefinition = Document.schemaDefinition.extend({
+    schema: z.literal(DOCUMENT_SCHEMA),
+    data: z.object({
+        name: z.string(),
+        path: z.string(),
+        children: z.array(z.string())
+    })
+});
 
-    removeChild(childId) {
-        this.children = this.children.filter(child => child.id !== childId);
-        this.updated_at = new Date().toISOString();
-    }
-
-    listChildren() {
-        return this.children;
-    }
+export default class Directory extends Document {
+    constructor(options = {}) {}
 }
-
-export default Directory;

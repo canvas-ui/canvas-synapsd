@@ -13,42 +13,24 @@ import Db from './backends/lmdb/index.js';
 import schemaRegistry from './schemas/SchemaRegistry.js';
 
 // Indexes
-//import FtsIndex from './lib/FtsIndex.js';
-import BitmapIndex from './lib/BitmapIndex.js';
-import VectorIndex from '@lancedb/lancedb';
+import ChecksumIndex from './indexes/inverted/Checksum.js';
+import TimestampIndex from './indexes/inverted/Timestamp.js';
+import BitmapIndex from './indexes/bitmaps/index.js';
+import VectorIndex from './indexes/vector/index.js';
 
 // Constants
+const INTERNAL_BITMAP_ID_MIN = 0;
 const INTERNAL_BITMAP_ID_MAX = 128 * 1024; // 128KB
 
 /**
  * SynapsD
- *
- * ** Simple ** indexing engine for Canvas
- *
- * Context index:
- *  - Bitmaps with explicit AND
- * Feature index:
- *  - Bitmaps with explicit OR, supports AND
- *  - built-in (validated) features:
- *          'data/abstraction/<abstraction>'
- *          'mime/<mime>'
- *          'tag/<tag>'
- *          'system/os/<os>'
- *          'system/device/<device>'
- *          'system/user/<user>'
- *          'action/<action>'
- *  - custom features:
- *          'custom/<your/custom/feature/structure>'
- * Filters:
- *  - Time range
- *  - Regexp
- *  - Fulltext search
  */
 
 class SynapsD extends EventEmitter {
 
-    #db;
-    #rootPath;
+    #db;        // Database backend instance
+    #rootPath;  // Root path of the database
+    #status;    // Status of the database
 
     constructor(options = {
         backupOnOpen: false,
@@ -61,182 +43,276 @@ class SynapsD extends EventEmitter {
         debug('Initializing Canvas SynapsD');
         debug('DB Options:', options);
 
-        // Initialize database backend, or use provided instance
-        if (options.db && options.db instanceof Db) {
-            this.#db = options.db;
-            this.#rootPath = this.#db.path;
-        } else {
-            if (!options.path) { throw new Error('Database path required'); }
-            this.#db = new Db(options);
-            this.#rootPath = options.path;
-        }
+        this.#status = 'initializing';
 
-        // Support for custom caching backend (assuming it implements a Map interface)
+        // Initialize database backend
+        if (!options.path) { throw new Error('Database path required'); }
+        this.#db = new Db(options);
+        this.#rootPath = options.path;
+
+        // Support for custom (presumably in-memory) caching backend (assuming it implements a Map interface)
         this.cache = options.cache ?? new Map();
 
-        // Initialize datasets
-        this.documents = this.#db.createDataset('documents');
-        this.metadata = this.#db.createDataset('metadata');
-        this.bitmaps = this.#db.createDataset('bitmaps');
+        // System metadata
+        this.metadata = this.#db.createDataset('system');
 
-        // Initialize inverted checksum index
-        this.hash2id = this.#db.createDataset('checksums'); // sha256/checksum -> id
+        // Main documents dataset
+        this.documents = this.#db.createDataset('documents');
 
         /**
-         * Indexes
+         * Inverted indexes
          */
 
-        // FTS index (until we move to something better)
-        // For flexsearch, we should switch to Document instead of Index
-        // See https://github.com/nextapps-de/flexsearch?tab=readme-ov-file#document.add
-        // We should also support a separate FTS index for paths
-        /*this.fts = new FtsIndex(this.#db.createDataset('fts'), {
-            preset: 'performance',
-            tokenize: 'forward',
-            cache: true,
-        });*/
+        this.checksumIndex = new ChecksumIndex({ // sha256/checksum -> id
+            store: this.#db.createDataset('checksums'),
+            cache: this.cache,
+        });
 
-        // Bitmap indexes
-        this.bContexts = new BitmapIndex(
-            this.bitmaps.createDataset('contexts'),
+        this.timestampIndex = new TimestampIndex({ // timestamp -> id
+            store: this.#db.createDataset('timestamps'),
+            cache: this.cache,
+        });
+
+        /**
+         * Bitmap indexes
+         */
+
+        this.bitmaps = this.#db.createDataset('bitmaps');
+        this.bitmapIndex = new BitmapIndex(
+            this.bitmaps,
             this.cache,
+        );
+
+        this.contextBitmaps = this.bitmapIndex.createCollection(
+            'contexts',
+            { rangeMin: INTERNAL_BITMAP_ID_MAX + 1 }
+        );
+
+        this.featureBitmaps = this.bitmapIndex.createCollection(
+            'features',
             {
-                tag: 'contexts',
-                rangeMin: INTERNAL_BITMAP_ID_MAX
-            });
+                rangeMin: INTERNAL_BITMAP_ID_MAX + 1,
+                columnPrefixes: {
+                    'system/os': {
+                        mandatory: false,
+                    },
+                    'system/device': {
+                        mandatory: false,
+                    },
+                    'system/user': {
+                        mandatory: false,
+                    },
+                    'data/abstraction': {
+                        mandatory: true,
+                    },
+                    'data/encoding': {
+                        mandatory: false,
+                    },
+                    'data/mime/type': {
+                        mandatory: false,
+                    },
+                    'custom': {
+                        mandatory: false,
+                    },
+                    'tag': { // Maybe should be under custom/tag instead?
+                        mandatory: false,
+                    },
+                }
+            }
+        );
 
-        this.bFeatures = new BitmapIndex(
-            this.bitmaps.createDataset('features'),
-            this.cache,
+        this.filterBitmaps = this.bitmapIndex.createCollection(
+            'filters',
+        );
+
+        this.actionBitmaps = this.bitmapIndex.createCollection(
+            'actions',
             {
-                tag: 'features',
-                rangeMin: INTERNAL_BITMAP_ID_MAX
-            });
+                columnPrefixes: {
+                    'index/action/insert': {
+                        mandatory: false,
+                    },
+                    'index/action/update': {
+                        mandatory: false,
+                    },
+                    'index/action/remove': {
+                        mandatory: false,
+                    },
+                    'index/action/delete': {
+                        mandatory: false,
+                    },
+                }
+            }
+        );
 
-        this.bFilters = new BitmapIndex(
-            this.bitmaps.createDataset('filters'),
-            this.cache,
-            {
-                tag: 'filters',
-                rangeMin: INTERNAL_BITMAP_ID_MAX
-            });
+        /**
+         * Vector store backend (LanceDB)
+         */
 
-        // RAG
-        this.dChunks = this.#db.createDataset('chunks'); // Useless for now
-        this.vEmbeddings = VectorIndex.connect(path.join(options.path, 'embeddings'));
+        this.vectorStore = null;
 
-        this.timestamps = this.#db.createDataset('timestamps');
+        /**
+         * Filters
+         */
 
     }
+
+    /**
+     * Service
+     */
+
+    async start() {
+        this.#status = 'running';
+    }
+
+    async shutdown() {
+        try {
+            this.#status = 'shutting down   ';
+            await this.#db.close();
+            this.#status = 'shutdown';
+            debug('SynapsD database closed');
+        } catch (error) {
+            this.#status = 'error';
+            throw error;
+        }
+    }
+
+    /**
+     * Getters
+     */
 
     get path() { return this.#rootPath; }
 
+    get stats() {
+        return {
+            // TODO: Implement
+        };
+    }
+
+    get counts() {
+        return {
+            documents: this.#documentCount(),
+        };
+    }
+
+    get status() { return this.#status; }
+
     /**
-     * CRUD operations
+     * Stateful transactions (used by Contexts)
      */
 
-    async insertDocument(obj, contextArray = [], featureArray = []) {
-        debug('Inserting object to index');
+    createTransaction() {}
 
-        // Validate and parse object
-        await this.#validateObject(obj);
-        const document = this.#parseDocument(obj);
+    commitTransaction() {}
 
-        // Insert document to metadata store
-        await this.metadata.put(document.id, document);
+    abortTransaction() {}
 
-        // Update checksum index
-        for (const [algo, checksum] of document.checksums) {
-            await this.#insertChecksum(algo, checksum, document.id);
-        }
 
-        // Update bitmaps
-        this.bContexts.tickManySync(contextArray, document.id);
-        this.bFeatures.tickManySync(featureArray, document.id);
+    /**
+     * CRUD :: Single document operations
+     */
 
-        // Update FTS index
-        await this.fts.insert(document.id, document.searchArray);
+    async insertDocument(document, contextArray = [], featureArray = []) {
+        // Validate document
+        this.validateDocument(document);
 
-        debug('Object inserted to index:', document);
-
-        // Emit event
-        this.emit('index:insert', document.id);
-
-        // Return document.id
-        return document.id;
     }
 
     async hasDocument(id, contextArray = [], featureArray = []) {
-        debug(`Checking if object ID "${id}" exists in index`);
+    }
 
-        // Validate ID
-        if (!id) { throw new Error('Object ID required'); }
-
-        // Check metadata store
-        if (!this.metadata.has(id)) { return false; }
-
-        // Calculate bitmaps
-        let contextBitmap = this.bContexts.AND(contextArray);
-        let featureBitmap = this.bFeatures.OR(featureArray);
-        contextBitmap.andInPlace(featureBitmap);
-
-        // Return result
-        return !contextBitmap.isEmpty;
+    async hasDocumentByChecksum(checksum) {
     }
 
     async getDocument(id) { }
 
-    async getDocumentMetadata(id) {}
+    async getDocumentByChecksum(checksum) { }
 
-    async updateDocument(obj, contextArray = [], featureArray = []) {
-        debug('Updating object in index', obj);
+    async getMetadata(id) { }
 
-        // Validate and parse object
-        await this.#validateObject(obj);
-        const document = this.#parseDocument(obj);
+    async getMetadataByChecksum(checksum) { }
 
-        // Update document in metadata
-        await this.metadata.put(document.id, document);
+    async updateDocument(document, contextArray = [], featureArray = []) {
 
-        // Update checksum index
-        for (const [algo, checksum] of document.checksums) {
-            await this.#insertChecksum(algo, checksum, document.id);
-        }
-
-        // Update bitmaps
-        this.bContexts.tickManySync(contextArray, document.id);
-        this.bFeatures.tickManySync(featureArray, document.id);
-
-        // Update FTS index
-        await this.fts.update(document.id, document.searchArray);
-
-        // Emit event
-        this.emit('index:update', document.id);
-
-        // Return document.id
-        return document.id;
     }
 
     async removeDocument(id, contextArray = [], featureArray = []) {
-        debug(`Removing object ${id} from bitmap indexes; Context: ${contextArray} Features: ${featureArray}`);
-        let document = await this.metadata.get(id);
-        if (!document) {
-            debug(`Document ${id} not found`);
-            return false;
-        }
 
-        // Update bitmaps
-        if (contextArray.length > 0) { this.bContexts.untickManySync(contextArray, id); }
-        if (featureArray.length > 0) { this.bFeatures.untickManySync(featureArray, id); }
+    }
 
-        // TODO: Calculate deltas
-        this.emit('index:remove', id, { contextArray: contextArray, featureArray: featureArray });
-
-        // Return document.id
-        return document.id;
+    async removeDocumentByChecksum(checksum, contextArray = [], featureArray = []) {
     }
 
     async deleteDocument(docId) {}
+
+    async deleteDocumentByChecksum(checksum) {
+    }
+
+
+    /**
+     * CRUD :: Batch operations
+     */
+
+    async insertBatch(documents, contextArray = [], featureArray = []) {
+    }
+
+    async getBatch(ids) { }
+
+    async getBatchByChecksums(checksums) { }
+
+    async getMetadataBatch(ids) { }
+
+    async getMetadataBatchByChecksums(checksums) { }
+
+    async updateBatch(documents, contextArray = [], featureArray = []) { }
+
+    async removeBatch(ids, contextArray = [], featureArray = []) { }
+
+    async removeBatchByChecksums(checksums) { }
+
+    async deleteBatch(ids) { }
+
+    async deleteBatchByChecksums(checksums) { }
+
+    /**
+     * Bitmap operations
+     */
+
+    async updateBitmaps(ids, contextArray = [], featureArray = []) { }
+
+    async updateContextBitmaps(ids, contextArray) { }
+
+    async updateFeatureBitmaps(ids, featureArray) { }
+
+    async updateFilterBitmaps(ids, filterArray) { }
+
+    // We need to implement the following methods to support Context tree operations:
+    // - mergeContextBitmap (apply the current bitmap to an array of bitmaps)
+    // - subtractContextBitmap (subtract the current bitmap from an array of bitmaps)
+    // - intersectContextBitmap (intersect the current bitmap with an array of bitmaps)
+    // - unionContextBitmap (union the current bitmap with an array of bitmaps)
+    // - xorContextBitmap (xor the current bitmap with an array of bitmaps)
+    // - invertContextBitmap (invert the current bitmap)
+    // - isEmptyContextBitmap (check if the current bitmap is empty)
+    // - toArrayContextBitmap (convert the current bitmap to an array of ids)
+    // - fromArrayContextBitmap (convert an array of ids to a bitmap)
+    // - getContextBitmap (get the current bitmap)
+    // - setContextBitmap (set the current bitmap)
+    // - clearContextBitmap (clear the current bitmap)
+    // - deleteContextBitmap (delete the current bitmap)
+
+    // Optional (vanilla) methods:
+    // - intersectBitmap (intersect the current bitmap with an array of bitmaps)
+    // - unionBitmap (union the current bitmap with an array of bitmaps)
+    // - xorBitmap (xor the current bitmap with a array of bitmaps)
+    // - invertBitmap (invert the current bitmap)
+    // - isEmptyBitmap (check if the current bitmap is empty)
+    // - toArrayBitmap (convert the current bitmap to an array of ids)
+    // - fromArrayBitmap (convert an array of ids to a bitmap)
+    // - getBitmap (get the current bitmap)
+    // - setBitmap (set the current bitmap)
+    // - clearBitmap (clear the current bitmap)
+    // - deleteBitmap (delete the current bitmap)
 
     /**
      * Query operations
@@ -281,97 +357,107 @@ class SynapsD extends EventEmitter {
             ids;
     }
 
-    async getMetadata(id) {
-        debug(`Getting metadata object ID "${id}"`);
+    /**
+     * Schema operations
+     */
 
-        if (id === null) { throw new Error('Object ID required'); }
-        if (!Number.isInteger(id) || id < 0) {
-            throw new Error('Object ID must be a non-negative integer');
-        }
+    listSchemas() { return schemaRegistry.listSchemas(); }
 
-        // Fetch document
-        let document = await this.metadata.get(id);
-        if (!document) { return null; }
+    hasSchema(schemaId) { return schemaRegistry.hasSchema(schemaId); }
 
-        return document;
-    }
-
-    async getMetadataForChecksum(algo, checksum) {
-        debug(`Getting object by checksum ${algo}/${checksum}`);
-
-        // Validate algorithm and checksum
-        if (!algo || typeof algo !== 'string') { throw new Error('Algorithm must be a valid string'); }
-        if (!checksum || typeof checksum !== 'string') { throw new Error('Checksum must be a valid string'); }
-
-        // Convert checksum to ID
-        let id = await this.#checksumToId(algo, checksum);
-        if (!id) { return null; }
-
-        // Fetch document by ID
-        return this.getMetadata(id);
-    }
-
-    listSchemas() {
-        return schemaRegistry.listSchemas();
-    }
-
-    getSchema(schemaId) {
-        return schemaRegistry.getSchema(schemaId);
-    }
-
+    getSchema(schemaId) { return schemaRegistry.getSchema(schemaId); }
 
     /**
      * Utils
      */
 
-    generateObjectID() {
-        let count = this.objectCount();
-        return INTERNAL_BITMAP_ID_MAX + count + 1;
-    }
-
-    objectCount() {
-        let stats = this.metadata.getStats();
-        return stats.entryCount;
-    }
-
-    async #validateObject(obj) {
-        if (!obj) { throw new Error('Object required'); }
-
-        // These are generated by the storage backend
-        if (!obj.checksums || !obj.checksums.size) {
-            throw new Error('Object checksums array required');
+    /**
+     * Resolves a checksum string to a document ID
+     * @param {string} checksum - Checksum string
+     * @returns {Promise<number|null>} Document ID or null if not found
+     * @throws {Error} If checksum format is invalid
+     */
+    async checksumStringToId(checksum) {
+        if (typeof checksum !== 'string') {
+            throw new Error('Checksum must be a string');
         }
-        if (!obj.embeddings || !Array.isArray(obj.embeddings)) {
-            throw new Error('Object embeddings array required');
+        return await this.hash2id.get(checksum);
+    }
+
+    /**
+     * Resolves an algorithmic checksum to a document ID
+     * @param {string} algo - Hash algorithm (e.g., 'sha256')
+     * @param {string} checksum - Checksum value
+     * @returns {Promise<number|null>} Document ID or null if not found
+     * @throws {Error} If inputs are invalid
+     */
+    async checksumToId(algo, checksum) {
+        if (!algo || !checksum) {
+            throw new Error('Algorithm and checksum are required');
         }
-
-        return true;
-    }
-
-    #parseDocument(obj) {
-        // Return only what we care about
-        return {
-            id: obj.id || this.generateObjectID(),
-            created_at: obj.created_at || new Date().toISOString(),
-            updated_at: obj.updated_at || new Date().toISOString(),
-            action: obj.action || 'insert',
-            checksums: obj.checksums,
-            embeddings: obj.embeddings,
-            searchArray: obj.searchArray || [],
-        };
-    }
-
-    async #insertChecksum(algo, checksum, id) {
-        return await this.hash2id.put(`${algo}/${checksum}`, id);
-    }
-
-    async #checksumToId(algo, checksum) {
         return await this.hash2id.get(`${algo}/${checksum}`);
     }
 
-    async close() {
-        await this.#db.close();
-        debug('Index database closed');
+    /**
+     * Resolves multiple checksums to document IDs
+     * @param {string} algo - Hash algorithm
+     * @param {string[]} checksums - Array of checksums
+     * @returns {Promise<Array<number|null>>} Array of document IDs (null for not found)
+     * @throws {Error} If inputs are invalid
+     */
+    async checksumBatchToIds(algo, checksums) {
+        if (!Array.isArray(checksums)) {
+            throw new Error('Expected array of checksums');
+        }
+        return await Promise.all(
+            checksums.map(checksum => this.checksumToId(algo, checksum))
+        );
+    }
+
+    /**
+     * Resolves multiple checksum strings to document IDs
+     * @param {string[]} checksums - Array of checksum strings
+     * @returns {Promise<Array<number|null>>} Array of document IDs (null for not found)
+     * @throws {Error} If input is invalid
+     */
+    async checksumStringBatchToIds(checksums) {
+        if (!Array.isArray(checksums)) {
+            throw new Error('Expected array of checksums');
+        }
+        return await Promise.all(
+            checksums.map(checksum => this.checksumStringToId(checksum))
+        );
+    }
+
+    /**
+     * Convenience method to get only found IDs from a batch
+     * @param {string[]} checksums - Array of checksum strings
+     * @returns {Promise<number[]>} Array of found document IDs
+     */
+    async resolveValidChecksums(checksums) {
+        const results = await this.checksumStringBatchToIds(checksums);
+        return results.filter(id => id !== null);
+    }
+
+    validateDocument(document) {
+        if (!document) throw new Error('Document required');
+        if (!document.schema) throw new Error('Document schema required');
+
+        const Schema = schemaRegistry.getSchema(document.schema);
+        if (!Schema) throw new Error(`Schema "${document.schema}" not found`);
+
+        // Schema validation
+        return Schema.validateData(document);
+    }
+
+    #generateDocumentID() {
+        let count = this.#documentCount();
+        return INTERNAL_BITMAP_ID_MAX + count + 1;
+    }
+
+    #documentCount() {
+        let stats = this.documents.getStats();
+        return stats.entryCount;
     }
 
 }

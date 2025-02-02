@@ -14,7 +14,17 @@ function uuid12(delimiter = true) {
         ([1e3]+1e3+1e3).replace(/[018]/g,b=>(b^crypto.rng(1)[0]%16>>b/4).toString(16));
 }
 
+function generateChecksum(data, algorithm = 'sha1') {
+    return crypto.createHash(algorithm).update(data).digest('hex');
+}
+
+function generateChecksumFromObject(object, algorithm = 'sha1') {
+    return generateChecksum(JSON.stringify(object), algorithm);
+}
+
 export {
     uuid,
     uuid12,
-}   
+    generateChecksum,
+    generateChecksumFromObject
+}

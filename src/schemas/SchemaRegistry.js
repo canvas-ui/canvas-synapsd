@@ -1,15 +1,23 @@
+'use strict';
+
 // Schemas
-import Document from './Document.js';
-import File from './abstractions/File.js';
+import BaseDocument from './BaseDocument.js';
+//import Directory from './abstractions/Directory.js';
+//import Email from './abstractions/Email.js';
+//import File from './abstractions/File.js';
 import Note from './abstractions/Note.js';
 import Tab from './abstractions/Tab.js';
+//import Todo from './abstractions/Todo.js';
 
 // Default schema registry (for now hard-coded)
 const SCHEMA_REGISTRY = {
-    'data/abstraction/document': Document,
-    'data/abstraction/file': File,
+    'data/abstraction/document': BaseDocument,
+    //'data/abstraction/directory': Directory,
+    //'data/abstraction/email': Email,
+    //'data/abstraction/file': File,
     'data/abstraction/note': Note,
     'data/abstraction/tab': Tab,
+    //'data/abstraction/todo': Todo,
 };
 
 
@@ -18,7 +26,6 @@ class SchemaRegistry {
     #schemas = new Map();
 
     constructor() {
-        // Initialize schema registry (placeholder)
         this.#schemas = this.#initSchemaRegistry();
     }
 
@@ -42,29 +49,6 @@ class SchemaRegistry {
      */
     hasSchema(schemaId) {
         return this.#schemas.has(schemaId);
-    }
-
-    /**
-     * Validate document against its schema
-     * @param {object} document Document to validate
-     * @returns {boolean} True if valid, throws error if invalid
-     */
-    validateDocument(document) {
-        if (!document.schema) {
-            throw new Error('Document schema not specified');
-        }
-
-        const SchemaClass = this.#schemas.get(document.schema);
-        if (!SchemaClass) {
-            throw new Error(`No schema found for ${document.schema}`);
-        }
-
-        try {
-            SchemaClass.schemaDefinition.parse(document);
-            return true;
-        } catch (error) {
-            throw new Error(`Schema validation failed: ${error.message}`);
-        }
     }
 
     /**

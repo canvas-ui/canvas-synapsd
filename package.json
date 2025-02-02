@@ -6,6 +6,7 @@
   "main": "src/index.js",
   "dependencies": {
     "@lancedb/lancedb": "^0.15.0",
+    "apache-arrow": "^19.0.0",
     "date-fns": "^2.30.0",
     "debug": "^4.3.4",
     "eventemitter2": "^6.4.9",
