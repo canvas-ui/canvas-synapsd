@@ -108,7 +108,7 @@ export default class BaseDocument {
         this.latest_version = options.latest_version ?? 1; // Stored in the parent document
 
         // Generate checksums
-        this.checksumArray = options.checksumArray ?? this.generateChecksums();
+        this.checksumArray = options.checksumArray ?? this.generateChecksumStrings();
 
         // Validate document
         this.validate();
@@ -123,7 +123,7 @@ export default class BaseDocument {
      * Data helpers
      */
 
-    generateChecksums() {
+    generateChecksumStrings() {
         const checksumData = this.generateChecksumData();
         return this.indexOptions.checksumAlgorithms.map((algorithm) => {
             return `${algorithm}/${generateChecksum(checksumData, algorithm)}`;
