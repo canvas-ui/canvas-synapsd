@@ -1,6 +1,6 @@
 {
   "name": "canvas-synapsd",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Canvas SynapsD - Context-based document indexing engine",
   "type": "module",
   "main": "src/index.js",
