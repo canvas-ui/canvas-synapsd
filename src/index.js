@@ -53,9 +53,6 @@ class SynapsD extends EventEmitter {
         // Support for custom (presumably in-memory) caching backend (assuming it implements a Map interface)
         this.cache = options.cache ?? new Map();
 
-        // System metadata
-        this.metadata = this.#db.createDataset('system');
-
         // Main documents dataset
         this.documents = this.#db.createDataset('documents');
 
@@ -77,73 +74,16 @@ class SynapsD extends EventEmitter {
          * Bitmap indexes
          */
 
-        this.bitmaps = this.#db.createDataset('bitmaps');
+        this.bitmapStore = this.#db.createDataset('bitmaps');
         this.bitmapIndex = new BitmapIndex(
-            this.bitmaps,
+            this.bitmapStore,
             this.cache,
         );
 
-        this.contextBitmaps = this.bitmapIndex.createCollection(
-            'contexts',
-            { rangeMin: INTERNAL_BITMAP_ID_MAX + 1 }
-        );
-
-        this.featureBitmaps = this.bitmapIndex.createCollection(
-            'features',
-            {
-                rangeMin: INTERNAL_BITMAP_ID_MAX + 1,
-                columnPrefixes: {
-                    'system/os': {
-                        mandatory: false,
-                    },
-                    'system/device': {
-                        mandatory: false,
-                    },
-                    'system/user': {
-                        mandatory: false,
-                    },
-                    'data/abstraction': {
-                        mandatory: true,
-                    },
-                    'data/encoding': {
-                        mandatory: false,
-                    },
-                    'data/mime/type': {
-                        mandatory: false,
-                    },
-                    'custom': {
-                        mandatory: false,
-                    },
-                    'tag': { // Maybe should be under custom/tag instead?
-                        mandatory: false,
-                    },
-                }
-            }
-        );
-
-        this.filterBitmaps = this.bitmapIndex.createCollection(
-            'filters',
-        );
-
-        this.actionBitmaps = this.bitmapIndex.createCollection(
-            'actions',
-            {
-                columnPrefixes: {
-                    'index/action/insert': {
-                        mandatory: false,
-                    },
-                    'index/action/update': {
-                        mandatory: false,
-                    },
-                    'index/action/remove': {
-                        mandatory: false,
-                    },
-                    'index/action/delete': {
-                        mandatory: false,
-                    },
-                }
-            }
-        );
+        this.contextBitmaps = this.bitmapIndex.createCollection();
+        this.featureBitmaps = this.bitmapIndex.createCollection();
+        this.filterBitmaps = this.bitmapIndex.createCollection();
+        this.actionBitmaps = this.bitmapIndex.createCollection();
 
         /**
          * Vector store backend (LanceDB)

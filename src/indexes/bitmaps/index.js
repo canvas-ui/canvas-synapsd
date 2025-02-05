@@ -1,37 +1,50 @@
 'use strict';
 
-// Added EventEmitter import for change notifications
+// Utils
 import EventEmitter from 'eventemitter2';
-import RoaringBitmap32 from 'roaring';
 import debug from 'debug';
 const log = debug('canvas:synapsd:bitmapIndex');
 
 // Includes
+import RoaringBitmap32 from 'roaring';
 import Bitmap from './lib/Bitmap.js';
 import BitmapCollection from './lib/BitmapCollection.js';
 
-// Allowed bitmap key prefixes
-const ALLOWED_PREFIXES = ['context/', 'data/', 'system/', 'client/', 'user/', 'tag/', 'custom/'];
+// Constants
+const ALLOWED_PREFIXES = [
+    'context/',
+    'feature/', // Legacy
+    'filter/',  // Legacy
+    'action/',
+    'data/',
+    'system/',
+    'client/',
+    'user/',
+    'tag/',
+    'custom/',
+    'nested/',
+];
 
 class BitmapIndex {
 
     constructor(backingStore = new Map(), cache = new Map(), options = {}) {
         this.store = backingStore;
         this.cache = cache;
-        log(`BitmapIndex initialized`);
 
         // Set range and tag options (used when creating new Bitmaps)
         this.rangeMin = options.rangeMin || 0;
         this.rangeMax = options.rangeMax || 4294967296; // 2^32
-        this.tag = options.tag || 'bitmap';
 
         // If an emitter is passed in options, use it; otherwise create a new one.
         this.emitter = options.emitter || new EventEmitter();
+        log(`BitmapIndex initialized with range ${this.rangeMin} - ${this.rangeMax}`);
     }
 
-    /* ===== Helper Methods ===== */
+    /**
+     * Utils
+     */
 
-    // Validate that a key (ignoring a leading "!" for negation) follows naming conventions.
+    // Validate key (ignoring leading "!" for negation)
     static _validateKey(key) {
         const normalizedKey = key.startsWith('!') ? key.slice(1) : key;
         const isValid = ALLOWED_PREFIXES.some(prefix => normalizedKey.startsWith(prefix));
@@ -60,9 +73,9 @@ class BitmapIndex {
 
     createCollection(collectionName, options = {}) {
         if (!collectionName) { throw new Error('Collection name required'); }
-        if (!options.backingStore) { options.backingStore = this.store; }
-        if (!options.cache) { options.cache = this.cache; }
-        return new BitmapCollection(collectionName, options);
+        if (!options.rangeMin) { options.rangeMin = this.rangeMin; }
+        if (!options.rangeMax) { options.rangeMax = this.rangeMax; }
+        return new BitmapCollection(collectionName, this, options);
     }
 
     /**
@@ -93,7 +106,7 @@ class BitmapIndex {
     tickManySync(keyArray, ids) {
         log('Ticking many', keyArray, ids);
         let affectedKeys = [];
-        // Process keys in batchq
+        // Process keys in batch
         for (const key of keyArray) {
             BitmapIndex._validateKey(key);
             const bitmap = this.getBitmap(key, true);
@@ -148,7 +161,7 @@ class BitmapIndex {
      */
 
     AND(keyArray) {
-        log(`${this.tag} -> AND(): keyArray: "${keyArray}"`);
+        log(`AND(): keyArray: "${keyArray}"`);
         if (!Array.isArray(keyArray)) { throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`); }
 
         // Split positive and negative keys (keys starting with "!" mean NOT)
@@ -192,7 +205,7 @@ class BitmapIndex {
     }
 
     OR(keyArray) {
-        log(`${this.tag} -> OR(): keyArray: "${keyArray}"`);
+        log(`OR(): keyArray: "${keyArray}"`);
         if (!Array.isArray(keyArray)) { throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`); }
 
         const positiveKeys = [];
@@ -227,7 +240,7 @@ class BitmapIndex {
     }
 
     XOR(keyArray) {
-        log(`${this.tag} -> XOR(): keyArray: "${keyArray}"`);
+        log(`XOR(): keyArray: "${keyArray}"`);
         if (!Array.isArray(keyArray)) {
             throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`);
         }
@@ -290,7 +303,7 @@ class BitmapIndex {
 
     createBitmap(key, oidArrayOrBitmap = null) {
         BitmapIndex._validateKey(key);
-        log(`${this.tag} -> createBitmap(): Creating bitmap with key ID "${key}"`);
+        log(`createBitmap(): Creating bitmap with key ID "${key}"`);
 
         if (this.hasBitmap(key)) {
             log(`Bitmap with key ID "${key}" already exists`);
