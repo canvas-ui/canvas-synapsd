@@ -1,6 +1,7 @@
 'use strict';
 
-// Utils
+// Added EventEmitter import for change notifications
+import EventEmitter from 'eventemitter2';
 import RoaringBitmap32 from 'roaring';
 import debug from 'debug';
 const log = debug('canvas:synapsd:bitmapIndex');
@@ -9,12 +10,48 @@ const log = debug('canvas:synapsd:bitmapIndex');
 import Bitmap from './lib/Bitmap.js';
 import BitmapCollection from './lib/BitmapCollection.js';
 
+// Allowed bitmap key prefixes
+const ALLOWED_PREFIXES = ['context/', 'data/', 'system/', 'client/', 'user/', 'tag/', 'custom/'];
+
 class BitmapIndex {
 
     constructor(backingStore = new Map(), cache = new Map(), options = {}) {
         this.store = backingStore;
         this.cache = cache;
         log(`BitmapIndex initialized`);
+
+        // Set range and tag options (used when creating new Bitmaps)
+        this.rangeMin = options.rangeMin || 0;
+        this.rangeMax = options.rangeMax || 4294967296; // 2^32
+        this.tag = options.tag || 'bitmap';
+
+        // If an emitter is passed in options, use it; otherwise create a new one.
+        this.emitter = options.emitter || new EventEmitter();
+    }
+
+    /* ===== Helper Methods ===== */
+
+    // Validate that a key (ignoring a leading "!" for negation) follows naming conventions.
+    static _validateKey(key) {
+        const normalizedKey = key.startsWith('!') ? key.slice(1) : key;
+        const isValid = ALLOWED_PREFIXES.some(prefix => normalizedKey.startsWith(prefix));
+        if (!isValid) {
+            throw new Error(`Bitmap key "${key}" does not follow naming convention. Must start with one of: ${ALLOWED_PREFIXES.join(', ')}`);
+        }
+    }
+
+    // Returns the prefix (with trailing slash) from a key (ignoring possible "!")
+    static _getPrefix(key) {
+        const normalizedKey = key.startsWith('!') ? key.slice(1) : key;
+        return normalizedKey.split('/')[0] + '/';
+    }
+
+    // Emit an update event with one or more bitmap keys.
+    emitBitmapUpdate(keyOrKeys) {
+        if (this.emitter && typeof this.emitter.emit === 'function') {
+            const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
+            this.emitter.emit('bitmap:update', keys);
+        }
     }
 
     /**
@@ -33,47 +70,76 @@ class BitmapIndex {
      */
 
     tickSync(key, ids) {
+        BitmapIndex._validateKey(key);
         log('Ticking', key, ids);
         const bitmap = this.getBitmap(key, true);
         bitmap.addMany(Array.isArray(ids) ? ids : [ids]);
         this.saveBitmap(key, bitmap);
+        this.emitBitmapUpdate(key);
         return bitmap;
     }
 
     untickSync(key, ids) {
+        BitmapIndex._validateKey(key);
         log('Unticking', key, ids);
         const bitmap = this.getBitmap(key, false);
         if (!bitmap) return null;
         bitmap.removeMany(Array.isArray(ids) ? ids : [ids]);
         this.saveBitmap(key, bitmap);
+        this.emitBitmapUpdate(key);
         return bitmap;
     }
 
     tickManySync(keyArray, ids) {
         log('Ticking many', keyArray, ids);
-        // TODO: Replace with batch operation
-        return keyArray.map(key => this.tickSync(key, ids));
+        let affectedKeys = [];
+        // Process keys in batchq
+        for (const key of keyArray) {
+            BitmapIndex._validateKey(key);
+            const bitmap = this.getBitmap(key, true);
+            bitmap.addMany(Array.isArray(ids) ? ids : [ids]);
+            this.saveBitmap(key, bitmap);
+            affectedKeys.push(key);
+        }
+        if (affectedKeys.length) {
+            this.emitBitmapUpdate(affectedKeys);
+        }
+        return affectedKeys;
     }
 
     untickManySync(keyArray, ids) {
         log('Unticking many', keyArray, ids);
-        // TODO: Replace with batch operation
-        return keyArray.map(key => this.untickSync(key, ids));
+        let affectedKeys = [];
+        // Process keys in batch
+        for (const key of keyArray) {
+            BitmapIndex._validateKey(key);
+            const bitmap = this.getBitmap(key, false);
+            if (!bitmap) continue;
+            bitmap.removeMany(Array.isArray(ids) ? ids : [ids]);
+            this.saveBitmap(key, bitmap);
+            affectedKeys.push(key);
+        }
+        if (affectedKeys.length) {
+            this.emitBitmapUpdate(affectedKeys);
+        }
+        return affectedKeys;
     }
 
     removeSync(key, ids) {
+        BitmapIndex._validateKey(key);
         log('Removing', key, ids);
         const bitmap = this.getBitmap(key, false);
         if (!bitmap) return null;
         bitmap.removeMany(Array.isArray(ids) ? ids : [ids]);
         this.saveBitmap(key, bitmap);
+        this.emitBitmapUpdate(key);
         return bitmap;
     }
 
     deleteSync(id) {
         log(`Deleting object references with ID "${id}" from all bitmaps in collection`);
         for (const key of this.listBitmaps()) {
-            this.remove(key, id);
+            this.removeSync(key, id);
         }
     }
 
@@ -83,31 +149,81 @@ class BitmapIndex {
 
     AND(keyArray) {
         log(`${this.tag} -> AND(): keyArray: "${keyArray}"`);
-        if (!Array.isArray(keyArray)) {throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`);}
+        if (!Array.isArray(keyArray)) { throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`); }
 
-        let partial = null;
+        // Split positive and negative keys (keys starting with "!" mean NOT)
+        const positiveKeys = [];
+        const negativeKeys = [];
         for (const key of keyArray) {
-            const bitmap = this.getBitmap(key, true);
-
-            // Initialize partial with the first non-empty bitmap
-            if (!partial) {
-                partial = bitmap;
-                continue;
+            if (key.startsWith('!')) {
+                negativeKeys.push(key.slice(1));
+            } else {
+                positiveKeys.push(key);
             }
-            // Perform AND operation
-            partial.andInPlace(bitmap);
         }
 
-        // Return partial or an empty roaring bitmap
+        let partial = null;
+        if (positiveKeys.length) {
+            for (const key of positiveKeys) {
+                BitmapIndex._validateKey(key);
+                const bitmap = this.getBitmap(key, true);
+                // clone the first bitmap so we don't change the original
+                partial = partial ? partial.and(bitmap) : bitmap.clone();
+            }
+        } else {
+            // If no positive keys, we cannot calculate a proper intersection.
+            // (Optionally, you could define a universal set based on rangeMin/rangeMax.)
+            partial = new RoaringBitmap32();
+        }
+
+        if (negativeKeys.length) {
+            let negativeUnion = new RoaringBitmap32();
+            for (const key of negativeKeys) {
+                BitmapIndex._validateKey(key);
+                const nbitmap = this.getBitmap(key, false);
+                if (nbitmap) {
+                    negativeUnion.orInPlace(nbitmap);
+                }
+            }
+            partial.andNotInPlace(negativeUnion);
+        }
+
         return partial || new RoaringBitmap32();
     }
 
     OR(keyArray) {
         log(`${this.tag} -> OR(): keyArray: "${keyArray}"`);
-        if (!Array.isArray(keyArray)) {throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`);}
-        // Filter out invalid bitmaps, for OR we are pretty tolerant (for now at least)
-        const validBitmaps = keyArray.map(key => this.getBitmap(key)).filter(Boolean);
-        return validBitmaps.length ? RoaringBitmap32.orMany(validBitmaps) : new RoaringBitmap32();
+        if (!Array.isArray(keyArray)) { throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`); }
+
+        const positiveKeys = [];
+        const negativeKeys = [];
+        for (const key of keyArray) {
+            if (key.startsWith('!')) {
+                negativeKeys.push(key.slice(1));
+            } else {
+                positiveKeys.push(key);
+            }
+        }
+
+        let result = new RoaringBitmap32();
+        for (const key of positiveKeys) {
+            BitmapIndex._validateKey(key);
+            const bmp = this.getBitmap(key, true);
+            result.orInPlace(bmp);
+        }
+
+        if (negativeKeys.length) {
+            let negativeUnion = new RoaringBitmap32();
+            for (const key of negativeKeys) {
+                BitmapIndex._validateKey(key);
+                const bmp = this.getBitmap(key, false);
+                if (bmp) {
+                    negativeUnion.orInPlace(bmp);
+                }
+            }
+            result.andNotInPlace(negativeUnion);
+        }
+        return result;
     }
 
     XOR(keyArray) {
@@ -115,18 +231,38 @@ class BitmapIndex {
         if (!Array.isArray(keyArray)) {
             throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`);
         }
-
-        const validBitmaps = [];
+        const positiveKeys = [];
+        const negativeKeys = [];
         for (const key of keyArray) {
-            const bitmap = this.getBitmap(key, false);
-            if (bitmap && bitmap instanceof Bitmap && !bitmap.isEmpty()) {
-                validBitmaps.push(bitmap);
+            if (key.startsWith('!')) {
+                negativeKeys.push(key.slice(1));
+            } else {
+                positiveKeys.push(key);
             }
         }
 
-        return validBitmaps.length > 0
-            ? RoaringBitmap32.xorMany(validBitmaps)
-            : new RoaringBitmap32();
+        let result = null;
+        for (const key of positiveKeys) {
+            BitmapIndex._validateKey(key);
+            const bmp = this.getBitmap(key, false);
+            if (bmp) {
+                result = result ? result.xor(bmp) : bmp.clone();
+            }
+        }
+        result = result || new RoaringBitmap32();
+
+        if (negativeKeys.length) {
+            let negativeUnion = new RoaringBitmap32();
+            for (const key of negativeKeys) {
+                BitmapIndex._validateKey(key);
+                const bmp = this.getBitmap(key, false);
+                if (bmp) {
+                    negativeUnion.orInPlace(bmp);
+                }
+            }
+            result.andNotInPlace(negativeUnion);
+        }
+        return result;
     }
 
     /**
@@ -134,7 +270,7 @@ class BitmapIndex {
      */
 
     getBitmap(key, autoCreateBitmap = false) {
-        log('Getting bitmap', key, 'autoCreateBitmap:', autoCreateBitmap);
+        BitmapIndex._validateKey(key);
         if (this.cache.has(key)) {
             log(`Returning Bitmap key "${key}" from cache`);
             return this.cache.get(key);
@@ -153,6 +289,7 @@ class BitmapIndex {
     }
 
     createBitmap(key, oidArrayOrBitmap = null) {
+        BitmapIndex._validateKey(key);
         log(`${this.tag} -> createBitmap(): Creating bitmap with key ID "${key}"`);
 
         if (this.hasBitmap(key)) {
@@ -174,21 +311,29 @@ class BitmapIndex {
     }
 
     renameBitmap(oldKey, newKey) {
+        BitmapIndex._validateKey(oldKey);
+        BitmapIndex._validateKey(newKey);
         log(`Renaming bitmap "${oldKey}" to "${newKey}"`);
         const bitmap = this.getBitmap(oldKey);
         if (!bitmap) { return null; }
         this.deleteBitmap(oldKey);
         this.saveBitmap(newKey, bitmap.serialize());
+        this.emitBitmapUpdate(newKey);
         return bitmap;
     }
 
     deleteBitmap(key) {
+        BitmapIndex._validateKey(key);
         log(`Deleting bitmap "${key}"`);
         this.cache.delete(key);
         this.store.del(key);
+        if (this.emitter && typeof this.emitter.emit === 'function') {
+            this.emitter.emit('bitmap:deleted', key);
+        }
     }
 
     hasBitmap(key) {
+        BitmapIndex._validateKey(key);
         return this.store.has(key);
     }
 

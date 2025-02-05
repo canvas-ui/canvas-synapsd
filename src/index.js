@@ -321,9 +321,9 @@ class SynapsD extends EventEmitter {
     // timeRange query can be done using the filterArray
     async listDocuments(contextArray = [], featureArray = [], filterArray = [], options = {}) {
         debug(`Listing objects contextArray: ${contextArray} featureArray: ${featureArray} filterArray: ${filterArray}`);
-        // Bitmap ops always return a bitmap
-        let contextBitmap = this.bContexts.AND(contextArray);
-        let featureBitmap = this.bFeatures.OR(featureArray);
+        // Use the context and feature bitmap collections from the BitmapIndex
+        let contextBitmap = this.contextBitmaps.AND(contextArray);
+        let featureBitmap = this.featureBitmaps.OR(featureArray);
 
         let res = [];
 
@@ -348,13 +348,10 @@ class SynapsD extends EventEmitter {
 
     async findDocuments(query, contextArray = [], featureArray = [], filterArray = [], options = {}) {
         debug(`Finding objects with query: ${query}`);
-        let ids = await this.fts.search(query);
-        if (!ids) { return []; }
-        // Compute bitmap intersection
-        // Compute filters
-        return (options.returnMetadata) ?
-            await Promise.all(ids.map(id => this.metadata.get(id))) :
-            ids;
+        // Full-text search (fts) is not implemented in this version.
+        // Returning an empty array and letting the application decide on fallback behavior.
+        console.warn('Full-text search (fts) is not implemented yet');
+        return [];
     }
 
     /**
@@ -381,7 +378,7 @@ class SynapsD extends EventEmitter {
         if (typeof checksum !== 'string') {
             throw new Error('Checksum must be a string');
         }
-        return await this.hash2id.get(checksum);
+        return await this.checksumIndex.get(checksum);
     }
 
     /**
@@ -395,7 +392,7 @@ class SynapsD extends EventEmitter {
         if (!algo || !checksum) {
             throw new Error('Algorithm and checksum are required');
         }
-        return await this.hash2id.get(`${algo}/${checksum}`);
+        return await this.checksumIndex.get(`${algo}/${checksum}`);
     }
 
     /**
