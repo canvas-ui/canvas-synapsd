@@ -56,6 +56,16 @@ export default class BitmapCollection {
         return this.manager.listBitmaps(this.collectionName + '/');
     }
 
+    tickMany(names, ids) {
+        const keys = names.map(name => this.makeKey(name));
+        return this.manager.tickMany(keys, ids);
+    }
+
+    untickMany(names, ids) {
+        const keys = names.map(name => this.makeKey(name));
+        return this.manager.untickMany(keys, ids);
+    }
+
     /**
      * Bitmap operations
      */

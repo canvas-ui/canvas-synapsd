@@ -80,10 +80,10 @@ class SynapsD extends EventEmitter {
             this.cache,
         );
 
-        this.contextBitmaps = this.bitmapIndex.createCollection();
-        this.featureBitmaps = this.bitmapIndex.createCollection();
-        this.filterBitmaps = this.bitmapIndex.createCollection();
-        this.actionBitmaps = this.bitmapIndex.createCollection();
+        this.contextBitmaps = this.bitmapIndex.createCollection('context');
+        this.featureBitmaps = this.bitmapIndex.createCollection('feature');
+        this.filterBitmaps = this.bitmapIndex.createCollection('filter');
+        this.actionBitmaps = this.bitmapIndex.createCollection('action');
 
         /**
          * Vector store backend (LanceDB)
@@ -159,21 +159,75 @@ class SynapsD extends EventEmitter {
     }
 
     async hasDocument(id, contextArray = [], featureArray = []) {
+        if (!id) { throw new Error('Document id required'); }
+        if (!Array.isArray(contextArray)) { throw new Error('Context array required'); }
+        if (!Array.isArray(featureArray)) { throw new Error('Feature array required'); }
+
+        if (!this.documents.has(id)) { return false; }
+
+        let contextBitmap = contextArray.length > 0 ? this.contextBitmaps.AND(contextArray) : null;
+        let featureBitmap = featureArray.length > 0 ? this.featureBitmaps.OR(featureArray) : null;
+
+        if (contextBitmap && featureBitmap) {
+            contextBitmap.andInPlace(featureBitmap);
+            return contextBitmap.size > 0;
+        } else if (contextBitmap) {
+            return contextBitmap.size > 0;
+        } else if (featureBitmap) {
+            return featureBitmap.size > 0;
+        } else {
+            return true;
+        }
     }
 
     async hasDocumentByChecksum(checksum) {
+        if (!checksum) { throw new Error('Checksum required'); }
+
+        let id = await this.checksumStringToId(checksum);
+        if (!id) { return false; }
+
+        return await this.hasDocument(id);
     }
 
-    async getDocument(id) { }
+    async getDocument(id) {
+        if (!id) { throw new Error('Document id required'); }
+        if (!this.documents.has(id)) { return null; }
+        return await this.documents.get(id);
+    }
 
-    async getDocumentByChecksum(checksum) { }
+    async getDocumentByChecksum(checksum) {
+        if (!checksum) { throw new Error('Checksum required'); }
+
+        let id = await this.checksumStringToId(checksum);
+        if (!id) { return null; }
+
+        return await this.getDocument(id);
+    }
+
 
     async getMetadata(id) { }
 
     async getMetadataByChecksum(checksum) { }
 
     async updateDocument(document, contextArray = [], featureArray = []) {
+        if (!document) { throw new Error('Document required'); }
+        if (!Array.isArray(contextArray)) { throw new Error('Context array required'); }
+        if (!Array.isArray(featureArray)) { throw new Error('Feature array required'); }
 
+        let id = document.id;
+        if (!id) { throw new Error('Document id required'); }
+
+        let doc = await this.documents.get(id);
+        if (!doc) { throw new Error('Document not found'); }
+
+        // Update context bitmaps if provided
+        if (contextArray.length > 0) {
+            let contextBitmap = this.contextBitmaps.tickMany(contextArray);
+        }
+
+        // Update feature bitmaps if provided
+
+        return await this.documents.put(id, doc);
     }
 
     async removeDocument(id, contextArray = [], featureArray = []) {
@@ -183,7 +237,15 @@ class SynapsD extends EventEmitter {
     async removeDocumentByChecksum(checksum, contextArray = [], featureArray = []) {
     }
 
-    async deleteDocument(docId) {}
+    async deleteDocument(id) {
+        if (!id) { throw new Error('Document id required'); }
+        if (!this.documents.has(id)) { throw new Error('Document not found'); }
+
+        // Its cheaper to maintain a bitmap of deleted documents then to
+        // loop through all bitmaps and remove the document from each one.
+
+        await this.documents.delete(id);
+    }
 
     async deleteDocumentByChecksum(checksum) {
     }
@@ -196,9 +258,22 @@ class SynapsD extends EventEmitter {
     async insertBatch(documents, contextArray = [], featureArray = []) {
     }
 
-    async getBatch(ids) { }
+    async getBatch(ids) {
+        if (!Array.isArray(ids)) {
+            throw new Error('Expected array of ids');
+        }
 
-    async getBatchByChecksums(checksums) { }
+        return await this.documents.getMany(ids);
+    }
+
+    async getBatchByChecksums(checksums) {
+        if (!Array.isArray(checksums)) {
+            throw new Error('Expected array of checksums');
+        }
+
+        let ids = await this.checksumStringBatchToIds(checksums);
+        return await this.documents.getMany(ids);
+    }
 
     async getMetadataBatch(ids) { }
 

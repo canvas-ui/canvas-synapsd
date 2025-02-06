@@ -16,6 +16,7 @@ const ALLOWED_PREFIXES = [
     'feature/', // Legacy
     'filter/',  // Legacy
     'action/',
+    'index/',
     'data/',
     'system/',
     'client/',
@@ -38,6 +39,9 @@ class BitmapIndex {
         // If an emitter is passed in options, use it; otherwise create a new one.
         this.emitter = options.emitter || new EventEmitter();
         log(`BitmapIndex initialized with range ${this.rangeMin} - ${this.rangeMax}`);
+
+        // Create a bitmap for deleted documents
+        this.deletedDocuments = this.createBitmap('index/deleted');
     }
 
     /**
