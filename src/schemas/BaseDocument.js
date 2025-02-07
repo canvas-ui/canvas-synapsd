@@ -65,7 +65,7 @@ export default class BaseDocument {
     constructor(options = {}) {
         // Base
         this.id = options.id; // TODO: Should not be here
-        this.schema = options.schema;
+        this.schema = options.schema ?? DOCUMENT_SCHEMA;
         this.schemaVersion = options.schemaVersion ?? DOCUMENT_SCHEMA_VERSION;
 
         // Timestamps

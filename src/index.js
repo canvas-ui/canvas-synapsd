@@ -53,14 +53,15 @@ class SynapsD extends EventEmitter {
         // Support for custom (presumably in-memory) caching backend (assuming it implements a Map interface)
         this.cache = options.cache ?? new Map();
 
-        // Main documents dataset
+        // Main JSON document datasets
         this.documents = this.#db.createDataset('documents');
+        this.metadata = this.#db.createDataset('metadata');
 
         /**
          * Inverted indexes
          */
 
-        this.checksumIndex = new ChecksumIndex({ // sha256/checksum -> id
+        this.checksumIndex = new ChecksumIndex({ // algorithm/checksum -> id
             store: this.#db.createDataset('checksums'),
             cache: this.cache,
         });
@@ -80,10 +81,10 @@ class SynapsD extends EventEmitter {
             this.cache,
         );
 
-        this.contextBitmaps = this.bitmapIndex.createCollection('context');
-        this.featureBitmaps = this.bitmapIndex.createCollection('feature');
-        this.filterBitmaps = this.bitmapIndex.createCollection('filter');
-        this.actionBitmaps = this.bitmapIndex.createCollection('action');
+        this.gc = this.bitmapIndex.createCollection('gc');
+        this.gc.createBitmap('active');
+        this.gc.createBitmap('deleted');
+        this.gc.createBitmap('freed');
 
         /**
          * Vector store backend (LanceDB)
@@ -95,6 +96,8 @@ class SynapsD extends EventEmitter {
          * Filters
          */
 
+        debug('SynapsD initialized');
+
     }
 
     /**
@@ -103,6 +106,7 @@ class SynapsD extends EventEmitter {
 
     async start() {
         this.#status = 'running';
+        debug('SynapsD started');
     }
 
     async shutdown() {
@@ -113,6 +117,7 @@ class SynapsD extends EventEmitter {
             debug('SynapsD database closed');
         } catch (error) {
             this.#status = 'error';
+            debug('SynapsD database error', error);
             throw error;
         }
     }
@@ -156,6 +161,41 @@ class SynapsD extends EventEmitter {
         // Validate document
         this.validateDocument(document);
 
+        // Recalculate checksums
+        document.checksumArray = document.generateChecksumStrings();
+
+        // If a checksum already exists, update the document
+        if (await this.hasDocumentByChecksum(document.checksumArray[0])) {
+            return await this.updateDocument(document, contextArray, featureArray);
+        }
+
+        // Generate a new document ID
+        document.id = this.#generateDocumentID();
+
+        // Insert a new document into the database
+        // TODO: Add versioning support
+        await this.documents.put(document.id, document);
+
+        // Update context bitmaps
+        if (contextArray.length > 0) {
+            this.bitmapIndex.tickMany(document.id, contextArray);
+        }
+
+        // Update feature bitmaps
+        if (featureArray.length > 0) {
+            this.bitmapIndex.tickMany(document.id, featureArray);
+        }
+
+        // Update metadata
+        await this.metadata.put(document.id, {
+            id: document.id,
+            created_at: document.created_at,
+            updated_at: document.updated_at,
+            status: 'active',
+        });
+
+        // Return the document
+        return document;
     }
 
     async hasDocument(id, contextArray = [], featureArray = []) {

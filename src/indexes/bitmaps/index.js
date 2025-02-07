@@ -13,17 +13,22 @@ import BitmapCollection from './lib/BitmapCollection.js';
 // Constants
 const ALLOWED_PREFIXES = [
     'context/',
-    'feature/', // Legacy
-    'filter/',  // Legacy
-    'action/',
-    'index/',
-    'data/',
+    'action/insert/',
+    'action/update/',
+    'action/remove/',
+    'action/delete/',
+    'data/abstraction/', // This is our schema type
+    'data/mime/',
+    'data/content/encoding/',
+    'data/content/type/',
     'system/',
-    'client/',
+    'client/os/',
+    'client/application/',
+    'client/device/',
     'user/',
     'tag/',
-    'custom/',
     'nested/',
+    'custom/',
 ];
 
 class BitmapIndex {
