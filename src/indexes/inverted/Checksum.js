@@ -1,29 +1,28 @@
 'use strict';
 export default class ChecksumIndex {
 
-    constructor(store, cache = new Map()) {
-        if (!store) { throw new Error('A Map() like store reference required'); }
-        this.store = store;
-        this.cache = cache;
+    constructor(options = {}) {
+        if (!options.store) { throw new Error('A Map() like store reference required'); }
+        this.store = options.store
     }
 
-    get(checksum) {
+    async get(checksum) {
         return this.store.get(checksum);
     }
 
-    set(checksum, id) {
-        return this.store.set(checksum, id);
+    async set(checksum, id) {
+        this.store.set(checksum, id);
     }
 
-    delete(checksum) {
+    async delete(checksum) {
         return this.store.delete(checksum);
     }
 
-    has(checksum) {
+    async has(checksum) {
         return this.store.has(checksum);
     }
 
-    list(algorithm = 'sha256') {
+    async list(algorithm = 'sha256') {
         return this.store.keys();
     }
 

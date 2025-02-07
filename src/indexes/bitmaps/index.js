@@ -21,6 +21,7 @@ const ALLOWED_PREFIXES = [
     'data/mime/',
     'data/content/encoding/',
     'data/content/type/',
+    'index/',
     'system/',
     'client/os/',
     'client/application/',
@@ -47,7 +48,7 @@ class BitmapIndex {
         log(`BitmapIndex initialized with range ${this.rangeMin} - ${this.rangeMax}`);
 
         // Create a bitmap for deleted documents
-        this.deletedDocuments = this.createBitmap('index/deleted');
+        this.deletedDocuments = this.createBitmap('index/deleted', []);
     }
 
     /**
@@ -326,7 +327,7 @@ class BitmapIndex {
         return bitmap;
     }
 
-    createBitmap(key, oidArrayOrBitmap = null) {
+    createBitmap(key, oidArrayOrBitmap = []) {
         BitmapIndex._validateKey(key);
         log(`createBitmap(): Creating bitmap with key ID "${key}"`);
 
@@ -445,17 +446,15 @@ class BitmapIndex {
      */
 
     #parseInput(input) {
-        if (!input) {
-            log('Creating new empty bitmap');
-            return new RoaringBitmap32();
-        } else if (input instanceof RoaringBitmap32) {
+        if (input instanceof Bitmap) {
             log(`RoaringBitmap32 supplied as input with ${input.size} elements`);
             return input;
         } else if (Array.isArray(input)) {
-            log(`OID Array supplied as input with ${input.length} elements`);
-            return new RoaringBitmap32(input);
-        } else if (typeof input === 'number') {
+            log(`Document ID Array supplied as input with ${input.length} elements`);
             return input;
+        } else if (typeof input === 'number') {
+            log(`Document ID supplied as input`);
+            return [input];
         } else {
             throw new TypeError(`Invalid input type: ${typeof input}`);
         }

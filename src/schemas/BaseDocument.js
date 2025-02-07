@@ -242,9 +242,9 @@ export default class BaseDocument {
 
             // Metadata section
             metadata: this.metadata,
-            checksums: Array.from(this.checksums),
+            checksums: this.checksums,
             embeddings: this.embeddings,
-            features: Array.from(this.features),
+            features: this.features,
             paths: this.paths,
 
             // Document data/payload, omitted for blobs
@@ -261,8 +261,8 @@ export default class BaseDocument {
     static fromJSON(json) {
         const doc = new BaseDocument({  // Changed from Document to BaseDocument
             ...json,
-            checksums: new Map(json.checksums),
-            features: new Map(json.features),
+            checksums: Array.from(json.checksums),
+            features: Array.from(json.features),
             embeddings: json.embeddings,
             data: json.data,
         });

@@ -1,4 +1,7 @@
-// Metadata schema
+'use strict';
+
+// Utils
+import { z } from 'zod';
 
 const MetadataSchema = z.object({
     id: z.number().int().positive(),

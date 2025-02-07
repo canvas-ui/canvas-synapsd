@@ -62,13 +62,11 @@ class SynapsD extends EventEmitter {
          */
 
         this.checksumIndex = new ChecksumIndex({ // algorithm/checksum -> id
-            store: this.#db.createDataset('checksums'),
-            cache: this.cache,
+            store: this.#db.createDataset('checksums')
         });
 
         this.timestampIndex = new TimestampIndex({ // timestamp -> id
-            store: this.#db.createDataset('timestamps'),
-            cache: this.cache,
+            store: this.#db.createDataset('timestamps')
         });
 
         /**
@@ -81,10 +79,10 @@ class SynapsD extends EventEmitter {
             this.cache,
         );
 
-        this.gc = this.bitmapIndex.createCollection('gc');
-        this.bActive = this.gc.createBitmap('active');
-        this.bDeleted = this.gc.createBitmap('deleted');
-        this.bFreed = this.gc.createBitmap('freed');
+        //this.gc = this.bitmapIndex; //.createCollection('gc');
+        //this.bActive = this.gc.createBitmap('active');
+        //this.bDeleted = this.gc.createBitmap('deleted');
+        //this.bFreed = this.gc.createBitmap('freed');
 
         /**
          * Vector store backend (LanceDB)
@@ -312,7 +310,7 @@ class SynapsD extends EventEmitter {
 
         // Its cheaper to maintain a bitmap of deleted documents then to
         // loop through all bitmaps and remove the document from each one.
-        this.bDeleted.tick(id);
+        //this.bDeleted.tick(id);
 
         // Remove document from all bitmaps
         // TODO: Rework, darn expensive!
@@ -569,7 +567,7 @@ class SynapsD extends EventEmitter {
         if (!Schema) throw new Error(`Schema "${document.schema}" not found`);
 
         // Schema validation
-        return Schema.validateData(document);
+        return Schema.validate(document);
     }
 
     #generateDocumentID() {
