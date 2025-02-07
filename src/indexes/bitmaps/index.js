@@ -33,7 +33,8 @@ const ALLOWED_PREFIXES = [
 
 class BitmapIndex {
 
-    constructor(backingStore = new Map(), cache = new Map(), options = {}) {
+    constructor(backingStore, cache = new Map(), options = {}) {
+        if (!backingStore) { throw new Error('Backing store required'); }
         this.store = backingStore;
         this.cache = cache;
 
@@ -47,33 +48,6 @@ class BitmapIndex {
 
         // Create a bitmap for deleted documents
         this.deletedDocuments = this.createBitmap('index/deleted');
-    }
-
-    /**
-     * Utils
-     */
-
-    // Validate key (ignoring leading "!" for negation)
-    static _validateKey(key) {
-        const normalizedKey = key.startsWith('!') ? key.slice(1) : key;
-        const isValid = ALLOWED_PREFIXES.some(prefix => normalizedKey.startsWith(prefix));
-        if (!isValid) {
-            throw new Error(`Bitmap key "${key}" does not follow naming convention. Must start with one of: ${ALLOWED_PREFIXES.join(', ')}`);
-        }
-    }
-
-    // Returns the prefix (with trailing slash) from a key (ignoring possible "!")
-    static _getPrefix(key) {
-        const normalizedKey = key.startsWith('!') ? key.slice(1) : key;
-        return normalizedKey.split('/')[0] + '/';
-    }
-
-    // Emit an update event with one or more bitmap keys.
-    emitBitmapUpdate(keyOrKeys) {
-        if (this.emitter && typeof this.emitter.emit === 'function') {
-            const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
-            this.emitter.emit('bitmap:update', keys);
-        }
     }
 
     /**
@@ -93,7 +67,7 @@ class BitmapIndex {
 
     tickSync(key, ids) {
         BitmapIndex._validateKey(key);
-        log('Ticking', key, ids);
+        log('Ticking bitmap key', key, ids);
         const bitmap = this.getBitmap(key, true);
         bitmap.addMany(Array.isArray(ids) ? ids : [ids]);
         this.saveBitmap(key, bitmap);
@@ -103,7 +77,7 @@ class BitmapIndex {
 
     untickSync(key, ids) {
         BitmapIndex._validateKey(key);
-        log('Unticking', key, ids);
+        log('Unticking bitmap key', key, ids);
         const bitmap = this.getBitmap(key, false);
         if (!bitmap) return null;
         bitmap.removeMany(Array.isArray(ids) ? ids : [ids]);
@@ -113,34 +87,44 @@ class BitmapIndex {
     }
 
     tickManySync(keyArray, ids) {
-        log('Ticking many', keyArray, ids);
+        log('Ticking bitmap keyArray', keyArray, ids);
+        const keysArray = Array.isArray(keyArray) ? keyArray : [keyArray];
+        const idsArray = Array.isArray(ids) ? ids : [ids];
         let affectedKeys = [];
+
         // Process keys in batch
-        for (const key of keyArray) {
+        for (const key of keysArray) {
             BitmapIndex._validateKey(key);
             const bitmap = this.getBitmap(key, true);
-            bitmap.addMany(Array.isArray(ids) ? ids : [ids]);
+            bitmap.addMany(idsArray);
             this.saveBitmap(key, bitmap);
             affectedKeys.push(key);
         }
-        if (affectedKeys.length) {
-            this.emitBitmapUpdate(affectedKeys);
-        }
+
+        if (affectedKeys.length) { this.emitBitmapUpdate(affectedKeys); }
         return affectedKeys;
     }
 
     untickManySync(keyArray, ids) {
-        log('Unticking many', keyArray, ids);
+        log('Unticking bitmap keyArray', keyArray, ids);
+        const keysArray = Array.isArray(keyArray) ? keyArray : [keyArray];
+        const idsArray = Array.isArray(ids) ? ids : [ids];
         let affectedKeys = [];
+
         // Process keys in batch
-        for (const key of keyArray) {
+        for (const key of keysArray) {
             BitmapIndex._validateKey(key);
             const bitmap = this.getBitmap(key, false);
-            if (!bitmap) continue;
-            bitmap.removeMany(Array.isArray(ids) ? ids : [ids]);
+            if (!bitmap) {
+                log(`Bitmap at key "${key}" not found in the persistent store`);
+                continue;
+            }
+
+            bitmap.removeMany(idsArray);
             this.saveBitmap(key, bitmap);
             affectedKeys.push(key);
         }
+
         if (affectedKeys.length) {
             this.emitBitmapUpdate(affectedKeys);
         }
@@ -149,9 +133,12 @@ class BitmapIndex {
 
     removeSync(key, ids) {
         BitmapIndex._validateKey(key);
-        log('Removing', key, ids);
+        log('Removing bitmap key', key, ids);
         const bitmap = this.getBitmap(key, false);
-        if (!bitmap) return null;
+        if (!bitmap) {
+            log(`Bitmap at key "${key}" not found in the persistent store`);
+            return null;
+        }
         bitmap.removeMany(Array.isArray(ids) ? ids : [ids]);
         this.saveBitmap(key, bitmap);
         this.emitBitmapUpdate(key);
@@ -215,7 +202,9 @@ class BitmapIndex {
 
     OR(keyArray) {
         log(`OR(): keyArray: "${keyArray}"`);
-        if (!Array.isArray(keyArray)) { throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`); }
+        if (!Array.isArray(keyArray)) {
+            throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`);
+        }
 
         const positiveKeys = [];
         const negativeKeys = [];
@@ -289,6 +278,33 @@ class BitmapIndex {
 
     /**
      * Utils
+     */
+
+    // Validate key (ignoring leading "!" for negation)
+    static _validateKey(key) {
+        const normalizedKey = key.startsWith('!') ? key.slice(1) : key;
+        const isValid = ALLOWED_PREFIXES.some(prefix => normalizedKey.startsWith(prefix));
+        if (!isValid) {
+            throw new Error(`Bitmap key "${key}" does not follow naming convention. Must start with one of: ${ALLOWED_PREFIXES.join(', ')}`);
+        }
+    }
+
+    // Returns the prefix (with trailing slash) from a key (ignoring possible "!")
+    static _getPrefix(key) {
+        const normalizedKey = key.startsWith('!') ? key.slice(1) : key;
+        return normalizedKey.split('/')[0] + '/';
+    }
+
+    // Emit an update event with one or more bitmap keys.
+    emitBitmapUpdate(keyOrKeys) {
+        if (this.emitter && typeof this.emitter.emit === 'function') {
+            const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
+            this.emitter.emit('bitmap:update', keys);
+        }
+    }
+
+    /**
+     * Database operations
      */
 
     getBitmap(key, autoCreateBitmap = false) {
@@ -392,6 +408,32 @@ class BitmapIndex {
             rangeMin: this.rangeMin,
             rangeMax: this.rangeMax,
         });
+    }
+
+    batchLoadBitmaps(keyArray) {
+        const keys = Array.isArray(keyArray) ? keyArray : [keyArray];
+        const bitmaps = [];
+        // TODO: Create a initializeBitmap() method that will take a buffer and initialize a bitmap
+        // Then use a this.store.getMany() method to load multiple bitmaps with one query
+        // Then initialize them into the cache
+        // Premature optimization is the root of all evil.
+        // Hence the implementation below :)
+        for (const key of keys) {
+            if (this.cache.has(key)) {
+                bitmaps.push(this.cache.get(key));
+            } else {
+                bitmaps.push(this.loadBitmap(key));
+            }
+        }
+        return bitmaps;
+    }
+
+    batchSaveBitmaps(keyArray, bitmapArray) {
+        const keys = Array.isArray(keyArray) ? keyArray : [keyArray];
+        const bitmaps = Array.isArray(bitmapArray) ? bitmapArray : [bitmapArray];
+        for (let i = 0; i < keys.length; i++) {
+            this.saveBitmap(keys[i], bitmaps[i]);
+        }
     }
 
     clearCache() {

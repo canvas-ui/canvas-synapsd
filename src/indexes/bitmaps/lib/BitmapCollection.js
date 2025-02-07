@@ -21,30 +21,30 @@ export default class BitmapCollection {
      * Key management
      */
 
-    makeKey(name) {
-        return `${this.collectionName}/${name}`;
+    makeKey(key) {
+        return `${this.collectionName}/${key}`;
     }
 
     /**
      * Core operations
      */
 
-    getBitmap(name, autoCreate = false) {
-        return this.manager.getBitmap(this.makeKey(name), autoCreate);
+    getBitmap(key, autoCreate = false) {
+        return this.manager.getBitmap(this.makeKey(key), autoCreate);
     }
 
-    saveBitmap(name, bitmap) {
-        return this.manager.saveBitmap(this.makeKey(name), bitmap);
+    saveBitmap(key, bitmap) {
+        return this.manager.saveBitmap(this.makeKey(key), bitmap);
     }
 
-    deleteBitmap(name) {
-        return this.manager.deleteBitmap(this.makeKey(name));
+    deleteBitmap(key) {
+        return this.manager.deleteBitmap(this.makeKey(key));
     }
 
-    renameBitmap(oldName, newName) {
+    renameBitmap(oldKey, newKey) {
         return this.manager.renameBitmap(
-            this.makeKey(oldName),
-            this.makeKey(newName)
+            this.makeKey(oldKey),
+            this.makeKey(newKey)
         );
     }
 
@@ -56,34 +56,34 @@ export default class BitmapCollection {
         return this.manager.listBitmaps(this.collectionName + '/');
     }
 
-    tickMany(names, ids) {
-        const keys = names.map(name => this.makeKey(name));
-        return this.manager.tickMany(keys, ids);
+    tickMany(keys, ids) {
+        const fullKeys = keys.map(key => this.makeKey(key));
+        return this.manager.tickMany(fullKeys, ids);
     }
 
-    untickMany(names, ids) {
-        const keys = names.map(name => this.makeKey(name));
-        return this.manager.untickMany(keys, ids);
+    untickMany(keys, ids) {
+        const fullKeys = keys.map(key => this.makeKey(key));
+        return this.manager.untickMany(fullKeys, ids);
     }
 
     /**
      * Bitmap operations
      */
 
-    AND(names) {
-        const keys = names.map(name => this.makeKey(name));
-        return this.manager.AND(keys);
+    AND(keys) {
+        const fullKeys = keys.map(key => this.makeKey(key));
+        return this.manager.AND(fullKeys);
     }
 
-    OR(names) {
-        const keys = names.map(name => this.makeKey(name));
-        return this.manager.OR(keys);
+    OR(keys) {
+        const fullKeys = keys.map(key => this.makeKey(key));
+        return this.manager.OR(fullKeys);
     }
 
-    NOT(sourceName, targetName) {
+    NOT(sourceKey, targetKey) {
         return this.manager.NOT(
-            this.makeKey(sourceName),
-            this.makeKey(targetName)
+            this.makeKey(sourceKey),
+            this.makeKey(targetKey)
         );
     }
 
@@ -91,17 +91,17 @@ export default class BitmapCollection {
      * Collection-specific operations
      */
 
-    applyToMany(sourceName, targetNames) {
+    applyToMany(sourceKey, targetKeys) {
         return this.manager.applyToMany(
-            this.makeKey(sourceName),
-            targetNames.map(name => this.makeKey(name))
+            this.makeKey(sourceKey),
+            targetKeys.map(key => this.makeKey(key))
         );
     }
 
-    subtractFromMany(sourceName, targetNames) {
+    subtractFromMany(sourceKey, targetKeys) {
         return this.manager.subtractFromMany(
-            this.makeKey(sourceName),
-            targetNames.map(name => this.makeKey(name))
+            this.makeKey(sourceKey),
+            targetKeys.map(key => this.makeKey(key))
         );
     }
 
@@ -109,37 +109,37 @@ export default class BitmapCollection {
      * Context tree operations
      */
 
-    mergeUp(sourcePath, targetPath) {
-        const sourceBitmap = this.getBitmap(sourcePath);
+    mergeUp(sourceKey, targetKey) {
+        const sourceBitmap = this.getBitmap(sourceKey);
         if (!sourceBitmap) return null;
 
-        // Apply source bitmap to all parent layers in target path
-        const targetParts = targetPath.split('/');
-        const targetNames = [];
-        let currentPath = '';
+        // Apply source bitmap to all parent layers in targetKey
+        const targetParts = targetKey.split('/');
+        const targetKeys = [];
+        let currentKey = '';
 
         for (const part of targetParts) {
-            currentPath = currentPath ? `${currentPath}/${part}` : part;
-            targetNames.push(currentPath);
+            currentKey = currentKey ? `${currentKey}/${part}` : part;
+            targetKeys.push(currentKey);
         }
 
-        return this.applyToMany(sourcePath, targetNames);
+        return this.applyToMany(sourceKey, targetKeys);
     }
 
-    moveNode(sourcePath, targetPath) {
-        // First apply the bitmap up the target path
-        this.mergeUp(sourcePath, targetPath);
+    moveNode(sourceKey, targetKey) {
+        // First apply the bitmap up the targetKey
+        this.mergeUp(sourceKey, targetKey);
 
-        // Then subtract it from the source path components
-        const sourceParts = sourcePath.split('/');
-        const sourceNames = [];
-        let currentPath = '';
+        // Then subtract it from the sourceKey components
+        const sourceParts = sourceKey.split('/');
+        const sourceKeys = [];
+        let currentKey = '';
 
         for (const part of sourceParts) {
-            currentPath = currentPath ? `${currentPath}/${part}` : part;
-            sourceNames.push(currentPath);
+            currentKey = currentKey ? `${currentKey}/${part}` : part;
+            sourceKeys.push(currentKey);
         }
 
-        return this.subtractFromMany(sourcePath, sourceNames);
+        return this.subtractFromMany(sourceKey, sourceKeys);
     }
 }

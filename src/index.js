@@ -82,9 +82,9 @@ class SynapsD extends EventEmitter {
         );
 
         this.gc = this.bitmapIndex.createCollection('gc');
-        this.gc.createBitmap('active');
-        this.gc.createBitmap('deleted');
-        this.gc.createBitmap('freed');
+        this.bActive = this.gc.createBitmap('active');
+        this.bDeleted = this.gc.createBitmap('deleted');
+        this.bFreed = this.gc.createBitmap('freed');
 
         /**
          * Vector store backend (LanceDB)
@@ -131,12 +131,6 @@ class SynapsD extends EventEmitter {
     get stats() {
         return {
             // TODO: Implement
-        };
-    }
-
-    get counts() {
-        return {
-            documents: this.#documentCount(),
         };
     }
 
@@ -257,24 +251,59 @@ class SynapsD extends EventEmitter {
         let id = document.id;
         if (!id) { throw new Error('Document id required'); }
 
+        const oldChecksumArray = document.checksumArray;
+        document.checksumArray = document.generateChecksumStrings();
+
+        // Check the first checksum to see if it has changed
+        if (oldChecksumArray[0] !== document.checksumArray[0]) {
+            // Remove old checksums
+            for (const checksum of oldChecksumArray) {
+                this.checksumIndex.delete(checksum);
+            }
+            // Add new checksums
+            for (const checksum of document.checksumArray) {
+                this.checksumIndex.set(checksum, id);
+            }
+        }
+
+        // Update document in the database
+        await this.documents.put(id, document);
+
         let doc = await this.documents.get(id);
         if (!doc) { throw new Error('Document not found'); }
 
         // Update context bitmaps if provided
         if (contextArray.length > 0) {
-            let contextBitmap = this.contextBitmaps.tickMany(contextArray);
+            this.bitmapIndex.tickManySync(contextArray, id);
         }
 
         // Update feature bitmaps if provided
+        if (featureArray.length > 0) {
+            this.bitmapIndex.tickManySync(featureArray, id);
+        }
 
         return await this.documents.put(id, doc);
     }
 
     async removeDocument(id, contextArray = [], featureArray = []) {
+        if (!id) { throw new Error('Document id required'); }
+        if (!Array.isArray(contextArray)) { throw new Error('Context array required'); }
+        if (!Array.isArray(featureArray)) { throw new Error('Feature array required'); }
 
+        // Remove document will only remove the document from the supplied bitmaps
+        // It will not delete the document from the database.
+        if (contextArray.length > 0) {
+            this.bitmapIndex.untickManySync(contextArray, id);
+        }
+        if (featureArray.length > 0) {
+            this.bitmapIndex.untickManySync(featureArray, id);
+        }
     }
 
     async removeDocumentByChecksum(checksum, contextArray = [], featureArray = []) {
+        let id = await this.checksumStringToId(checksum);
+        if (!id) { throw new Error('Document not found'); }
+        await this.removeDocument(id, contextArray, featureArray);
     }
 
     async deleteDocument(id) {
@@ -283,11 +312,28 @@ class SynapsD extends EventEmitter {
 
         // Its cheaper to maintain a bitmap of deleted documents then to
         // loop through all bitmaps and remove the document from each one.
+        this.bDeleted.tick(id);
 
-        await this.documents.delete(id);
+        // Remove document from all bitmaps
+        // TODO: Rework, darn expensive!
+        try {
+            this.bitmapIndex.deleteSync(id);
+        } catch (error) {
+            debug('Error deleting document from bitmaps', error);
+        }
+
+        // Remove document from the database
+        try {
+            await this.documents.delete(id);
+        } catch (error) {
+            debug('Error deleting document from database', error);
+        }
     }
 
     async deleteDocumentByChecksum(checksum) {
+        let id = await this.checksumStringToId(checksum);
+        if (!id) { throw new Error('Document not found'); }
+        await this.deleteDocument(id);
     }
 
 
@@ -296,6 +342,10 @@ class SynapsD extends EventEmitter {
      */
 
     async insertBatch(documents, contextArray = [], featureArray = []) {
+        // TODO: Implement batch insert
+        for (const document of documents) {
+            await this.insertDocument(document, contextArray, featureArray);
+        }
     }
 
     async getBatch(ids) {
@@ -321,13 +371,33 @@ class SynapsD extends EventEmitter {
 
     async updateBatch(documents, contextArray = [], featureArray = []) { }
 
-    async removeBatch(ids, contextArray = [], featureArray = []) { }
+    async removeBatch(ids, contextArray = [], featureArray = []) {
+        ids = Array.isArray(ids) ? ids : [ids];
+        for (const id of ids) {
+            await this.removeDocument(id, contextArray, featureArray);
+        }
+    }
 
-    async removeBatchByChecksums(checksums) { }
+    async removeBatchByChecksums(checksums) {
+        let ids = await this.checksumStringBatchToIds(checksums);
+        for (const id of ids) {
+            await this.removeDocument(id);
+        }
+    }
 
-    async deleteBatch(ids) { }
+    async deleteBatch(ids) {
+        ids = Array.isArray(ids) ? ids : [ids];
+        for (const id of ids) {
+            await this.deleteDocument(id);
+        }
+    }
 
-    async deleteBatchByChecksums(checksums) { }
+    async deleteBatchByChecksums(checksums) {
+        let ids = await this.checksumStringBatchToIds(checksums);
+        for (const id of ids) {
+            await this.deleteDocument(id);
+        }
+    }
 
     /**
      * Bitmap operations

@@ -2,6 +2,7 @@
 
 // Schemas
 import BaseDocument from './BaseDocument.js';
+import Metadata from './Metadata.js';
 //import Directory from './abstractions/Directory.js';
 //import Email from './abstractions/Email.js';
 //import File from './abstractions/File.js';
@@ -11,6 +12,7 @@ import Tab from './abstractions/Tab.js';
 
 // Default schema registry (for now hard-coded)
 const SCHEMA_REGISTRY = {
+    'data/metadata': Metadata,
     'data/abstraction/document': BaseDocument,
     //'data/abstraction/directory': Directory,
     //'data/abstraction/email': Email,
