@@ -196,12 +196,12 @@ export default class BaseDocument {
     */
 
     addVersion(version) {
-        this.versions.push(version);
+        // Naive implementation:
+        // Object has a parent_id, empty parent_id means root document
+        // Object has a versions array with object IDs of previous versions
     }
 
-    removeVersion(version) {
-        this.versions = this.versions.filter((v) => v !== version);
-    }
+    removeVersion(version) { }
 
     /**
      * Utils
@@ -256,6 +256,13 @@ export default class BaseDocument {
             version_number: this.version_number,
             latest_version: this.latest_version,
         };
+    }
+
+    static toJSON() {
+        return JSON.stringify({
+            // Base
+
+        });
     }
 
     static fromJSON(json) {

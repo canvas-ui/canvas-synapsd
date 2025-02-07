@@ -44,6 +44,11 @@ class SchemaRegistry {
         return schema;
     }
 
+    getJsonSchema(schemaId) {
+        const schema = this.getSchema(schemaId);
+        return schema.toJSON();
+    }
+
     /**
      * Check if schema is registered
      * @param {string} schemaId Schema identifier

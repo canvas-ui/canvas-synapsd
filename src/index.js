@@ -2,7 +2,6 @@
 
 // Utils
 import EventEmitter from 'eventemitter2';
-import path from 'path';
 import debugMessage from 'debug';
 const debug = debugMessage('canvas-synapsd');
 
@@ -95,7 +94,6 @@ class SynapsD extends EventEmitter {
          */
 
         debug('SynapsD initialized');
-
     }
 
     /**
@@ -149,15 +147,22 @@ class SynapsD extends EventEmitter {
      * CRUD :: Single document operations
      */
 
-    async insertDocument(document, contextArray = [], featureArray = []) {
+    async insertDocument(doc, contextArray = [], featureArray = []) {
         // Validate document
-        this.validateDocument(document);
+        if (! this.validateDocument(doc) ) {
+            throw new Error('Document validation failed');
+        }
+
+        // TODO: Move to a dedicated method
+        const Schema = schemaRegistry.getSchema(doc.schema);
+        const document = new Schema(doc);
 
         // Recalculate checksums
         document.checksumArray = document.generateChecksumStrings();
 
         // If a checksum already exists, update the document
         if (await this.hasDocumentByChecksum(document.checksumArray[0])) {
+            debug('Document already exists, updating');
             return await this.updateDocument(document, contextArray, featureArray);
         }
 
@@ -170,12 +175,12 @@ class SynapsD extends EventEmitter {
 
         // Update context bitmaps
         if (contextArray.length > 0) {
-            this.bitmapIndex.tickMany(document.id, contextArray);
+            this.bitmapIndex.tickManySync(contextArray, document.id);
         }
 
         // Update feature bitmaps
         if (featureArray.length > 0) {
-            this.bitmapIndex.tickMany(document.id, featureArray);
+            this.bitmapIndex.tickManySync(featureArray, document.id);
         }
 
         // Update metadata
@@ -243,6 +248,13 @@ class SynapsD extends EventEmitter {
 
     async updateDocument(document, contextArray = [], featureArray = []) {
         if (!document) { throw new Error('Document required'); }
+
+        // Validate document
+        if (! this.validateDocument(document) ) {
+            throw new Error('Document validation failed');
+        }
+
+        // Validate context and feature arrays
         if (!Array.isArray(contextArray)) { throw new Error('Context array required'); }
         if (!Array.isArray(featureArray)) { throw new Error('Feature array required'); }
 
