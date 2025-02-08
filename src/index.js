@@ -228,7 +228,7 @@ class SynapsD extends EventEmitter {
         let id = await this.checksumStringToId(checksum);
         if (!id) { return false; }
 
-        return await this.hasDocument(id);
+        return await this.documents.has(id);
     }
 
     async getDocument(id) {
@@ -279,27 +279,27 @@ class SynapsD extends EventEmitter {
             }
             // Add new checksums
             for (const checksum of document.checksumArray) {
-                this.checksumIndex.set(checksum, id);
+                this.checksumIndex.set(checksum, document.id);
             }
         }
 
         // Update document in the database
-        await this.documents.put(id, document);
+        await this.documents.put(document.id, document);
 
-        let doc = await this.documents.get(id);
+        let doc = await this.documents.get(document.id);
         if (!doc) { throw new Error('Document not found'); }
 
         // Update context bitmaps if provided
         if (contextArray.length > 0) {
-            this.bitmapIndex.tickManySync(contextArray, id);
+            this.bitmapIndex.tickManySync(contextArray, document.id);
         }
 
         // Update feature bitmaps if provided
         if (featureArray.length > 0) {
-            this.bitmapIndex.tickManySync(featureArray, id);
+            this.bitmapIndex.tickManySync(featureArray, document.id);
         }
 
-        return await this.documents.put(id, doc);
+        return await this.documents.put(document.id, doc);
     }
 
     async removeDocument(id, contextArray = [], featureArray = []) {
