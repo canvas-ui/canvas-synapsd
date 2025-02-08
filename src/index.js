@@ -183,6 +183,11 @@ class SynapsD extends EventEmitter {
             this.bitmapIndex.tickManySync(featureArray, document.id);
         }
 
+        // Add checksums to the inverted index
+        for (const checksum of document.checksumArray) {
+            this.checksumIndex.set(checksum, document.id);
+        }
+
         // Update metadata
         await this.metadata.put(document.id, {
             id: document.id,
@@ -258,10 +263,12 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(contextArray)) { throw new Error('Context array required'); }
         if (!Array.isArray(featureArray)) { throw new Error('Feature array required'); }
 
-        let id = document.id;
-        if (!id) { throw new Error('Document id required'); }
+        const existingDocument = await this.getDocumentByChecksum(document.checksumArray[0]);
+        if (!existingDocument) { throw new Error('Document not found'); }
 
-        const oldChecksumArray = document.checksumArray;
+        console.log(existingDocument);
+
+        const oldChecksumArray = existingDocument.checksumArray;
         document.checksumArray = document.generateChecksumStrings();
 
         // Check the first checksum to see if it has changed
@@ -456,25 +463,8 @@ class SynapsD extends EventEmitter {
     // timeRange query can be done using the filterArray
     async listDocuments(contextArray = [], featureArray = [], filterArray = [], options = {}) {
         debug(`Listing objects contextArray: ${contextArray} featureArray: ${featureArray} filterArray: ${filterArray}`);
-        // Use the context and feature bitmap collections from the BitmapIndex
-        let contextBitmap = this.contextBitmaps.AND(contextArray);
-        let featureBitmap = this.featureBitmaps.OR(featureArray);
 
-        let res = [];
-
-        if (contextBitmap.isEmpty) {
-            res = featureBitmap.toArray();
-        } else {
-            contextBitmap.andInPlace(featureBitmap);
-            res = contextBitmap.toArray();
-        }
-
-        // if (filterArray.length > 0) {} // TODO
-        if (res.length === 0) { return []; }
-
-        if (options.returnMetadata) {
-            res = await Promise.all(res.map(id => this.metadata.get(id)));
-        }
+        const res = await this.documents.listEntries();
 
         return (options.limit && options.limit > 0) ?
             res.slice(0, options.limit) :

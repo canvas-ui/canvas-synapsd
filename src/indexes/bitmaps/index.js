@@ -4,9 +4,11 @@
 import EventEmitter from 'eventemitter2';
 import debug from 'debug';
 const log = debug('canvas:synapsd:bitmapIndex');
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
 
 // Includes
-import RoaringBitmap32 from 'roaring';
+const { RoaringBitmap32 } = require('roaring/RoaringBitmap32');
 import Bitmap from './lib/Bitmap.js';
 import BitmapCollection from './lib/BitmapCollection.js';
 
@@ -182,7 +184,6 @@ class BitmapIndex {
             }
         } else {
             // If no positive keys, we cannot calculate a proper intersection.
-            // (Optionally, you could define a universal set based on rangeMin/rangeMax.)
             partial = new RoaringBitmap32();
         }
 
@@ -396,19 +397,24 @@ class BitmapIndex {
 
     loadBitmap(key) {
         log(`Loading bitmap with key ID "${key}" from persistent store`);
-        let bitmapData = this.store.get(key);
+        const bitmapData = this.store.get(key);
         if (!bitmapData) {
             log(`Unable to load bitmap "${key}" from the database`);
             return null;
         }
 
-        let bitmap = new RoaringBitmap32();
-        return Bitmap.create(bitmap.deserialize(bitmapData, true), {
+        // Create a new Bitmap instance with the serialized data
+        const bitmap = new Bitmap(bitmapData, {
             type: 'static',
             key: key,
             rangeMin: this.rangeMin,
             rangeMax: this.rangeMax,
         });
+
+        // Cache the bitmap for future use
+        this.cache.set(key, bitmap);
+
+        return bitmap;
     }
 
     batchLoadBitmaps(keyArray) {
