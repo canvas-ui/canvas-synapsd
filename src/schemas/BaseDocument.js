@@ -95,7 +95,7 @@ export default class BaseDocument {
          * Document data/payload, omitted for blobs
          */
 
-        this.data = options.data ?? null;
+        this.data = options.data ?? {};
         this.dataPaths = options.dataPaths ?? [];
 
         /**
@@ -332,4 +332,35 @@ export default class BaseDocument {
         }
     }
 
+    /**
+     * Create a document from input data
+     * @param {Object} input Input data
+     * @param {Object} options Additional options
+     * @returns {BaseDocument} New document instance
+     */
+    static fromData(input, options = {}) {
+        return this.create({
+            data: this.normalizeInputData(input),
+            ...options
+        });
+    }
+
+    /**
+     * Factory method to create documents from normalized input
+     * @protected
+     */
+    static create(options = {}) {
+        return new this(options);
+    }
+
+    /**
+     * Normalize input data based on document type
+     * @protected
+     */
+    static normalizeInputData(input) {
+        if (typeof input !== 'object' || input === null) {
+            throw new Error('Base documents require object input');
+        }
+        return input;
+    }
 }

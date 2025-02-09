@@ -10,7 +10,7 @@ import Db from './backends/lmdb/index.js';
 
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
-
+import BaseDocument from './schemas/BaseDocument.js';
 // Indexes
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
@@ -147,17 +147,19 @@ class SynapsD extends EventEmitter {
      * CRUD :: Single document operations
      */
 
-    async insertDocument(doc, contextArray = [], featureArray = []) {
+    async insertDocument(document, contextArray = [], featureArray = []) {
         // Validate document
-        if (! this.validateDocument(doc) ) {
+        if (!this.validateDocument(document)) {
             throw new Error('Document validation failed');
         }
 
-        // TODO: Move to a dedicated method
-        const Schema = schemaRegistry.getSchema(doc.schema);
-        const document = new Schema(doc);
+        // Check if the document is an instance of BaseDocument, initialize it if so
+        if (!(document instanceof BaseDocument)) {
+            const Schema = schemaRegistry.getSchema(document.schema);
+            document = new Schema(document);
+        }
 
-        // Recalculate checksums
+        // Generate checksums before checking existence
         document.checksumArray = document.generateChecksumStrings();
 
         // If a checksum already exists, update the document
@@ -169,8 +171,12 @@ class SynapsD extends EventEmitter {
         // Generate a new document ID
         document.id = this.#generateDocumentID();
 
+        // If document.schema is not part of featureArray, add it
+        if (!featureArray.includes(document.schema)) {
+            featureArray.push(document.schema);
+        }
+
         // Insert a new document into the database
-        // TODO: Add versioning support
         await this.documents.put(document.id, document);
 
         // Update context bitmaps
@@ -188,15 +194,6 @@ class SynapsD extends EventEmitter {
             this.checksumIndex.set(checksum, document.id);
         }
 
-        // Update metadata
-        await this.metadata.put(document.id, {
-            id: document.id,
-            created_at: document.created_at,
-            updated_at: document.updated_at,
-            status: 'active',
-        });
-
-        // Return the document
         return document;
     }
 
@@ -255,7 +252,7 @@ class SynapsD extends EventEmitter {
         if (!document) { throw new Error('Document required'); }
 
         // Validate document
-        if (! this.validateDocument(document) ) {
+        if (!this.validateDocument(document)) {
             throw new Error('Document validation failed');
         }
 
@@ -263,31 +260,49 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(contextArray)) { throw new Error('Context array required'); }
         if (!Array.isArray(featureArray)) { throw new Error('Feature array required'); }
 
+        // Ensure document is properly initialized
+        if (!(document instanceof BaseDocument)) {
+            const Schema = schemaRegistry.getSchema(document.schema);
+            document = new Schema(document);
+        }
+
+        // If document.schema is not part of featureArray, add it
+        if (!featureArray.includes(document.schema)) {
+            featureArray.push(document.schema);
+        }
+
+        // Ensure document has checksums
+        document.checksumArray = document.generateChecksumStrings();
+
+        // Get existing document
         const existingDocument = await this.getDocumentByChecksum(document.checksumArray[0]);
         if (!existingDocument) { throw new Error('Document not found'); }
 
-        console.log(existingDocument);
-
-        const oldChecksumArray = existingDocument.checksumArray;
-        document.checksumArray = document.generateChecksumStrings();
-
-        // Check the first checksum to see if it has changed
-        if (oldChecksumArray[0] !== document.checksumArray[0]) {
-            // Remove old checksums
-            for (const checksum of oldChecksumArray) {
-                this.checksumIndex.delete(checksum);
-            }
-            // Add new checksums
-            for (const checksum of document.checksumArray) {
-                this.checksumIndex.set(checksum, document.id);
-            }
+        // Ensure existing document is properly initialized
+        let oldChecksumArray = [];
+        if (existingDocument instanceof BaseDocument) {
+            oldChecksumArray = existingDocument.checksumArray || [];
+        } else {
+            const Schema = schemaRegistry.getSchema(existingDocument.schema);
+            const existingDoc = new Schema(existingDocument);
+            oldChecksumArray = existingDoc.checksumArray || [];
         }
+
+        // Copy the ID from existing document
+        document.id = existingDocument.id;
 
         // Update document in the database
         await this.documents.put(document.id, document);
 
-        let doc = await this.documents.get(document.id);
-        if (!doc) { throw new Error('Document not found'); }
+        // Update checksum index - remove old checksums
+        for (const checksum of oldChecksumArray) {
+            this.checksumIndex.delete(checksum);
+        }
+
+        // Add new checksums
+        for (const checksum of document.checksumArray) {
+            this.checksumIndex.set(checksum, document.id);
+        }
 
         // Update context bitmaps if provided
         if (contextArray.length > 0) {
@@ -299,7 +314,7 @@ class SynapsD extends EventEmitter {
             this.bitmapIndex.tickManySync(featureArray, document.id);
         }
 
-        return await this.documents.put(document.id, doc);
+        return document;
     }
 
     async removeDocument(id, contextArray = [], featureArray = []) {
@@ -420,6 +435,10 @@ class SynapsD extends EventEmitter {
      * Bitmap operations
      */
 
+    async listBitmaps() {
+        return await this.bitmapIndex.listBitmaps();
+    }
+
     async updateBitmaps(ids, contextArray = [], featureArray = []) { }
 
     async updateContextBitmaps(ids, contextArray) { }
@@ -460,15 +479,51 @@ class SynapsD extends EventEmitter {
      * Query operations
      */
 
-    // timeRange query can be done using the filterArray
     async listDocuments(contextArray = [], featureArray = [], filterArray = [], options = {}) {
-        debug(`Listing objects contextArray: ${contextArray} featureArray: ${featureArray} filterArray: ${filterArray}`);
+        debug(`Listing documents with context: ${contextArray}, features: ${featureArray}, filters: ${filterArray}`);
 
-        const res = await this.documents.listEntries();
+        // Initialize result bitmap
+        let resultBitmap = null;
 
-        return (options.limit && options.limit > 0) ?
-            res.slice(0, options.limit) :
-            res;
+        // Apply context filters if provided
+        if (contextArray.length > 0) {
+            resultBitmap = this.bitmapIndex.AND(contextArray);
+        }
+
+        // Apply feature filters if provided
+        if (featureArray.length > 0) {
+            const featureBitmap = this.bitmapIndex.OR(featureArray);
+            if (resultBitmap) {
+                resultBitmap.andInPlace(featureBitmap);
+            } else {
+                resultBitmap = featureBitmap;
+            }
+        }
+
+        // Apply additional filters if provided
+        if (filterArray.length > 0) {
+            const filterBitmap = this.bitmapIndex.AND(filterArray);
+            if (resultBitmap) {
+                resultBitmap.andInPlace(filterBitmap);
+            } else {
+                resultBitmap = filterBitmap;
+            }
+        }
+
+        // If no filters were applied, get all documents
+        if (!resultBitmap || resultBitmap.isEmpty) {
+            const entries = await this.documents.listEntries();
+            return options.limit ? entries.slice(0, options.limit) : entries;
+        }
+
+        // Convert bitmap to array of document IDs
+        const documentIds = Array.from(resultBitmap);
+
+        // Fetch documents for the filtered IDs
+        const documents = await this.getBatch(documentIds);
+
+        // Apply limit if specified
+        return options.limit ? documents.slice(0, options.limit) : documents;
     }
 
     async findDocuments(query, contextArray = [], featureArray = [], filterArray = [], options = {}) {

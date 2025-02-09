@@ -14,8 +14,6 @@ const schemaDefinition = BaseDocument.schemaDefinition.extend({
 });
 
 export default class Tab extends BaseDocument {
-    static schemaType = 'tab';
-
     constructor(options = {}) {
         super({
             ...options,
@@ -45,6 +43,34 @@ export default class Tab extends BaseDocument {
     get url() { return this.data.url; }
     get title() { return this.data.title; }
     get favicon() { return this.data.favicon; }
+
+    /**
+     * Create a tab from input data
+     * @param {string|Object} input URL string or data object
+     * @param {Object} options Additional options
+     * @returns {Tab} New tab instance
+     */
+    static fromData(input, options = {}) {
+        return this.create({
+            ...options,
+            data: this.normalizeInputData(input)
+        });
+    }
+
+    /**
+     * Normalize input data based on document type
+     * @protected
+     */
+    static normalizeInputData(input) {
+        if (typeof input === 'string') {
+            return {
+                url: input,
+                title: null,
+                favicon: null
+            };
+        }
+        return input;
+    }
 
     /**
      * Validates the tab document

@@ -13,8 +13,6 @@ const schemaDefinition = BaseDocument.schemaDefinition.extend({
 });
 
 export default class Note extends BaseDocument {
-    static schemaType = 'note';
-
     constructor(options = {}) {
         super({
             ...options,
@@ -42,6 +40,33 @@ export default class Note extends BaseDocument {
 
     get title() { return this.data.title; }
     get content() { return this.data.content; }
+
+    /**
+     * Create a note from input data
+     * @param {string|Object} input Note content or data object
+     * @param {Object} options Additional options
+     * @returns {Note} New note instance
+     */
+    static fromData(input, options = {}) {
+        return this.create({
+            content: typeof input === 'string' ? input : input.content,
+            title: options.title || (typeof input === 'string' ? this.generateDefaultTitle(input) : input.title)
+        });
+    }
+
+    static normalizeInputData(input) {
+        if (typeof input === 'string') {
+            return {
+                content: input,
+                title: this.generateDefaultTitle(input)
+            };
+        }
+        return input;
+    }
+
+    static generateDefaultTitle(content) {
+        return content.split('\n')[0].slice(0, 50) || 'Untitled Note';
+    }
 
     /**
      * Validates the note document

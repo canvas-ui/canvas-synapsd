@@ -23,7 +23,6 @@ class Bitmap extends RoaringBitmap32 {
 
         log(`Bitmap "${this.key}" type ${this.type}, ID range: ${this.rangeMin} - ${this.rangeMax} initialized`);
         log(`Bitmap "${this.key}" has ${this.size} objects`);
-        log(`Bitmap instance of RoaringBitmap32: ${this instanceof RoaringBitmap32}`);
     }
 
     tick(oid) {
