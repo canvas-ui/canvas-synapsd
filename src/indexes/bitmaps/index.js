@@ -81,11 +81,16 @@ class BitmapIndex {
     untickSync(key, ids) {
         BitmapIndex._validateKey(key);
         log('Unticking bitmap key', key, ids);
+
         const bitmap = this.getBitmap(key, false);
         if (!bitmap) return null;
+
         bitmap.removeMany(Array.isArray(ids) ? ids : [ids]);
-        this.saveBitmap(key, bitmap);
-        this.emitBitmapUpdate(key);
+        if (!bitmap.isEmpty()) { // Wont save if bitmap is empty
+            this.saveBitmap(key, bitmap);
+            this.emitBitmapUpdate(key);
+        }
+
         return bitmap;
     }
 
@@ -354,11 +359,14 @@ class BitmapIndex {
         BitmapIndex._validateKey(oldKey);
         BitmapIndex._validateKey(newKey);
         log(`Renaming bitmap "${oldKey}" to "${newKey}"`);
+
         const bitmap = this.getBitmap(oldKey);
-        if (!bitmap) { return null; }
+        if (!bitmap) { throw new Error(`Unable to rename bitmap "${oldKey}" to "${newKey}" because bitmap "${oldKey}" does not exist`); }
+
         this.deleteBitmap(oldKey);
         this.saveBitmap(newKey, bitmap.serialize());
         this.emitBitmapUpdate(newKey);
+
         return bitmap;
     }
 

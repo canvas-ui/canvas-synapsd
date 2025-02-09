@@ -13,7 +13,6 @@ class Bitmap extends RoaringBitmap32 {
     constructor(oidArrayOrBitmap = [], options = {}) {
         super(oidArrayOrBitmap);
 
-        this.type = options.type || 'static';
         if (!options.key) {
             throw new Error('Bitmap key required');
         }
@@ -21,7 +20,7 @@ class Bitmap extends RoaringBitmap32 {
         this.rangeMin = options.rangeMin ?? 0;
         this.rangeMax = options.rangeMax ?? 4294967296;
 
-        log(`Bitmap "${this.key}" type ${this.type}, ID range: ${this.rangeMin} - ${this.rangeMax} initialized`);
+        log(`Bitmap "${this.key}" ID range: ${this.rangeMin} - ${this.rangeMax} initialized`);
         log(`Bitmap "${this.key}" has ${this.size} objects`);
     }
 
