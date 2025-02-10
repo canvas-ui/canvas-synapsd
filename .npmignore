@@ -1,0 +1,8 @@
+.cursorrules
+.cursorignore
+.gitignore
+.git
+.github
+.vscode
+.eslintrc.js
+_test*
