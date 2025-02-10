@@ -19,7 +19,6 @@ const ALLOWED_PREFIXES = [
     'data/abstraction/', // This is our schema type
     'data/mime/',
     'data/content/encoding/',
-    'data/content/type/',
     'index/',
     'system/',
     'client/os/',

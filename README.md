@@ -33,7 +33,7 @@ We could use composite keys and LMDB range queries instead (timestamp.docID => d
 The following bitmap index prefixes are enforced to organize and filter documents:
 
 - `context/` - Context path bitmaps, used internally by Canvas (as context tree nodes, context/uuid)
-- `data/abstraction/<schema>` - Schema type filters
+- `data/abstraction/<schema>` - Schema type filters (incl subtrees like data/abstraction/file/ext/json)
 - `data/mime/<type>`
 - `data/content/encoding/<encoding>`
 - `index/` - Index-related filters
