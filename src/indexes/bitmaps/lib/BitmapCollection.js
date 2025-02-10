@@ -68,27 +68,6 @@ export default class BitmapCollection {
     }
 
     /**
-     * Bitmap operations
-     */
-
-    AND(keys) {
-        const fullKeys = keys.map(key => this.makeKey(key));
-        return this.manager.AND(fullKeys);
-    }
-
-    OR(keys) {
-        const fullKeys = keys.map(key => this.makeKey(key));
-        return this.manager.OR(fullKeys);
-    }
-
-    NOT(sourceKey, targetKey) {
-        return this.manager.NOT(
-            this.makeKey(sourceKey),
-            this.makeKey(targetKey)
-        );
-    }
-
-    /**
      * Collection-specific operations
      */
 

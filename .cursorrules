@@ -16,10 +16,10 @@
 
 ## Project Overview
 
-We are building SynapsD, a JSON Document store and bitmap indexing engine for "Canvas".  
+We are building SynapsD, a JSON Document store and bitmap indexing engine for "Canvas".
 Canvas is a cross-platform desktop overlay to help organize work / workflows and data into separate "contexts".
 Contexts are represented by a virtual file-system tree. Every tree node("directory") represents a layer linked to a roaring bitmap.
-Layers are unique - a `reports` layer of the `/work/acme/reports` and `/work/reports` context URLs are the same internally stored under the same uuid,
+Layers are unique - `reports` layer of the `/work/acme/reports` and `/work/reports` context URLs is internally stored under the same uuid,
 Context layers filter different data based on where they are placed within the context tree.
 - Context URL structure: `sessionID@workspaceID://context/url`, for example `my-laptop@universe://work/acme/devops/jira-1234`
 
@@ -27,12 +27,11 @@ Context layers filter different data based on where they are placed within the c
 
 - We use ES6 vanilla JavaScript and may use TypeScript in the future
 - We use bash and powershell for scripting
-- We use Node.js with a LTS v20+
-- We use LMDB for user/workspace databases and as a JSON document store (https://www.npmjs.com/package/lmdb)
-- We use PouchDB planned to replace LMDB in v2.0
+- We use Node.js with a LTS v20.x version
+- We use LMDB for user/workspace indexes and as a JSON document store (https://www.npmjs.com/package/lmdb)
 - We use roaring-bitmaps (https://www.npmjs.com/package/roaring)
-- We use FlexSearch for full-text search (https://www.npmjs.com/package/flexsearch)
-- We use LanceDB for vector search (https://www.npmjs.com/package/lancedb)
+- We use FlexSearch for full-text search indexes (https://www.npmjs.com/package/flexsearch)
+- We use LanceDB for vector search indexes (https://www.npmjs.com/package/lancedb)
 
 ## Current project file structure
 

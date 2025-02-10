@@ -151,8 +151,14 @@ class BitmapIndex {
 
     deleteSync(id) {
         log(`Deleting object references with ID "${id}" from all bitmaps in collection`);
-        for (const key of this.listBitmaps()) {
-            this.removeSync(key, id);
+        // First fetch all bitmap keys
+        const bitmapKeys = this.listBitmaps();
+
+        // Then untick the ID for the whole list
+        try {
+            this.untickManySync(bitmapKeys, id);
+        } catch (error) {
+            log(`Error deleting object references with ID "${id}" from all bitmaps in collection`, error);
         }
     }
 

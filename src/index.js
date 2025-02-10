@@ -27,10 +27,9 @@ const INTERNAL_BITMAP_ID_MAX = 100000;
 
 class SynapsD extends EventEmitter {
 
-    #db;          // Database backend instance
-    #rootPath;    // Root path of the database
-    #status;      // Status of the database
-    #maxAssignedId; // Highest assigned document ID
+    #db;        // Database backend instance
+    #rootPath;  // Root path of the database
+    #status;    // Status of the database
 
     constructor(options = {
         backupOnOpen: false,
@@ -79,7 +78,7 @@ class SynapsD extends EventEmitter {
             this.cache,
         );
 
-        //this.gc = this.bitmapIndex; //.createCollection('gc');
+        this.deletedDocuments = this.bitmapIndex.createBitmap('action/deleted'); //.createCollection('gc');
         //this.bActive = this.gc.createBitmap('active');
         //this.bDeleted = this.gc.createBitmap('deleted');
         //this.bFreed = this.gc.createBitmap('freed');
@@ -96,13 +95,6 @@ class SynapsD extends EventEmitter {
 
         debug('SynapsD initialized');
         debug('Document count:', this.#documentCount());
-
-        // Initialize freeIDs pool for tracking freed document IDs.
-        // For demonstration, using a JavaScript Set
-        this.freeIDs = new Set();
-
-        // Initialize maxAssignedId with the base offset.
-        this.#maxAssignedId = INTERNAL_BITMAP_ID_MAX;
     }
 
     /**
@@ -359,8 +351,8 @@ class SynapsD extends EventEmitter {
         if (!id) { throw new Error('Document id required'); }
         if (!this.documents.has(id)) { throw new Error('Document not found'); }
 
-        // When deleting a document, add its ID to the freeIDs pool for reuse.
-        this.freeIDs.add(id);
+        // Mark the document as deleted
+        await this.deletedDocuments.tick(id);
 
         // Remove document from all bitmaps
         // TODO: Rework, darn expensive!
@@ -654,20 +646,8 @@ class SynapsD extends EventEmitter {
     }
 
     #generateDocumentID() {
-        // Check for available freed IDs first.
-        if (this.freeIDs.size > 0) {
-            // Retrieve and remove the lowest free ID.
-            const freeIds = Array.from(this.freeIDs);
-            // Optionally, sort them to get the smallest
-            freeIds.sort((a, b) => a - b);
-            const freeId = freeIds[0];
-            this.freeIDs.delete(freeId);
-            return freeId;
-        }
-
-        // Otherwise, assign a new ID.
-        this.#maxAssignedId += 1;
-        return this.#maxAssignedId;
+        let count = this.#documentCount();
+        return INTERNAL_BITMAP_ID_MAX + count + 1;
     }
 
     #documentCount() {
