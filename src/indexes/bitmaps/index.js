@@ -15,10 +15,7 @@ import BitmapCollection from './lib/BitmapCollection.js';
 // Constants
 const ALLOWED_PREFIXES = [
     'context/',
-    'action/insert/',
-    'action/update/',
-    'action/remove/',
-    'action/delete/',
+    'action/',
     'data/abstraction/', // This is our schema type
     'data/mime/',
     'data/content/encoding/',
