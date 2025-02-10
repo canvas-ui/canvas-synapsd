@@ -19,7 +19,7 @@ import VectorIndex from './indexes/vector/index.js';
 
 // Constants
 const INTERNAL_BITMAP_ID_MIN = 0;
-const INTERNAL_BITMAP_ID_MAX = 128 * 1024; // 128KB
+const INTERNAL_BITMAP_ID_MAX = 100000;
 
 /**
  * SynapsD
@@ -94,6 +94,7 @@ class SynapsD extends EventEmitter {
          */
 
         debug('SynapsD initialized');
+        debug('Document count:', this.#documentCount());
     }
 
     /**
@@ -181,12 +182,16 @@ class SynapsD extends EventEmitter {
 
         // Update context bitmaps
         if (contextArray.length > 0) {
-            this.bitmapIndex.tickManySync(contextArray, document.id);
+            for (const context of contextArray) {
+                await this.bitmapIndex.tickSync(context, document.id);
+            }
         }
 
         // Update feature bitmaps
         if (featureArray.length > 0) {
-            this.bitmapIndex.tickManySync(featureArray, document.id);
+            for (const feature of featureArray) {
+                await this.bitmapIndex.tickSync(feature, document.id);
+            }
         }
 
         // Add checksums to the inverted index
@@ -306,12 +311,16 @@ class SynapsD extends EventEmitter {
 
         // Update context bitmaps if provided
         if (contextArray.length > 0) {
-            this.bitmapIndex.tickManySync(contextArray, document.id);
+            for (const context of contextArray) {
+                await this.bitmapIndex.tickSync(context, document.id);
+            }
         }
 
         // Update feature bitmaps if provided
         if (featureArray.length > 0) {
-            this.bitmapIndex.tickManySync(featureArray, document.id);
+            for (const feature of featureArray) {
+                await this.bitmapIndex.tickSync(feature, document.id);
+            }
         }
 
         return document;
@@ -510,17 +519,27 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        // If no filters were applied, get all documents
+        // If no filters were applied or result is empty, get all documents
         if (!resultBitmap || resultBitmap.isEmpty) {
-            const entries = await this.documents.listEntries();
-            return options.limit ? entries.slice(0, options.limit) : entries;
+            // Changed from listEntries to getRange for consistency
+            const documents = [];
+            for await (const { key, value } of this.documents.getRange()) {
+                documents.push(value);
+            }
+            return options.limit ? documents.slice(0, options.limit) : documents;
         }
 
         // Convert bitmap to array of document IDs
         const documentIds = Array.from(resultBitmap);
 
-        // Fetch documents for the filtered IDs
-        const documents = await this.getBatch(documentIds);
+        // Changed: Get documents one by one to avoid undefined entries
+        const documents = [];
+        for (const id of documentIds) {
+            const doc = await this.documents.get(id);
+            if (doc) {
+                documents.push(doc);
+            }
+        }
 
         // Apply limit if specified
         return options.limit ? documents.slice(0, options.limit) : documents;
