@@ -44,9 +44,6 @@ class BitmapIndex {
         // If an emitter is passed in options, use it; otherwise create a new one.
         this.emitter = options.emitter || new EventEmitter();
         log(`BitmapIndex initialized with range ${this.rangeMin} - ${this.rangeMax}`);
-
-        // Create a bitmap for deleted documents
-        this.deletedDocuments = this.createBitmap('index/deleted', []);
     }
 
     /**
@@ -341,12 +338,11 @@ class BitmapIndex {
 
         if (this.hasBitmap(key)) {
             log(`Bitmap with key ID "${key}" already exists`);
-            return false;
+            return this.getBitmap(key);
         }
 
         const bitmapData = this.#parseInput(oidArrayOrBitmap);
         const bitmap = new Bitmap(bitmapData, {
-            type: 'static',
             key: key,
             rangeMin: this.rangeMin,
             rangeMax: this.rangeMax,
@@ -390,6 +386,9 @@ class BitmapIndex {
     listBitmaps() {
         let bitmapList = [];
         for (const key of this.store.getKeys()) {
+            // Skip deleted documents bitmap
+            // TODO: We'll use a dedicated dataset for system/index bitmaps
+            if (key.startsWith('action/deleted')) { continue; }
             bitmapList.push(key);
         }
         return bitmapList;
@@ -415,7 +414,6 @@ class BitmapIndex {
 
         // Create a new Bitmap instance with the serialized data
         const bitmap = new Bitmap(bitmapData, {
-            type: 'static',
             key: key,
             rangeMin: this.rangeMin,
             rangeMax: this.rangeMax,

@@ -83,6 +83,8 @@ class SynapsD extends EventEmitter {
         //this.bDeleted = this.gc.createBitmap('deleted');
         //this.bFreed = this.gc.createBitmap('freed');
 
+        console.log(this.deletedDocuments.toArray());
+
         /**
          * Vector store backend (LanceDB)
          */
@@ -352,6 +354,7 @@ class SynapsD extends EventEmitter {
         if (!this.documents.has(id)) { throw new Error('Document not found'); }
 
         // Mark the document as deleted
+        debug(`Deleting document ${id}`);
         await this.deletedDocuments.tick(id);
 
         // Remove document from all bitmaps
@@ -646,6 +649,12 @@ class SynapsD extends EventEmitter {
     }
 
     #generateDocumentID() {
+        const recycledId = this.deletedDocuments.pop();
+        if (recycledId) {
+            debug(`Using recycled document ID: ${recycledId}`);
+            return recycledId;
+        }
+
         let count = this.#documentCount();
         return INTERNAL_BITMAP_ID_MAX + count + 1;
     }

@@ -24,7 +24,6 @@ const DEFAULT_DOCUMENT_DATA_ENCODING = 'utf8';
 // Base document schema definition
 const documentSchema = z.object({
     // Base
-    id: z.number().int().positive().optional(),
     schema: z.string(),
     schemaVersion: z.string(),
 
@@ -64,7 +63,7 @@ export default class BaseDocument {
 
     constructor(options = {}) {
         // Base
-        this.id = options.id; // TODO: Should not be here
+        this.id = null;
         this.schema = options.schema ?? DOCUMENT_SCHEMA;
         this.schemaVersion = options.schemaVersion ?? DOCUMENT_SCHEMA_VERSION;
 
