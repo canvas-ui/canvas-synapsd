@@ -1,5 +1,6 @@
 'use strict';
 
+// Utils
 import debug from 'debug';
 const log = debug('canvas-synapsd:bitmapCollection');
 

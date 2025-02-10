@@ -27,9 +27,10 @@ const INTERNAL_BITMAP_ID_MAX = 100000;
 
 class SynapsD extends EventEmitter {
 
-    #db;        // Database backend instance
-    #rootPath;  // Root path of the database
-    #status;    // Status of the database
+    #db;          // Database backend instance
+    #rootPath;    // Root path of the database
+    #status;      // Status of the database
+    #maxAssignedId; // Highest assigned document ID
 
     constructor(options = {
         backupOnOpen: false,
@@ -49,12 +50,12 @@ class SynapsD extends EventEmitter {
         this.#db = new Db(options);
         this.#rootPath = options.path;
 
-        // Support for custom (presumably in-memory) caching backend (assuming it implements a Map interface)
+        // Support for custom (presumably in-memory) caching backend (assuming it implements a Map() interface)
         this.cache = options.cache ?? new Map();
 
         // Main JSON document datasets
-        this.documents = this.#db.createDataset('documents');
-        this.metadata = this.#db.createDataset('metadata');
+        this.documents = this.#db.createDataset('documents');   // If you want to use SynapsD to store JSON documents
+        this.metadata = this.#db.createDataset('metadata');    // If you want to use SynapsD for metedata only
 
         /**
          * Inverted indexes
@@ -95,6 +96,13 @@ class SynapsD extends EventEmitter {
 
         debug('SynapsD initialized');
         debug('Document count:', this.#documentCount());
+
+        // Initialize freeIDs pool for tracking freed document IDs.
+        // For demonstration, using a JavaScript Set
+        this.freeIDs = new Set();
+
+        // Initialize maxAssignedId with the base offset.
+        this.#maxAssignedId = INTERNAL_BITMAP_ID_MAX;
     }
 
     /**
@@ -351,9 +359,8 @@ class SynapsD extends EventEmitter {
         if (!id) { throw new Error('Document id required'); }
         if (!this.documents.has(id)) { throw new Error('Document not found'); }
 
-        // Its cheaper to maintain a bitmap of deleted documents then to
-        // loop through all bitmaps and remove the document from each one.
-        //this.bDeleted.tick(id);
+        // When deleting a document, add its ID to the freeIDs pool for reuse.
+        this.freeIDs.add(id);
 
         // Remove document from all bitmaps
         // TODO: Rework, darn expensive!
@@ -647,8 +654,20 @@ class SynapsD extends EventEmitter {
     }
 
     #generateDocumentID() {
-        let count = this.#documentCount();
-        return INTERNAL_BITMAP_ID_MAX + count + 1;
+        // Check for available freed IDs first.
+        if (this.freeIDs.size > 0) {
+            // Retrieve and remove the lowest free ID.
+            const freeIds = Array.from(this.freeIDs);
+            // Optionally, sort them to get the smallest
+            freeIds.sort((a, b) => a - b);
+            const freeId = freeIds[0];
+            this.freeIDs.delete(freeId);
+            return freeId;
+        }
+
+        // Otherwise, assign a new ID.
+        this.#maxAssignedId += 1;
+        return this.#maxAssignedId;
     }
 
     #documentCount() {

@@ -1,4 +1,5 @@
 'use strict';
+
 export default class ChecksumIndex {
 
     constructor(options = {}) {
@@ -22,8 +23,22 @@ export default class ChecksumIndex {
         return this.store.has(checksum);
     }
 
-    async list(algorithm = 'sha256') {
-        return this.store.keys();
+    // Meant for testing purposes
+    async listChecksums(algorithm = 'sha256') {
+        // Optimize by leveraging LMDB range queries.
+        // Ensure algorithm prefix ends with a "/" so that it matches the key structure (e.g., "sha256/").
+        const prefix = algorithm.endsWith('/') ? algorithm : algorithm + '/';
+        const lowerBound = prefix;
+        const upperBound = prefix + '\uffff'; // This ensures we cover all keys with the given prefix.
+
+        const checksums = [];
+
+        // Using "start" and "end" options per lmdb's range query API.
+        for await (const { key } of this.store.getRange({ start: lowerBound, end: upperBound })) {
+            checksums.push(key);
+        }
+
+        return checksums;
     }
 
 }

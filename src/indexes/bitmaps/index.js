@@ -3,7 +3,7 @@
 // Utils
 import EventEmitter from 'eventemitter2';
 import debug from 'debug';
-const log = debug('canvas:synapsd:bitmapIndex');
+const log = debug('canvas-synapsd:bitmapIndex');
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
