@@ -178,17 +178,14 @@ class BitmapIndex {
             }
         }
 
-        let partial = null;
+        let partial = new RoaringBitmap32();
         if (positiveKeys.length) {
             for (const key of positiveKeys) {
                 BitmapIndex._validateKey(key);
                 const bitmap = this.getBitmap(key, true);
                 // clone the first bitmap so we don't change the original
-                partial = partial ? partial.and(bitmap) : bitmap.clone();
+                partial = partial.and(bitmap);
             }
-        } else {
-            // If no positive keys, we cannot calculate a proper intersection.
-            partial = new RoaringBitmap32();
         }
 
         if (negativeKeys.length) {
