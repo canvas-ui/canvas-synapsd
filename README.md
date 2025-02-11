@@ -53,6 +53,7 @@ The following bitmap index prefixes are enforced to organize and filter document
 - For 2.0 we should move entirely to Collections (prefix based, not dataset based)
 - API should be db.createCollection('collectionName', options); options at least rangeMin/rangeMax
 - We should move all internal bitmaps out of view, list methods should not return them nor should it be possible to edit them directly
+- Add proper stats() support
 
 ## References
 
