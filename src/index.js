@@ -446,8 +446,20 @@ class SynapsD extends EventEmitter {
      * Bitmap operations
      */
 
+    async createBitmap(name) {
+        return await this.bitmapIndex.createBitmap(name);
+    }
+
     async listBitmaps() {
         return await this.bitmapIndex.listBitmaps();
+    }
+
+    async renameBitmap(oldName, newName) {
+        return await this.bitmapIndex.renameBitmap(oldName, newName);
+    }
+
+    async deleteBitmap(name) {
+        return await this.bitmapIndex.deleteBitmap(name);
     }
 
     async updateBitmaps(ids, contextArray = [], featureArray = []) { }

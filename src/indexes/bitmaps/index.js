@@ -178,14 +178,22 @@ class BitmapIndex {
             }
         }
 
-        let partial = new RoaringBitmap32();
+        let partial = null;
         if (positiveKeys.length) {
-            for (const key of positiveKeys) {
-                BitmapIndex._validateKey(key);
-                const bitmap = this.getBitmap(key, true);
-                // clone the first bitmap so we don't change the original
-                partial = partial.and(bitmap);
+            // Start with the first bitmap
+            BitmapIndex._validateKey(positiveKeys[0]);
+            partial = this.getBitmap(positiveKeys[0], true).clone();
+
+            // AND with remaining bitmaps
+            for (let i = 1; i < positiveKeys.length; i++) {
+                BitmapIndex._validateKey(positiveKeys[i]);
+                const bitmap = this.getBitmap(positiveKeys[i], true);
+                partial.andInPlace(bitmap);
             }
+        } else {
+            // If no positive keys, start with a full bitmap
+            partial = new RoaringBitmap32();
+            partial.addRange(this.rangeMin, this.rangeMax);
         }
 
         if (negativeKeys.length) {
