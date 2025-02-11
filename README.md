@@ -51,9 +51,22 @@ The following bitmap index prefixes are enforced to organize and filter document
 ## TODO
 
 - For 2.0 we should move entirely to Collections (prefix based, not dataset based)
-- API should be db.createCollection('collectionName', options); options at least rangeMin/rangeMax
+- API should be 
+  - db.createCollection('collectionName', options); options at least rangeMin/rangeMax; returns a Collection obj
+  - db.listCollections()
+  - db.getCollection('collectionName')
+  - collection.listBitmaps()
+  - collection.getBitmap() // createBitmap, removeBitmap, hasBitmap and the whole spiel
+  - tick(key, ids)
+  - tickMany(keyArray, ids)
+  - tickAll(ids)
+  - untick(key, ids)
+  - untickMany(keyArray, ids)
+  - unticAll(ids)
 - We should move all internal bitmaps out of view, list methods should not return them nor should it be possible to edit them directly
 - Add proper stats() support
+- Cleanup existing methods; implement the same consistent api to Bitmap, BitmapCollection and the main DB class
+- All of the above is a breeze with todays tools, goes to show that the only limiting factor in most scenarios will prominently become time!
 
 ## References
 
