@@ -34,18 +34,16 @@ We could use composite keys and LMDB range queries instead (timestamp/docID => d
 
 The following bitmap index prefixes are enforced to organize and filter documents:
 
+- `internal/` - Internal bitmaps
 - `context/` - Context path bitmaps, used internally by Canvas (as context tree nodes, context/uuid)
 - `data/abstraction/<schema>` - Schema type filters (incl subtrees like data/abstraction/file/ext/json)
 - `data/mime/<type>`
 - `data/content/encoding/<encoding>`
-- `index/`
-- `system/`
 - `client/os/`
 - `client/application/`
 - `client/device/<device-id>`
 - `user/`
 - `tag/` - Generic tag bitmaps
-- `nested/` - Nested bitmaps (contacts are a good example)
 - `custom/` - Throw what you need here
 
 ## TODO
@@ -66,6 +64,7 @@ The following bitmap index prefixes are enforced to organize and filter document
 - We should move all internal bitmaps out of view, list methods should not return them nor should it be possible to edit them directly
 - Add proper stats() support
 - Cleanup existing methods; implement the same consistent api to Bitmap, BitmapCollection and the main DB class
+- Implement nested bitmaps (simplest would be to just detect if a bitmap key ends with a ID or something like _nested:id or _ref:id)
 - All of the above is a breeze with todays tools, goes to show that the only limiting factor in most scenarios will prominently become time!
 
 ## References
