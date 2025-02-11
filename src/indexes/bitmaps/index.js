@@ -14,13 +14,11 @@ import BitmapCollection from './lib/BitmapCollection.js';
 
 // Constants
 const ALLOWED_PREFIXES = [
+    'internal/',
     'context/',
-    'action/',
     'data/abstraction/', // This is our schema type
     'data/mime/',
     'data/content/encoding/',
-    'index/',
-    'system/',
     'client/os/',
     'client/application/',
     'client/device/',
@@ -44,6 +42,9 @@ class BitmapIndex {
         // If an emitter is passed in options, use it; otherwise create a new one.
         this.emitter = options.emitter || new EventEmitter();
         log(`BitmapIndex initialized with range ${this.rangeMin} - ${this.rangeMax}`);
+
+        // Create a internal bitmap collection
+        this.system = this.createCollection('internal');
     }
 
     /**
@@ -388,15 +389,29 @@ class BitmapIndex {
         return this.store.has(key);
     }
 
-    listBitmaps() {
-        let bitmapList = [];
-        for (const key of this.store.getKeys()) {
-            // Skip deleted documents bitmap
-            // TODO: We'll use a dedicated dataset for system/index bitmaps
-            if (key.startsWith('action/deleted')) { continue; }
-            bitmapList.push(key);
+    async listBitmaps(prefix = '') {
+        if (prefix) {
+            // If prefix provided, use range query
+            const keys = [];
+            for await (const key of this.store.getKeys({
+                start: prefix,
+                end: prefix + '\uffff'
+            })) {
+                if (!key.startsWith('internal/')) {
+                    keys.push(key);
+                }
+            }
+            return keys;
         }
-        return bitmapList;
+
+        // If no prefix, get all keys except deleted documents
+        const keys = [];
+        for await (const key of this.store.getKeys()) {
+            if (!key.startsWith('internal/')) {
+                keys.push(key);
+            }
+        }
+        return keys;
     }
 
     saveBitmap(key, bitmap) {

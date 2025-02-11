@@ -6,16 +6,15 @@ const log = debug('canvas-synapsd:bitmapCollection');
 
 export default class BitmapCollection {
 
-    constructor(collectionName, bitmapManager, options = {}) {
-        if (!collectionName) { throw new Error('BitmapCollection name required'); }
-        if (!bitmapManager) { throw new Error('BitmapManager instance required'); }
+    constructor(name, bitmapIndex, options = {}) {
+        if (!name) { throw new Error('BitmapCollection name required'); }
+        if (!bitmapIndex) { throw new Error('BitmapIndex instance required'); }
 
-        this.collectionName = collectionName;
-        this.manager = bitmapManager;
-        this.rangeMin = options.rangeMin || 0;
-        this.rangeMax = options.rangeMax || 2147483647;
+        this.name = name;
+        this.bitmapIndex = bitmapIndex;
+        this.keyPrefix = `collection/${name}/`;
 
-        log(`BitmapCollection "${this.collectionName}" initialized with range ${this.rangeMin} - ${this.rangeMax}`);
+        log(`BitmapCollection "${this.name}" initialized`);
     }
 
     /**
@@ -23,7 +22,7 @@ export default class BitmapCollection {
      */
 
     makeKey(key) {
-        return `${this.collectionName}/${key}`;
+        return `${this.keyPrefix}${key}`;
     }
 
     /**
@@ -31,19 +30,19 @@ export default class BitmapCollection {
      */
 
     getBitmap(key, autoCreate = false) {
-        return this.manager.getBitmap(this.makeKey(key), autoCreate);
+        return this.bitmapIndex.getBitmap(this.makeKey(key), autoCreate);
     }
 
     saveBitmap(key, bitmap) {
-        return this.manager.saveBitmap(this.makeKey(key), bitmap);
+        return this.bitmapIndex.saveBitmap(this.makeKey(key), bitmap);
     }
 
     deleteBitmap(key) {
-        return this.manager.deleteBitmap(this.makeKey(key));
+        return this.bitmapIndex.deleteBitmap(this.makeKey(key));
     }
 
     renameBitmap(oldKey, newKey) {
-        return this.manager.renameBitmap(
+        return this.bitmapIndex.renameBitmap(
             this.makeKey(oldKey),
             this.makeKey(newKey)
         );
@@ -53,18 +52,26 @@ export default class BitmapCollection {
      * Collection operations
      */
 
-    listBitmaps() {
-        return this.manager.listBitmaps(this.collectionName + '/');
+    async listBitmaps() {
+        // Use LMDB's range query directly with the collection prefix
+        const keys = [];
+        for await (const key of this.bitmapIndex.store.getKeys({
+            start: this.keyPrefix,
+            end: this.keyPrefix + '\uffff'
+        })) {
+            keys.push(key);
+        }
+        return keys;
     }
 
     tickMany(keys, ids) {
         const fullKeys = keys.map(key => this.makeKey(key));
-        return this.manager.tickMany(fullKeys, ids);
+        return this.bitmapIndex.tickMany(fullKeys, ids);
     }
 
     untickMany(keys, ids) {
         const fullKeys = keys.map(key => this.makeKey(key));
-        return this.manager.untickMany(fullKeys, ids);
+        return this.bitmapIndex.untickMany(fullKeys, ids);
     }
 
     /**
@@ -72,14 +79,14 @@ export default class BitmapCollection {
      */
 
     applyToMany(sourceKey, targetKeys) {
-        return this.manager.applyToMany(
+        return this.bitmapIndex.applyToMany(
             this.makeKey(sourceKey),
             targetKeys.map(key => this.makeKey(key))
         );
     }
 
     subtractFromMany(sourceKey, targetKeys) {
-        return this.manager.subtractFromMany(
+        return this.bitmapIndex.subtractFromMany(
             this.makeKey(sourceKey),
             targetKeys.map(key => this.makeKey(key))
         );
@@ -121,5 +128,11 @@ export default class BitmapCollection {
         }
 
         return this.subtractFromMany(sourceKey, sourceKeys);
+    }
+
+    // Create a bitmap in this collection
+    createBitmap(name) {
+        const key = this.keyPrefix + name;
+        return this.bitmapIndex.createBitmap(key);
     }
 }

@@ -78,7 +78,7 @@ class SynapsD extends EventEmitter {
             this.cache,
         );
 
-        this.deletedDocuments = this.bitmapIndex.createBitmap('action/deleted'); //.createCollection('gc');
+        this.deletedDocuments = this.bitmapIndex.createBitmap('internal/deleted'); //.createCollection('gc');
         //this.bActive = this.gc.createBitmap('active');
         //this.bDeleted = this.gc.createBitmap('deleted');
         //this.bFreed = this.gc.createBitmap('freed');
