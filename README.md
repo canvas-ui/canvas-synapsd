@@ -19,6 +19,10 @@ A very simple, naive implementation of a JSON document store with some bitmap in
   - **checksumFields**: JSON document fields to calculate checksums
   - **searchFields**: Full text search fields
   - **embeddingFields**: Concatenated fields to calculate embedding vectors (no chunk support for now)
+- **storageOptions**:
+  - **supportedBackends**: Array of backend names to use
+  - **defaultBackend**: Default backend to use
+  - **defaultBackendOptions**: Default backend options
 
 ### Index implementation
 
@@ -39,9 +43,10 @@ The following bitmap index prefixes are enforced to organize and filter document
 - `data/abstraction/<schema>` - Schema type filters (incl subtrees like data/abstraction/file/ext/json)
 - `data/mime/<type>`
 - `data/content/encoding/<encoding>`
-- `client/os/`
-- `client/application/`
+- `client/os/<os>`
+- `client/application/<application>`
 - `client/device/<device-id>`
+- `client/network/<network-id>` -We support storing documents on multiple backends(StoreD), when a canvas application connects from a certain network, not all backends may be reachable(your home NAS from work for example)
 - `user/`
 - `tag/` - Generic tag bitmaps
 - `custom/` - Throw what you need here
@@ -61,7 +66,8 @@ The following bitmap index prefixes are enforced to organize and filter document
   - untick(key, ids)
   - untickMany(keyArray, ids)
   - unticAll(ids)
-- We should move all internal bitmaps out of view, list methods should not return them nor should it be possible to edit them directly
+- We should move all internal bitmaps out of view, list methods should not return them nor should it be possible to edit them directly(maybe a dedicated dataset for internal bitmaps?)
+- We need to **implement a ignoreMissingBitmaps** option for list methods; this module is consumed by tool calls from ai agents and minions, compiling a list of bitmaps may not be very accurate
 - Add proper stats() support
 - Cleanup existing methods; implement the same consistent api to Bitmap, BitmapCollection and the main DB class
 - Implement nested bitmaps (simplest would be to just detect if a bitmap key ends with a ID or something like _nested:id or _ref:id)
