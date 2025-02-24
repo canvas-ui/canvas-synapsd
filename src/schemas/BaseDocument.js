@@ -77,6 +77,9 @@ export default class BaseDocument {
             checksumFields: options?.index?.checksumFields || ['data'],
             searchFields: options?.index?.searchFields || ['data'],
             embeddingFields: options?.index?.embeddingFields || ['data'],
+            embeddingModel: options?.index?.embeddingModel || 'gte-Qwen2-1.5B-instruct',
+            embeddingDimensions: options?.index?.embeddingDimensions || 8960,
+            embeddingProvider: options?.index?.embeddingProvider || 'canvas',
         };
 
         /**
@@ -108,6 +111,9 @@ export default class BaseDocument {
 
         // Generate checksums
         this.checksumArray = options.checksumArray ?? this.generateChecksumStrings();
+
+        // Embeddings can be supplied or generated on-demand as model: [embeddings]
+        this.embeddings = options.embeddings ?? {};
 
         // Validate document
         this.validate();
