@@ -1,9 +1,16 @@
-## Dev
-/.vscode
+# Portable runtimes
+/runtimes/**
+!/runtimes/.keep
+
+# Data directories
+/data/**
+/user/**
+
+# Dev
 /.fossil-settings
 /_SCRATCH_
 
-## Logs
+# Logs
 *.log
 */*/logs/*
 npm-debug.log*
@@ -11,7 +18,7 @@ yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
 
-## Node
+# Node
 **/node_modules/
 **/node_modules.linux/
 **/node_modules.linux-musl/
@@ -64,7 +71,7 @@ typings/
 # Cache objects
 packer_cache/
 
-## Files
+# Files
 *.box
 *.bz
 *.bz2
@@ -75,12 +82,12 @@ packer_cache/
 *.log
 *.old
 *.tgz
-*.tar
+*.tar#
 *.tsbuildinfo
 *.zip
 _test*
 
-## Runtime
+# Runtime
 *.pid
 *.pid.lock
 *.seed
