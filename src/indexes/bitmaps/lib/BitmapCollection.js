@@ -2,7 +2,7 @@
 
 // Utils
 import debugInstance from 'debug';
-const debug = debugInstance('canvas:synapsd:bitmaps:collection');
+const debug = debugInstance('canvas:synapsd:bitmap-collection');
 
 export default class BitmapCollection {
 
@@ -14,7 +14,7 @@ export default class BitmapCollection {
         this.bitmapIndex = bitmapIndex;
         this.keyPrefix = `collection/${name}/`;
 
-        log(`BitmapCollection "${this.name}" initialized`);
+        debug(`BitmapCollection "${this.name}" initialized`);
     }
 
     /**

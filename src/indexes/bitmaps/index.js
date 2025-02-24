@@ -3,7 +3,7 @@
 // Utils
 import EventEmitter from 'eventemitter2';
 import debugInstance from 'debug';
-const debug = debugInstance('canvas:synapsd:bitmaps:manager');
+const debug = debugInstance('canvas:synapsd:bitmap-manager');
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 

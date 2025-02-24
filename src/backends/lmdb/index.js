@@ -6,7 +6,7 @@ import fs from 'fs';
 import { mkdirp } from 'mkdirp'
 
 import debugInstance from 'debug';
-const debug = debugInstance('canvas:synapsd:lmdb');
+const debug = debugInstance('canvas:service:synapsd:lmdb');
 
 // Database backend
 import { open } from 'lmdb';

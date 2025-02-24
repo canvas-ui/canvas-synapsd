@@ -1,8 +1,8 @@
 import { Index } from "flexsearch";
 import { promises as fs } from 'fs';
-import debug from 'debug';
 
-const log = debug('canvas:synapsd:fts');
+import debugInstance from 'debug';
+const debug = debugInstance('canvas:synapsd:fts');
 
 class Fts {
 
@@ -62,7 +62,7 @@ class Fts {
     async loadIndex() {
         const data = await this.#store.get('index');
         if (!data) {
-            log('No existing index found. Starting with an empty index.');
+            debug('No existing index found. Starting with an empty index.');
             return;
         }
         this.index.import(data);
@@ -73,12 +73,12 @@ class Fts {
             const data = await fs.readFile(this.indexPath, 'utf8');
             const dump = JSON.parse(data);
             await this.index.import(dump);
-            log('Index loaded successfully');
+            debug('Index loaded successfully');
         } catch (error) {
             if (error.code === 'ENOENT') {
-                log('No existing index found. Starting with an empty index.');
+                debug('No existing index found. Starting with an empty index.');
             } else {
-                log('Error loading index:', error);
+                debug('Error loading index:', error);
             }
         }
     }
@@ -92,9 +92,9 @@ class Fts {
         try {
             const dump = await this.index.export();
             await fs.writeFile(this.indexPath, JSON.stringify(dump));
-            log('Index saved successfully');
+            debug('Index saved successfully');
         } catch (error) {
-            log('Error saving index:', error);
+            debug('Error saving index:', error);
         }
     }
 }

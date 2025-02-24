@@ -4,7 +4,7 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 import debugInstance from 'debug';
-const debug = debugInstance('canvas:synapsd:bitmaps:instance');
+const debug = debugInstance('canvas:synapsd:bitmap');
 
 // Includes
 const { RoaringBitmap32 } = require('roaring/RoaringBitmap32');
@@ -20,8 +20,8 @@ class Bitmap extends RoaringBitmap32 {
         this.rangeMin = options.rangeMin ?? 0;
         this.rangeMax = options.rangeMax ?? 4294967296;
 
-        log(`Bitmap "${this.key}" ID range: ${this.rangeMin} - ${this.rangeMax} initialized`);
-        log(`Bitmap "${this.key}" has ${this.size} objects`);
+        debug(`Bitmap "${this.key}" ID range: ${this.rangeMin} - ${this.rangeMax} initialized`);
+        debug(`Bitmap "${this.key}" has ${this.size} objects`);
     }
 
     tick(oid) {
