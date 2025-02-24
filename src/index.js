@@ -2,8 +2,8 @@
 
 // Utils
 import EventEmitter from 'eventemitter2';
-import debugMessage from 'debug';
-const debug = debugMessage('canvas-synapsd');
+import debugInstance from 'debug';
+const debug = debugInstance('canvas:synapsd:service');
 
 // DB Backend
 import Db from './backends/lmdb/index.js';

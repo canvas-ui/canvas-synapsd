@@ -3,8 +3,8 @@
 // Utils
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-import debug from 'debug';
-const log = debug('canvas-synapsd:bitmap');
+import debugInstance from 'debug';
+const debug = debugInstance('canvas:synapsd:bitmaps:instance');
 
 // Includes
 const { RoaringBitmap32 } = require('roaring/RoaringBitmap32');

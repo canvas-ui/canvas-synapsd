@@ -2,8 +2,8 @@
 
 // Utils
 import EventEmitter from 'eventemitter2';
-import debug from 'debug';
-const log = debug('canvas-synapsd:bitmapIndex');
+import debugInstance from 'debug';
+const debug = debugInstance('canvas:synapsd:bitmaps:manager');
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
@@ -41,7 +41,7 @@ class BitmapIndex {
 
         // If an emitter is passed in options, use it; otherwise create a new one.
         this.emitter = options.emitter || new EventEmitter();
-        log(`BitmapIndex initialized with range ${this.rangeMin} - ${this.rangeMax}`);
+        debug(`BitmapIndex initialized with range ${this.rangeMin} - ${this.rangeMax}`);
 
         // Create a internal bitmap collection
         this.system = this.createCollection('internal');
@@ -64,7 +64,7 @@ class BitmapIndex {
 
     tickSync(key, ids) {
         BitmapIndex._validateKey(key);
-        log('Ticking bitmap key', key, ids);
+        debug('Ticking bitmap key', key, ids);
         const bitmap = this.getBitmap(key, true);
         bitmap.addMany(Array.isArray(ids) ? ids : [ids]);
         this.saveBitmap(key, bitmap);
@@ -74,7 +74,7 @@ class BitmapIndex {
 
     untickSync(key, ids) {
         BitmapIndex._validateKey(key);
-        log('Unticking bitmap key', key, ids);
+        debug('Unticking bitmap key', key, ids);
 
         const bitmap = this.getBitmap(key, false);
         if (!bitmap) return null;
@@ -89,7 +89,7 @@ class BitmapIndex {
     }
 
     tickManySync(keyArray, ids) {
-        log('Ticking bitmap keyArray', keyArray, ids);
+        debug('Ticking bitmap keyArray', keyArray, ids);
         const keysArray = Array.isArray(keyArray) ? keyArray : [keyArray];
         const idsArray = Array.isArray(ids) ? ids : [ids];
         let affectedKeys = [];
@@ -108,7 +108,7 @@ class BitmapIndex {
     }
 
     untickManySync(keyArray, ids) {
-        log('Unticking bitmap keyArray', keyArray, ids);
+        debug('Unticking bitmap keyArray', keyArray, ids);
         const keysArray = Array.isArray(keyArray) ? keyArray : [keyArray];
         const idsArray = Array.isArray(ids) ? ids : [ids];
         let affectedKeys = [];
@@ -118,7 +118,7 @@ class BitmapIndex {
             BitmapIndex._validateKey(key);
             const bitmap = this.getBitmap(key, false);
             if (!bitmap) {
-                log(`Bitmap at key "${key}" not found in the persistent store`);
+                debug(`Bitmap at key "${key}" not found in the persistent store`);
                 continue;
             }
 
@@ -135,10 +135,10 @@ class BitmapIndex {
 
     removeSync(key, ids) {
         BitmapIndex._validateKey(key);
-        log('Removing bitmap key', key, ids);
+        debug('Removing bitmap key', key, ids);
         const bitmap = this.getBitmap(key, false);
         if (!bitmap) {
-            log(`Bitmap at key "${key}" not found in the persistent store`);
+            debug(`Bitmap at key "${key}" not found in the persistent store`);
             return null;
         }
         bitmap.removeMany(Array.isArray(ids) ? ids : [ids]);
@@ -148,7 +148,7 @@ class BitmapIndex {
     }
 
     deleteSync(id) {
-        log(`Deleting object references with ID "${id}" from all bitmaps in collection`);
+        debug(`Deleting object references with ID "${id}" from all bitmaps in collection`);
         // First fetch all bitmap keys
         const bitmapKeys = this.listBitmaps();
 
@@ -156,7 +156,7 @@ class BitmapIndex {
         try {
             this.untickManySync(bitmapKeys, id);
         } catch (error) {
-            log(`Error deleting object references with ID "${id}" from all bitmaps in collection`, error);
+            debug(`Error deleting object references with ID "${id}" from all bitmaps in collection`, error);
         }
     }
 
@@ -165,7 +165,7 @@ class BitmapIndex {
      */
 
     AND(keyArray) {
-        log(`AND(): keyArray: "${keyArray}"`);
+        debug(`AND(): keyArray: "${keyArray}"`);
         if (!Array.isArray(keyArray)) { throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`); }
 
         // Split positive and negative keys (keys starting with "!" mean NOT)
@@ -213,7 +213,7 @@ class BitmapIndex {
     }
 
     OR(keyArray) {
-        log(`OR(): keyArray: "${keyArray}"`);
+        debug(`OR(): keyArray: "${keyArray}"`);
         if (!Array.isArray(keyArray)) {
             throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`);
         }
@@ -250,7 +250,7 @@ class BitmapIndex {
     }
 
     XOR(keyArray) {
-        log(`XOR(): keyArray: "${keyArray}"`);
+        debug(`XOR(): keyArray: "${keyArray}"`);
         if (!Array.isArray(keyArray)) {
             throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`);
         }
@@ -322,14 +322,14 @@ class BitmapIndex {
     getBitmap(key, autoCreateBitmap = false) {
         BitmapIndex._validateKey(key);
         if (this.cache.has(key)) {
-            log(`Returning Bitmap key "${key}" from cache`);
+            debug(`Returning Bitmap key "${key}" from cache`);
             return this.cache.get(key);
         }
 
         // Load from store
         if (this.hasBitmap(key)) { return this.loadBitmap(key); }
 
-        log(`Bitmap at key ${key} not found in the persistent store`);
+        debug(`Bitmap at key ${key} not found in the persistent store`);
         if (!autoCreateBitmap) { return null; }
 
         let bitmap = this.createBitmap(key);
@@ -340,10 +340,10 @@ class BitmapIndex {
 
     createBitmap(key, oidArrayOrBitmap = []) {
         BitmapIndex._validateKey(key);
-        log(`createBitmap(): Creating bitmap with key ID "${key}"`);
+        debug(`createBitmap(): Creating bitmap with key ID "${key}"`);
 
         if (this.hasBitmap(key)) {
-            log(`Bitmap with key ID "${key}" already exists`);
+            debug(`Bitmap with key ID "${key}" already exists`);
             return this.getBitmap(key);
         }
 
@@ -355,14 +355,14 @@ class BitmapIndex {
         });
 
         this.saveBitmap(key, bitmap);
-        log(`Bitmap with key ID "${key}" created successfully`);
+        debug(`Bitmap with key ID "${key}" created successfully`);
         return bitmap;
     }
 
     renameBitmap(oldKey, newKey) {
         BitmapIndex._validateKey(oldKey);
         BitmapIndex._validateKey(newKey);
-        log(`Renaming bitmap "${oldKey}" to "${newKey}"`);
+        debug(`Renaming bitmap "${oldKey}" to "${newKey}"`);
 
         const bitmap = this.getBitmap(oldKey);
         if (!bitmap) { throw new Error(`Unable to rename bitmap "${oldKey}" to "${newKey}" because bitmap "${oldKey}" does not exist`); }
@@ -376,7 +376,7 @@ class BitmapIndex {
 
     deleteBitmap(key) {
         BitmapIndex._validateKey(key);
-        log(`Deleting bitmap "${key}"`);
+        debug(`Deleting bitmap "${key}"`);
         this.cache.delete(key);
         this.store.del(key);
         if (this.emitter && typeof this.emitter.emit === 'function') {
@@ -415,7 +415,7 @@ class BitmapIndex {
     }
 
     saveBitmap(key, bitmap) {
-        log('Storing bitmap to persistent store', key);
+        debug('Storing bitmap to persistent store', key);
         if (!key) { throw new Error('Key is required'); }
         if (!bitmap) { throw new Error('Bitmap is required'); }
         if (!(bitmap instanceof Bitmap)) { throw new Error('Bitmap must be an instance of Bitmap'); }
@@ -425,10 +425,10 @@ class BitmapIndex {
     }
 
     loadBitmap(key) {
-        log(`Loading bitmap with key ID "${key}" from persistent store`);
+        debug(`Loading bitmap with key ID "${key}" from persistent store`);
         const bitmapData = this.store.get(key);
         if (!bitmapData) {
-            log(`Unable to load bitmap "${key}" from the database`);
+            debug(`Unable to load bitmap "${key}" from the database`);
             return null;
         }
 
@@ -481,13 +481,13 @@ class BitmapIndex {
 
     #parseInput(input) {
         if (input instanceof Bitmap) {
-            log(`RoaringBitmap32 supplied as input with ${input.size} elements`);
+            debug(`RoaringBitmap32 supplied as input with ${input.size} elements`);
             return input;
         } else if (Array.isArray(input)) {
-            log(`Document ID Array supplied as input with ${input.length} elements`);
+            debug(`Document ID Array supplied as input with ${input.length} elements`);
             return input;
         } else if (typeof input === 'number') {
-            log(`Document ID supplied as input`);
+            debug(`Document ID supplied as input`);
             return [input];
         } else {
             throw new TypeError(`Invalid input type: ${typeof input}`);

@@ -1,8 +1,8 @@
 'use strict';
 
 // Utils
-import debug from 'debug';
-const log = debug('canvas-synapsd:bitmapCollection');
+import debugInstance from 'debug';
+const debug = debugInstance('canvas:synapsd:bitmaps:collection');
 
 export default class BitmapCollection {
 
