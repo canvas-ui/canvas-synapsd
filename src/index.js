@@ -154,12 +154,15 @@ class SynapsD extends EventEmitter {
 
         // Check if the document is an instance of BaseDocument, initialize it if so
         if (!(document instanceof BaseDocument)) {
+            debug('Document is not an instance of BaseDocument, initializing');
             const Schema = schemaRegistry.getSchema(document.schema);
             document = new Schema(document);
         }
 
         // Generate checksums before checking existence
+        debug('Before generating checksums:', document.checksumArray);
         document.checksumArray = document.generateChecksumStrings();
+        debug('After generating checksums:', document.checksumArray);
 
         // If a checksum already exists, update the document
         if (await this.hasDocumentByChecksum(document.checksumArray[0])) {
@@ -169,6 +172,7 @@ class SynapsD extends EventEmitter {
 
         // Generate a new document ID
         document.id = this.#generateDocumentID();
+        debug('Generated document ID:', document.id);
 
         // If document.schema is not part of featureArray, add it
         if (!featureArray.includes(document.schema)) {
@@ -177,9 +181,11 @@ class SynapsD extends EventEmitter {
 
         // Insert a new document into the database
         await this.documents.put(document.id, document);
+        debug('Document inserted with ID:', document.id);
 
         // Update context bitmaps
         if (contextArray.length > 0) {
+            debug('Updating context bitmaps:', contextArray);
             for (const context of contextArray) {
                 this.bitmapIndex.tickSync(context, document.id);
             }
@@ -187,12 +193,14 @@ class SynapsD extends EventEmitter {
 
         // Update feature bitmaps
         if (featureArray.length > 0) {
+            debug('Updating feature bitmaps:', featureArray);
             for (const feature of featureArray) {
                 this.bitmapIndex.tickSync(feature, document.id);
             }
         }
 
         // Add checksums to the inverted index
+        debug('Adding checksums to inverted index:', document.checksumArray);
         for (const checksum of document.checksumArray) {
             this.checksumIndex.set(checksum, document.id);
         }
@@ -598,7 +606,10 @@ class SynapsD extends EventEmitter {
         if (typeof checksum !== 'string') {
             throw new Error('Checksum must be a string');
         }
-        return await this.checksumIndex.get(checksum);
+        debug('Resolving checksum string to ID:', checksum);
+        const id = await this.checksumIndex.get(checksum);
+        debug('Resolved checksum to ID:', id);
+        return id;
     }
 
     /**

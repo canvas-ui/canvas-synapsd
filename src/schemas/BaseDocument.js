@@ -130,9 +130,14 @@ export default class BaseDocument {
 
     generateChecksumStrings() {
         const checksumData = this.generateChecksumData();
-        return this.indexOptions.checksumAlgorithms.map((algorithm) => {
-            return `${algorithm}/${generateChecksum(checksumData, algorithm)}`;
+        console.log('Generating checksums for data:', checksumData);
+        const checksums = this.indexOptions.checksumAlgorithms.map((algorithm) => {
+            const checksum = `${algorithm}/${generateChecksum(checksumData, algorithm)}`;
+            console.log(`Generated checksum with ${algorithm}:`, checksum);
+            return checksum;
         });
+        console.log('Final checksumArray:', checksums);
+        return checksums;
     }
 
     generateChecksumData() {
@@ -247,7 +252,7 @@ export default class BaseDocument {
 
             // Metadata section
             metadata: this.metadata,
-            checksums: this.checksums,
+            checksumArray: this.checksumArray,
             embeddings: this.embeddings,
             features: this.features,
             paths: this.paths,
@@ -273,8 +278,8 @@ export default class BaseDocument {
     static fromJSON(json) {
         const doc = new BaseDocument({  // Changed from Document to BaseDocument
             ...json,
-            checksums: Array.from(json.checksums),
-            features: Array.from(json.features),
+            checksumArray: Array.isArray(json.checksumArray) ? json.checksumArray : [],
+            features: Array.isArray(json.features) ? json.features : [],
             embeddings: json.embeddings,
             data: json.data,
         });
@@ -312,7 +317,7 @@ export default class BaseDocument {
     }
 
     get schemaDefinition() {
-        return Document.schemaDefinition;
+        return BaseDocument.schemaDefinition;
     }
 
     isJsonDocument() {
