@@ -13,8 +13,8 @@ class Bitmap extends RoaringBitmap32 {
     constructor(oidArrayOrBitmap = [], options = {}) {
         super(oidArrayOrBitmap);
 
-        if (!options.key) {
-            throw new Error('Bitmap key required');
+        if (!options.key || typeof options.key !== 'string' || options.key.trim() === '') {
+            throw new Error('Valid bitmap key string required');
         }
         this.key = options.key;
         this.rangeMin = options.rangeMin ?? 0;

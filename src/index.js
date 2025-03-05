@@ -11,6 +11,7 @@ import Db from './backends/lmdb/index.js';
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
 import BaseDocument from './schemas/BaseDocument.js';
+
 // Indexes
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
@@ -79,11 +80,6 @@ class SynapsD extends EventEmitter {
         );
 
         this.deletedDocuments = this.bitmapIndex.createBitmap('internal/deleted'); //.createCollection('gc');
-        //this.bActive = this.gc.createBitmap('active');
-        //this.bDeleted = this.gc.createBitmap('deleted');
-        //this.bFreed = this.gc.createBitmap('freed');
-
-        console.log(this.deletedDocuments.toArray());
 
         /**
          * Vector store backend (LanceDB)
@@ -185,14 +181,14 @@ class SynapsD extends EventEmitter {
         // Update context bitmaps
         if (contextArray.length > 0) {
             for (const context of contextArray) {
-                await this.bitmapIndex.tickSync(context, document.id);
+                this.bitmapIndex.tickSync(context, document.id);
             }
         }
 
         // Update feature bitmaps
         if (featureArray.length > 0) {
             for (const feature of featureArray) {
-                await this.bitmapIndex.tickSync(feature, document.id);
+                this.bitmapIndex.tickSync(feature, document.id);
             }
         }
 
@@ -209,18 +205,29 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(contextArray)) { throw new Error('Context array required'); }
         if (!Array.isArray(featureArray)) { throw new Error('Feature array required'); }
 
-        if (!this.documents.has(id)) { return false; }
+        // First check if the document exists in the database
+        if (!await this.documents.has(id)) {
+            debug(`Document with ID "${id}" not found in the database`);
+            return false;
+        }
 
-        let contextBitmap = contextArray.length > 0 ? this.contextBitmaps.AND(contextArray) : null;
-        let featureBitmap = featureArray.length > 0 ? this.featureBitmaps.OR(featureArray) : null;
+        // If no context or feature filters, document exists
+        if (contextArray.length === 0 && featureArray.length === 0) {
+            return true;
+        }
 
+        // Apply context and feature filters
+        let contextBitmap = contextArray.length > 0 ? this.bitmapIndex.AND(contextArray) : null;
+        let featureBitmap = featureArray.length > 0 ? this.bitmapIndex.OR(featureArray) : null;
+
+        // Check if the document matches the filters
         if (contextBitmap && featureBitmap) {
             contextBitmap.andInPlace(featureBitmap);
-            return contextBitmap.size > 0;
+            return contextBitmap.has(id);
         } else if (contextBitmap) {
-            return contextBitmap.size > 0;
+            return contextBitmap.has(id);
         } else if (featureBitmap) {
-            return featureBitmap.size > 0;
+            return featureBitmap.has(id);
         } else {
             return true;
         }
@@ -314,14 +321,14 @@ class SynapsD extends EventEmitter {
         // Update context bitmaps if provided
         if (contextArray.length > 0) {
             for (const context of contextArray) {
-                await this.bitmapIndex.tickSync(context, document.id);
+                this.bitmapIndex.tickSync(context, document.id);
             }
         }
 
         // Update feature bitmaps if provided
         if (featureArray.length > 0) {
             for (const feature of featureArray) {
-                await this.bitmapIndex.tickSync(feature, document.id);
+                this.bitmapIndex.tickSync(feature, document.id);
             }
         }
 
@@ -360,7 +367,7 @@ class SynapsD extends EventEmitter {
         // Remove document from all bitmaps
         // TODO: Rework, darn expensive!
         try {
-            this.bitmapIndex.deleteSync(id);
+            await this.bitmapIndex.deleteSync(id);
         } catch (error) {
             debug('Error deleting document from bitmaps', error);
         }
@@ -661,19 +668,72 @@ class SynapsD extends EventEmitter {
     }
 
     #generateDocumentID() {
-        const recycledId = this.deletedDocuments.pop();
-        if (recycledId) {
-            debug(`Using recycled document ID: ${recycledId}`);
-            return recycledId;
-        }
+        try {
+            // Try to get a recycled ID first
+            const recycledId = this.#popDeletedId();
+            if (recycledId !== null) {
+                debug(`Using recycled document ID: ${recycledId}`);
+                return recycledId;
+            }
 
-        let count = this.#documentCount();
-        return INTERNAL_BITMAP_ID_MAX + count + 1;
+            // Generate a new ID based on the document count
+            let count = this.#documentCount();
+            // Ensure count is a number
+            count = typeof count === 'number' ? count : 0;
+            const newId = INTERNAL_BITMAP_ID_MAX + count + 1;
+            debug(`Generated new document ID: ${newId}`);
+            return newId;
+        } catch (error) {
+            debug(`Error generating document ID: ${error.message}`);
+            // Fallback to a random ID in case of any errors
+            const fallbackId = INTERNAL_BITMAP_ID_MAX + Math.floor(Math.random() * 1000000) + 1;
+            debug(`Using fallback document ID: ${fallbackId}`);
+            return fallbackId;
+        }
     }
 
     #documentCount() {
-        let stats = this.documents.getStats();
-        return stats.entryCount;
+        try {
+            const stats = this.documents.getStats();
+            if (stats && typeof stats.entryCount === 'number') {
+                return stats.entryCount;
+            }
+            debug('Invalid document count from stats, returning 0');
+            return 0;
+        } catch (error) {
+            debug(`Error getting document count: ${error.message}`);
+            return 0;
+        }
+    }
+
+    /**
+     * Safely get a recycled ID from the deletedDocuments bitmap
+     * @returns {number|null} A numeric ID or null if none available
+     * @private
+     */
+    #popDeletedId() {
+        try {
+            if (!this.deletedDocuments || this.deletedDocuments.isEmpty()) {
+                return null;
+            }
+
+            // Get the minimum ID from the deleted documents bitmap
+            const minId = this.deletedDocuments.minimum();
+
+            // Ensure it's a valid number
+            if (typeof minId !== 'number' || isNaN(minId) || !Number.isInteger(minId) || minId <= 0) {
+                debug(`Invalid minimum ID in deletedDocuments: ${minId}`);
+                return null;
+            }
+
+            // Remove this ID from the bitmap
+            this.deletedDocuments.remove(minId);
+
+            return minId;
+        } catch (error) {
+            debug(`Error popping deleted ID: ${error.message}`);
+            return null;
+        }
     }
 
 }
