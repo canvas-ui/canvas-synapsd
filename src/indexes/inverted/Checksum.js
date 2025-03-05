@@ -8,16 +8,11 @@ export default class ChecksumIndex {
     }
 
     async get(checksum) {
-        console.log('ChecksumIndex.get called with:', checksum);
-        const result = this.store.get(checksum);
-        console.log('ChecksumIndex.get result:', result);
-        return result;
+        return this.store.get(checksum);
     }
 
     async set(checksum, id) {
-        console.log('ChecksumIndex.set called with:', checksum, id);
         this.store.set(checksum, id);
-        console.log('ChecksumIndex.set completed');
     }
 
     async delete(checksum) {

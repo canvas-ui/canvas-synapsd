@@ -130,14 +130,9 @@ export default class BaseDocument {
 
     generateChecksumStrings() {
         const checksumData = this.generateChecksumData();
-        console.log('Generating checksums for data:', checksumData);
-        const checksums = this.indexOptions.checksumAlgorithms.map((algorithm) => {
-            const checksum = `${algorithm}/${generateChecksum(checksumData, algorithm)}`;
-            console.log(`Generated checksum with ${algorithm}:`, checksum);
-            return checksum;
+        return this.indexOptions.checksumAlgorithms.map((algorithm) => {
+            return `${algorithm}/${generateChecksum(checksumData, algorithm)}`;
         });
-        console.log('Final checksumArray:', checksums);
-        return checksums;
     }
 
     generateChecksumData() {

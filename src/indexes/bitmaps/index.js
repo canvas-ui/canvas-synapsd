@@ -266,8 +266,7 @@ class BitmapIndex {
         }
     }
 
-    // This method needs to be async since it calls listBitmaps which is async
-    async deleteSync(id) {
+    async delete(id) {
         if (id === undefined || id === null) {
             throw new Error('ID cannot be null or undefined');
         }
