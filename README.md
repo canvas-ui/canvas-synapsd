@@ -18,7 +18,12 @@ A very simple, naive implementation of a JSON document store with some bitmap in
   - **checksumAlgorithms**: Checksums to calculate
   - **checksumFields**: JSON document fields to calculate checksums
   - **searchFields**: Full text search fields
-  - **embeddingFields**: Concatenated fields to calculate embedding vectors (no chunk support for now)
+  - **embeddingFields**: Concatenated fields to calculate embedding vectors
+  - **embeddingModel**: Model to use for embedding
+  - **embeddingDimensions**: Dimensions of the embedding vectors
+  - **embeddingProvider**: Provider to use for embedding
+  - **embeddingProviderOptions**: Options for the embedding provider
+  - **chunking**: Chunking options
 - **storageOptions**:
   - **supportedBackends**: Array of backend names to use
   - **defaultBackend**: Default backend to use
@@ -53,24 +58,32 @@ The following bitmap index prefixes are enforced to organize and filter document
 
 ## TODO
 
+- add support for chunking
+- add support for versioning
+- add support for embeddings (we should calculate embeddings on the db side if none are provided)
+- add support for vector search
+- move the contextTree functionality from Canvas to this module (db will present a tree view on top of the dataset)
+- switch to (andBitmapArray, orBitmapArray, filterArray) instead of contextBitmapArray and featureBitmapArray
 - For 2.0 we should move entirely to Collections (prefix based, not dataset based)
-- API should be 
-  - db.createCollection('collectionName', options); options at least rangeMin/rangeMax; returns a Collection obj
-  - db.listCollections()
-  - db.getCollection('collectionName')
-  - collection.listBitmaps()
-  - collection.getBitmap() // createBitmap, removeBitmap, hasBitmap and the whole spiel
-  - tick(key, ids)
-  - tickMany(keyArray, ids)
-  - tickAll(ids)
-  - untick(key, ids)
-  - untickMany(keyArray, ids)
-  - unticAll(ids)
+  - API should be 
+    - db.createCollection('collectionName', options); options at least rangeMin/rangeMax; returns a Collection obj
+    - db.listCollections()
+    - db.getCollection('collectionName')
+    - collection.listBitmaps()
+    - collection.getBitmap() // createBitmap, removeBitmap, hasBitmap and the whole spiel
+    - tick(key, ids)
+    - tickMany(keyArray, ids)
+    - tickAll(ids)
+    - untick(key, ids)
+    - untickMany(keyArray, ids)
+    - unticAll(ids)
 - We should move all internal bitmaps out of view, list methods should not return them nor should it be possible to edit them directly(maybe a dedicated dataset for internal bitmaps?)
 - We need to **implement a ignoreMissingBitmaps** option for list methods; this module is consumed by tool calls from ai agents and minions, compiling a list of bitmaps may not be very accurate
 - Add proper stats() support
+  - We should keep track of bitmap usage
+  - The above implies having "static" and "dynamic" bitmaps, static would be kept regardless of their usage but dynamic would be removed when not in use
 - Cleanup existing methods; implement the same consistent api to Bitmap, BitmapCollection and the main DB class
-- Implement nested bitmaps (simplest would be to just detect if a bitmap key ends with a ID or something like _nested:id or _ref:id)
+- Implement nested bitmaps (simplest would be to just detect if a bitmap key ends with a ID or something like _nested:id or_ref:id)
 - All of the above is a breeze with todays tools, goes to show that the only limiting factor in most scenarios will prominently become time!
 
 ## References

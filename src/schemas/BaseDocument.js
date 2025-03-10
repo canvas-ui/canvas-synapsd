@@ -32,7 +32,16 @@ const documentSchema = z.object({
         checksumAlgorithms: z.array(z.string()),
         checksumFields: z.array(z.string()),
         searchFields: z.array(z.string()),
-        embeddingFields: z.array(z.string())
+        embeddingFields: z.array(z.string()),
+        embeddingModel: z.string(),
+        embeddingDimensions: z.number(),
+        embeddingProvider: z.string(),
+        embeddingProviderOptions: z.record(z.any()),
+        chunking: z.object({
+            type: z.enum(['sentence', 'paragraph', 'chunk']),
+            chunkSize: z.number(),
+            chunkOverlap: z.number(),
+        }),
     }),
 
     // Timestamps
@@ -45,6 +54,8 @@ const documentSchema = z.object({
         dataContentEncoding: z.string()
     }).and(z.record(z.any())), // Allow additional metadata fields
 
+    // This is actually a checksum string array checksumAlgo/checksumValue,
+    // maybe we should rename or refactor this part!
     checksumArray: z.array(z.string()),
 
     // Document data/payload
@@ -52,6 +63,7 @@ const documentSchema = z.object({
     dataPaths: z.array(z.string()).optional(),
 
     // Versioning
+    // We _could_ use version support by LMDB, but went with a naive backend-agnostic approach
     parent_id: z.string().nullable(),
     versions: z.array(z.any()),
     version_number: z.number().int().positive(),
