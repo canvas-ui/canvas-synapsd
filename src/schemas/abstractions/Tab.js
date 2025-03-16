@@ -1,107 +1,61 @@
 'use strict';
 
-import BaseDocument from '../BaseDocument.js';
+import Document, { documentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
-const DOCUMENT_SCHEMA = 'data/abstraction/tab';
-const schemaDefinition = BaseDocument.schemaDefinition.extend({
-    schema: z.literal(DOCUMENT_SCHEMA),
+const DOCUMENT_SCHEMA_NAME = 'data/abstraction/tab';
+const DOCUMENT_SCHEMA_VERSION = '2.0';
+
+const documentDataSchema = z.object({
+    schema: z.string(),
+    schemaVersion: z.string().optional(),
     data: z.object({
         url: z.string().url(),
-        title: z.string().optional().nullable(),
-        favicon: z.string().url().optional().nullable()
-    })
+        title: z.string().optional(),
+    }).passthrough(),
+    metadata: z.object().optional()
 });
 
-export default class Tab extends BaseDocument {
+export default class Tab extends Document {
     constructor(options = {}) {
-        super({
-            ...options,
-            schema: DOCUMENT_SCHEMA,
-            data: {
-                url: options.url,
-                title: options.title ?? null,
-                favicon: options.favicon ?? null,
-                ...options.data
-            },
-            index: {
-                ...options.index,
-                searchFields: ['data.url', 'data.title'],
-                checksumFields: ['data.url']
-            }
-        });
-    }
+        // Set schema before calling super
+        options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
+        options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
 
-    static get schemaDefinition() {
-        return schemaDefinition;
-    }
+        super(options);
 
-    get schemaDefinition() {
-        return Tab.schemaDefinition;
-    }
-
-    get url() { return this.data.url; }
-    get title() { return this.data.title; }
-    get favicon() { return this.data.favicon; }
-
-    /**
-     * Create a tab from input data
-     * @param {string|Object} input URL string or data object
-     * @param {Object} options Additional options
-     * @returns {Tab} New tab instance
-     */
-    static fromData(input, options = {}) {
-        return this.create({
-            ...options,
-            data: this.normalizeInputData(input)
-        });
+        // Customize indexOptions for Tab
+        this.indexOptions = {
+            ...this.indexOptions,
+            ftsSearchFields: ['data.title', 'data.url'],
+            vectorEmbeddingFields: ['data.title', 'data.url'],
+            checksumFields: ['data.url']
+        };
     }
 
     /**
-     * Normalize input data based on document type
-     * @protected
+     * Create a Tab from minimal data
+     * @param {Object} data - Tab data
+     * @returns {Tab} New Tab instance
      */
-    static normalizeInputData(input) {
-        if (typeof input === 'string') {
-            return {
-                url: input,
-                title: null,
-                favicon: null
-            };
-        }
-        return input;
+    static fromData(data) {
+        data.schema = DOCUMENT_SCHEMA_NAME;
+        return new Tab(data);
     }
 
-    /**
-     * Validates the tab document
-     * @throws {Error} If validation fails
-     * @returns {boolean} True if validation passes
-     */
-    validate() {
-        // First run base validation
-        super.validate();
-
-        try {
-            // Tab-specific schema validation
-            Tab.schemaDefinition.parse(this);
-            return true;
-        } catch (error) {
-            throw new Error(`Tab validation failed: ${error.message}`);
-        }
+    static get dataSchema() {
+        return documentDataSchema;
     }
 
-    /**
-     * Static method to validate tab data
-     * @param {Object} data - Data to validate
-     * @throws {Error} If validation fails
-     * @returns {boolean} True if validation passes
-     */
-    static validateData(data) {
-        try {
-            schemaDefinition.shape.data.parse(data);
-            return true;
-        } catch (error) {
-            throw new Error(`Tab data validation failed: ${error.message}`);
-        }
+    static get schema() {
+        return documentSchema;
+    }
+
+    static validate(document) {
+        return documentSchema.parse(document);
+    }
+
+    static validateData(documentData) {
+        return documentDataSchema.parse(documentData);
     }
 }

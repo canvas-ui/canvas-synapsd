@@ -1,53 +1,63 @@
 'use strict';
 
-import Document from '../BaseDocument.js';
+import Document, { documentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
-const DOCUMENT_SCHEMA = 'data/abstraction/todo';
-const schemaDefinition = Document.schemaDefinition.extend({
-    schema: z.literal(DOCUMENT_SCHEMA),
+const DOCUMENT_SCHEMA_NAME = 'data/abstraction/todo';
+const DOCUMENT_SCHEMA_VERSION = '2.0';
+
+const documentDataSchema = z.object({
+    schema: z.string(),
+    schemaVersion: z.string().optional(),
     data: z.object({
         title: z.string(),
-        description: z.string(),
-        dueDate: z.string().nullable(),
-        completed: z.boolean()
-    })
+        description: z.string().optional(),
+        completed: z.boolean().optional(),
+        dueDate: z.string().datetime().optional(),
+    }).passthrough(),
+    metadata: z.object().optional()
 });
 
-class Todo extends Document {
+export default class Todo extends Document {
     constructor(options = {}) {
+        // Set schema before calling super
+        options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
+        options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
+
         super(options);
-        this.type = 'todo';
-        this.title = options.title || '';
-        this.description = options.description || '';
-        this.dueDate = options.dueDate || null;
-        this.completed = options.completed || false;
+
+        // Customize indexOptions for Todo
+        this.indexOptions = {
+            ...this.indexOptions,
+            ftsSearchFields: ['data.title', 'data.description'],
+            vectorEmbeddingFields: ['data.title', 'data.description'],
+            checksumFields: ['data.title', 'data.description']
+        };
     }
 
-    updateTitle(newTitle) {
-        this.title = newTitle;
-        this.updated_at = new Date().toISOString();
+    /**
+     * Create a Todo from minimal data
+     * @param {Object} data - Todo data
+     * @returns {Todo} New Todo instance
+     */
+    static fromData(data) {
+        data.schema = DOCUMENT_SCHEMA_NAME;
+        return new Todo(data);
     }
 
-    updateDescription(newDescription) {
-        this.description = newDescription;
-        this.updated_at = new Date().toISOString();
+    static get dataSchema() {
+        return documentDataSchema;
     }
 
-    updateDueDate(newDueDate) {
-        this.dueDate = newDueDate;
-        this.updated_at = new Date().toISOString();
+    static get schema() {
+        return documentSchema;
     }
 
-    markAsCompleted() {
-        this.completed = true;
-        this.updated_at = new Date().toISOString();
+    static validate(document) {
+        return documentSchema.parse(document);
     }
 
-    markAsIncomplete() {
-        this.completed = false;
-        this.updated_at = new Date().toISOString();
+    static validateData(documentData) {
+        return documentDataSchema.parse(documentData);
     }
 }
-
-export default Todo;

@@ -1,62 +1,70 @@
 'use strict';
 
-import Document from '../BaseDocument.js';
+import Document, { documentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
-const DOCUMENT_SCHEMA = 'data/abstraction/email';
-const schemaDefinition = Document.schemaDefinition.extend({
-    schema: z.literal(DOCUMENT_SCHEMA),
+const DOCUMENT_SCHEMA_NAME = 'data/abstraction/email';
+const DOCUMENT_SCHEMA_VERSION = '2.0';
+
+const documentDataSchema = z.object({
+    schema: z.string(),
+    schemaVersion: z.string().optional(),
+    // Draft/placeholder implementation
     data: z.object({
-        from: z.string(),
-        to: z.string(),
         subject: z.string(),
-        body: z.string()
-    })
+        from: z.string().email(),
+        to: z.array(z.string().email()),
+        cc: z.array(z.string().email()).optional(),
+        bcc: z.array(z.string().email()).optional(),
+        body: z.string(),
+        htmlBody: z.string().optional(),
+        attachments: z.array(z.any()).optional(),
+        receivedAt: z.string().datetime(),
+        deviceId: z.string(),
+    }).passthrough(),
+    metadata: z.object().optional()
 });
 
 export default class Email extends Document {
     constructor(options = {}) {
-        super({
-            ...options,
-            schema: DOCUMENT_SCHEMA,
-            data: {
-                from: options.from || '',
-                to: options.to || '',
-                subject: options.subject || '',
-                body: options.body || '',
-                ...options.data
-            }
-        });
+        // Set schema before calling super
+        options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
+        options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
+
+        super(options);
+
+        // Customize indexOptions for Email
+        this.indexOptions = {
+            ...this.indexOptions,
+            ftsSearchFields: ['data.subject', 'data.body', 'data.from', 'data.to'],
+            vectorEmbeddingFields: ['data.subject', 'data.body'],
+            checksumFields: ['data.subject', 'data.from', 'data.to', 'data.receivedAt']
+        };
     }
 
-    static get schemaDefinition() {
-        return schemaDefinition;
+    /**
+     * Create an Email from minimal data
+     * @param {Object} data - Email data
+     * @returns {Email} New Email instance
+     */
+    static fromData(data) {
+        data.schema = DOCUMENT_SCHEMA_NAME;
+        return new Email(data);
     }
 
-    get schemaDefinition() {
-        return Email.schemaDefinition;
+    static get dataSchema() {
+        return documentDataSchema;
     }
 
-    validate() {
-        // First run base validation
-        super.validate();
-
-        // Note-specific validation
-        if (!this.data.content) throw new Error('Note content required');
-        if (typeof this.data.content !== 'string') throw new Error('Note content must be a string');
-
-        // Add any other note-specific validation rules
-        return true;
+    static get schema() {
+        return documentSchema;
     }
 
-    static validateData(data) {
-        // First run base validation
-        super.validateData(data);
+    static validate(document) {
+        return documentSchema.parse(document);
+    }
 
-        // Note-specific validation
-        if (!data.content) throw new Error('Note content required');
-        if (typeof data.content !== 'string') throw new Error('Note content must be a string');
-
-        return true;
+    static validateData(documentData) {
+        return documentDataSchema.parse(documentData);
     }
 }

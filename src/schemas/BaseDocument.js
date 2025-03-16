@@ -13,17 +13,26 @@ import {
     isThisYear,
 } from 'date-fns';
 import { generateChecksum } from '../utils/crypto.js';
+import { debug } from 'console';
 
-// Constants
-const DOCUMENT_SCHEMA = 'data/abstraction/document';
+// Document constants
+const DOCUMENT_SCHEMA_NAME = 'data/abstraction/document';
 const DOCUMENT_SCHEMA_VERSION = '2.0';
 const DOCUMENT_DATA_CHECKSUM_ALGORITHMS = ['sha1', 'sha256'];
 const DEFAULT_DOCUMENT_DATA_TYPE = 'application/json';
 const DEFAULT_DOCUMENT_DATA_ENCODING = 'utf8';
 
-// Base document schema definition
+// Minimal schema definition (for API/frontend data input)
+const documentDataSchema = z.object({
+    schema: z.string(),
+    schemaVersion: z.string().optional(),
+    data: z.record(z.any())
+});
+
+// Full document schema definition (for internal storage)
 const documentSchema = z.object({
     // Base
+    id: z.number().int().positive().optional(),
     schema: z.string(),
     schemaVersion: z.string(),
 
@@ -31,115 +40,283 @@ const documentSchema = z.object({
     indexOptions: z.object({
         checksumAlgorithms: z.array(z.string()),
         checksumFields: z.array(z.string()),
-        searchFields: z.array(z.string()),
-        embeddingFields: z.array(z.string()),
-        embeddingModel: z.string(),
-        embeddingDimensions: z.number(),
-        embeddingProvider: z.string(),
-        embeddingProviderOptions: z.record(z.any()),
-        chunking: z.object({
-            type: z.enum(['sentence', 'paragraph', 'chunk']),
-            chunkSize: z.number(),
-            chunkOverlap: z.number(),
-        }),
-    }),
+        ftsSearchFields: z.array(z.string()),
+        vectorEmbeddingFields: z.array(z.string()),
+        embeddingOptions: z.object({
+            embeddingModel: z.string(),
+            embeddingDimensions: z.number(),
+            embeddingProvider: z.string(),
+            embeddingProviderOptions: z.record(z.any()).optional(),
+            chunking: z.object({
+                type: z.enum(['sentence', 'paragraph', 'chunk']),
+                chunkSize: z.number(),
+                chunkOverlap: z.number(),
+            }).optional(),
+        }).optional(),
+    }).optional(),
 
     // Timestamps
-    created_at: z.string().datetime(),
-    updated_at: z.string().datetime(),
-
-    // Metadata section
-    metadata: z.object({
-        dataContentType: z.string(),
-        dataContentEncoding: z.string()
-    }).and(z.record(z.any())), // Allow additional metadata fields
-
-    // This is actually a checksum string array checksumAlgo/checksumValue,
-    // maybe we should rename or refactor this part!
-    checksumArray: z.array(z.string()),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
 
     // Document data/payload
     data: z.record(z.any()),
-    dataPaths: z.array(z.string()).optional(),
+
+    // Metadata section
+    metadata: z.object({
+        contentType: z.string(),
+        contentEncoding: z.string(),
+        dataPaths: z.array(z.string()).optional(), // A document may have multiple data paths
+    }).and(z.record(z.any())).optional(), // Allow additional metadata fields
+
+    // Checksums
+    checksumArray: z.array(z.string()).optional(),
+    embeddingsArray: z.array(z.string()).optional(),
 
     // Versioning
-    // We _could_ use version support by LMDB, but went with a naive backend-agnostic approach
-    parent_id: z.string().nullable(),
-    versions: z.array(z.any()),
-    version_number: z.number().int().positive(),
-    latest_version: z.number().int().positive()
+    parentId: z.string().nullable().optional(),
+    versions: z.array(z.string()).optional(),
+    versionNumber: z.number().int().positive().optional(),
+    latestVersion: z.number().int().positive().optional()
 });
 
-export default class BaseDocument {
-    static schemaType = 'base';
+/**
+ * Base Document class
+ */
 
+class BaseDocument {
+
+    /**
+     * Constructor
+     * @param {Object} options - Document options
+     * @param {string} options.id - Document ID
+     * @param {string} options.schema - Document schema
+     * @param {string} options.schemaVersion - Document schema version
+     * @param {Object} options.data - Document data
+     * @param {Object} options.metadata - Document metadata
+     * @param {Object} options.indexOptions - Document index options
+     */
     constructor(options = {}) {
         // Base
-        this.id = null;
-        this.schema = options.schema ?? DOCUMENT_SCHEMA;
+        this.id = options.id ?? null;
+        this.schema = options.schema ?? DOCUMENT_SCHEMA_NAME;
         this.schemaVersion = options.schemaVersion ?? DOCUMENT_SCHEMA_VERSION;
-
-        // Timestamps
-        this.created_at = options.created_at ?? new Date().toISOString();
-        this.updated_at = new Date().toISOString();
 
         // Internal index configuration
         this.indexOptions = {
-            checksumAlgorithms: options?.index?.checksumAlgorithms ?? DOCUMENT_DATA_CHECKSUM_ALGORITHMS,
-            checksumFields: options?.index?.checksumFields || ['data'],
-            searchFields: options?.index?.searchFields || ['data'],
-            embeddingFields: options?.index?.embeddingFields || ['data'],
-            embeddingModel: options?.index?.embeddingModel || 'gte-Qwen2-1.5B-instruct',
-            embeddingDimensions: options?.index?.embeddingDimensions || 8960,
-            embeddingProvider: options?.index?.embeddingProvider || 'canvas',
+            checksumAlgorithms: options.indexOptions?.checksumAlgorithms || DOCUMENT_DATA_CHECKSUM_ALGORITHMS,
+            checksumFields: options.indexOptions?.checksumFields || ['data'],
+            ftsSearchFields: options.indexOptions?.ftsSearchFields || ['data'],
+            vectorEmbeddingFields: options.indexOptions?.vectorEmbeddingFields || ['data'],
+            ...options.indexOptions,
+            embeddingOptions: {
+                ...options.indexOptions?.embeddingOptions,
+                embeddingModel: options.indexOptions?.embeddingOptions?.embeddingModel || 'text-embedding-3-small',
+                embeddingDimensions: options.indexOptions?.embeddingOptions?.embeddingDimensions || 1536,
+                embeddingProvider: options.indexOptions?.embeddingOptions?.embeddingProvider || 'openai',
+                embeddingProviderOptions: options.indexOptions?.embeddingOptions?.embeddingProviderOptions || {},
+                chunking: options.indexOptions?.embeddingOptions?.chunking || {
+                    type: 'sentence',
+                    chunkSize: 1000,
+                    chunkOverlap: 200,
+                },
+            },
         };
 
-        /**
-         * Metadata section
-         */
-
-        this.metadata = {
-            dataContentType: options.meta?.dataContentType ?? DEFAULT_DOCUMENT_DATA_TYPE,
-            dataContentEncoding: options.meta?.dataContentEncoding ?? DEFAULT_DOCUMENT_DATA_ENCODING,
-            ...options.meta,
-        };
-
-
-        /**
-         * Document data/payload, omitted for blobs
-         */
-
+        // Document data/payload
         this.data = options.data ?? {};
-        this.dataPaths = options.dataPaths ?? [];
+        this.metadata = {
+            contentType: options.metadata?.contentType || DEFAULT_DOCUMENT_DATA_TYPE,
+            contentEncoding: options.metadata?.contentEncoding || DEFAULT_DOCUMENT_DATA_ENCODING,
+            dataPaths: options.metadata?.dataPaths || [],
+            ...options.metadata,
+        };
 
-        /**
-         * Versioning
-         */
+        // Checksums/embeddings
+        this.checksumArray = options.checksumArray || this.generateChecksumStrings();
+        this.embeddingsArray = options.embeddingsArray || [];
 
-        this.parent_id = options.parent_id ?? null; // Stored in the child document
-        this.versions = options.versions ?? []; // Stored in the parent document
-        this.version_number = options.version_number ?? 1;
-        this.latest_version = options.latest_version ?? 1; // Stored in the parent document
+        // Timestamps
+        this.createdAt = options.createdAt ?? new Date().toISOString();
+        this.updatedAt = options.updatedAt ?? new Date().toISOString();
 
-        // Generate checksums
-        this.checksumArray = options.checksumArray ?? this.generateChecksumStrings();
-
-        // Embeddings can be supplied or generated on-demand as model: [embeddings]
-        this.embeddings = options.embeddings ?? {};
-
-        // Validate document
-        this.validate();
-    }
-
-    update(document) {
-        Object.assign(this, document);
-        this.updated_at = new Date().toISOString();
+        // Versioning
+        this.parentId = options.parentId || null;
+        this.versions = options.versions || [];
+        this.versionNumber = options.versionNumber || 1;
+        this.latestVersion = options.latestVersion || 1;
     }
 
     /**
-     * Data helpers
+     * Create a BaseDocument from minimal data
+     * @param {Object} data - Note data
+     * @returns {Note} New Note instance
+     */
+    static fromData(data) {
+        if (!BaseDocument.validateData(data)) {
+            throw new Error('Invalid document data');
+        };
+
+        const document = new BaseDocument(data);
+        return document;
+    }
+
+    static get dataSchema() {
+        return documentDataSchema;
+    }
+
+    static get schema() {
+        return documentSchema;
+    }
+
+    /**
+     * Update the document with new data
+     * @param {Object} data - New data to update the document with
+     * @returns {BaseDocument} Updated document instance
+     */
+    update(data) {
+        if (!data) return this;
+
+        // Track if data was updated to know if we need to regenerate checksums
+        let dataUpdated = false;
+
+        // Update ID if provided
+        if (data.id) { this.id = data.id; }
+
+        // Update data if provided
+        if (data.data) {
+            this.data = data.data;
+            dataUpdated = true;
+        }
+
+        // Update metadata if provided
+        if (data.metadata) {
+            this.metadata = {
+                ...this.metadata,
+                ...data.metadata
+            };
+        }
+
+        // Update index options if provided
+        if (data.indexOptions) {
+            this.indexOptions = {
+                ...this.indexOptions,
+                ...data.indexOptions,
+                // Preserve nested objects with proper merging
+                embeddingOptions: {
+                    ...this.indexOptions.embeddingOptions,
+                    ...data.indexOptions.embeddingOptions,
+                    // Preserve chunking options with proper merging
+                    chunking: data.indexOptions.embeddingOptions?.chunking ? {
+                        ...this.indexOptions.embeddingOptions.chunking,
+                        ...data.indexOptions.embeddingOptions.chunking
+                    } : this.indexOptions.embeddingOptions.chunking
+                }
+            };
+            dataUpdated = true;
+        }
+
+        // Update checksums and embeddings if explicitly provided
+        if (data.checksumArray) {
+            this.checksumArray = data.checksumArray;
+        } else if (dataUpdated) {
+            // Regenerate checksums if data was updated
+            this.checksumArray = this.generateChecksumStrings();
+        }
+
+        if (data.embeddingsArray) {
+            this.embeddingsArray = data.embeddingsArray;
+        }
+
+        // Always update the updatedAt timestamp
+        this.updatedAt = data.updatedAt ?? new Date().toISOString();
+
+        // Update versioning information if provided
+        if (data.parentId) { this.parentId = data.parentId; }
+        if (data.versions) { this.versions = data.versions; }
+        if (data.versionNumber) { this.versionNumber = data.versionNumber; }
+        if (data.latestVersion) { this.latestVersion = data.latestVersion; }
+
+        return this;
+    }
+
+    /**
+     * Validates the document structure and data
+     * @throws {Error} If validation fails
+     * @returns {boolean} True if validation passes
+     */
+    validate() {
+        try {
+            // Validate using Zod schema
+            BaseDocument.schema.parse(this);
+
+            // Additional validation
+            if (!this.id) {
+                throw new Error('Document ID is required');
+            }
+
+            if (!this.data) {
+                throw new Error('Document data is required');
+            }
+
+            if (!this.indexOptions?.checksumFields?.length) {
+                throw new Error('At least one checksum field must be specified');
+            }
+
+            return true;
+        } catch (error) {
+            throw new Error(`Document validation failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Validate a document against the schema
+     * @param {Object} document - Document to validate
+     * @returns {Object} Validated document
+     * @static
+     */
+    static validate(document) {
+        return BaseDocument.schema.parse(document)
+    }
+
+    /**
+     * Validate document data against the schema
+     * @param {Object} data - Document data to validate
+     * @returns {Object} Validated document data
+     * @static
+     */
+    static validateData(data) {
+        return BaseDocument.dataSchema.parse(data);
+    }
+
+
+    /**
+     * Versioning
      */
 
+    addVersion(data = {}) { /* TODO: Implement */ }
+
+    listVersions() {}
+
+    getVersion(version) { /* TODO: Implement */ }
+
+    removeVersion(version) { /* TODO: Implement */ }
+
+    getLatestVersion() { /* TODO: Implement */ }
+
+    getPreviousVersion() { /* TODO: Implement */ }
+
+    getNextVersion() { /* TODO: Implement */ }
+
+
+    /**
+     * Utils
+     */
+
+    /**
+     * Generate checksum strings for the document
+     * @returns {Array<string>} Array of checksum strings
+     */
     generateChecksumStrings() {
         const checksumData = this.generateChecksumData();
         return this.indexOptions.checksumAlgorithms.map((algorithm) => {
@@ -147,6 +324,10 @@ export default class BaseDocument {
         });
     }
 
+    /**
+     * Generate checksum data for the document
+     * @returns {string} Checksum data
+     */
     generateChecksumData() {
         try {
             // Default to the whole data object if no specific fields are set
@@ -170,12 +351,16 @@ export default class BaseDocument {
         }
     }
 
+    /**
+     * Generate full-text search data for the document
+     * @returns {Array<string>|null} FTS data
+     */
     generateFtsData() {
         try {
-            if (!this.indexOptions?.searchFields?.length) return null;
+            if (!this.indexOptions?.ftsSearchFields?.length) return null;
 
             // Extract specified fields
-            const fieldValues = this.indexOptions.searchFields
+            const fieldValues = this.indexOptions.ftsSearchFields
                 .map((field) => {
                     const value = this.getNestedValue(this, field);
                     return value ? String(value).trim() : null;
@@ -189,12 +374,16 @@ export default class BaseDocument {
         }
     }
 
+    /**
+     * Generate embeddings data for the document
+     * @returns {Array<string>|null} Embeddings data
+     */
     generateEmbeddingsData() {
         try {
-            if (!this.indexOptions?.embeddingFields?.length) return null;
+            if (!this.indexOptions?.vectorEmbeddingFields?.length) return null;
 
             // Extract specified fields
-            const fieldValues = this.indexOptions.embeddingFields
+            const fieldValues = this.indexOptions.vectorEmbeddingFields
                 .map((field) => {
                     const value = this.getNestedValue(this, field);
                     return value || null;
@@ -209,21 +398,37 @@ export default class BaseDocument {
     }
 
     /**
-     * Versioning helpers
-    */
+     * Get a nested value from an object
+     * @param {Object} obj - The object to get the nested value from
+     * @param {string} path - The path to the nested value
+     * @returns {any} The nested value
+     */
+    getNestedValue(obj, path) {
+        if (!obj || !path) return undefined;
 
-    addVersion(version) {
-        // Naive implementation:
-        // Object has a parent_id, empty parent_id means root document
-        // Object has a versions array with object IDs of previous versions
+        try {
+            return path.split('.').reduce((current, key) => {
+                if (current === null || current === undefined) return undefined;
+                return current[key];
+            }, obj);
+        } catch (error) {
+            return undefined;
+        }
     }
 
-    removeVersion(version) { }
-
     /**
-     * Utils
+     * Checks if a date string is within a specific time frame
+     * @param {string} dateString - The date string to check
+     * @param {string} timeFrameIdentifier - The time frame identifier, one of:
+     *   - 'today'
+     *   - 'yesterday'
+     *   - 'thisWeek'
+     *   - 'thisISOWeek'
+     *   - 'thisMonth'
+     *   - 'thisQuarter'
+     *   - 'thisYear'
+     * @returns {boolean} True if the date is within the time frame, false otherwise
      */
-
     static isWithinTimeFrame(dateString, timeFrameIdentifier) {
         const date = parseISO(dateString);
         const timeFrameChecks = {
@@ -239,145 +444,39 @@ export default class BaseDocument {
         return timeFrameChecks[timeFrameIdentifier]?.(date) ?? false;
     }
 
-    static validate(document) {
-        return documentSchema.parse(document);
-    }
-
+    /**
+     * Convert the document to JSON
+     * @returns {string} JSON representation of the document
+     */
     toJSON() {
-        return {
-            // Base
+        return JSON.stringify({
             id: this.id,
             schema: this.schema,
             schemaVersion: this.schemaVersion,
-
-            // Timestamps
-            created_at: this.created_at,
-            updated_at: this.updated_at,
-
-            // Internal index configuration
-            indexOptions: this.indexOptions,
-
-            // Metadata section
-            metadata: this.metadata,
-            checksumArray: this.checksumArray,
-            embeddings: this.embeddings,
-            features: this.features,
-            paths: this.paths,
-
-            // Document data/payload, omitted for blobs
             data: this.data,
-
-            // Versioning
-            parent_id: this.parent_id,
+            metadata: this.metadata,
+            indexOptions: this.indexOptions,
+            createdAt: this.createdAt,
+            updatedAt: this.updatedAt,
+            checksumArray: this.checksumArray,
+            embeddingsArray: this.embeddingsArray,
+            parentId: this.parentId,
             versions: this.versions,
-            version_number: this.version_number,
-            latest_version: this.latest_version,
-        };
-    }
-
-    static toJSON() {
-        return JSON.stringify({
-            // Base
-
-        });
-    }
-
-    static fromJSON(json) {
-        const doc = new BaseDocument({  // Changed from Document to BaseDocument
-            ...json,
-            checksumArray: Array.isArray(json.checksumArray) ? json.checksumArray : [],
-            features: Array.isArray(json.features) ? json.features : [],
-            embeddings: json.embeddings,
-            data: json.data,
-        });
-
-        return doc;
-    }
-
-    /**
-     * Validates the document structure and data
-     * @throws {Error} If validation fails
-     * @returns {boolean} True if validation passes
-     */
-    validate() {
-        try {
-            // Validate using Zod schema
-            BaseDocument.schemaDefinition.parse(this);
-
-            // Additional validation
-            if (!this.data) {
-                throw new Error('Document data is required');
-            }
-
-            if (!this.indexOptions?.checksumFields?.length) {
-                throw new Error('At least one checksum field must be specified');
-            }
-
-            return true;
-        } catch (error) {
-            throw new Error(`Document validation failed: ${error.message}`);
-        }
-    }
-
-    static get schemaDefinition() {
-        return documentSchema;
-    }
-
-    get schemaDefinition() {
-        return BaseDocument.schemaDefinition;
-    }
-
-    isJsonDocument() {
-        return this.metadata.dataContentType === 'application/json';
-    }
-
-    // TODO: Fixme, this assumes everything other than a blob is stored as JSON which may not be the case
-    isBlob() {
-        return this.metadata.dataContentType !== 'application/json';
-    }
-
-    getNestedValue(obj, path) {
-        if (!obj || !path) return undefined;
-
-        try {
-            return path.split('.').reduce((current, key) => {
-                if (current === null || current === undefined) return undefined;
-                return current[key];
-            }, obj);
-        } catch (error) {
-            return undefined;
-        }
-    }
-
-    /**
-     * Create a document from input data
-     * @param {Object} input Input data
-     * @param {Object} options Additional options
-     * @returns {BaseDocument} New document instance
-     */
-    static fromData(input, options = {}) {
-        return this.create({
-            data: this.normalizeInputData(input),
-            ...options
+            versionNumber: this.versionNumber,
+            latestVersion: this.latestVersion,
         });
     }
 
     /**
-     * Factory method to create documents from normalized input
-     * @protected
+     * Convert the document to an object
+     * @returns {Object} Object representation of the document
      */
-    static create(options = {}) {
-        return new this(options);
+    toObject() {
+        return JSON.parse(this.toJSON());
     }
 
-    /**
-     * Normalize input data based on document type
-     * @protected
-     */
-    static normalizeInputData(input) {
-        if (typeof input !== 'object' || input === null) {
-            throw new Error('Base documents require object input');
-        }
-        return input;
-    }
 }
+
+// Export document class and schemas
+export default BaseDocument;
+export { documentDataSchema, documentSchema };

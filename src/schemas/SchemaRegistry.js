@@ -1,25 +1,58 @@
 'use strict';
 
-// Schemas
+// Base document
 import BaseDocument from './BaseDocument.js';
-//import Directory from './abstractions/Directory.js';
-//import Email from './abstractions/Email.js';
-//import File from './abstractions/File.js';
+
+// Schemas
+import Document from './abstractions/Document.js';
+import Directory from './abstractions/Directory.js';
+import Email from './abstractions/Email.js';
+import File from './abstractions/File.js';
 import Note from './abstractions/Note.js';
 import Tab from './abstractions/Tab.js';
-//import Todo from './abstractions/Todo.js';
+import Todo from './abstractions/Todo.js';
 
 // Default schema registry (for now hard-coded)
 const SCHEMA_REGISTRY = {
-    'data/abstraction/document': BaseDocument,
-    //'data/abstraction/directory': Directory,
-    //'data/abstraction/email': Email,
-    //'data/abstraction/file': File,
+    'data/abstraction/base': BaseDocument,
+    'data/abstraction/document': Document,
+    'data/abstraction/directory': Directory,
+    'data/abstraction/email': Email,
+    'data/abstraction/file': File,
     'data/abstraction/note': Note,
     'data/abstraction/tab': Tab,
-    //'data/abstraction/todo': Todo,
+    'data/abstraction/todo': Todo,
 };
 
+export function isDocument(obj) {
+    if (!obj || typeof obj !== 'object') return false;
+
+    // Check for essential document properties
+    return (
+        obj.schema &&
+        typeof obj.schema === 'string' &&
+        obj.schemaVersion &&
+        obj.data !== undefined &&
+        obj.metadata &&
+        obj instanceof BaseDocument
+    ) || false;
+}
+
+export function isDocumentData(obj) {
+    if (!obj || typeof obj !== 'object') return false;
+
+    // Check for minimal proto object properties
+    return (
+        obj.schema &&
+        typeof obj.schema === 'string' &&
+        obj.data !== undefined &&
+        !(obj instanceof BaseDocument)
+    );
+}
+
+/**
+ * Schema registry singleton
+ */
 
 class SchemaRegistry {
 
@@ -30,21 +63,26 @@ class SchemaRegistry {
     }
 
     /**
-     * Get schema by ID
+     * Get schema class by ID
      * @param {string} schemaId Schema identifier
-     * @returns {object} Schema definition
+     * @returns {Class} Schema class
+     * @throws {Error} If schema is not found
      */
     getSchema(schemaId) {
-        const schema = this.#schemas.get(schemaId);
-        if (!schema) {
-            throw new Error(`Schema ${schemaId} not found`);
+        if (!this.hasSchema(schemaId)) {
+            throw new Error(`Schema not found: ${schemaId}`);
         }
-        return schema;
+        return this.#schemas.get(schemaId);
     }
 
-    getJsonSchema(schemaId) {
-        const schema = this.getSchema(schemaId);
-        return schema.toJSON();
+    /**
+     * Get proto schema definition by ID (for frontend/API validation)
+     * @param {string} schemaId Schema identifier
+     * @returns {object} Proto schema definition
+     */
+    getDataSchema(schemaId) {
+        const SchemaClass = this.getSchema(schemaId);
+        return SchemaClass.dataSchema;
     }
 
     /**
@@ -62,6 +100,28 @@ class SchemaRegistry {
      */
     listSchemas() {
         return Array.from(this.#schemas.keys());
+    }
+
+    /**
+     * Validate a full document against its schema
+     * @param {Object} document - The document to validate
+     * @returns {boolean} True if validation passes, false otherwise
+     * @private
+     */
+    #validateDocument(document) {
+        const SchemaClass = this.getSchema(document.schema);
+        return SchemaClass.validate(document);
+    }
+
+    /**
+     * Validate document data against its document schema
+     * @param {Object} data - The document data to validate
+     * @returns {boolean} True if validation passes, false otherwise
+     * @private
+     */
+    #validateDocumentData(data) {
+        const SchemaClass = this.getSchema(data.schema);
+        return SchemaClass.validateData(data);
     }
 
     /**

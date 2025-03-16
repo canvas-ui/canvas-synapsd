@@ -1,103 +1,61 @@
 'use strict';
 
-import BaseDocument from '../BaseDocument.js';
+import Document, { documentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
-const DOCUMENT_SCHEMA = 'data/abstraction/note';
-const schemaDefinition = BaseDocument.schemaDefinition.extend({
-    schema: z.literal(DOCUMENT_SCHEMA),
+const DOCUMENT_SCHEMA_NAME = 'data/abstraction/note';
+const DOCUMENT_SCHEMA_VERSION = '2.0';
+
+const documentDataSchema = z.object({
+    schema: z.string(),
+    schemaVersion: z.string().optional(),
     data: z.object({
-        title: z.string().optional().nullable(),
-        content: z.string()
-    })
+        title: z.string().optional(),
+        content: z.string(),
+    }).passthrough(),
+    metadata: z.object().optional()
 });
 
-export default class Note extends BaseDocument {
+export default class Note extends Document {
     constructor(options = {}) {
-        super({
-            ...options,
-            schema: DOCUMENT_SCHEMA,
-            data: {
-                title: options.title ?? null,
-                content: options.content,
-                ...options.data
-            },
-            index: {
-                ...options.index,
-                searchFields: ['data.title', 'data.content'],
-                checksumFields: ['data.content']
-            }
-        });
-    }
+        // Set schema before calling super
+        options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
+        options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
 
-    static get schemaDefinition() {
-        return schemaDefinition;
-    }
+        super(options);
 
-    get schemaDefinition() {
-        return Note.schemaDefinition;
-    }
-
-    get title() { return this.data.title; }
-    get content() { return this.data.content; }
-
-    /**
-     * Create a note from input data
-     * @param {string|Object} input Note content or data object
-     * @param {Object} options Additional options
-     * @returns {Note} New note instance
-     */
-    static fromData(input, options = {}) {
-        return this.create({
-            content: typeof input === 'string' ? input : input.content,
-            title: options.title || (typeof input === 'string' ? this.generateDefaultTitle(input) : input.title)
-        });
-    }
-
-    static normalizeInputData(input) {
-        if (typeof input === 'string') {
-            return {
-                content: input,
-                title: this.generateDefaultTitle(input)
-            };
-        }
-        return input;
-    }
-
-    static generateDefaultTitle(content) {
-        return content.split('\n')[0].slice(0, 50) || 'Untitled Note';
+        // Customize indexOptions for Note
+        this.indexOptions = {
+            ...this.indexOptions,
+            ftsSearchFields: ['data.title', 'data.content'],
+            vectorEmbeddingFields: ['data.title', 'data.content'],
+            checksumFields: ['data.title', 'data.content']
+        };
     }
 
     /**
-     * Validates the note document
-     * @throws {Error} If validation fails
-     * @returns {boolean} True if validation passes
+     * Create a Note from minimal data
+     * @param {Object} data - Note data
+     * @returns {Note} New Note instance
      */
-    validate() {
-        // First run base validation
-        super.validate();
-
-        try {
-            // Note-specific schema validation
-            Note.schemaDefinition.parse(this);
-            return true;
-        } catch (error) {
-            throw new Error(`Note validation failed: ${error.message}`);
-        }
+    static fromData(data) {
+        data.schema = DOCUMENT_SCHEMA_NAME;
+        return new Note(data);
     }
 
-    /**
-     * Static method to validate note data
-     * @param {Object} data - Data to validate
-     * @throws {Error} If validation fails
-     * @returns {boolean} True if validation passes
-     */
-    static validateData(data) {
-        try {
-            schemaDefinition.shape.data.parse(data);
-            return true;
-        } catch (error) {
-            throw new Error(`Note data validation failed: ${error.message}`);
-        }
+    static get dataSchema() {
+        return documentDataSchema;
+    }
+
+    static get schema() {
+        return documentSchema;
+    }
+
+    static validate(document) {
+        return documentSchema.parse(document);
+    }
+
+    static validateData(documentData) {
+        return documentDataSchema.parse(documentData);
     }
 }

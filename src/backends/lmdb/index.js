@@ -51,11 +51,11 @@ class Db {
             };
 
             this.db = new open(options);
-            debug(`Initialized LMDB database backend at "${options.path}"`);
+            debug(`LMDB database backend at "${options.path} initialized"`);
         } else {
             this.db = options;
             this.#dataset = dataset;
-            debug(`Initialized LMDB dataset "${dataset}"`);
+            debug(`LMDB dataset "${dataset}" initialized`);
         }
 
         // Set the db path in the wrapper class

@@ -10,27 +10,34 @@ import Db from './backends/lmdb/index.js';
 
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
+import { isDocument, isDocumentData } from './schemas/SchemaRegistry.js';
 import BaseDocument from './schemas/BaseDocument.js';
 
 // Indexes
+import BitmapIndex from './indexes/bitmaps/index.js';
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
-import BitmapIndex from './indexes/bitmaps/index.js';
-import VectorIndex from './indexes/vector/index.js';
+import { Schema } from 'zod';
 
 // Constants
 const INTERNAL_BITMAP_ID_MIN = 0;
 const INTERNAL_BITMAP_ID_MAX = 100000;
 
 /**
- * SynapsD
+ * Simplified SynapsD class
  */
 
 class SynapsD extends EventEmitter {
 
-    #db;        // Database backend instance
+    #dbBackend = 'lmdb';
+
     #rootPath;  // Root path of the database
+    #db;        // Database backend instance
     #status;    // Status of the database
+
+    #bitmapStore;
+    #bitmapCache;
+
 
     constructor(options = {
         backupOnOpen: false,
@@ -40,81 +47,58 @@ class SynapsD extends EventEmitter {
         // TODO: Add per dataset versioning support to the underlying db backend!
     }) {
         super(options.eventEmitterOptions);
-        debug('Initializing Canvas SynapsD');
+        debug('Initializing SynapsD');
         debug('DB Options:', options);
 
         this.#status = 'initializing';
+        this.#rootPath = options.rootPath ?? options.path;
 
         // Initialize database backend
-        if (!options.path) { throw new Error('Database path required'); }
-        this.#db = new Db(options);
-        this.#rootPath = options.path;
-
-        // Support for custom (presumably in-memory) caching backend (assuming it implements a Map() interface)
-        this.cache = options.cache ?? new Map();
-
-        // Main JSON document datasets
-        this.documents = this.#db.createDataset('documents');   // If you want to use SynapsD to store JSON documents
-        this.metadata = this.#db.createDataset('metadata');    // If you want to use SynapsD for metedata only
-
-        /**
-         * Inverted indexes
-         */
-
-        this.checksumIndex = new ChecksumIndex({ // algorithm/checksum -> id
-            store: this.#db.createDataset('checksums')
+        if (!this.#rootPath) { throw new Error('Database path required'); }
+        this.#db = new Db({
+            ...options,
+            path: this.#rootPath,
         });
 
-        this.timestampIndex = new TimestampIndex({ // timestamp -> id
-            store: this.#db.createDataset('timestamps')
-        });
+        // Document datasets
+        this.documents = this.#db.createDataset('documents');
+        this.metadata = this.#db.createDataset('metadata');
 
         /**
          * Bitmap indexes
          */
 
-        this.bitmapStore = this.#db.createDataset('bitmaps');
+        this.#bitmapCache = options.bitmapCache ?? new Map();
+        this.#bitmapStore = this.#db.createDataset('bitmaps');
         this.bitmapIndex = new BitmapIndex(
-            this.bitmapStore,
-            this.cache,
+            this.#bitmapStore,
+            this.#bitmapCache,
         );
 
-        this.deletedDocuments = this.bitmapIndex.createBitmap('internal/deleted'); //.createCollection('gc');
+        // Deleted documents bitmap
+        this.deletedDocumentsBitmap = this.bitmapIndex.createBitmap('internal/gc/deleted');
+
+        // Action bitmaps
+        // TODO: Refactor
+        this.actionBitmaps = {
+            created: this.bitmapIndex.createBitmap('internal/action/created'),
+            updated: this.bitmapIndex.createBitmap('internal/action/updated'),
+            deleted: this.bitmapIndex.createBitmap('internal/action/deleted'),
+        };
 
         /**
-         * Vector store backend (LanceDB)
+         * Inverted indexes
          */
 
-        this.vectorStore = null;
+        this.checksumIndex = new ChecksumIndex(this.#db.createDataset('checksums'));
+        this.timestampIndex = new TimestampIndex(
+            this.#db.createDataset('timestamps'),
+            this.actionBitmaps,
+        );
 
-        /**
-         * Filters
-         */
+        // TODO: FTS index
+        // TODO: Vector index
 
-        debug('SynapsD initialized');
-        debug('Document count:', this.#documentCount());
-    }
-
-    /**
-     * Service
-     */
-
-    async start() {
-        this.#status = 'running';
-        debug('SynapsD started');
-    }
-
-    async shutdown() {
-        try {
-            this.#status = 'shutting down   ';
-            await this.#db.close();
-            this.#status = 'shutdown';
-            debug('SynapsD database closed');
-        } catch (error) {
-            this.#status = 'error';
-            debug('SynapsD database error', error);
-            throw error;
-        }
     }
 
     /**
@@ -122,82 +106,194 @@ class SynapsD extends EventEmitter {
      */
 
     get path() { return this.#rootPath; }
-
     get stats() {
         return {
-            // TODO: Implement
+            dbBackend: this.#dbBackend,
+            dbPath: this.#rootPath,
+            status: this.#status,
+            documentCount: this.documents.getCount(),
+            metadataCount: this.metadata.getCount(),
+            bitmapCacheSize: this.#bitmapCache.size,
+            bitmapStoreSize: this.#bitmapStore.getCount(),
+            checksumIndexSize: this.checksumIndex.getCount(),
+            timestampIndexSize: this.timestampIndex.getCount(),
         };
     }
 
     get status() { return this.#status; }
+    get db() { return this.#db; } // Could be useful
 
     /**
-     * Stateful transactions (used by Contexts)
+     * Service methods
      */
 
-    createTransaction() {}
+    async start() {
+        debug('Starting SynapsD');
+        try {
+            // Initialize database backend
+            // Initialize index backends
 
-    commitTransaction() {}
+            this.#status = 'running';
+            this.emit('started');
+            debug('SynapsD started');
+        } catch (error) {
+            this.#status = 'error';
+            debug('SynapsD database error during startup: ', error);
+            throw error;
+        }
+    }
 
-    abortTransaction() {}
+    async shutdown() {
+        debug('Shutting down SynapsD');
+        try {
+            this.#status = 'shutting down';
+            this.emit('before-shutdown');
+
+            // Close index backends
+
+            // Close database backend
+            await this.#db.close();
+
+            this.#status = 'shutdown';
+            this.emit('shutdown');
+
+            debug('SynapsD database closed');
+        } catch (error) {
+            this.#status = 'error';
+            debug('SynapsD database error during shutdown: ', error);
+            throw error;
+        }
+    }
+
+    isRunning() { return this.#status === 'running'; }
+
+    /**
+     * Schema methods
+     */
+
+    getSchema(schemaId) { return schemaRegistry.getSchema(schemaId); }
+    getDataSchema(schemaId) { return schemaRegistry.getDataSchema(schemaId); }
+    hasSchema(schemaId) { return schemaRegistry.hasSchema(schemaId); }
+    listSchemas() { return schemaRegistry.listSchemas(); }
+
+    validateData(documentData) {
+        if (!documentData || typeof documentData !== 'object') {
+            debug('Invalid document data:', documentData);
+            return false;
+        }
+
+        try {
+            // Check if schema exists
+            if (!this.hasSchema(documentData.schema)) {
+                debug(`Schema ${documentData.schema} not found`);
+                return false;
+            }
+
+            // Get schema class and validate
+            const SchemaClass = this.getSchema(documentData.schema);
+            return SchemaClass.validateData(documentData);
+        } catch (error) {
+            debug('Validation error:', error);
+            return false;
+        }
+    }
+
+    validateDocument(document) {
+        if (!document || typeof document !== 'object') {
+            return false;
+        }
+
+        try {
+            // Check if schema exists
+            if (!this.hasSchema(document.schema)) {
+                return false;
+            }
+
+            // Get schema class and validate
+            const SchemaClass = this.getSchema(document.schema);
+            return SchemaClass.validate(document);
+        } catch (error) {
+            debug('Validation error:', error);
+            return false;
+        }
+    }
 
 
     /**
-     * CRUD :: Single document operations
+     * CRUD methods
      */
 
+    // TODO: A combined upsert method would be more appropriate here
     async insertDocument(document, contextArray = [], featureArray = []) {
-        // Validate document
-        if (!this.validateDocument(document)) {
-            throw new Error('Document validation failed');
-        }
+        if (!document) { throw new Error('Document is required'); }
+        if (!Array.isArray(contextArray)) { throw new Error('Context array must be an array'); }
+        if (!Array.isArray(featureArray)) { throw new Error('Feature array must be an array'); }
+        debug('insertDocument: ', document);
 
-        // Check if the document is an instance of BaseDocument, initialize it if so
-        if (!(document instanceof BaseDocument)) {
-            const Schema = schemaRegistry.getSchema(document.schema);
-            document = new Schema(document);
-        }
-
-        // Generate checksums before checking existence
-        document.checksumArray = document.generateChecksumStrings();
+        let parsedDocument = this.#parseInitializeDocument(document);
+        const storedDocument = await this.getByChecksumString(parsedDocument.checksumArray[0]);
 
         // If a checksum already exists, update the document
-        if (await this.hasDocumentByChecksum(document.checksumArray[0])) {
-            debug('Document already exists, updating');
-            return await this.updateDocument(document, contextArray, featureArray);
+        if (storedDocument) {
+            debug(`insertDocument: Document found by checksum ${parsedDocument.checksumArray[0]}, updating..`);
+            return this.updateDocument(storedDocument, contextArray, featureArray);
+        } else {
+            debug(`insertDocument: Document not found by checksum ${parsedDocument.checksumArray[0]}, inserting`);
         }
 
-        // Generate a new document ID
-        document.id = this.#generateDocumentID();
-
-        // If document.schema is not part of featureArray, add it
-        if (!featureArray.includes(document.schema)) {
-            featureArray.push(document.schema);
-        }
-
-        // Insert a new document into the database
-        await this.documents.put(document.id, document);
-
-        // Update context bitmaps
-        if (contextArray.length > 0) {
-            for (const context of contextArray) {
-                this.bitmapIndex.tickSync(context, document.id);
+        // Checksum not found in the index, insert as a new document
+        try {
+            parsedDocument.id = this.#generateDocumentID(); // If checksum differs, always generate a new ID
+            parsedDocument.validate();
+            await this.documents.put(parsedDocument.id, parsedDocument);
+            await this.checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
+            await this.timestampIndex.insert('created', parsedDocument.createdAt || new Date().toISOString(), parsedDocument.id);
+            if (parsedDocument.updatedAt) {
+                await this.timestampIndex.insert('updated', parsedDocument.updatedAt, parsedDocument.id);
             }
-        }
 
-        // Update feature bitmaps
-        if (featureArray.length > 0) {
+            // Update context bitmaps
+            if (contextArray.length > 0) {
+                for (const context of contextArray) {
+                    this.bitmapIndex.tickSync(context, parsedDocument.id);
+                }
+            }
+
+            // If document.schema is not part of featureArray, add it
+            if (!featureArray.includes(parsedDocument.schema)) {
+                featureArray.push(parsedDocument.schema);
+            }
+
+            // Update feature bitmaps
             for (const feature of featureArray) {
-                this.bitmapIndex.tickSync(feature, document.id);
+                this.bitmapIndex.tickSync(feature, parsedDocument.id);
+            }
+
+            return parsedDocument.id;
+        } catch (error) {
+            debug(`Error inserting document: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async insertDocumentArray(docArray, contextArray = [], featureArray = []) {
+        if (!Array.isArray(docArray)) { docArray = [docArray]; }
+        if (!Array.isArray(contextArray)) { throw new Error('Context array must be an array'); }
+        if (!Array.isArray(featureArray)) { throw new Error('Feature array must be an array'); }
+
+        // Collect errors
+        let errors = {};
+
+        // Insert documents
+        // TODO: Insert with a batch operation
+        for (const doc of docArray) {
+            try {
+                await this.insertDocument(doc, contextArray, featureArray);
+            } catch (error) {
+                errors[doc.id] = error;
             }
         }
-
-        // Add checksums to the inverted index
-        for (const checksum of document.checksumArray) {
-            this.checksumIndex.set(checksum, document.id);
-        }
-
-        return document;
+        return errors;
     }
 
     async hasDocument(id, contextArray = [], featureArray = []) {
@@ -236,282 +332,17 @@ class SynapsD extends EventEmitter {
     async hasDocumentByChecksum(checksum) {
         if (!checksum) { throw new Error('Checksum required'); }
 
-        let id = await this.checksumStringToId(checksum);
+        let id = await this.checksumIndex.checksumStringToId(checksum);
         if (!id) { return false; }
 
         return await this.documents.has(id);
     }
 
-    async getDocument(id) {
-        if (!id) { throw new Error('Document id required'); }
-        if (!this.documents.has(id)) { return null; }
-        return await this.documents.get(id);
-    }
-
-    async getDocumentByChecksum(checksum) {
-        if (!checksum) { throw new Error('Checksum required'); }
-
-        let id = await this.checksumStringToId(checksum);
-        if (!id) { return null; }
-
-        return await this.getDocument(id);
-    }
-
-
-    async getMetadata(id) { }
-
-    async getMetadataByChecksum(checksum) { }
-
-    async updateDocument(document, contextArray = [], featureArray = []) {
-        if (!document) { throw new Error('Document required'); }
-
-        // Validate document
-        if (!this.validateDocument(document)) {
-            throw new Error('Document validation failed');
-        }
-
-        // Validate context and feature arrays
-        if (!Array.isArray(contextArray)) { throw new Error('Context array required'); }
-        if (!Array.isArray(featureArray)) { throw new Error('Feature array required'); }
-
-        // Ensure document is properly initialized
-        if (!(document instanceof BaseDocument)) {
-            const Schema = schemaRegistry.getSchema(document.schema);
-            document = new Schema(document);
-        }
-
-        // If document.schema is not part of featureArray, add it
-        if (!featureArray.includes(document.schema)) {
-            featureArray.push(document.schema);
-        }
-
-        // Ensure document has checksums
-        document.checksumArray = document.generateChecksumStrings();
-
-        // Get existing document
-        const existingDocument = await this.getDocumentByChecksum(document.checksumArray[0]);
-        if (!existingDocument) { throw new Error('Document not found'); }
-
-        // Ensure existing document is properly initialized
-        let oldChecksumArray = [];
-        if (existingDocument instanceof BaseDocument) {
-            oldChecksumArray = existingDocument.checksumArray || [];
-        } else {
-            const Schema = schemaRegistry.getSchema(existingDocument.schema);
-            const existingDoc = new Schema(existingDocument);
-            oldChecksumArray = existingDoc.checksumArray || [];
-        }
-
-        // Copy the ID from existing document
-        document.id = existingDocument.id;
-
-        // Update document in the database
-        await this.documents.put(document.id, document);
-
-        // Update checksum index - remove old checksums
-        for (const checksum of oldChecksumArray) {
-            this.checksumIndex.delete(checksum);
-        }
-
-        // Add new checksums
-        for (const checksum of document.checksumArray) {
-            this.checksumIndex.set(checksum, document.id);
-        }
-
-        // Update context bitmaps if provided
-        if (contextArray.length > 0) {
-            for (const context of contextArray) {
-                this.bitmapIndex.tickSync(context, document.id);
-            }
-        }
-
-        // Update feature bitmaps if provided
-        if (featureArray.length > 0) {
-            for (const feature of featureArray) {
-                this.bitmapIndex.tickSync(feature, document.id);
-            }
-        }
-
-        return document;
-    }
-
-    async removeDocument(id, contextArray = [], featureArray = []) {
-        if (!id) { throw new Error('Document id required'); }
-        if (!Array.isArray(contextArray)) { throw new Error('Context array required'); }
-        if (!Array.isArray(featureArray)) { throw new Error('Feature array required'); }
-
-        // Remove document will only remove the document from the supplied bitmaps
-        // It will not delete the document from the database.
-        if (contextArray.length > 0) {
-            this.bitmapIndex.untickManySync(contextArray, id);
-        }
-        if (featureArray.length > 0) {
-            this.bitmapIndex.untickManySync(featureArray, id);
-        }
-    }
-
-    async removeDocumentByChecksum(checksum, contextArray = [], featureArray = []) {
-        let id = await this.checksumStringToId(checksum);
-        if (!id) { throw new Error('Document not found'); }
-        await this.removeDocument(id, contextArray, featureArray);
-    }
-
-    async deleteDocument(id) {
-        if (!id) { throw new Error('Document id required'); }
-        if (!this.documents.has(id)) { return false; }
-
-        // Get document before deletion
-        const document = await this.documents.get(id);
-
-        // Delete document from database
-        await this.documents.delete(id);
-
-        // Delete document from all bitmaps
-        await this.bitmapIndex.delete(id);
-
-        // Delete document checksums from inverted index
-        if (document.checksumArray) {
-            for (const checksum of document.checksumArray) {
-                await this.checksumIndex.delete(checksum);
-            }
-        }
-
-        // Add document ID to deleted documents bitmap
-        this.deletedDocuments.tick(id);
-
-        return true;
-    }
-
-    async deleteDocumentByChecksum(checksum) {
-        let id = await this.checksumStringToId(checksum);
-        if (!id) { throw new Error('Document not found'); }
-        await this.deleteDocument(id);
-    }
-
-
-    /**
-     * CRUD :: Batch operations
-     */
-
-    async insertBatch(documents, contextArray = [], featureArray = []) {
-        // TODO: Implement batch insert
-        for (const document of documents) {
-            await this.insertDocument(document, contextArray, featureArray);
-        }
-    }
-
-    async getBatch(ids) {
-        if (!Array.isArray(ids)) {
-            throw new Error('Expected array of ids');
-        }
-
-        return await this.documents.getMany(ids);
-    }
-
-    async getBatchByChecksums(checksums) {
-        if (!Array.isArray(checksums)) {
-            throw new Error('Expected array of checksums');
-        }
-
-        let ids = await this.checksumStringBatchToIds(checksums);
-        return await this.documents.getMany(ids);
-    }
-
-    async getMetadataBatch(ids) { }
-
-    async getMetadataBatchByChecksums(checksums) { }
-
-    async updateBatch(documents, contextArray = [], featureArray = []) { }
-
-    async removeBatch(ids, contextArray = [], featureArray = []) {
-        ids = Array.isArray(ids) ? ids : [ids];
-        for (const id of ids) {
-            await this.removeDocument(id, contextArray, featureArray);
-        }
-    }
-
-    async removeBatchByChecksums(checksums) {
-        let ids = await this.checksumStringBatchToIds(checksums);
-        for (const id of ids) {
-            await this.removeDocument(id);
-        }
-    }
-
-    async deleteBatch(ids) {
-        ids = Array.isArray(ids) ? ids : [ids];
-        for (const id of ids) {
-            await this.deleteDocument(id);
-        }
-    }
-
-    async deleteBatchByChecksums(checksums) {
-        let ids = await this.checksumStringBatchToIds(checksums);
-        for (const id of ids) {
-            await this.deleteDocument(id);
-        }
-    }
-
-    /**
-     * Bitmap operations
-     */
-
-    async createBitmap(name) {
-        return await this.bitmapIndex.createBitmap(name);
-    }
-
-    async listBitmaps() {
-        return await this.bitmapIndex.listBitmaps();
-    }
-
-    async renameBitmap(oldName, newName) {
-        return await this.bitmapIndex.renameBitmap(oldName, newName);
-    }
-
-    async deleteBitmap(name) {
-        return await this.bitmapIndex.deleteBitmap(name);
-    }
-
-    async updateBitmaps(ids, contextArray = [], featureArray = []) { }
-
-    async updateContextBitmaps(ids, contextArray) { }
-
-    async updateFeatureBitmaps(ids, featureArray) { }
-
-    async updateFilterBitmaps(ids, filterArray) { }
-
-    // We need to implement the following methods to support Context tree operations:
-    // - mergeContextBitmap (apply the current bitmap to an array of bitmaps)
-    // - subtractContextBitmap (subtract the current bitmap from an array of bitmaps)
-    // - intersectContextBitmap (intersect the current bitmap with an array of bitmaps)
-    // - unionContextBitmap (union the current bitmap with an array of bitmaps)
-    // - xorContextBitmap (xor the current bitmap with an array of bitmaps)
-    // - invertContextBitmap (invert the current bitmap)
-    // - isEmptyContextBitmap (check if the current bitmap is empty)
-    // - toArrayContextBitmap (convert the current bitmap to an array of ids)
-    // - fromArrayContextBitmap (convert an array of ids to a bitmap)
-    // - getContextBitmap (get the current bitmap)
-    // - setContextBitmap (set the current bitmap)
-    // - clearContextBitmap (clear the current bitmap)
-    // - deleteContextBitmap (delete the current bitmap)
-
-    // Optional (vanilla) methods:
-    // - intersectBitmap (intersect the current bitmap with an array of bitmaps)
-    // - unionBitmap (union the current bitmap with an array of bitmaps)
-    // - xorBitmap (xor the current bitmap with a array of bitmaps)
-    // - invertBitmap (invert the current bitmap)
-    // - isEmptyBitmap (check if the current bitmap is empty)
-    // - toArrayBitmap (convert the current bitmap to an array of ids)
-    // - fromArrayBitmap (convert an array of ids to a bitmap)
-    // - getBitmap (get the current bitmap)
-    // - setBitmap (set the current bitmap)
-    // - clearBitmap (clear the current bitmap)
-    // - deleteBitmap (delete the current bitmap)
-
-    /**
-     * Query operations
-     */
-
-    async listDocuments(contextArray = [], featureArray = [], filterArray = [], options = {}) {
+    // Returns documents from the main dataset + context and/or feature bitmaps
+    async listDocuments(contextArray = [], featureArray = [], filterArray = [], options = { limit: null }) {
+        if (!Array.isArray(contextArray)) { throw new Error('Context array must be an array'); }
+        if (!Array.isArray(featureArray)) { throw new Error('Feature array must be an array'); }
+        if (!Array.isArray(filterArray)) { throw new Error('Filter array must be an array'); }
         debug(`Listing documents with context: ${contextArray}, features: ${featureArray}, filters: ${filterArray}`);
 
         // Initialize result bitmap
@@ -568,105 +399,466 @@ class SynapsD extends EventEmitter {
         return options.limit ? documents.slice(0, options.limit) : documents;
     }
 
-    async findDocuments(query, contextArray = [], featureArray = [], filterArray = [], options = {}) {
-        debug(`Finding objects with query: ${query}`);
-        // Full-text search (fts) is not implemented in this version.
-        // Returning an empty array and letting the application decide on fallback behavior.
-        console.warn('Full-text search (fts) is not implemented yet');
-        return [];
-    }
+    // Updates documents in context and/or feature bitmaps
+    async updateDocument(document, contextArray = [], featureArray = []) {
+        if (!document) { throw new Error('Document required'); }
+        if (!document.id) { throw new Error('Document must have an ID for update operations'); }
+        if (!Array.isArray(contextArray)) { throw new Error('Context array must be an array'); }
+        if (!Array.isArray(featureArray)) { throw new Error('Feature array must be an array'); }
+        debug('updateDocument: ', document);
 
-    /**
-     * Schema operations
-     */
+        let parsedDocument = this.#parseInitializeDocument(document);
+        let updatedDocument = null;
 
-    listSchemas() { return schemaRegistry.listSchemas(); }
+        try {
+            // Get stored document (now returns a proper document instance)
+            const storedDocumentData = await this.getById(parsedDocument.id);
+            if (!storedDocumentData) {
+                throw new Error(`updateDocument: Document not found based on ID ${parsedDocument.id}`);
+            }
 
-    hasSchema(schemaId) { return schemaRegistry.hasSchema(schemaId); }
+            const storedDocument = this.#parseInitializeDocument(storedDocumentData);
+            debug('updateDocument > Stored document: ', storedDocument);
+            updatedDocument = storedDocument.update(parsedDocument);
+            debug('updateDocument > Updated document: ', updatedDocument);
 
-    getSchema(schemaId) { return schemaRegistry.getSchema(schemaId); }
+            // Validate and save
+            updatedDocument.validate();
+            await this.documents.put(updatedDocument.id, updatedDocument);
 
-    /**
-     * Utils
-     */
-
-    /**
-     * Resolves a checksum string to a document ID
-     * @param {string} checksum - Checksum string
-     * @returns {Promise<number|null>} Document ID or null if not found
-     * @throws {Error} If checksum format is invalid
-     */
-    async checksumStringToId(checksum) {
-        if (typeof checksum !== 'string') {
-            throw new Error('Checksum must be a string');
+            // Update checksum index
+            await this.checksumIndex.deleteArray(storedDocument.checksumArray);
+            await this.checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
+        } catch (error) {
+            throw error;
         }
-        return await this.checksumIndex.get(checksum);
-    }
 
-    /**
-     * Resolves an algorithmic checksum to a document ID
-     * @param {string} algo - Hash algorithm (e.g., 'sha256')
-     * @param {string} checksum - Checksum value
-     * @returns {Promise<number|null>} Document ID or null if not found
-     * @throws {Error} If inputs are invalid
-     */
-    async checksumToId(algo, checksum) {
-        if (!algo || !checksum) {
-            throw new Error('Algorithm and checksum are required');
+        // Update context bitmaps if provided
+        if (contextArray.length > 0) {
+            for (const context of contextArray) {
+                this.bitmapIndex.tickSync(context, updatedDocument.id);
+            }
         }
-        return await this.checksumIndex.get(`${algo}/${checksum}`);
-    }
 
-    /**
-     * Resolves multiple checksums to document IDs
-     * @param {string} algo - Hash algorithm
-     * @param {string[]} checksums - Array of checksums
-     * @returns {Promise<Array<number|null>>} Array of document IDs (null for not found)
-     * @throws {Error} If inputs are invalid
-     */
-    async checksumBatchToIds(algo, checksums) {
-        if (!Array.isArray(checksums)) {
-            throw new Error('Expected array of checksums');
+        // If document.schema is not part of featureArray, add it
+        if (!featureArray.includes(updatedDocument.schema)) {
+            featureArray.push(updatedDocument.schema);
         }
-        return await Promise.all(
-            checksums.map(checksum => this.checksumToId(algo, checksum))
-        );
-    }
 
-    /**
-     * Resolves multiple checksum strings to document IDs
-     * @param {string[]} checksums - Array of checksum strings
-     * @returns {Promise<Array<number|null>>} Array of document IDs (null for not found)
-     * @throws {Error} If input is invalid
-     */
-    async checksumStringBatchToIds(checksums) {
-        if (!Array.isArray(checksums)) {
-            throw new Error('Expected array of checksums');
+        // Update feature bitmaps if provided
+        if (featureArray.length > 0) {
+            for (const feature of featureArray) {
+                this.bitmapIndex.tickSync(feature, updatedDocument.id);
+            }
         }
-        return await Promise.all(
-            checksums.map(checksum => this.checksumStringToId(checksum))
-        );
+
+        return updatedDocument;
+    }
+
+    async updateDocumentArray(docArray, contextArray = [], featureArray = []) {
+        if (!Array.isArray(docArray)) { docArray = [docArray]; }
+        if (!Array.isArray(contextArray)) { throw new Error('Context array must be an array'); }
+        if (!Array.isArray(featureArray)) { throw new Error('Feature array must be an array'); }
+
+        // Collect errors
+        let errors = {};
+
+        // Update documents
+        // TODO: Update with a batch operation
+        for (const doc of docArray) {
+            try {
+                await this.updateDocument(doc, contextArray, featureArray);
+            } catch (error) {
+                errors[doc.id] = error;
+            }
+        }
+
+        return errors;
+    }
+
+    // Removes documents from context and/or feature bitmaps
+    async removeDocument(docId, contextArray = [], featureArray = []) {
+        if (!docId) { throw new Error('Document id required'); }
+        if (!Array.isArray(contextArray)) { throw new Error('Context array must be an array'); }
+        if (!Array.isArray(featureArray)) { throw new Error('Feature array must be an array'); }
+
+        // Remove document will only remove the document from the supplied bitmaps
+        // It will not delete the document from the database.
+        if (contextArray.length > 0) {
+            this.bitmapIndex.untickManySync(contextArray, docId);
+        }
+        if (featureArray.length > 0) {
+            this.bitmapIndex.untickManySync(featureArray, docId);
+        }
+    }
+
+    async removeDocumentArray(docIdArray, contextArray = [], featureArray = []) {
+        if (!Array.isArray(docIdArray)) { docIdArray = [docIdArray]; }
+        if (!Array.isArray(contextArray)) { throw new Error('Context array must be an array'); }
+        if (!Array.isArray(featureArray)) { throw new Error('Feature array must be an array'); }
+
+        // Collect errors
+        let errors = {};
+
+        // TODO: Implement batch operation
+        for (const id of docIdArray) {
+            try {
+                await this.removeDocument(id, contextArray, featureArray);
+            } catch (error) {
+                errors[id] = error;
+            }
+        }
+
+        return errors;
+    }
+
+    // Deletes documents from all bitmaps and the main dataset
+    async deleteDocument(docId) {
+        if (!docId) { throw new Error('Document id required'); }
+        if (!await this.documents.has(docId)) { return false; }
+        debug(`deleteDocument: Document with ID "${docId}" found, deleting..`);
+
+        try {
+            // Get document before deletion
+            const documentData = await this.documents.get(docId);
+            const document = this.#parseDocument(documentData);
+            debug(`deleteDocument > Document: `, document);
+
+            // Delete document from database
+            await this.documents.delete(docId);
+
+            // Delete document from all bitmaps
+            await this.bitmapIndex.delete(docId);
+
+            // Delete document checksums from inverted index
+            await this.checksumIndex.deleteArray(document.checksumArray);
+
+            // Add document ID to deleted documents bitmap
+            await this.deletedDocumentsBitmap.tick(docId);
+
+            debug(`Document with ID "${docId}" deleted`);
+            return true;
+        } catch (error) {
+            debug(`Error deleting document ${docId}: `, error);
+            return false;
+        }
+    }
+
+    async deleteDocumentArray(docIdArray) {
+        if (!Array.isArray(docIdArray)) { docIdArray = [docIdArray]; }
+
+        // Collect errors
+        let errors = {};
+
+        // TODO: Implement batch operation
+        for (const id of docIdArray) {
+            try {
+                await this.deleteDocument(id);
+            } catch (error) {
+                errors[id] = error;
+            }
+        }
+
+        return errors;
     }
 
     /**
-     * Convenience method to get only found IDs from a batch
-     * @param {string[]} checksums - Array of checksum strings
-     * @returns {Promise<number[]>} Array of found document IDs
+     * Convenience methods
      */
-    async resolveValidChecksums(checksums) {
-        const results = await this.checksumStringBatchToIds(checksums);
-        return results.filter(id => id !== null);
+
+    /**
+     * Get a document by ID and return a properly instantiated document object
+     * @param {string|number} id - Document ID
+     * @returns {BaseDocument|null} Document instance or null if not found
+     */
+    async getById(id) {
+        if (!id) { throw new Error('Document id required'); }
+
+        // Get raw document data from database
+        const rawDocData = await this.documents.get(id);
+        if (!rawDocData) {
+            debug(`Document with ID ${id} not found`);
+            return null;
+        }
+
+        // Return a JS object
+        return this.#parseDocument(rawDocData);
     }
 
-    validateDocument(document) {
-        if (!document) throw new Error('Document required');
-        if (!document.schema) throw new Error('Document schema required');
+    /**
+     * Get multiple documents by ID and return properly instantiated document objects
+     * @param {Array<string|number>} idArray - Array of document IDs
+     * @returns {Array<BaseDocument>} Array of document instances
+     */
+    async getByIdArray(idArray) {
+        if (!Array.isArray(idArray)) { idArray = [idArray]; }
 
-        const Schema = schemaRegistry.getSchema(document.schema);
-        if (!Schema) throw new Error(`Schema "${document.schema}" not found`);
+        const documents = [];
+        for (const id of idArray) {
+            try {
+                // Use getById which now properly instantiates document objects
+                const doc = await this.getById(id);
+                if (doc) {
+                    documents.push(doc);
+                }
+            } catch (error) {
+                debug(`Error getting document with ID ${id}: ${error.message}`);
+            }
+        }
+        return documents;
+    }
 
-        // Schema validation
-        return Schema.validate(document);
+    /**
+     * Get a document by checksum string and return a properly instantiated document object
+     * @param {string} checksumString - Checksum string
+     * @returns {BaseDocument|null} Document instance or null if not found
+     */
+    async getByChecksumString(checksumString) {
+        if (!checksumString) { throw new Error('Checksum string required'); }
+
+        // Get document ID from checksum index
+        const id = await this.checksumIndex.checksumStringToId(checksumString);
+        if (!id) { return null; }
+
+        // Use getById which now properly instantiates document objects
+        return await this.getById(id);
+    }
+
+    /**
+     * Get multiple documents by checksum string and return properly instantiated document objects
+     * @param {Array<string>} checksumStringArray - Array of checksum strings
+     * @returns {Array<BaseDocument>} Array of document instances
+     */
+    async getByChecksumStringArray(checksumStringArray) {
+        if (!Array.isArray(checksumStringArray)) { checksumStringArray = [checksumStringArray]; }
+
+        const ids = [];
+        for (const checksum of checksumStringArray) {
+            try {
+                const id = await this.checksumIndex.checksumStringToId(checksum);
+                if (id) {
+                    ids.push(id);
+                }
+            } catch (error) {
+                debug(`Error getting ID for checksum ${checksum}: ${error.message}`);
+            }
+        }
+
+        // Use getByIdArray which now properly instantiates document objects
+        return await this.getByIdArray(ids);
+    }
+
+    /**
+     * Query methods
+     */
+
+    async query(query, contextArray = [], featureArray = [], filterArray = [], metadataOnly = false) {
+        if (typeof query !== 'string') { throw new Error('Query must be a string'); }
+        if (!Array.isArray(contextArray)) { throw new Error('Context array must be an array'); }
+        if (!Array.isArray(featureArray)) { throw new Error('Feature array must be an array'); }
+        if (!Array.isArray(filterArray)) { throw new Error('Filter array must be an array'); }
+
+        debug('Query not implemented yet');
+        throw new Error('Query method not implemented yet');
+    }
+
+    async ftsQuery(query, contextArray = [], featureArray = [], filterArray = [], metadataOnly = false) {
+        if (typeof query !== 'string') { throw new Error('Query must be a string'); }
+        if (!Array.isArray(contextArray)) { throw new Error('Context array must be an array'); }
+        if (!Array.isArray(featureArray)) { throw new Error('Feature array must be an array'); }
+        if (!Array.isArray(filterArray)) { throw new Error('Filter array must be an array'); }
+
+        debug('FTS Query not implemented yet');
+        throw new Error('FTS Query method not implemented yet');
+    }
+
+    /**
+     * Stateful transactions (used by Contexts)
+     */
+
+    createTransaction() {
+        debug('Transactions not implemented yet');
+        throw new Error('Transactions not implemented yet');
+    }
+
+    commitTransaction(id) {
+        if (!id) { throw new Error('Transaction ID required'); }
+        debug('Transactions not implemented yet');
+        throw new Error('Transactions not implemented yet');
+    }
+
+    abortTransaction(id) {
+        if (!id) { throw new Error('Transaction ID required'); }
+        debug('Transactions not implemented yet');
+        throw new Error('Transactions not implemented yet');
+    }
+
+    listTransactions() {
+        debug('Transactions not implemented yet');
+        throw new Error('Transactions not implemented yet');
+    }
+
+
+    /**
+     * Bitmap management methods
+     */
+
+    createBitmap(id, options = {}) {
+        return this.bitmapIndex.createBitmap(id, options);
+    }
+
+    listBitmaps(collection) {
+        return this.bitmapIndex.listBitmaps(collection);
+    }
+
+    getBitmap(id) {
+        return this.bitmapIndex.getBitmap(id);
+    }
+
+    deleteBitmap(id) {
+        return this.bitmapIndex.deleteBitmap(id);
+    }
+
+    updateBitmap(id, options = {}) {
+        return this.bitmapIndex.updateBitmap(id, options);
+    }
+
+    hasBitmap(id) {
+        return this.bitmapIndex.hasBitmap(id);
+    }
+
+    tickBitmaps(docIdArray, bitmapArray) {
+        if (!Array.isArray(docIdArray)) { docIdArray = [docIdArray]; }
+        if (!Array.isArray(bitmapArray)) { bitmapArray = [bitmapArray]; }
+
+        for (const bitmapId of bitmapArray) {
+            for (const docId of docIdArray) {
+                this.bitmapIndex.tickSync(bitmapId, docId);
+            }
+        }
+    }
+
+    untickBitmaps(docIdArray, bitmapArray) {
+        if (!Array.isArray(docIdArray)) { docIdArray = [docIdArray]; }
+        if (!Array.isArray(bitmapArray)) { bitmapArray = [bitmapArray]; }
+
+        for (const bitmapId of bitmapArray) {
+            for (const docId of docIdArray) {
+                this.bitmapIndex.untickSync(bitmapId, docId);
+            }
+        }
+    }
+
+    /**
+     * Bitmap Collection methods
+     */
+
+    createCollection(id, options = {}) {
+        return this.bitmapIndex.createCollection(id, options);
+    }
+
+    listCollections() {
+        return this.bitmapIndex.listCollections();
+    }
+
+    getCollection(id) {
+        return this.bitmapIndex.getCollection(id);
+    }
+
+    updateCollection(id, options = {}) {
+        return this.bitmapIndex.updateCollection(id, options);
+    }
+
+    deleteCollection(id) {
+        return this.bitmapIndex.deleteCollection(id);
+    }
+
+    hasCollection(id) {
+        return this.bitmapIndex.hasCollection(id);
+    }
+
+    /**
+     * Internal methods
+     */
+
+    /**
+     * Parse a document data object
+     * @param {Object} documentData - Document data object
+     * @returns {Object} Parsed document data object
+     * @private
+     */
+    #parseDocument(documentData) {
+        if (!documentData) { throw new Error('Document data required'); }
+        if (typeof documentData === 'string') {
+            try {
+                documentData = JSON.parse(documentData);
+            } catch (error) {
+                debug(`Error parsing document data: ${error.message}`);
+                throw error;
+            }
+        }
+
+        return documentData;
+    }
+
+    /**
+     * Initialize a document
+     * @param {Object} documentData - Document data object
+     * @returns {BaseDocument} Initialized document instance
+     * @private
+     */
+    #initializeDocument(documentData) {
+        if (!documentData) { throw new Error('Document data required'); }
+        let doc;
+
+        // Make sure we have a document object
+        if (isDocumentData(documentData)) {
+            // Get the schema class for the document
+            const Schema = this.getSchema(documentData.schema);
+            if (!Schema) { throw new Error(`Schema ${documentData.schema} not found`); }
+
+            // Create a document instance from data
+            doc = Schema.fromData(documentData);
+
+            // Ensure checksums are generated
+            if (!doc.checksumArray || doc.checksumArray.length === 0) {
+                doc.checksumArray = doc.generateChecksumStrings();
+            }
+        } else if (isDocument(documentData)) {
+            doc = documentData;
+
+            // Ensure checksums are generated
+            if (!doc.checksumArray || doc.checksumArray.length === 0) {
+                doc.checksumArray = doc.generateChecksumStrings();
+            }
+        } else {
+            throw new Error('Invalid document: must be a document instance or valid document data');
+        }
+
+        return doc;
+    }
+
+    /**
+     * Parse and initialize a document
+     * @param {Object} document - Document data or instance to parse
+     * @returns {BaseDocument} Initialized document instance
+     * @private
+     */
+    #parseInitializeDocument(documentData) {
+        if (!documentData) { throw new Error('Document data required'); }
+        let doc;
+
+        // Ensure we are dealing with a JS object
+        documentData = this.#parseDocument(documentData);
+
+        // Initialize the document
+        doc = this.#initializeDocument(documentData);
+
+        return doc;
+    }
+
+    #documentCount() {
+        return this.documents.getCount();
     }
 
     #generateDocumentID() {
@@ -687,24 +879,7 @@ class SynapsD extends EventEmitter {
             return newId;
         } catch (error) {
             debug(`Error generating document ID: ${error.message}`);
-            // Fallback to a random ID in case of any errors
-            const fallbackId = INTERNAL_BITMAP_ID_MAX + Math.floor(Math.random() * 1000000) + 1;
-            debug(`Using fallback document ID: ${fallbackId}`);
-            return fallbackId;
-        }
-    }
-
-    #documentCount() {
-        try {
-            const stats = this.documents.getStats();
-            if (stats && typeof stats.entryCount === 'number') {
-                return stats.entryCount;
-            }
-            debug('Invalid document count from stats, returning 0');
-            return 0;
-        } catch (error) {
-            debug(`Error getting document count: ${error.message}`);
-            return 0;
+            throw error;
         }
     }
 
@@ -715,12 +890,12 @@ class SynapsD extends EventEmitter {
      */
     #popDeletedId() {
         try {
-            if (!this.deletedDocuments || this.deletedDocuments.isEmpty()) {
+            if (!this.deletedDocumentsBitmap || this.deletedDocumentsBitmap.isEmpty()) {
                 return null;
             }
 
             // Get the minimum ID from the deleted documents bitmap
-            const minId = this.deletedDocuments.minimum();
+            const minId = this.deletedDocumentsBitmap.minimum();
 
             // Ensure it's a valid number
             if (typeof minId !== 'number' || isNaN(minId) || !Number.isInteger(minId) || minId <= 0) {
@@ -729,7 +904,7 @@ class SynapsD extends EventEmitter {
             }
 
             // Remove this ID from the bitmap
-            this.deletedDocuments.remove(minId);
+            this.deletedDocumentsBitmap.remove(minId);
 
             return minId;
         } catch (error) {

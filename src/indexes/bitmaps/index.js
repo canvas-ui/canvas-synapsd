@@ -16,14 +16,11 @@ import BitmapCollection from './lib/BitmapCollection.js';
 const ALLOWED_PREFIXES = [
     'internal/',
     'context/',
-    'data/abstraction/', // This is our schema type
-    'data/mime/',
-    'data/content/encoding/',
-    'client/os/',
-    'client/application/',
-    'client/device/',
+    'client/',
+    'server/',
     'user/',
     'tag/',
+    'data/',
     'nested/',
     'custom/',
 ];
@@ -659,7 +656,7 @@ class BitmapIndex {
     }
 
     /**
-     * Internal methods (sync, using a Map() like interface)
+     * Internal methods
      */
 
     #parseInput(oidArrayOrBitmap) {
@@ -680,6 +677,18 @@ class BitmapIndex {
         }
 
         throw new Error(`Invalid input data type: ${typeof oidArrayOrBitmap}`);
+    }
+
+    #loadBitmapsFromStore(bitmapIdArray) {
+        if (!Array.isArray(bitmapIdArray)) { bitmapIdArray = [bitmapIdArray]; }
+    }
+
+    #saveBitmapsToStore(bitmapIdArray) {
+        if (!Array.isArray(bitmapIdArray)) { bitmapIdArray = [bitmapIdArray]; }
+    }
+
+    #deleteBitmapsFromStore(bitmapIdArray) {
+        if (!Array.isArray(bitmapIdArray)) { bitmapIdArray = [bitmapIdArray]; }
     }
 
 }
