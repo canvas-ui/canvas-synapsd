@@ -17,7 +17,6 @@ import BaseDocument from './schemas/BaseDocument.js';
 import BitmapIndex from './indexes/bitmaps/index.js';
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
-import { Schema } from 'zod';
 
 // Constants
 const INTERNAL_BITMAP_ID_MIN = 0;
