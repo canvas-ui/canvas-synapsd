@@ -37,7 +37,6 @@ class SynapsD extends EventEmitter {
     #bitmapStore;
     #bitmapCache;
 
-
     constructor(options = {
         backupOnOpen: false,
         backupOnClose: true,
@@ -98,6 +97,14 @@ class SynapsD extends EventEmitter {
         // TODO: FTS index
         // TODO: Vector index
 
+    }
+
+    async test() {
+        const coll = this.bitmapIndex.createCollection('internal');
+        await coll.createBitmap('test1');
+        const bitmap = coll.getBitmap('test1');
+        console.log(bitmap.toArray())
+        return coll.listBitmaps();
     }
 
     /**
