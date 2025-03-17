@@ -17,7 +17,7 @@ const documentDataSchema = z.object({
         size: z.number(),
         lastModified: z.string().datetime().optional(),
     }).passthrough(),
-    metadata: z.object().optional()
+    metadata: z.object().optional(),
 });
 
 export default class File extends Document {
@@ -33,7 +33,7 @@ export default class File extends Document {
             ...this.indexOptions,
             ftsSearchFields: ['data.name', 'data.path'],
             vectorEmbeddingFields: ['data.name', 'data.path', 'data.mimeType'],
-            checksumFields: ['data.name', 'data.path', 'data.size', 'data.lastModified', 'data.deviceId']
+            checksumFields: ['data.name', 'data.path', 'data.size', 'data.lastModified', 'data.deviceId'],
         };
     }
 

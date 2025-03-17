@@ -99,7 +99,7 @@ class Bitmap extends RoaringBitmap32 {
         if (!Array.isArray(oidArray)) {
             throw new Error(`Not an array: ${oidArray}`);
         }
-        if (oidArray.length === 0) return;
+        if (oidArray.length === 0) {return;}
 
         const minOid = Math.min(...oidArray);
         const maxOid = Math.max(...oidArray);

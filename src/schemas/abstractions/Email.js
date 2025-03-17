@@ -22,7 +22,7 @@ const documentDataSchema = z.object({
         receivedAt: z.string().datetime(),
         deviceId: z.string(),
     }).passthrough(),
-    metadata: z.object().optional()
+    metadata: z.object().optional(),
 });
 
 export default class Email extends Document {
@@ -38,7 +38,7 @@ export default class Email extends Document {
             ...this.indexOptions,
             ftsSearchFields: ['data.subject', 'data.body', 'data.from', 'data.to'],
             vectorEmbeddingFields: ['data.subject', 'data.body'],
-            checksumFields: ['data.subject', 'data.from', 'data.to', 'data.receivedAt']
+            checksumFields: ['data.subject', 'data.from', 'data.to', 'data.receivedAt'],
         };
     }
 

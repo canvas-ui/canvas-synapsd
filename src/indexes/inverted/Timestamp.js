@@ -72,10 +72,10 @@ export default class TimestampIndex {
      */
     async findByRange(rangeFrom, rangeTo) {
         if (!rangeFrom) {
-            throw new Error("A starting range (rangeFrom) is required.");
+            throw new Error('A starting range (rangeFrom) is required.');
         }
         if (!rangeTo) {
-            throw new Error("An ending range (rangeTo) is required.");
+            throw new Error('An ending range (rangeTo) is required.');
         }
 
         const documentIds = [];
@@ -96,7 +96,7 @@ export default class TimestampIndex {
      */
     async findByRangeAndAction(action, rangeFrom, rangeTo) {
         if (!action) {
-            throw new Error("An action is required.");
+            throw new Error('An action is required.');
         }
 
         // Validate action
@@ -151,7 +151,7 @@ export default class TimestampIndex {
      */
     async list(prefix) {
         if (!prefix) {
-            throw new Error("A timestamp prefix is required.");
+            throw new Error('A timestamp prefix is required.');
         }
 
         const documentIds = [];
@@ -184,7 +184,7 @@ export default class TimestampIndex {
      */
     async listByAction(action, prefix) {
         if (!action) {
-            throw new Error("An action is required.");
+            throw new Error('An action is required.');
         }
 
         // Validate action
@@ -209,7 +209,7 @@ export default class TimestampIndex {
      */
     getByAction(action) {
         if (!action) {
-            throw new Error("An action is required.");
+            throw new Error('An action is required.');
         }
 
         // Validate action
