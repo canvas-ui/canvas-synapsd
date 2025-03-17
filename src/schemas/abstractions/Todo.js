@@ -15,7 +15,7 @@ const documentDataSchema = z.object({
         completed: z.boolean().optional(),
         dueDate: z.string().datetime().optional(),
     }).passthrough(),
-    metadata: z.object().optional()
+    metadata: z.object().optional(),
 });
 
 export default class Todo extends Document {
@@ -31,7 +31,7 @@ export default class Todo extends Document {
             ...this.indexOptions,
             ftsSearchFields: ['data.title', 'data.description'],
             vectorEmbeddingFields: ['data.title', 'data.description'],
-            checksumFields: ['data.title', 'data.description']
+            checksumFields: ['data.title', 'data.description'],
         };
     }
 

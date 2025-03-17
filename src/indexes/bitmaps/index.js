@@ -96,7 +96,7 @@ class BitmapIndex {
         debug('Unticking bitmap key', key, ids);
 
         const bitmap = this.getBitmap(key, false);
-        if (!bitmap) return null;
+        if (!bitmap) {return null;}
 
         const idsArray = Array.isArray(ids) ? ids : [ids];
 
@@ -137,7 +137,7 @@ class BitmapIndex {
         debug('Ticking bitmap keyArray', keyArray, ids);
         const keysArray = Array.isArray(keyArray) ? keyArray : [keyArray];
         const idsArray = Array.isArray(ids) ? ids : [ids];
-        let affectedKeys = [];
+        const affectedKeys = [];
 
         if (idsArray.length === 0) {
             debug('No IDs to tick for keyArray', keyArray);
@@ -176,7 +176,7 @@ class BitmapIndex {
         debug('Unticking bitmap keyArray', keyArray, ids);
         const keysArray = Array.isArray(keyArray) ? keyArray : [keyArray];
         const idsArray = Array.isArray(ids) ? ids : [ids];
-        let affectedKeys = [];
+        const affectedKeys = [];
 
         if (idsArray.length === 0) {
             debug('No IDs to untick for keyArray', keyArray);
@@ -325,7 +325,7 @@ class BitmapIndex {
         }
 
         if (negativeKeys.length) {
-            let negativeUnion = new RoaringBitmap32();
+            const negativeUnion = new RoaringBitmap32();
             for (const key of negativeKeys) {
                 BitmapIndex._validateKey(key);
                 const nbitmap = this.getBitmap(key, false);
@@ -355,7 +355,7 @@ class BitmapIndex {
             }
         }
 
-        let result = new RoaringBitmap32();
+        const result = new RoaringBitmap32();
         for (const key of positiveKeys) {
             BitmapIndex._validateKey(key);
             const bmp = this.getBitmap(key, true);
@@ -363,7 +363,7 @@ class BitmapIndex {
         }
 
         if (negativeKeys.length) {
-            let negativeUnion = new RoaringBitmap32();
+            const negativeUnion = new RoaringBitmap32();
             for (const key of negativeKeys) {
                 BitmapIndex._validateKey(key);
                 const bmp = this.getBitmap(key, false);
@@ -402,7 +402,7 @@ class BitmapIndex {
         result = result || new RoaringBitmap32();
 
         if (negativeKeys.length) {
-            let negativeUnion = new RoaringBitmap32();
+            const negativeUnion = new RoaringBitmap32();
             for (const key of negativeKeys) {
                 BitmapIndex._validateKey(key);
                 const bmp = this.getBitmap(key, false);
@@ -557,7 +557,7 @@ class BitmapIndex {
             const keys = [];
             for await (const key of this.store.getKeys({
                 start: prefix,
-                end: prefix + '\uffff'
+                end: prefix + '\uffff',
             })) {
                 if (!key.startsWith('internal/')) {
                     keys.push(key);

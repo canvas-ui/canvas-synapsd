@@ -44,7 +44,7 @@ export default class BitmapCollection {
     renameBitmap(oldKey, newKey) {
         return this.bitmapIndex.renameBitmap(
             this.makeKey(oldKey),
-            this.makeKey(newKey)
+            this.makeKey(newKey),
         );
     }
 
@@ -57,7 +57,7 @@ export default class BitmapCollection {
         const keys = [];
         for await (const key of this.bitmapIndex.store.getKeys({
             start: this.keyPrefix,
-            end: this.keyPrefix + '\uffff'
+            end: this.keyPrefix + '\uffff',
         })) {
             keys.push(key);
         }
@@ -81,14 +81,14 @@ export default class BitmapCollection {
     applyToMany(sourceKey, targetKeys) {
         return this.bitmapIndex.applyToMany(
             this.makeKey(sourceKey),
-            targetKeys.map(key => this.makeKey(key))
+            targetKeys.map(key => this.makeKey(key)),
         );
     }
 
     subtractFromMany(sourceKey, targetKeys) {
         return this.bitmapIndex.subtractFromMany(
             this.makeKey(sourceKey),
-            targetKeys.map(key => this.makeKey(key))
+            targetKeys.map(key => this.makeKey(key)),
         );
     }
 
@@ -98,7 +98,7 @@ export default class BitmapCollection {
 
     mergeUp(sourceKey, targetKey) {
         const sourceBitmap = this.getBitmap(sourceKey);
-        if (!sourceBitmap) return null;
+        if (!sourceBitmap) {return null;}
 
         // Apply source bitmap to all parent layers in targetKey
         const targetParts = targetKey.split('/');

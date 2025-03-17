@@ -88,7 +88,7 @@ export default class ChecksumIndex {
         }
 
         return await Promise.all(
-            checksums.map(checksum => this.checksumToId(algo, checksum))
+            checksums.map(checksum => this.checksumToId(algo, checksum)),
         );
     }
 
@@ -98,7 +98,7 @@ export default class ChecksumIndex {
         }
 
         return await Promise.all(
-            checksums.map(checksum => this.checksumStringToId(checksum))
+            checksums.map(checksum => this.checksumStringToId(checksum)),
         );
     }
 

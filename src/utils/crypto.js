@@ -26,5 +26,5 @@ export {
     uuid,
     uuid12,
     generateChecksum,
-    generateChecksumFromObject
-}
+    generateChecksumFromObject,
+};

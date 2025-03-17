@@ -25,7 +25,7 @@ const SCHEMA_REGISTRY = {
 };
 
 export function isDocument(obj) {
-    if (!obj || typeof obj !== 'object') return false;
+    if (!obj || typeof obj !== 'object') {return false;}
 
     // Check for essential document properties
     return (
@@ -39,7 +39,7 @@ export function isDocument(obj) {
 }
 
 export function isDocumentData(obj) {
-    if (!obj || typeof obj !== 'object') return false;
+    if (!obj || typeof obj !== 'object') {return false;}
 
     // Check for minimal proto object properties
     return (
