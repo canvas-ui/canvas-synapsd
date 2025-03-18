@@ -77,7 +77,7 @@ class SynapsD extends EventEmitter {
         this.deletedDocumentsBitmap = this.bitmapIndex.createBitmap('internal/gc/deleted');
 
         // Action bitmaps
-        // TODO: Refactor
+        // TODO: Refactor || FIX!
         this.actionBitmaps = {
             created: this.bitmapIndex.createBitmap('internal/action/created'),
             updated: this.bitmapIndex.createBitmap('internal/action/updated'),
@@ -96,6 +96,9 @@ class SynapsD extends EventEmitter {
 
         // TODO: FTS index
         // TODO: Vector index
+
+        // Collections
+        this.collections = new Map()
 
     }
 
@@ -123,6 +126,12 @@ class SynapsD extends EventEmitter {
             bitmapStoreSize: this.#bitmapStore.getCount(),
             checksumIndexSize: this.checksumIndex.getCount(),
             timestampIndexSize: this.timestampIndex.getCount(),
+            deletedDocumentsCount: this.deletedDocumentsBitmap.size,
+            actionBitmaps: {
+                created: this.actionBitmaps.created.size,
+                updated: this.actionBitmaps.updated.size,
+                deleted: this.actionBitmaps.deleted.size,
+            },
         };
     }
 
@@ -725,12 +734,12 @@ class SynapsD extends EventEmitter {
         return this.bitmapIndex.getBitmap(id);
     }
 
-    deleteBitmap(id) {
-        return this.bitmapIndex.deleteBitmap(id);
+    renameBitmap(oldId, newId) {
+        return this.bitmapIndex.renameBitmap(oldId, newId);
     }
 
-    updateBitmap(id, options = {}) {
-        return this.bitmapIndex.updateBitmap(id, options);
+    deleteBitmap(id) {
+        return this.bitmapIndex.deleteBitmap(id);
     }
 
     hasBitmap(id) {
@@ -775,16 +784,12 @@ class SynapsD extends EventEmitter {
         return this.bitmapIndex.getCollection(id);
     }
 
-    updateCollection(id, options = {}) {
-        return this.bitmapIndex.updateCollection(id, options);
+    hasCollection(id) {
+        return this.bitmapIndex.hasCollection(id);
     }
 
     deleteCollection(id) {
         return this.bitmapIndex.deleteCollection(id);
-    }
-
-    hasCollection(id) {
-        return this.bitmapIndex.hasCollection(id);
     }
 
     /**

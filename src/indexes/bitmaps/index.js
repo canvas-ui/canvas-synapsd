@@ -40,6 +40,9 @@ class BitmapIndex {
         this.emitter = options.emitter || new EventEmitter();
         debug(`BitmapIndex initialized with range ${this.rangeMin} - ${this.rangeMax}`);
 
+        // Collection Map
+        this.collections = new Map();
+
         // Create a internal bitmap collection
         this.system = this.createCollection('internal');
     }
@@ -52,7 +55,40 @@ class BitmapIndex {
         if (!collectionName) { throw new Error('Collection name required'); }
         if (!options.rangeMin) { options.rangeMin = this.rangeMin; }
         if (!options.rangeMax) { options.rangeMax = this.rangeMax; }
-        return new BitmapCollection(collectionName, this, options);
+        if (this.collections.has(collectionName)) {
+            return this.collections.get(collectionName);
+        }
+
+        debug(`Creating new BitmapCollection "${collectionName}"`);
+        this.collections.set(collectionName, new BitmapCollection(collectionName, this, options));
+
+        return this.collections.get(collectionName);
+    }
+
+    listCollections() {
+        return Array.from(this.collections.keys());
+    }
+
+    getCollection(collectionName) {
+        if (!collectionName) { throw new Error('Collection name required'); }
+        if (!this.collections.has(collectionName)) {
+            throw new Error(`BitmapCollection "${collectionName}" not found`);
+        }
+        return this.collections.get(collectionName);
+
+    }
+
+    hasCollection(collectionName) {
+        return this.collections.has(collectionName);
+    }
+
+    deleteCollection(collectionName) {
+        if (!collectionName) { throw new Error('Collection name required'); }
+        if (!this.collections.has(collectionName)) {
+            throw new Error(`BitmapCollection "${collectionName}" not found`);
+        }
+
+        return this.collections.delete(collectionName);
     }
 
     /**
@@ -60,7 +96,7 @@ class BitmapIndex {
      */
 
     createBitmap(key, oidArrayOrBitmap = []) {
-        BitmapIndex.#validateKey(key);
+        BitmapIndex.validateKey(key);
         debug(`createBitmap(): Creating bitmap with key ID "${key}"`);
 
         try {
@@ -95,8 +131,33 @@ class BitmapIndex {
         }
     }
 
+    async listBitmaps(prefix = '') {
+        if (prefix) {
+            // If prefix provided, use range query
+            const keys = [];
+            for await (const key of this.store.getKeys({
+                start: prefix,
+                end: prefix + '\uffff',
+            })) {
+                if (!key.startsWith('internal/')) {
+                    keys.push(key);
+                }
+            }
+            return keys;
+        }
+
+        // If no prefix, get all keys except deleted documents
+        const keys = [];
+        for await (const key of this.store.getKeys()) {
+            if (!key.startsWith('internal/')) {
+                keys.push(key);
+            }
+        }
+        return keys;
+    }
+
     getBitmap(key, autoCreateBitmap = false) {
-        BitmapIndex.#validateKey(key);
+        BitmapIndex.validateKey(key);
 
         // First check the cache
         if (this.cache.has(key)) {
@@ -131,8 +192,8 @@ class BitmapIndex {
     }
 
     renameBitmap(oldKey, newKey) {
-        BitmapIndex.#validateKey(oldKey);
-        BitmapIndex.#validateKey(newKey);
+        BitmapIndex.validateKey(oldKey);
+        BitmapIndex.validateKey(newKey);
         debug(`Renaming bitmap "${oldKey}" to "${newKey}"`);
 
         const bitmap = this.getBitmap(oldKey);
@@ -146,7 +207,7 @@ class BitmapIndex {
     }
 
     deleteBitmap(key) {
-        BitmapIndex.#validateKey(key);
+        BitmapIndex.validateKey(key);
         debug(`Deleting bitmap "${key}"`);
         this.cache.delete(key);
         this.store.del(key);
@@ -156,33 +217,8 @@ class BitmapIndex {
     }
 
     hasBitmap(key) {
-        BitmapIndex.#validateKey(key);
+        BitmapIndex.validateKey(key);
         return this.store.has(key);
-    }
-
-    async listBitmaps(prefix = '') {
-        if (prefix) {
-            // If prefix provided, use range query
-            const keys = [];
-            for await (const key of this.store.getKeys({
-                start: prefix,
-                end: prefix + '\uffff',
-            })) {
-                if (!key.startsWith('internal/')) {
-                    keys.push(key);
-                }
-            }
-            return keys;
-        }
-
-        // If no prefix, get all keys except deleted documents
-        const keys = [];
-        for await (const key of this.store.getKeys()) {
-            if (!key.startsWith('internal/')) {
-                keys.push(key);
-            }
-        }
-        return keys;
     }
 
     /**
@@ -190,7 +226,7 @@ class BitmapIndex {
      */
 
     tickSync(key, ids) {
-        BitmapIndex.#validateKey(key);
+        BitmapIndex.validateKey(key);
         debug('Ticking bitmap key', key, ids);
         const bitmap = this.getBitmap(key, true);
         const idsArray = Array.isArray(ids) ? ids : [ids];
@@ -222,7 +258,7 @@ class BitmapIndex {
     }
 
     untickSync(key, ids) {
-        BitmapIndex.#validateKey(key);
+        BitmapIndex.validateKey(key);
         debug('Unticking bitmap key', key, ids);
 
         const bitmap = this.getBitmap(key, false);
@@ -291,7 +327,7 @@ class BitmapIndex {
 
         // Process keys in batch
         for (const key of keysArray) {
-            BitmapIndex.#validateKey(key);
+            BitmapIndex.validateKey(key);
             const bitmap = this.getBitmap(key, true);
             bitmap.addMany(validIds);
             this.#saveBitmap(key, bitmap);
@@ -330,7 +366,7 @@ class BitmapIndex {
 
         // Process keys in batch
         for (const key of keysArray) {
-            BitmapIndex.#validateKey(key);
+            BitmapIndex.validateKey(key);
             const bitmap = this.getBitmap(key, false);
             if (!bitmap) {
                 debug(`Bitmap at key "${key}" not found in the persistent store`);
@@ -349,7 +385,7 @@ class BitmapIndex {
     }
 
     removeSync(key, ids) {
-        BitmapIndex.#validateKey(key);
+        BitmapIndex.validateKey(key);
         debug('Removing bitmap key', key, ids);
 
         const bitmap = this.getBitmap(key, false);
@@ -439,12 +475,12 @@ class BitmapIndex {
         let partial = null;
         if (positiveKeys.length) {
             // Start with the first bitmap
-            BitmapIndex.#validateKey(positiveKeys[0]);
+            BitmapIndex.validateKey(positiveKeys[0]);
             partial = this.getBitmap(positiveKeys[0], true).clone();
 
             // AND with remaining bitmaps
             for (let i = 1; i < positiveKeys.length; i++) {
-                BitmapIndex.#validateKey(positiveKeys[i]);
+                BitmapIndex.validateKey(positiveKeys[i]);
                 const bitmap = this.getBitmap(positiveKeys[i], true);
                 partial.andInPlace(bitmap);
             }
@@ -457,7 +493,7 @@ class BitmapIndex {
         if (negativeKeys.length) {
             const negativeUnion = new RoaringBitmap32();
             for (const key of negativeKeys) {
-                BitmapIndex.#validateKey(key);
+                BitmapIndex.validateKey(key);
                 const nbitmap = this.getBitmap(key, false);
                 if (nbitmap) {
                     negativeUnion.orInPlace(nbitmap);
@@ -487,7 +523,7 @@ class BitmapIndex {
 
         const result = new RoaringBitmap32();
         for (const key of positiveKeys) {
-            BitmapIndex.#validateKey(key);
+            BitmapIndex.validateKey(key);
             const bmp = this.getBitmap(key, true);
             result.orInPlace(bmp);
         }
@@ -495,7 +531,7 @@ class BitmapIndex {
         if (negativeKeys.length) {
             const negativeUnion = new RoaringBitmap32();
             for (const key of negativeKeys) {
-                BitmapIndex.#validateKey(key);
+                BitmapIndex.validateKey(key);
                 const bmp = this.getBitmap(key, false);
                 if (bmp) {
                     negativeUnion.orInPlace(bmp);
@@ -523,7 +559,7 @@ class BitmapIndex {
 
         let result = null;
         for (const key of positiveKeys) {
-            BitmapIndex.#validateKey(key);
+            BitmapIndex.validateKey(key);
             const bmp = this.getBitmap(key, false);
             if (bmp) {
                 result = result ? result.xor(bmp) : bmp.clone();
@@ -534,7 +570,7 @@ class BitmapIndex {
         if (negativeKeys.length) {
             const negativeUnion = new RoaringBitmap32();
             for (const key of negativeKeys) {
-                BitmapIndex.#validateKey(key);
+                BitmapIndex.validateKey(key);
                 const bmp = this.getBitmap(key, false);
                 if (bmp) {
                     negativeUnion.orInPlace(bmp);
@@ -550,7 +586,7 @@ class BitmapIndex {
      */
 
     // Validate key (ignoring leading "!" for negation)
-    static #validateKey(key) {
+    static validateKey(key) {
         if (!key) { throw new Error('Bitmap key cannot be null or undefined'); }
         if (typeof key !== 'string') { throw new Error('Bitmap key must be a string'); }
 
@@ -559,12 +595,8 @@ class BitmapIndex {
         if (!isValid) {
             throw new Error(`Bitmap key "${key}" does not follow naming convention. Must start with one of: ${ALLOWED_PREFIXES.join(', ')}`);
         }
-    }
 
-    // Returns the prefix (with trailing slash) from a key (ignoring possible "!")
-    static _getPrefix(key) {
-        const normalizedKey = key.startsWith('!') ? key.slice(1) : key;
-        return normalizedKey.split('/')[0] + '/';
+        return true;
     }
 
     // Emit an update event with one or more bitmap keys.
@@ -596,6 +628,14 @@ class BitmapIndex {
         } catch (error) {
             debug(`Error saving bitmap "${key}"`, error);
             throw new Error(`Failed to save bitmap "${key}": ${error.message}`);
+        }
+    }
+
+    #batchSaveBitmaps(keyArray, bitmapArray) {
+        const keys = Array.isArray(keyArray) ? keyArray : [keyArray];
+        const bitmaps = Array.isArray(bitmapArray) ? bitmapArray : [bitmapArray];
+        for (let i = 0; i < keys.length; i++) {
+            this.#saveBitmap(keys[i], bitmaps[i]);
         }
     }
 
@@ -645,14 +685,6 @@ class BitmapIndex {
             }
         }
         return bitmaps;
-    }
-
-    #batchSaveBitmaps(keyArray, bitmapArray) {
-        const keys = Array.isArray(keyArray) ? keyArray : [keyArray];
-        const bitmaps = Array.isArray(bitmapArray) ? bitmapArray : [bitmapArray];
-        for (let i = 0; i < keys.length; i++) {
-            this.#saveBitmap(keys[i], bitmaps[i]);
-        }
     }
 
     clearCache() {
