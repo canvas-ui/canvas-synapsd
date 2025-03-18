@@ -102,6 +102,14 @@ class SynapsD extends EventEmitter {
 
     }
 
+    async test() {
+        const coll = this.bitmapIndex.createCollection('internal');
+        await coll.createBitmap('test1');
+        const bitmap = coll.getBitmap('test1');
+        console.log(bitmap.toArray())
+        return coll.listBitmaps();
+    }
+
     /**
      * Getters
      */
