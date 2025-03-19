@@ -14,7 +14,7 @@ const documentDataSchema = z.object({
         path: z.string(),
         content: z.array(z.any()),
     }).passthrough(),
-    metadata: z.object().optional()
+    metadata: z.object().optional(),
 });
 
 export default class Directory extends Document {
@@ -30,7 +30,7 @@ export default class Directory extends Document {
             ...this.indexOptions,
             ftsSearchFields: ['data.name', 'data.path'],
             vectorEmbeddingFields: ['data.name', 'data.path'],
-            checksumFields: ['data.name', 'data.path', 'data.deviceId']
+            checksumFields: ['data.name', 'data.path', 'data.deviceId'],
         };
     }
 

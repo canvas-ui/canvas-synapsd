@@ -27,7 +27,8 @@ export default class ChecksumIndex {
     }
 
     async delete(checksum) {
-        return this.store.delete(checksum);
+        const res = await this.store.delete(checksum);
+        return res;
     }
 
     async deleteArray(checksumArray) {
@@ -37,7 +38,7 @@ export default class ChecksumIndex {
         }
     }
 
-    async has(checksum) {
+    has(checksum) {
         return this.store.has(checksum);
     }
 
@@ -88,7 +89,7 @@ export default class ChecksumIndex {
         }
 
         return await Promise.all(
-            checksums.map(checksum => this.checksumToId(algo, checksum))
+            checksums.map(checksum => this.checksumToId(algo, checksum)),
         );
     }
 
@@ -98,7 +99,7 @@ export default class ChecksumIndex {
         }
 
         return await Promise.all(
-            checksums.map(checksum => this.checksumStringToId(checksum))
+            checksums.map(checksum => this.checksumStringToId(checksum)),
         );
     }
 

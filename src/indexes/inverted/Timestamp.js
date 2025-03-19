@@ -34,7 +34,7 @@ export default class TimestampIndex {
      * @param {string} timestamp - ISO timestamp string
      * @param {string|number} id - Document ID
      */
-    insert(action, timestamp, id) {
+    async insert(action, timestamp, id) {
         if (!action || !timestamp || !id) {
             throw new Error('action, timestamp, and id are required');
         }
@@ -49,10 +49,10 @@ export default class TimestampIndex {
         }
 
         // Store timestamp => id mapping
-        this.store.set(timestamp, id);
+        await this.store.put(timestamp, id);
 
         // Add document ID to the appropriate action bitmap
-        this.actionBitmaps[action].tick(id);
+        await this.actionBitmaps[action].tick(id);
     }
 
     /**
@@ -72,10 +72,10 @@ export default class TimestampIndex {
      */
     async findByRange(rangeFrom, rangeTo) {
         if (!rangeFrom) {
-            throw new Error("A starting range (rangeFrom) is required.");
+            throw new Error('A starting range (rangeFrom) is required.');
         }
         if (!rangeTo) {
-            throw new Error("An ending range (rangeTo) is required.");
+            throw new Error('An ending range (rangeTo) is required.');
         }
 
         const documentIds = [];
@@ -96,7 +96,7 @@ export default class TimestampIndex {
      */
     async findByRangeAndAction(action, rangeFrom, rangeTo) {
         if (!action) {
-            throw new Error("An action is required.");
+            throw new Error('An action is required.');
         }
 
         // Validate action
@@ -120,7 +120,7 @@ export default class TimestampIndex {
      * @param {boolean} removeFromBitmaps - Whether to remove the ID from action bitmaps
      * @returns {Promise<boolean>} Success status
      */
-    async delete(timestamp, removeFromBitmaps = true) {
+    async delete(timestamp, removeFromBitmaps = false) {
         const id = await this.get(timestamp);
 
         if (id && removeFromBitmaps) {
@@ -151,7 +151,7 @@ export default class TimestampIndex {
      */
     async list(prefix) {
         if (!prefix) {
-            throw new Error("A timestamp prefix is required.");
+            throw new Error('A timestamp prefix is required.');
         }
 
         const documentIds = [];
@@ -184,7 +184,7 @@ export default class TimestampIndex {
      */
     async listByAction(action, prefix) {
         if (!action) {
-            throw new Error("An action is required.");
+            throw new Error('An action is required.');
         }
 
         // Validate action
@@ -209,7 +209,7 @@ export default class TimestampIndex {
      */
     getByAction(action) {
         if (!action) {
-            throw new Error("An action is required.");
+            throw new Error('An action is required.');
         }
 
         // Validate action
@@ -219,6 +219,14 @@ export default class TimestampIndex {
 
         // Return all IDs in the action bitmap
         return this.actionBitmaps[action].toArray();
+    }
+
+    async listAll() {
+        const timestamps = [];
+        for await (const { key } of this.store.getRange()) {
+            timestamps.push(key);
+        }
+        return timestamps;
     }
 
     static isWithinTimeFrame(dateString, timeFrameIdentifier) {

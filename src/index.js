@@ -17,7 +17,6 @@ import BaseDocument from './schemas/BaseDocument.js';
 import BitmapIndex from './indexes/bitmaps/index.js';
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
-import { Schema } from 'zod';
 
 // Constants
 const INTERNAL_BITMAP_ID_MIN = 0;
@@ -37,7 +36,6 @@ class SynapsD extends EventEmitter {
 
     #bitmapStore;
     #bitmapCache;
-
 
     constructor(options = {
         backupOnOpen: false,
@@ -79,7 +77,7 @@ class SynapsD extends EventEmitter {
         this.deletedDocumentsBitmap = this.bitmapIndex.createBitmap('internal/gc/deleted');
 
         // Action bitmaps
-        // TODO: Refactor
+        // TODO: Refactor || FIX!
         this.actionBitmaps = {
             created: this.bitmapIndex.createBitmap('internal/action/created'),
             updated: this.bitmapIndex.createBitmap('internal/action/updated'),
@@ -99,6 +97,17 @@ class SynapsD extends EventEmitter {
         // TODO: FTS index
         // TODO: Vector index
 
+        // Collections
+        this.collections = new Map()
+
+    }
+
+    async test() {
+        const coll = this.bitmapIndex.createCollection('internal');
+        await coll.createBitmap('test1');
+        const bitmap = coll.getBitmap('test1');
+        console.log(bitmap.toArray())
+        return coll.listBitmaps();
     }
 
     /**
@@ -117,6 +126,12 @@ class SynapsD extends EventEmitter {
             bitmapStoreSize: this.#bitmapStore.getCount(),
             checksumIndexSize: this.checksumIndex.getCount(),
             timestampIndexSize: this.timestampIndex.getCount(),
+            deletedDocumentsCount: this.deletedDocumentsBitmap.size,
+            actionBitmaps: {
+                created: this.actionBitmaps.created.size,
+                updated: this.actionBitmaps.updated.size,
+                deleted: this.actionBitmaps.deleted.size,
+            },
         };
     }
 
@@ -234,7 +249,7 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
         debug('insertDocument: ', document);
 
-        let parsedDocument = this.#parseInitializeDocument(document);
+        const parsedDocument = this.#parseInitializeDocument(document);
         const storedDocument = await this.getByChecksumString(parsedDocument.checksumArray[0]);
 
         // If a checksum already exists, update the document
@@ -286,7 +301,7 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
         // Collect errors
-        let errors = {};
+        const errors = {};
 
         // Insert documents
         // TODO: Insert with a batch operation
@@ -317,8 +332,8 @@ class SynapsD extends EventEmitter {
         }
 
         // Apply context and feature filters
-        let contextBitmap = contextBitmapArray.length > 0 ? this.bitmapIndex.AND(contextBitmapArray) : null;
-        let featureBitmap = featureBitmapArray.length > 0 ? this.bitmapIndex.OR(featureBitmapArray) : null;
+        const contextBitmap = contextBitmapArray.length > 0 ? this.bitmapIndex.AND(contextBitmapArray) : null;
+        const featureBitmap = featureBitmapArray.length > 0 ? this.bitmapIndex.OR(featureBitmapArray) : null;
 
         // Check if the document matches the filters
         if (contextBitmap && featureBitmap) {
@@ -336,7 +351,7 @@ class SynapsD extends EventEmitter {
     async hasDocumentByChecksum(checksum) {
         if (!checksum) { throw new Error('Checksum required'); }
 
-        let id = await this.checksumIndex.checksumStringToId(checksum);
+        const id = await this.checksumIndex.checksumStringToId(checksum);
         if (!id) { return false; }
 
         return await this.documents.has(id);
@@ -411,7 +426,7 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
         debug('updateDocument: ', document);
 
-        let parsedDocument = this.#parseInitializeDocument(document);
+        const parsedDocument = this.#parseInitializeDocument(document);
         let updatedDocument = null;
 
         try {
@@ -465,7 +480,7 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
         // Collect errors
-        let errors = {};
+        const errors = {};
 
         // Update documents
         // TODO: Update with a batch operation
@@ -502,7 +517,7 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
         // Collect errors
-        let errors = {};
+        const errors = {};
 
         // TODO: Implement batch operation
         for (const id of docIdArray) {
@@ -526,7 +541,7 @@ class SynapsD extends EventEmitter {
             // Get document before deletion
             const documentData = await this.documents.get(docId);
             const document = this.#parseDocument(documentData);
-            debug(`deleteDocument > Document: `, document);
+            debug('deleteDocument > Document: ', document);
 
             // Delete document from database
             await this.documents.delete(docId);
@@ -552,7 +567,7 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(docIdArray)) { docIdArray = [docIdArray]; }
 
         // Collect errors
-        let errors = {};
+        const errors = {};
 
         // TODO: Implement batch operation
         for (const id of docIdArray) {
@@ -719,12 +734,12 @@ class SynapsD extends EventEmitter {
         return this.bitmapIndex.getBitmap(id);
     }
 
-    deleteBitmap(id) {
-        return this.bitmapIndex.deleteBitmap(id);
+    renameBitmap(oldId, newId) {
+        return this.bitmapIndex.renameBitmap(oldId, newId);
     }
 
-    updateBitmap(id, options = {}) {
-        return this.bitmapIndex.updateBitmap(id, options);
+    deleteBitmap(id) {
+        return this.bitmapIndex.deleteBitmap(id);
     }
 
     hasBitmap(id) {
@@ -769,16 +784,12 @@ class SynapsD extends EventEmitter {
         return this.bitmapIndex.getCollection(id);
     }
 
-    updateCollection(id, options = {}) {
-        return this.bitmapIndex.updateCollection(id, options);
+    hasCollection(id) {
+        return this.bitmapIndex.hasCollection(id);
     }
 
     deleteCollection(id) {
         return this.bitmapIndex.deleteCollection(id);
-    }
-
-    hasCollection(id) {
-        return this.bitmapIndex.hasCollection(id);
     }
 
     /**

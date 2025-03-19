@@ -1,4 +1,4 @@
-import { Index } from "flexsearch";
+import { Index } from 'flexsearch';
 import { promises as fs } from 'fs';
 
 import debugInstance from 'debug';

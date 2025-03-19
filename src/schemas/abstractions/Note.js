@@ -13,7 +13,7 @@ const documentDataSchema = z.object({
         title: z.string().optional(),
         content: z.string(),
     }).passthrough(),
-    metadata: z.object().optional()
+    metadata: z.object().optional(),
 });
 
 export default class Note extends Document {
@@ -29,7 +29,7 @@ export default class Note extends Document {
             ...this.indexOptions,
             ftsSearchFields: ['data.title', 'data.content'],
             vectorEmbeddingFields: ['data.title', 'data.content'],
-            checksumFields: ['data.title', 'data.content']
+            checksumFields: ['data.title', 'data.content'],
         };
     }
 

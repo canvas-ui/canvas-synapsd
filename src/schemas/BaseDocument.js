@@ -26,7 +26,7 @@ const DEFAULT_DOCUMENT_DATA_ENCODING = 'utf8';
 const documentDataSchema = z.object({
     schema: z.string(),
     schemaVersion: z.string().optional(),
-    data: z.record(z.any())
+    data: z.record(z.any()),
 });
 
 // Full document schema definition (for internal storage)
@@ -77,7 +77,7 @@ const documentSchema = z.object({
     parentId: z.string().nullable().optional(),
     versions: z.array(z.string()).optional(),
     versionNumber: z.number().int().positive().optional(),
-    latestVersion: z.number().int().positive().optional()
+    latestVersion: z.number().int().positive().optional(),
 });
 
 /**
@@ -175,7 +175,7 @@ class BaseDocument {
      * @returns {BaseDocument} Updated document instance
      */
     update(data) {
-        if (!data) return this;
+        if (!data) {return this;}
 
         // Track if data was updated to know if we need to regenerate checksums
         let dataUpdated = false;
@@ -193,7 +193,7 @@ class BaseDocument {
         if (data.metadata) {
             this.metadata = {
                 ...this.metadata,
-                ...data.metadata
+                ...data.metadata,
             };
         }
 
@@ -209,9 +209,9 @@ class BaseDocument {
                     // Preserve chunking options with proper merging
                     chunking: data.indexOptions.embeddingOptions?.chunking ? {
                         ...this.indexOptions.embeddingOptions.chunking,
-                        ...data.indexOptions.embeddingOptions.chunking
-                    } : this.indexOptions.embeddingOptions.chunking
-                }
+                        ...data.indexOptions.embeddingOptions.chunking,
+                    } : this.indexOptions.embeddingOptions.chunking,
+                },
             };
             dataUpdated = true;
         }
@@ -276,7 +276,7 @@ class BaseDocument {
      * @static
      */
     static validate(document) {
-        return BaseDocument.schema.parse(document)
+        return BaseDocument.schema.parse(document);
     }
 
     /**
@@ -357,7 +357,7 @@ class BaseDocument {
      */
     generateFtsData() {
         try {
-            if (!this.indexOptions?.ftsSearchFields?.length) return null;
+            if (!this.indexOptions?.ftsSearchFields?.length) {return null;}
 
             // Extract specified fields
             const fieldValues = this.indexOptions.ftsSearchFields
@@ -380,7 +380,7 @@ class BaseDocument {
      */
     generateEmbeddingsData() {
         try {
-            if (!this.indexOptions?.vectorEmbeddingFields?.length) return null;
+            if (!this.indexOptions?.vectorEmbeddingFields?.length) {return null;}
 
             // Extract specified fields
             const fieldValues = this.indexOptions.vectorEmbeddingFields
@@ -404,11 +404,11 @@ class BaseDocument {
      * @returns {any} The nested value
      */
     getNestedValue(obj, path) {
-        if (!obj || !path) return undefined;
+        if (!obj || !path) {return undefined;}
 
         try {
             return path.split('.').reduce((current, key) => {
-                if (current === null || current === undefined) return undefined;
+                if (current === null || current === undefined) {return undefined;}
                 return current[key];
             }, obj);
         } catch (error) {

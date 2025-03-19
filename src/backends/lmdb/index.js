@@ -3,7 +3,7 @@
 // Utils
 import path from 'path';
 import fs from 'fs';
-import { mkdirp } from 'mkdirp'
+import { mkdirp } from 'mkdirp';
 
 import debugInstance from 'debug';
 const debug = debugInstance('canvas:service:synapsd:lmdb');
@@ -91,7 +91,7 @@ class Db {
     get stats() { return this.db.getStats(); }
 
     listKeys() {
-        let keys = [];
+        const keys = [];
         this.db.getKeys().forEach(element => {
             keys.push(element);
         });
@@ -99,7 +99,7 @@ class Db {
     }
 
     listValues() {
-        let values = [];
+        const values = [];
         this.db.getRange().forEach(element => {
             values.push(element.value);
         });
@@ -107,7 +107,7 @@ class Db {
     }
 
     listEntries() {
-        let entries = [];
+        const entries = [];
         this.db.getRange().forEach(element => {
             entries.push(element);
         });
@@ -117,7 +117,7 @@ class Db {
     // Creates a new dataset using the same wrapper class
     createDataset(dataset, options = {}) {
         debug(`Creating new dataset "${dataset}" using options: ${JSON.stringify(options)}`);
-        let db = this.db.openDB(dataset, options);
+        const db = this.db.openDB(dataset, options);
         return new Db(db, dataset);
     }
 

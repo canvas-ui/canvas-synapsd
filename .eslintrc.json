@@ -1,0 +1,52 @@
+{
+    "env": {
+        "browser": false,
+        "node": true,
+        "commonjs": false,
+        "es2021": true
+    },
+    "extends": [
+        "eslint:recommended",
+        "prettier"
+    ],
+    "parserOptions": {
+        "ecmaVersion": "latest",
+        "sourceType": "module"
+    },
+    "rules": {
+        "no-unused-vars": "warn",
+        "eqeqeq": ["warn", "always"],
+        "curly": ["warn", "all"],
+        "quotes": ["warn", "single", { "avoidEscape": true }],
+        "semi": ["warn", "always"],
+        "no-console": "off",
+        "indent": ["warn", 4, { "SwitchCase": 1 }],
+        "linebreak-style": ["warn", "unix"],
+        "comma-dangle": ["warn", "always-multiline"],
+        "max-len": ["warn", { "code": 128 }],
+        "no-var": "warn",
+        "prefer-const": "warn"
+    },
+    "ignorePatterns": [
+        "**/_test*.js",
+        "**/_test/",
+        "**/_old_/",
+        "**/_SCRATCH_/",
+        "**/extensions/**",
+        "**/src/ui/web/**",
+        "**/src/services/neurald/**",
+        "**/src/services/stored/**",
+        "**/src/services/synapsd/**",
+        "**/node_modules/**",
+        "**/*.json",
+        "**/*.md",
+        "**/*.css",
+        "**/*.html"
+    ],
+    "overrides": [
+        {
+            "files": ["*.js"],
+            "rules": {}
+        }
+    ]
+}

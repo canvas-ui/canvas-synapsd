@@ -1,4 +1,4 @@
-import * as lancedb from "@lancedb/lancedb";
+import * as lancedb from '@lancedb/lancedb';
 
 
 /*

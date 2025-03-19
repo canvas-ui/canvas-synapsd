@@ -5,6 +5,8 @@
 # Data directories
 /data/**
 /user/**
+/server/**
+/users/**
 
 # Dev
 /.fossil-settings
