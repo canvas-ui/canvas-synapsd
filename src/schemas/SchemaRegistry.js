@@ -3,7 +3,7 @@
 // Base document
 import BaseDocument from './BaseDocument.js';
 
-// Schemas
+// Document Schemas
 import Document from './abstractions/Document.js';
 import Directory from './abstractions/Directory.js';
 import Email from './abstractions/Email.js';
@@ -12,8 +12,18 @@ import Note from './abstractions/Note.js';
 import Tab from './abstractions/Tab.js';
 import Todo from './abstractions/Todo.js';
 
+// Tree Abstractions
+import Layer from './internal/tree/Layer.js'; // Base class for all layers
+import Canvas from './internal/tree/Canvas.js';
+import Context from './internal/tree/Context.js';
+import Label from './internal/tree/Label.js';
+import System from './internal/tree/System.js';
+import Universe from './internal/tree/Universe.js';
+import Workspace from './internal/tree/Workspace.js';
+
 // Default schema registry (for now hard-coded)
 const SCHEMA_REGISTRY = {
+    // Data Abstractions
     'data/abstraction/base': BaseDocument,
     'data/abstraction/document': Document,
     'data/abstraction/directory': Directory,
@@ -22,6 +32,15 @@ const SCHEMA_REGISTRY = {
     'data/abstraction/note': Note,
     'data/abstraction/tab': Tab,
     'data/abstraction/todo': Todo,
+
+    // Tree Abstractions
+    'internal/tree/layer': Layer,
+    'internal/tree/canvas': Canvas,
+    'internal/tree/context': Context,
+    'internal/tree/label': Label,
+    'internal/tree/system': System,
+    'internal/tree/universe': Universe,
+    'internal/tree/workspace': Workspace,
 };
 
 export function isDocument(obj) {

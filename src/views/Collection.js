@@ -14,8 +14,35 @@ export default class Collection {
     // keys for documents)
     // Before I loose time here, lets make the MVP usable :)
 
-    constructor() {
+    constructor(name, dataset, options = {}) {
+        if (!name) { throw new Error('Collection name required'); }
+        if (!dataset) { throw new Error('Dataset required'); }
 
+        this.name = name;
+        this.db = dataset;
+        this.options = options;
+
+        debug(`Data Collection "${this.name}" initialized`);
     }
+
+    /**
+     * Getters
+     */
+
+    get collectionName() {
+        return this.collectionName;
+    }
+
+    get db() {
+        return this.db;
+    }
+
+    get options() {
+        return this.options;
+    }
+
+    /**
+     * Collection methods
+     */
 
 }

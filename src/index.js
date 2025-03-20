@@ -17,6 +17,11 @@ import BaseDocument from './schemas/BaseDocument.js';
 import BitmapIndex from './indexes/bitmaps/index.js';
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
+import ContextLayerIndex from './indexes/context/index.js';
+
+// Views
+import Collection from './views/Collection.js';
+import ContextTree from './views/tree/index.js';
 
 // Constants
 const INTERNAL_BITMAP_ID_MIN = 0;
@@ -62,6 +67,9 @@ class SynapsD extends EventEmitter {
         this.documents = this.#db.createDataset('documents');
         this.metadata = this.#db.createDataset('metadata');
 
+        // Internal data
+        this.system = this.#db.createDataset('system');
+
         /**
          * Bitmap indexes
          */
@@ -100,14 +108,19 @@ class SynapsD extends EventEmitter {
         // Collections
         this.collections = new Map()
 
-    }
+        // Context Layer Index
+        this.layerIndex = new ContextLayerIndex({
+            dataset: this.#db.createDataset('layers'),
+        });
 
-    async test() {
-        const coll = this.bitmapIndex.createCollection('internal');
-        await coll.createBitmap('test1');
-        const bitmap = coll.getBitmap('test1');
-        console.log(bitmap.toArray())
-        return coll.listBitmaps();
+        // Context Tree
+        this.tree = new ContextTree({
+            documentDataset: this.documents,
+            metadataDataset: this.metadata,
+            bitmapIndex: this.bitmapIndex.createCollection('internal/tree'),
+            layerIndex: this.layerIndex,
+        });
+
     }
 
     /**
