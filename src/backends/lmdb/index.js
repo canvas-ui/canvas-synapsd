@@ -91,7 +91,7 @@ class Db {
     get stats() { return this.db.getStats(); }
 
     listKeys() {
-        const keys = [];
+        let keys = [];
         this.db.getKeys().forEach(element => {
             keys.push(element);
         });
@@ -99,7 +99,7 @@ class Db {
     }
 
     listValues() {
-        const values = [];
+        let values = [];
         this.db.getRange().forEach(element => {
             values.push(element.value);
         });
@@ -107,7 +107,7 @@ class Db {
     }
 
     listEntries() {
-        const entries = [];
+        let entries = [];
         this.db.getRange().forEach(element => {
             entries.push(element);
         });

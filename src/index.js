@@ -110,7 +110,7 @@ class SynapsD extends EventEmitter {
 
         // Context Layer Index
         this.layerIndex = new ContextLayerIndex({
-            dataset: this.#db.createDataset('layers'),
+            layerDataset: this.#db.createDataset('layers'),
         });
 
         // Context Tree
@@ -121,6 +121,10 @@ class SynapsD extends EventEmitter {
             layerIndex: this.layerIndex,
         });
 
+    }
+
+    test() {
+        return this.#bitmapStore.listEntries();
     }
 
     /**

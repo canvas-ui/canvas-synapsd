@@ -1,8 +1,8 @@
 'use strict';
 
-import Layer from './Layer.js';
+import Layer from './BaseLayer.js';
 
-export default class Context extends Layer {
+export default class Canvas extends Layer {
 
     constructor(options = {}) {
         super(options);

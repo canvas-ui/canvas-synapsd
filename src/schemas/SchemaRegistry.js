@@ -13,13 +13,13 @@ import Tab from './abstractions/Tab.js';
 import Todo from './abstractions/Todo.js';
 
 // Tree Abstractions
-import Layer from './internal/tree/Layer.js'; // Base class for all layers
-import Canvas from './internal/tree/Canvas.js';
-import Context from './internal/tree/Context.js';
-import Label from './internal/tree/Label.js';
-import System from './internal/tree/System.js';
-import Universe from './internal/tree/Universe.js';
-import Workspace from './internal/tree/Workspace.js';
+import BaseLayer from './internal/layers/BaseLayer.js'; // Base class for all layers
+import Canvas from './internal/layers/Canvas.js';
+import Context from './internal/layers/Context.js';
+import Label from './internal/layers/Label.js';
+import System from './internal/layers/System.js';
+import Universe from './internal/layers/Universe.js';
+import Workspace from './internal/layers/Workspace.js';
 
 // Default schema registry (for now hard-coded)
 const SCHEMA_REGISTRY = {
@@ -34,13 +34,13 @@ const SCHEMA_REGISTRY = {
     'data/abstraction/todo': Todo,
 
     // Tree Abstractions
-    'internal/tree/layer': Layer,
-    'internal/tree/canvas': Canvas,
-    'internal/tree/context': Context,
-    'internal/tree/label': Label,
-    'internal/tree/system': System,
-    'internal/tree/universe': Universe,
-    'internal/tree/workspace': Workspace,
+    'internal/layers/base': BaseLayer,          // Base class for all layers
+    'internal/layers/canvas': Canvas,           // Can store context, feature and filter bitmaps + dashboard / UI layouts
+    'internal/layers/context': Context,         // Default context layer(linked to a bitmap)
+    'internal/layers/label': Label,             // Label only (no associated bitmaps)
+    'internal/layers/system': System,           // System layers
+    'internal/layers/universe': Universe,       // Root layer for a workspace
+    'internal/layers/workspace': Workspace,     // "Mountpoint" to a workspace
 };
 
 export function isDocument(obj) {

@@ -6,20 +6,24 @@ const debug = debugMessage('synapsd:layer-index');
 // Schemas
 import SchemaRegistry from '../../schemas/SchemaRegistry.js';
 
-// Constants
-const LAYER_TYPES = [
-    'universe', // Root layer for a workspace
-    'system', // System layers (canvas, device, user, session)
-    'workspace', // "Mountpoint" to a workspace
-    'canvas', // Can store context, feature and filter bitmaps + dashboard / UI layouts
-    'context', // Has context bitmaps only
-    'label', // Label only (no associated bitmaps)
-];
-
+/**
+ * Context Layer Index
+ */
 class ContextLayerIndex {
 
     constructor(options = {}) {
+        if (!options.layerDataset) {
+            throw new Error('Layer dataset is required');
+        }
+
+        this.index = options.layerDataset;
         this.options = options;
+
+        // Initialize the name to layer map
+        this.nameToLayerMap = new Map();
+        this.#initNameToLayerMap();
+
+        debug(`Layer index initialized`);
     }
 
     /**
@@ -27,7 +31,7 @@ class ContextLayerIndex {
      */
 
     get layers() {
-        return this.options.layers;
+
     }
 
     /**
@@ -35,9 +39,7 @@ class ContextLayerIndex {
      */
 
     #initNameToLayerMap() {
-        for (const [id, layer] of this.layerIndex) {
-            this.nameToLayerMap.set(layer.name, this.index.get(layer.id));
-        }
+
     }
 
     #saveLayerToDb(layer, persistent = true) {
