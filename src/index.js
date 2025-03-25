@@ -816,7 +816,7 @@ class SynapsD extends EventEmitter {
      * Utils
      */
 
-    async dumpDocumentsToDir(dstDir, contextBitmapArray = [], featureBitmapArray = [], filterArray = []) {
+    async dumpDocuments(dstDir, contextBitmapArray = [], featureBitmapArray = [], filterArray = []) {
         if (!dstDir) { throw new Error('Destination directory required'); }
         if (typeof dstDir !== 'string') { throw new Error('Destination directory must be a string'); }
         debug('Dumping DB documents to directory: ', dstDir);
@@ -846,6 +846,20 @@ class SynapsD extends EventEmitter {
 
         debug('All queried documents have been written to the destination directories');
         return true;
+    }
+
+    async dumpBitmaps(dstDir, bitmapArray = []) {
+        if (!dstDir) { throw new Error('Destination directory required'); }
+        if (!Array.isArray(bitmapArray)) { bitmapArray = [bitmapArray]; }
+        if (typeof dstDir !== 'string') { throw new Error('Destination directory must be a string'); }
+        debug('Dumping DB bitmaps to directory: ', dstDir);
+        debug('Bitmap array: ', bitmapArray);
+
+        // Ensure the destination directory exists
+        if (!fs.existsSync(dstDir)) { fs.mkdirSync(dstDir, { recursive: true }); }
+
+        // TODO: To finish, more important stuff to be done!
+
     }
 
     /**
