@@ -3,6 +3,8 @@
 // Utils
 import EventEmitter from 'eventemitter2';
 import debugInstance from 'debug';
+import fs from 'fs';
+import path from 'path';
 const debug = debugInstance('canvas:synapsd');
 
 // DB Backend
@@ -423,6 +425,7 @@ class SynapsD extends EventEmitter {
         const documentIds = Array.from(resultBitmap);
 
         // Changed: Get documents one by one to avoid undefined entries
+        // TODO: Change to getMany as its faaaaaaaster!
         const documents = [];
         for (const id of documentIds) {
             const doc = await this.documents.get(id);
@@ -807,6 +810,42 @@ class SynapsD extends EventEmitter {
 
     deleteCollection(id) {
         return this.bitmapIndex.deleteCollection(id);
+    }
+
+    /**
+     * Utils
+     */
+
+    async dumpDocumentsToDir(dstDir, contextBitmapArray = [], featureBitmapArray = [], filterArray = []) {
+        if (!dstDir) { throw new Error('Destination directory required'); }
+        if (typeof dstDir !== 'string') { throw new Error('Destination directory must be a string'); }
+        debug('Dumping DB documents to directory: ', dstDir);
+        debug('Context bitmaps: ', contextBitmapArray);
+        debug('Feature bitmaps: ', featureBitmapArray);
+
+        // Ensure the destination directory exists
+        if (!fs.existsSync(dstDir)) { fs.mkdirSync(dstDir, { recursive: true }); }
+
+        // Get all documents from the documents dataset
+        const documentArray = await this.listDocuments(contextBitmapArray, featureBitmapArray, filterArray);
+        debug(`Found ${documentArray.length} documents to dump..`);
+
+        // Loop through all documents in the returned array
+        for (let doc of documentArray) {
+            doc = this.#parseInitializeDocument(doc);
+
+            // Create a directory for each document schema
+            const schemaDir = path.join(dstDir, doc.schema);
+            debug('Creating schema directory: ', schemaDir);
+            if (!fs.existsSync(schemaDir)) { fs.mkdirSync(schemaDir, { recursive: true }); }
+
+            // Write the document to the destination directory
+            debug('Writing document to: ', path.join(schemaDir, `${doc.id}.json`));
+            fs.writeFileSync(path.join(schemaDir, `${doc.id}.json`), doc.toJSON());
+        }
+
+        debug('All queried documents have been written to the destination directories');
+        return true;
     }
 
     /**

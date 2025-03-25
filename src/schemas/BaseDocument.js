@@ -464,7 +464,7 @@ class BaseDocument {
             versions: this.versions,
             versionNumber: this.versionNumber,
             latestVersion: this.latestVersion,
-        });
+        }, null, 2);
     }
 
     /**
