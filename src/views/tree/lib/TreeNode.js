@@ -46,6 +46,7 @@ export default class TreeNode {
         if (!this.hasChild(child.id)) {
             this.children.set(child.id, child);
         }
+
         return true;
     }
 
