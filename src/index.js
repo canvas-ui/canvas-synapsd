@@ -83,6 +83,9 @@ class SynapsD extends EventEmitter {
             this.#bitmapCache,
         );
 
+        // Context bitmaps
+        this.contextBitmapCollection = this.bitmapIndex.createCollection('context');
+
         // Deleted documents bitmap
         this.deletedDocumentsBitmap = this.bitmapIndex.createBitmap('internal/gc/deleted');
 
@@ -110,23 +113,6 @@ class SynapsD extends EventEmitter {
         // Collections
         this.collections = new Map()
 
-        // Context Layer Index
-        this.layerIndex = new ContextLayerIndex({
-            layerDataset: this.#db.createDataset('layers'),
-        });
-
-        // Context Tree
-        this.tree = new ContextTree({
-            documentDataset: this.documents,
-            metadataDataset: this.metadata,
-            bitmapIndex: this.bitmapIndex.createCollection('internal/tree'),
-            layerIndex: this.layerIndex,
-        });
-
-    }
-
-    test() {
-        return this.#bitmapStore.listEntries();
     }
 
     /**
