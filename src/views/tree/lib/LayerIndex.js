@@ -48,11 +48,17 @@ class LayerIndex extends EventEmitter {
      */
 
     getLayerByID(id) {
-        debug(`Getting layer ID ${id} from store..`);
-        return this.#store.get(id);
+        if (!id) { throw new Error('Layer ID is required'); }
+
+        // Normalize the ID - ensure it has the "layer/" prefix
+        const normalizedId = id.startsWith('layer/') ? id : `layer/${id}`;
+
+        debug(`Getting layer ID ${normalizedId} from store..`);
+        return this.#store.get(normalizedId);
     }
 
     getLayerByName(name) {
+        if (!name) { throw new Error('Layer name is required'); }
         if (!this.#initialized) {
             throw new Error('Layer index not initialized');
         }
@@ -62,7 +68,11 @@ class LayerIndex extends EventEmitter {
 
     hasLayer(id) { return this.hasLayerID(id); }
 
-    hasLayerID(id) { return this.#store.doesExist(id); }
+    hasLayerID(id) {
+        // Normalize the ID - ensure it has the "layer/" prefix
+        const normalizedId = id.startsWith('layer/') ? id : `layer/${id}`;
+        return this.#store.doesExist(normalizedId);
+    }
 
     hasLayerName(name) {
         if (!this.#initialized) {
@@ -120,7 +130,7 @@ class LayerIndex extends EventEmitter {
         type: 'context'
     }) {
         if (!this.#initialized) { throw new Error('Layer index not initialized'); }
-        debug(`Creating layer ${name} with options ${JSON.stringify(options)}`);
+        debug(`Creating layer "${name}" with options ${JSON.stringify(options)}`);
 
         // Check if layer type is valid
         if (options.type && !SchemaRegistry.hasSchema(`internal/layers/${options.type}`)) {
@@ -128,13 +138,14 @@ class LayerIndex extends EventEmitter {
         }
 
         // Check if layer already exists
-        if (this.hasLayerName(options.name)) {
+        if (this.hasLayerName(name)) {
+            debug(`Layer already exists, updating..`);
             //throw new Error(`Layer already exists: ${options.name}`);
-            return this.updateLayer(options.name, options);
+            return this.updateLayer(name, options);
         }
 
         const LayerSchema = SchemaRegistry.getSchema(`internal/layers/${options.type}`);
-        const layer = new LayerSchema(options);
+        const layer = new LayerSchema(name, options);
         if (!layer) { throw new Error(`Failed to create layer with options ${options}`); }
 
         await this.#dbStoreLayer(layer);
@@ -143,15 +154,17 @@ class LayerIndex extends EventEmitter {
 
     async updateLayer(name, options) {
         const layer = this.getLayerByName(name);
-        if (!layer) {
-            return false;
-        }
+
+        if (!layer) { throw new Error(`Layer not found: ${name}`); }
         if (layer.locked) {
             throw new Error('Layer is locked');
         }
+        // Unset the id from options to avoid overwriting existing layers by accident
+        delete options.id;
+
         Object.assign(layer, options);
         await this.#dbStoreLayer(layer);
-        return true;
+        return layer;
     }
 
     async renameLayer(name, newName) {
@@ -195,6 +208,10 @@ class LayerIndex extends EventEmitter {
 
     async removeLayerByID(id) {
         const layer = this.getLayerByID(id);
+        if (!layer) {
+            throw new Error(`Layer not found with ID: ${id}`);
+        }
+
         if (layer.locked) {
             throw new Error('Layer is locked');
         }
@@ -260,7 +277,6 @@ class LayerIndex extends EventEmitter {
         for (const layerId of layers) {
             debug(`Initializing layer ${layerId}`);
             const layer = this.getLayerByID(layerId);
-            console.log('layer', layer);
             this.#nameToLayerMap.set(layer.name, layer);
         }
     }

@@ -88,7 +88,7 @@ async function test() {
         console.log(db.stats);
 
         console.log('\n--- Listing Bitmaps (Sanity Check) ---');
-        console.log(await db.listBitmaps()); // List all bitmap keys
+        console.log(await db.bitmaps.listBitmaps()); // List all bitmap keys
 
         console.log('\n--- Testing listDocuments ---');
 
@@ -134,7 +134,7 @@ async function test() {
 
 
         console.log('\n--- Listing Bitmaps (Sanity Check) ---');
-        console.log(await db.listBitmaps());
+        console.log(await db.bitmaps.listBitmaps());
 
         console.log('\n---List Documents test ---');
         let res = await db.listDocuments(['context/aaa', 'context/bbb']);

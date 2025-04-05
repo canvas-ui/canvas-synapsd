@@ -13,7 +13,6 @@ class Layer {
         // Default options
         options = {
             id: uuidv4(),
-            schemaVersion: '2.0',
             type: 'context',
             color: null,
             ...options,
@@ -21,6 +20,7 @@ class Layer {
 
         // TODO: This constructor needs a proper cleanup!
         this.id = options.id;
+        this.schemaVersion = options.schemaVersion || '2.0';
         this.type = options.type ?? 'context';
         this.name = this.#sanitizeName(name);
         this.label = options.label ? this.#sanitizeLabel(options.label) : this.name;

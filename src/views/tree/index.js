@@ -37,475 +37,380 @@ import LayerIndex from './lib/LayerIndex.js';
  * but is now being moved to synapsd as it is conceptually a better fit, esp with the
  * more bitmap-centric methods we're adding(mergeUp/mergeDown etc).
  */
-export default class ContextTree extends EventEmitter {
+class ContextTree extends EventEmitter {
 
-    #root = null; // Root TreeNode
-    #layerIndex = null; // LayerIndex instance
-    #bitmapIndex = null; // Reference to BitmapIndex
+    // Data store
+    #dataStore = null; // Single data store for layers and the persistent tree structure
+    #showHiddenLayers;
+
+    // Runtime state
+    #initialized = false;
+
+    #layerIndex;
 
     constructor(options = {}) {
         super(options.eventEmitterOptions || {});
 
-        if (!options.bitmapIndex) { throw new Error('ContextTree requires bitmapIndex option'); }
-        if (!options.layerDataset) { throw new Error('ContextTree requires layerDataset option'); }
-        if (!options.treeDataset) { throw new Error('ContextTree requires treeDataset option'); }
+        if (!options.dataStore) { throw new Error('ContextTree requires a dataStore reference'); }
+        this.#dataStore = options.dataStore;
 
-        this.#bitmapIndex = options.bitmapIndex;
-        this.#layerDataset = options.layerDataset;
-        this.#treeDataset = options.treeDataset;
+        // Initialize the layer index class
+        this.#layerIndex = new LayerIndex(this.#dataStore, options);
 
-        // Optional datasets
-        this.documents = options.documentDataset;
-        this.metadata = options.metadataDataset;
+        // Options
+        this.#showHiddenLayers = options.showHiddenLayers || false;
 
-        this.options = options; // Store other options
+        // Root node
+        this.rootLayer = null;
+        this.root = null;
+    }
 
+    async initialize() {
         debug('Initializing context tree...');
+        await this.#layerIndex.initializeIndex();
 
-        // 1. Load existing layers into memory cache
-        this.#loadLayersFromDataset();
+        // Root layer is always created by the layer index(as a built-in layer)
+        // TODO: We should probably move the logic here
+        const rootLayer = this.#layerIndex.getLayerByName('/');
+        if (!rootLayer) { throw new Error('Root layer not found'); }
 
-        // 2. Ensure root layer exists
-        let rootLayer = this.#layersByName.get('/');
-        if (!rootLayer) {
-            debug('Root layer not found, creating...');
-            rootLayer = this.createLayer({ name: '/', type: 'universe', locked: true });
-            if (!rootLayer) {
-                throw new Error('Failed to create mandatory root layer!');
-            }
-        }
-        this.#root = new TreeNode(rootLayer.id, rootLayer); // Create root TreeNode
-        debug(`Root node using layer ID "${rootLayer.id}"`);
+        // Root node
+        this.rootLayer = rootLayer;
+        this.root = new TreeNode(rootLayer.id, rootLayer);
 
-        // 3. Load tree structure from dataset
-        if (this.#loadTreeStructure()) {
-            debug('Context tree structure loaded from dataset.');
-        } else {
-            debug('Context tree structure not found, using default root node.');
-            // Save initial root-only structure
-            this.#saveTreeStructure();
-        }
+        // Load the tree from the data store
+        await this.#loadTreeFromDataStore();
 
-        debug(`ContextTree initialized`);
+        debug('Context tree initialized');
+        debug(JSON.stringify(this.buildJsonTree(), null, 2));
 
-        // Optional: Log the loaded tree structure
-        // debug(JSON.stringify(this.buildJsonTree(), null, 2));
-
-        this.emit('tree:ready');
-    }
-
-    // --- Persistence ---
-
-    #loadLayersFromDataset() {
-        debug('Loading layers from dataset...');
-        this.#layersByName.clear();
-        this.#layersById.clear();
-        // Assuming layerDataset stores layer objects keyed by their ID
-        // Adjust iteration based on actual LMDB wrapper interface
-        for (const layer of this.#layerDataset.getRange({ values: true })) {
-            // Re-instantiate Layer objects? Or assume stored value is sufficient?
-            // For now, assume stored value IS the layer object.
-            if (layer && layer.id && layer.name) {
-                this.#layersByName.set(layer.name, layer);
-                this.#layersById.set(layer.id, layer);
-            } else {
-                debug('Warning: Invalid layer data found in dataset:', layer);
-            }
-        }
-        debug(`Loaded ${this.#layersByName.size} layers into cache.`);
-    }
-
-    #saveTreeStructure() {
-        debug('Saving tree structure...');
-        try {
-            const serializedTree = this.#serializeNode(this.#root);
-            this.#treeDataset.put('root', serializedTree);
-            debug('Tree structure saved.');
-            return true;
-        } catch (error) {
-            debug('Error saving tree structure:', error);
-            return false;
-        }
-    }
-
-    #loadTreeStructure() {
-        debug('Loading tree structure...');
-        try {
-            const serializedTree = this.#treeDataset.get('root');
-            if (!serializedTree) {
-                debug('No saved tree structure found.');
-                return false;
-            }
-            this.#root = this.#deserializeNode(serializedTree);
-             debug('Tree structure loaded successfully.');
-            return true;
-        } catch (error) {
-            debug('Error loading tree structure:', error);
-            // Reset to default root if loading fails
-             let rootLayer = this.#layersByName.get('/');
-             this.#root = new TreeNode(rootLayer.id, rootLayer);
-            return false;
-        }
-    }
-
-    // --- Serialization Helpers (Basic Example) ---
-
-    #serializeNode(node) {
-        // Simple serialization: only store layer ID and children IDs
-        const children = [];
-        for (const child of node.children.values()) {
-            children.push(this.#serializeNode(child));
-        }
-        return {
-            id: node.id, // Layer ID
-            c: children // Children
-        };
-    }
-
-    #deserializeNode(data) {
-        const layer = this.#layersById.get(data.id);
-        if (!layer) {
-            throw new Error(`Cannot deserialize node: Layer with ID ${data.id} not found.`);
-        }
-        const node = new TreeNode(layer.id, layer);
-        if (data.c && data.c.length > 0) {
-            for (const childData of data.c) {
-                node.addChild(this.#deserializeNode(childData));
-            }
-        }
-        return node;
+        this.#initialized = true;
     }
 
     /**
      * Getters
      */
 
-    get layers() {}
+    get layers() {
+        if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
+        return this.#layerIndex.listLayers();
+    }
+
     get paths() {
-        // Use the existing helper
         return this.#buildPathArray();
     }
-    get pathArray() { }
 
     /**
-     * Builds a serializable JSON representation of the tree structure.
-     * @returns {object} JSON representation of the tree.
+     * Path Operations
      */
-    get jsonTree() {
-        return this.#buildJsonNode(this.#root);
+
+    /**
+     * Check if a path exists in the tree
+     * @param {string} path - Path to check
+     * @returns {boolean} - True if path exists
+     */
+    pathExists(path) {
+        return this.#getNode(path) ? true : false;
     }
 
-    // --- Helper for jsonTree ---
-    #buildJsonNode(node) {
-        if (!node) return null;
-
-        const children = {};
-        if (node.hasChildren) {
-            // Sort children by name for consistent output
-            const sortedChildren = [...node.children.values()].sort((a, b) => a.name.localeCompare(b.name));
-            for (const child of sortedChildren) {
-                children[child.name] = this.#buildJsonNode(child);
-            }
-        }
-
-        return {
-            // Include relevant layer info
-            _id: node.id,
-            _type: node.payload?.type,
-            // _locked: node.payload?.locked,
-            ...(Object.keys(children).length > 0 && { children: children })
-        };
-    }
-
-    /**
-     * Tree methods
-     */
-
-    /**
-     * Ensures a path exists in the tree, creating layers and nodes as needed.
-     * Persists the updated tree structure.
-     * @param {string} path - Path string (e.g., "/foo/bar").
-     * @returns {TreeNode | null} The TreeNode corresponding to the final component of the path, or null if creation failed.
-     */
-    insertPath(path) {
-        debug(`Ensuring path exists: "${path}"`);
-        if (path === '/') {
-            return this.#root;
-        }
-
-        const components = path.replace(/^\/+|\/+$/g, '').split('/').filter(c => c !== '');
-        if (components.length === 0) {
-            return this.#root; // Should technically not happen due to initial checks
-        }
-
-        let currentNode = this.#root;
-        let createdNewNode = false;
-
-        for (const component of components) {
-            let layer = this.getLayerByName(component);
-
-            // Create layer if it doesn't exist
-            if (!layer) {
-                debug(`Layer "${component}" not found for path "${path}", creating...`);
-                layer = this.createLayer({ name: component, type: 'context' }); // Default to 'context' type?
-                if (!layer) {
-                     debug(`Failed to create layer "${component}" for path "${path}"`);
-                    return null; // Stop if layer creation fails
-                }
-            }
-
-            // Find or create the child TreeNode
-            let childNode = currentNode.getChild(layer.id);
-            if (!childNode) {
-                debug(`TreeNode for layer "${component}" (ID: ${layer.id}) not found under parent "${currentNode.name}", creating...`);
-                childNode = new TreeNode(layer.id, layer);
-                currentNode.addChild(childNode);
-                createdNewNode = true; // Mark that the tree structure changed
-            }
-
-            // Move to the next node in the path
-            currentNode = childNode;
-        }
-
-        // Save the tree structure if any new nodes were added
-        if (createdNewNode) {
-            this.#saveTreeStructure();
-        }
-
-        debug(`Path "${path}" ensured, final node layer: "${currentNode.name}"`);
-        return currentNode; // Return the final node in the path
-    }
-
-    /**
-     * Finds a TreeNode by its path string.
-     * @param {string} path - Path string (e.g., "/foo/bar").
-     * @returns {TreeNode | null} The TreeNode if found, otherwise null.
-     */
-    getNodeByPath(path) {
-        if (path === '/') {
-            return this.#root;
-        }
-        const components = path.replace(/^\/+|\/+$/g, '').split('/').filter(c => c !== '');
-        if (components.length === 0) {
-            return this.#root;
-        }
-
-        let currentNode = this.#root;
-        for (const component of components) {
-            const layer = this.getLayerByName(component);
-            if (!layer) {
-                return null; // Layer doesn't exist, so node can't exist
-            }
-            const childNode = currentNode.getChild(layer.id);
-            if (!childNode) {
-                return null; // Node doesn't exist in the tree structure
-            }
-            currentNode = childNode;
-        }
-        return currentNode;
-    }
-
-    /**
-     * Resolves a path string into an array of context bitmap keys (context/<uuid>).
-     * Ensures the path and layers exist if createIfNeeded is true.
-     * @param {string} pathString - The path string.
-     * @param {boolean} [createIfNeeded=true] - Whether to create nodes/layers.
-     * @returns {Promise<string[]>} Array of context bitmap keys.
-     */
-    async getContextKeysForPath(pathString, createIfNeeded = true) {
-        if (!pathString || typeof pathString !== 'string' || pathString === '/') {
-            // Root path or invalid path has no keys
+    async insertPath(path = '/', node, autoCreateLayers = true) {
+        debug(`Inserting path "${path}" into the context tree`);
+        if (path === '/' && !node) {
             return [];
         }
 
-        const components = pathString.replace(/^\/+|\/+$/g, '').split('/').filter(c => c !== '');
-        if (components.length === 0) {
-            return []; // Should not happen if check above is correct
-        }
+        let currentNode = this.root;
+        let child;
+        const layerIds = [];
+        const createdLayers = [];
 
-        const nodesInPath = []; // Will store the nodes along the path
-        let currentNode = this.#root;
-        let structureChanged = false;
-
-        for (const component of components) {
-            let layer = this.getLayerByName(component);
-
+        const layerNames = path.split('/').filter(Boolean);
+        for (const layerName of layerNames) {
+            let layer = this.#layerIndex.getLayerByName(layerName);
             if (!layer) {
-                // Layer doesn't exist
-                if (!createIfNeeded) {
-                    debug(`getContextKeysForPath: Layer "${component}" not found for path "${pathString}" and createIfNeeded=false.`);
-                    return []; // Path doesn't exist
-                }
-                // Create the layer
-                layer = this.createLayer({ name: component, type: 'context' });
-                if (!layer) {
-                    debug(`getContextKeysForPath: Failed to create layer "${component}" for path "${pathString}".`);
-                    return []; // Layer creation failed
+                debug(`Layer "${layerName}" not found in layerIndex`);
+                if (autoCreateLayers) {
+                    debug(`Creating layer "${layerName}"`);
+                    layer = await this.#layerIndex.createLayer(layerName);
+                    createdLayers.push(layer);
+                } else {
+                    debug(`Layer "${layerName}" not found at path "${path} and autoCreateLayers is disabled"`);
+                    return [];
                 }
             }
 
-            // Check if node exists under the current parent
-            let childNode = currentNode.getChild(layer.id);
+            layerIds.push(layer.id);
+            child = currentNode.getChild(layer.id);
 
-            if (!childNode) {
-                // Node doesn't exist
-                if (!createIfNeeded) {
-                    debug(`getContextKeysForPath: TreeNode for layer "${component}" not found in structure for path "${pathString}" and createIfNeeded=false.`);
-                    return []; // Path doesn't exist in the tree structure
-                }
-                // Create the TreeNode
-                debug(`getContextKeysForPath: Creating TreeNode for layer "${component}" (ID: ${layer.id}) under parent "${currentNode.name}".`);
-                childNode = new TreeNode(layer.id, layer);
-                currentNode.addChild(childNode);
-                structureChanged = true;
+            if (!child) {
+                child = new TreeNode(layer.id, layer);
+                currentNode.addChild(child);
             }
 
-            // Add the found/created node to our list and proceed
-            nodesInPath.push(childNode);
-            currentNode = childNode;
+            currentNode = child;
         }
 
-        // If the structure changed, save it
-        if (structureChanged) {
-            this.#saveTreeStructure();
+        if (node) {
+            child = currentNode.getChild(node.id);
+            if (child && child instanceof TreeNode) {
+                currentNode.addChild(child);
+            }
         }
 
-        // Map the collected nodes (nodesInPath) to their context keys
-        const keys = nodesInPath.map(node => `context/${node.id}`);
+        await this.#saveTreeToDataStore();
+        debug(`Path "${path}" inserted successfully.`);
 
-        return keys;
+        // Emit an event with the path and created layers
+        this.emit('tree:path:inserted', {
+            path,
+            layerIds,
+            createdLayers: createdLayers.map(layer => ({
+                id: layer.id,
+                name: layer.name,
+                type: layer.type
+            }))
+        });
+
+        return layerIds;
     }
 
-    copyPath(pathFrom, pathTo, recursive = false) {}
+    async movePath(pathFrom, pathTo, recursive = false) {
+        debug(`Moving layer from "${pathFrom}" to "${pathTo}"${recursive ? ' recursively' : ''}`);
 
-    movePath(pathFrom, pathTo, recursive = false) {}
+        const node = this.#getNode(pathFrom);
+        if (!node) {
+            debug('Unable to move layer, source node not found');
+            return false;
+        }
 
-    removePath(path, recursive = false) {}
+        const parentPath = this.#getParentPath(pathFrom);
+        const parentNode = this.#getNode(parentPath);
+        if (!parentNode) {
+            return false;
+        }
 
-    pathExists(path) {}
+        const layer = node.payload;
 
-    mergeUp(layerPath, fullPath) {}
+        if (recursive) {
+            // Check if destination contains source
+            if (pathTo.includes(layer.name)) {
+                throw new Error(`Destination path "${pathTo}" includes "${layer.name}"`);
+            }
 
-    mergeDown(layerPath, fullPath) {}
-
-    /**
-     * Layer methods
-     */
-
-    createLayer(options = {}) {
-        let layerName;
-        if (typeof options === 'string') {
-            layerName = options;
-            options = { name: layerName };
+            // For recursive move, we move the entire subtree
+            if (!this.insertPath(pathTo, node)) {
+                debug(`Unable to move layer "${layer.name}" into path "${pathTo}"`);
+                return false;
+            }
         } else {
-            layerName = options.name;
+            // For non-recursive move, we create a new node and transfer children
+            const targetNode = new TreeNode(layer.id, layer);
+
+            if (!this.insertPath(pathTo, targetNode)) {
+                debug(`Unable to move layer "${layer.name}" to path "${pathTo}"`);
+                return false;
+            }
+
+            // If node has children, move them to parent
+            if (node.hasChildren && !recursive) {
+                for (const child of node.children.values()) {
+                    parentNode.addChild(child);
+                }
+            }
         }
 
-        if (!layerName) {
-            throw new Error('Layer name is required to create a layer.');
-        }
+        // Remove node from its old location
+        parentNode.removeChild(node.id);
+        await this.#saveTreeToDataStore();
 
-        debug(`Attempting to create layer with options: ${JSON.stringify(options)}`);
+        // Emit an event with the source and destination paths
+        this.emit('tree:path:moved', {
+            pathFrom,
+            pathTo,
+            recursive,
+            layerId: layer.id,
+            layerName: layer.name,
+            layerType: layer.type
+        });
 
-        // TODO: Add validation for layer types (LAYER_TYPES constant from old LayerIndex)
-        // if (options.type && !LAYER_TYPES.includes(options.type)) {
-        //     throw new Error(`Invalid layer type: ${options.type}`);
-        // }
-
-        // Check if layer already exists by name
-        if (this.#layersByName.has(layerName)) {
-            debug(`Layer with name "${layerName}" already exists.`);
-            // TODO: Handle update logic if needed (like in old createLayer)
-            return this.#layersByName.get(layerName); // Return existing layer
-        }
-
-        // Create a new Layer instance (using BaseLayer for now)
-        // Generate UUID if not provided
-        options.id = options.id || crypto.randomUUID();
-        options.name = layerName; // Ensure name is set
-        const layer = new Layer(options); // Assumes BaseLayer constructor works like this
-
-        if (!layer || !layer.id) {
-            throw new Error(`Failed to instantiate layer with options ${JSON.stringify(options)}`);
-        }
-
-        // Persist and cache
-        try {
-            // TODO: Should check if layer is persistent (e.g., not built-in) before saving?
-            this.#layerDataset.put(layer.id, layer); // Store layer object keyed by ID
-            this.#layersById.set(layer.id, layer);
-            this.#layersByName.set(layer.name, layer);
-            debug(`Layer "${layer.name}" (ID: ${layer.id}) created successfully.`);
-            this.emit('layer:created', layer);
-            return layer;
-        } catch (error) {
-            debug(`Error persisting/caching layer "${layer.name}":`, error);
-            // Clean up cache if persistence failed?
-            this.#layersById.delete(layer.id);
-            this.#layersByName.delete(layer.name);
-            throw new Error(`Failed to save layer "${layer.name}": ${error.message}`);
-        }
+        return true;
     }
 
-    getLayer(name) { }
+    async copyPath(pathFrom, pathTo, recursive = false) {
+        debug(`Copying layer from "${pathFrom}" to "${pathTo}"${recursive ? ' recursively' : ''}`);
 
-    getLayerById(id) {
-        // Primarily uses cache, could fall back to dataset lookup if needed
-        return this.#layersById.get(id) || null;
+        const sourceNode = this.#getNode(pathFrom);
+        if (!sourceNode) {
+            debug(`Unable to copy layer, source node not found at path "${pathFrom}"`);
+            return false;
+        }
+
+        // Create a copy of the source node
+        const layer = sourceNode.payload;
+        const targetNode = new TreeNode(layer.id, layer);
+
+        if (!this.insertPath(pathTo, targetNode)) {
+            debug(`Unable to copy layer "${layer.name}" to path "${pathTo}"`);
+            return false;
+        }
+
+        // If recursive and source node has children, copy them too
+        if (recursive && sourceNode.hasChildren) {
+            const pathToWithLayer = pathTo === '/' ? `/${layer.name}` : `${pathTo}/${layer.name}`;
+
+            for (const child of sourceNode.children.values()) {
+                const childPath = pathFrom === '/' ? `/${child.name}` : `${pathFrom}/${child.name}`;
+                this.copyPath(childPath, pathToWithLayer, true);
+            }
+        }
+
+        await this.#saveTreeToDataStore();
+
+        // Emit an event with the source and destination paths
+        this.emit('tree:path:copied', {
+            pathFrom,
+            pathTo,
+            recursive,
+            layerId: layer.id,
+            layerName: layer.name,
+            layerType: layer.type
+        });
+
+        return true;
     }
 
-    getLayerByName(name) {
-        // Primarily uses cache, could fall back to dataset scan if needed (less efficient)
-        return this.#layersByName.get(name) || null;
+    /**
+     * Remove a path from the tree
+     * @param {string} path - Path to remove
+     * @param {boolean} recursive - Whether to remove recursively
+     * @returns {boolean} - True if successful
+     */
+    async removePath(path, recursive = false) {
+        debug(`Removing path "${path}"${recursive ? ' recursively' : ''}`);
+
+        const node = this.#getNode(path);
+        if (!node) {
+            debug(`Unable to remove layer, source node not found at path "${path}"`);
+            return false;
+        }
+
+        const parentPath = this.#getParentPath(path);
+        const parentNode = this.#getNode(parentPath);
+        if (!parentNode) {
+            throw new Error(`Unable to remove layer, parent node not found at path "${parentPath}"`);
+        }
+
+        const layer = node.payload;
+        const childrenCount = node.children.size;
+
+        // If non-recursive and node has children, move them to parent
+        if (!recursive && node.hasChildren) {
+            for (const child of node.children.values()) {
+                parentNode.addChild(child);
+            }
+        }
+
+        parentNode.removeChild(node.id);
+        await this.#saveTreeToDataStore();
+
+        // Emit an event with path and removal details
+        this.emit('tree:path:removed', {
+            path,
+            recursive,
+            layerId: layer.id,
+            layerName: layer.name,
+            layerType: layer.type,
+            hadChildren: childrenCount > 0,
+            childrenCount
+        });
+
+        return true;
     }
 
-    renameLayer(name, newName) { }
+    /**
+     * Merge a layer with layers above it (placeholder)
+     * @param {string} path - Path to merge
+     * @returns {boolean} - True if successful
+     */
+    async mergeUp(path) {
+        debug(`[PLACEHOLDER] Merging layer at "${path}" with layers above it`);
+        // TODO: Implement bitmap merging logic
 
-    updateLayer(name, options) { }
+        const node = this.#getNode(path);
+        if (!node) {
+            debug(`Unable to merge layer, node not found at path "${path}"`);
+            return false;
+        }
 
-    deleteLayer(layerName) { }
+        // Emit an event for the merge operation
+        this.emit('tree:layer:merged:up', {
+            path,
+            layerId: node.id,
+            layerName: node.name
+        });
 
-    layerNameToID(name) { }
-
-    layerIdToName(id) { }
+        return true;
+    }
 
     /**
-     * Document methods
+     * Merge a layer with layers below it (placeholder)
+     * @param {string} path - Path to merge
+     * @returns {boolean} - True if successful
      */
+    async mergeDown(path) {
+        debug(`[PLACEHOLDER] Merging layer at "${path}" with layers below it`);
+        // TODO: Implement bitmap merging logic
 
-    getDocument() { }
+        const node = this.#getNode(path);
+        if (!node) {
+            debug(`Unable to merge layer, node not found at path "${path}"`);
+            return false;
+        }
 
-    getDocumentArray() { }
+        // Emit an event for the merge operation
+        this.emit('tree:layer:merged:down', {
+            path,
+            layerId: node.id,
+            layerName: node.name
+        });
 
-    listDocuments() { }
-
-    insertDocument() { }
-
-    insertDocumentArray() { }
-
-    updateDocument() { }
-
-    updateDocumentArray() { }
-
-    removeDocument() { }
-
-    removeDocumentArray() { }
-
-    deleteDocument() { }
-
-    deleteDocumentArray() { }
+        return true;
+    }
 
     /**
-     * Query methods
+     * Node Methods
      */
-
-    query() { }
-
-    ftsQuery() { }
 
     /**
-     * Internal methods
+     * Get a node by path
+     * @param {string} path - Path to node
+     * @returns {Object} - Node or false if not found
      */
+    #getNode(path) {
+        if (path === '/' || !path) {
+            return this.root;
+        }
+        const layerNames = path.split('/').filter(Boolean);
+        let currentNode = this.root;
+
+        for (const layerName of layerNames) {
+            const layer = this.#layerIndex.getLayerByName(layerName);
+            if (!layer) {
+                debug(`Layer "${layerName}" not found in index`);
+                return false;
+            }
+
+            const child = currentNode.getChild(layer.id);
+            if (!child) {
+                debug(`Target path "${path}" does not exist`);
+                return false;
+            }
+
+            currentNode = child;
+        }
+
+        return currentNode;
+    }
 
     /**
      * Get parent path
@@ -533,32 +438,164 @@ export default class ContextTree extends EventEmitter {
                 paths.push(path.replace(/\/\//g, '/'));
             }
         };
-        traverseTree(this.#root);
+        traverseTree(this.root);
         return sort ? paths.sort() : paths;
     }
 
     /**
-     * Gets the root TreeNode.
-     * @returns {TreeNode}
+     * Build JSON representation of the tree
+     * @param {Object} node - Root node
+     * @returns {Object} - JSON tree
      */
-    getRootNode() {
-        return this.#root;
+    buildJsonTree(node = this.root) {
+        const buildTree = (currentNode) => {
+            const children = Array.from(currentNode.children.values())
+                .filter((child) => child instanceof TreeNode)
+                .map((child) => (child.hasChildren ? buildTree(child) : createLayerInfo(child.payload)));
+
+            let layer = this.#layerIndex.getLayerByID(currentNode.id)
+            if (!layer) { layer = this.rootLayer; }
+            return createLayerInfo(layer, children);
+        };
+
+        const createLayerInfo = (payload, children = []) => {
+            // Normalize the name to avoid issues with paths
+            const normalizedName = payload.name === '/' ? '/' : payload.name;
+
+            return {
+                id: payload.id,
+                type: payload.type,
+                name: normalizedName, // Use normalized name
+                label: payload.label,
+                description: payload.description,
+                color: payload.color,
+                locked: payload.locked,
+                children
+            };
+        };
+
+        return buildTree(node);
+    }
+
+    recalculateTree() {
+        debug('Recalculating tree after layer changes');
+        // Create a copy of the current tree without deleted layers
+        const newRoot = new TreeNode(this.rootLayer.id, this.rootLayer);
+
+        const rebuildTree = (oldNode, newParent) => {
+            for (const child of oldNode.children.values()) {
+                const layer = this.#layerIndex.getLayerByID(child.id);
+                if (layer) {
+                    const newChild = new TreeNode(layer.id, layer);
+                    newParent.addChild(newChild);
+
+                    if (child.hasChildren) {
+                        rebuildTree(child, newChild);
+                    }
+                }
+            }
+        };
+
+        rebuildTree(this.root, newRoot);
+        this.root = newRoot;
+        this.save();
+
+        // Emit a recalculation event
+        this.emit('tree:recalculated', {
+            timestamp: new Date().toISOString()
+        });
     }
 
     /**
-     * Gets the Layer object for the root node.
-     * @returns {Layer | null}
+     * Build a tree from JSON
+     * @param {Object} rootNode - Root node data
+     * @param {boolean} autoCreateLayers - Whether to automatically create layers
+     * @returns {Object} - Built tree
      */
-    getRootLayer() {
-        return this.#root ? this.#root.payload : null;
+    #buildTreeFromJson(rootNode = this.root, autoCreateLayers = true) {
+        const buildTree = (nodeData) => {
+            let node;
+            let layer;
+
+            // Extract the ID without the "layer/" prefix if it exists
+            const layerId = nodeData.id.startsWith('layer/') ? nodeData.id : `layer/${nodeData.id}`;
+
+            // Try both formats - with and without the "layer/" prefix
+            layer = this.#layerIndex.getLayerByID(layerId) || this.#layerIndex.getLayerByID(nodeData.id);
+
+            if ((!layer && !nodeData.name) || (!layer && !autoCreateLayers)) {
+                throw new Error(`Unable to find layer by ID "${nodeData.id}", can not create a tree node`);
+            }
+
+            if (!layer && autoCreateLayers) {
+                layer = this.#layerIndex.createLayer(nodeData.name);
+            }
+
+            // Ensure we have a valid layer before creating TreeNode
+            if (!layer) {
+                throw new Error(`Failed to get or create layer for ID "${nodeData.id}" and name "${nodeData.name}"`);
+            }
+
+            node = new TreeNode(layer.id, layer);
+            for (const childData of nodeData.children) {
+                const childNode = buildTree(childData);
+                node.addChild(childNode);
+            }
+
+            return node;
+        };
+
+        return buildTree(rootNode);
     }
 
     /**
-     * Gets the ID (UUID) of the root layer.
-     * @returns {string | null}
+     * Data Store Methods
      */
-    getRootLayerId() {
-        return this.#root ? this.#root.id : null;
+
+    async #saveTreeToDataStore() {
+        debug('Saving in-memory context tree to database');
+        const data = this.buildJsonTree();
+        try {
+            await this.#dataStore.put('tree', data);
+            debug('Tree saved successfully.');
+
+            // Emit a save event
+            this.emit('tree:saved', {
+                timestamp: new Date().toISOString()
+            });
+
+            return true;
+        } catch (error) {
+            debug(`Error saving tree to database: ${error.message}`);
+
+            // Emit an error event
+            this.emit('tree:error', {
+                operation: 'save',
+                error: error.message
+            });
+
+            throw error;
+        }
     }
 
+    #loadTreeFromDataStore() {
+        debug('Loading tree from the data store...');
+        const jsonTree = this.#dataStore.get('tree');
+        if (!jsonTree) {
+            debug('No persistent Tree data found in the data store, creating a new one...');
+            return;
+        }
+
+        debug('Found persistent Tree data in the data store, re-building tree...');
+        this.root = this.#buildTreeFromJson(jsonTree);
+
+        // Emit a load event
+        this.emit('tree:loaded', {
+            timestamp: new Date().toISOString()
+        });
+
+        return true;
+    }
 }
+
+export default ContextTree;

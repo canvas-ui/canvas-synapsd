@@ -51,7 +51,7 @@ class BitmapIndex {
             // Check if bitmap already exists
             if (this.hasBitmap(key)) {
                 debug(`Bitmap with key ID "${key}" already exists`);
-                const existingBitmap = this.getBitmap(key);
+                const existingBitmap = await this.getBitmap(key);
                 if (existingBitmap) {
                     return existingBitmap;
                 }
@@ -106,13 +106,18 @@ class BitmapIndex {
         // First check the cache
         if (this.cache.has(key)) {
             debug(`Returning Bitmap key "${key}" from cache`);
-            return this.cache.get(key);
+            const cachedBitmap = this.cache.get(key);
+            debug(`Bitmap type: ${cachedBitmap.constructor.name}, has addMany: ${typeof cachedBitmap.addMany === 'function'}`);
+            return cachedBitmap;
         }
 
         // Then try to load from store
         if (this.hasBitmap(key)) {
             const bitmap = this.#loadBitmapSync(key);
-            if (bitmap) { return bitmap; }
+            if (bitmap) {
+                debug(`Bitmap type: ${bitmap.constructor.name}, has addMany: ${typeof bitmap.addMany === 'function'}`);
+                return bitmap;
+            }
             debug(`Failed to load bitmap "${key}" from store`);
         } else {
             debug(`Bitmap at key "${key}" not found in the persistent store`);
@@ -128,6 +133,7 @@ class BitmapIndex {
             throw new Error(`Unable to create bitmap with key ID "${key}"`);
         }
 
+        debug(`Created bitmap type: ${bitmap.constructor.name}, has addMany: ${typeof bitmap.addMany === 'function'}`);
         return bitmap;
     }
 
@@ -177,10 +183,16 @@ class BitmapIndex {
      * Bitmap index operations
      */
 
-    tickSync(key, ids) {
+    async tick(key, ids) {
         BitmapIndex.validateKey(key);
+        key = BitmapIndex.normalizeKey(key);
         debug('Ticking bitmap key', key, ids);
-        const bitmap = this.getBitmap(key, true);
+
+        // Await the bitmap promise
+        const bitmap = await this.getBitmap(key, true);
+
+        debug(`In tick, bitmap type: ${bitmap ? bitmap.constructor.name : 'null'}, has addMany: ${bitmap ? (typeof bitmap.addMany === 'function') : 'N/A'}`);
+
         const idsArray = Array.isArray(ids) ? ids : [ids];
 
         if (idsArray.length === 0) {
@@ -204,15 +216,15 @@ class BitmapIndex {
         }
 
         bitmap.addMany(validIds);
-        this.#saveBitmap(key, bitmap);
+        await this.#saveBitmap(key, bitmap);
         return bitmap;
     }
 
-    untickSync(key, ids) {
+    async untick(key, ids) {
         BitmapIndex.validateKey(key);
         debug('Unticking bitmap key', key, ids);
 
-        const bitmap = this.getBitmap(key, false);
+        const bitmap = await this.getBitmap(key, false);
         if (!bitmap) {return null;}
 
         const idsArray = Array.isArray(ids) ? ids : [ids];
@@ -241,15 +253,15 @@ class BitmapIndex {
 
         if (bitmap.isEmpty()) {
             debug('Bitmap is now empty, deleting', key);
-            this.deleteBitmap(key);
+            await this.deleteBitmap(key);
             return null;
         } else {
-            this.#saveBitmap(key, bitmap);
+            await this.#saveBitmap(key, bitmap);
             return bitmap;
         }
     }
 
-    tickManySync(keyArray, ids) {
+    async tickMany(keyArray, ids) {
         debug('Ticking bitmap keyArray', keyArray, ids);
         const keysArray = Array.isArray(keyArray) ? keyArray : [keyArray];
         const idsArray = Array.isArray(ids) ? ids : [ids];
@@ -278,16 +290,16 @@ class BitmapIndex {
         // Process keys in batch
         for (const key of keysArray) {
             BitmapIndex.validateKey(key);
-            const bitmap = this.getBitmap(key, true);
+            const bitmap = await this.getBitmap(key, true);
             bitmap.addMany(validIds);
-            this.#saveBitmap(key, bitmap);
+            await this.#saveBitmap(key, bitmap);
             affectedKeys.push(key);
         }
 
         return affectedKeys;
     }
 
-    untickManySync(keyArray, ids) {
+    async untickMany(keyArray, ids) {
         debug('Unticking bitmap keyArray', keyArray, ids);
         const keysArray = Array.isArray(keyArray) ? keyArray : [keyArray];
         const idsArray = Array.isArray(ids) ? ids : [ids];
@@ -316,35 +328,46 @@ class BitmapIndex {
         // Process keys in batch
         for (const key of keysArray) {
             BitmapIndex.validateKey(key);
-            const bitmap = this.getBitmap(key, false);
+            const bitmap = await this.getBitmap(key, false);
             if (!bitmap) {
                 debug(`Bitmap at key "${key}" not found in the persistent store`);
                 continue;
             }
 
             bitmap.removeMany(validIds);
-            this.#saveBitmap(key, bitmap);
+            await this.#saveBitmap(key, bitmap);
             affectedKeys.push(key);
         }
 
         return affectedKeys;
     }
 
-    async tickMany(keyArray, ids) {
-        // Simple async wrapper for now
-        return this.tickManySync(keyArray, ids);
+    // For backward compatibility - these methods simply call the new async versions
+    async tickSync(key, ids) {
+        console.warn('DEPRECATED: tickSync is deprecated, use tick instead');
+        return this.tick(key, ids);
     }
 
-    async untickMany(keyArray, ids) {
-        // Simple async wrapper for now
-        return this.untickManySync(keyArray, ids);
+    async untickSync(key, ids) {
+        console.warn('DEPRECATED: untickSync is deprecated, use untick instead');
+        return this.untick(key, ids);
+    }
+
+    async tickManySync(keyArray, ids) {
+        console.warn('DEPRECATED: tickManySync is deprecated, use tickMany instead');
+        return this.tickMany(keyArray, ids);
+    }
+
+    async untickManySync(keyArray, ids) {
+        console.warn('DEPRECATED: untickManySync is deprecated, use untickMany instead');
+        return this.untickMany(keyArray, ids);
     }
 
     async applyToMany(sourceKey, targetKeys) {
         BitmapIndex.validateKey(sourceKey);
         debug(`applyToMany(): Applying source "${sourceKey}" to targets: "${targetKeys}"`);
 
-        const sourceBitmap = this.getBitmap(sourceKey, false);
+        const sourceBitmap = await this.getBitmap(sourceKey, false);
         if (!sourceBitmap || sourceBitmap.isEmpty()) {
             debug(`Source bitmap "${sourceKey}" not found or is empty, nothing to apply.`);
             return [];
@@ -356,7 +379,7 @@ class BitmapIndex {
         for (const targetKey of targetKeys) {
             BitmapIndex.validateKey(targetKey);
             // Auto-create target if it doesn't exist when applying
-            const targetBitmap = this.getBitmap(targetKey, true);
+            const targetBitmap = await this.getBitmap(targetKey, true);
             const originalSize = targetBitmap.size;
 
             targetBitmap.orInPlace(sourceBitmap);
@@ -385,7 +408,7 @@ class BitmapIndex {
         BitmapIndex.validateKey(sourceKey);
         debug(`subtractFromMany(): Subtracting source "${sourceKey}" from targets: "${targetKeys}"`);
 
-        const sourceBitmap = this.getBitmap(sourceKey, false);
+        const sourceBitmap = await this.getBitmap(sourceKey, false);
         if (!sourceBitmap || sourceBitmap.isEmpty()) {
             debug(`Source bitmap "${sourceKey}" not found or is empty, nothing to subtract.`);
             return [];
@@ -398,7 +421,7 @@ class BitmapIndex {
         for (const targetKey of targetKeys) {
             BitmapIndex.validateKey(targetKey);
             // Do not auto-create target if it doesn't exist when subtracting
-            const targetBitmap = this.getBitmap(targetKey, false);
+            const targetBitmap = await this.getBitmap(targetKey, false);
             if (!targetBitmap) {
                 debug(`Target bitmap "${targetKey}" not found, skipping subtraction.`);
                 continue;
@@ -434,7 +457,7 @@ class BitmapIndex {
      * Logical operations
      */
 
-    AND(keyArray) {
+    async AND(keyArray) {
         debug(`AND(): keyArray: "${keyArray}"`);
         if (!Array.isArray(keyArray)) { throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`); }
 
@@ -453,7 +476,7 @@ class BitmapIndex {
         if (positiveKeys.length) {
             // Start with the first bitmap
             BitmapIndex.validateKey(positiveKeys[0]);
-            const firstBitmap = this.getBitmap(positiveKeys[0], false); // Do NOT auto-create
+            const firstBitmap = await this.getBitmap(positiveKeys[0], false); // Do NOT auto-create
 
             // If the first key doesn't exist, the AND result must be empty
             if (!firstBitmap) {
@@ -464,7 +487,7 @@ class BitmapIndex {
             // AND with remaining bitmaps
             for (let i = 1; i < positiveKeys.length; i++) {
                 BitmapIndex.validateKey(positiveKeys[i]);
-                const bitmap = this.getBitmap(positiveKeys[i], false); // Do NOT auto-create
+                const bitmap = await this.getBitmap(positiveKeys[i], false); // Do NOT auto-create
 
                 // If any subsequent key doesn't exist, the AND result must be empty
                 if (!bitmap) {
@@ -482,7 +505,7 @@ class BitmapIndex {
             const negativeUnion = new RoaringBitmap32();
             for (const key of negativeKeys) {
                 BitmapIndex.validateKey(key);
-                const nbitmap = this.getBitmap(key, false);
+                const nbitmap = await this.getBitmap(key, false);
                 if (nbitmap) {
                     negativeUnion.orInPlace(nbitmap);
                 }
@@ -493,7 +516,7 @@ class BitmapIndex {
         return partial || new RoaringBitmap32();
     }
 
-    OR(keyArray) {
+    async OR(keyArray) {
         debug(`OR(): keyArray: "${keyArray}"`);
         if (!Array.isArray(keyArray)) {
             throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`);
@@ -512,7 +535,7 @@ class BitmapIndex {
         const result = new RoaringBitmap32();
         for (const key of positiveKeys) {
             BitmapIndex.validateKey(key);
-            const bmp = this.getBitmap(key, true);
+            const bmp = await this.getBitmap(key, true);
             result.orInPlace(bmp);
         }
 
@@ -520,7 +543,7 @@ class BitmapIndex {
             const negativeUnion = new RoaringBitmap32();
             for (const key of negativeKeys) {
                 BitmapIndex.validateKey(key);
-                const bmp = this.getBitmap(key, false);
+                const bmp = await this.getBitmap(key, false);
                 if (bmp) {
                     negativeUnion.orInPlace(bmp);
                 }
@@ -530,7 +553,7 @@ class BitmapIndex {
         return result;
     }
 
-    XOR(keyArray) {
+    async XOR(keyArray) {
         debug(`XOR(): keyArray: "${keyArray}"`);
         if (!Array.isArray(keyArray)) {
             throw new TypeError(`First argument must be an array of bitmap keys, "${typeof keyArray}" given`);
@@ -548,7 +571,7 @@ class BitmapIndex {
         let result = null;
         for (const key of positiveKeys) {
             BitmapIndex.validateKey(key);
-            const bmp = this.getBitmap(key, false);
+            const bmp = await this.getBitmap(key, false);
             if (bmp) {
                 result = result ? result.xor(bmp) : bmp.clone();
             }
@@ -559,7 +582,7 @@ class BitmapIndex {
             const negativeUnion = new RoaringBitmap32();
             for (const key of negativeKeys) {
                 BitmapIndex.validateKey(key);
-                const bmp = this.getBitmap(key, false);
+                const bmp = await this.getBitmap(key, false);
                 if (bmp) {
                     negativeUnion.orInPlace(bmp);
                 }
@@ -587,7 +610,7 @@ class BitmapIndex {
     }
 
     static normalizeKey(key) {
-        if (!key) { throw new Error('Bitmap key cannot be null or undefined'); }
+        if (!key) { return null; }
         if (typeof key !== 'string') { throw new Error('Bitmap key must be a string'); }
 
         // Replace backslashes with forward slashes
@@ -667,14 +690,19 @@ class BitmapIndex {
                 throw new Error(`Bitmap with key ID "${key}" not found in the persistent store`);
             }
 
-            const deserializedBitmap = Bitmap.deserialize(bitmapData, true);
+            // First deserialize into a RoaringBitmap32
+            const roaring = RoaringBitmap32.deserialize(bitmapData, true);
+            debug(`Deserialized bitmap data type: ${roaring.constructor.name}`);
 
-            // Create a new Bitmap instance with the serialized data
-            const bitmap = new Bitmap(deserializedBitmap, {
+            // Create a fresh Bitmap instance
+            const bitmap = new Bitmap(roaring, {
                 key: key,
                 rangeMin: this.rangeMin,
                 rangeMax: this.rangeMax,
             });
+
+            // Verify that the bitmap has the required methods
+            debug(`New bitmap instance type: ${bitmap.constructor.name}, has addMany: ${typeof bitmap.addMany === 'function'}`);
 
             // Cache the bitmap for future use
             this.cache.set(key, bitmap);

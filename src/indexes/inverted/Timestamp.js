@@ -15,7 +15,7 @@ export default class TimestampIndex {
 
     constructor(backingStore, actionBitmaps) {
         if (!backingStore) { throw new Error('backingStore reference required'); }
-        if (!actionBitmaps) { throw new Error('actionBitmaps reference required'); }
+        //if (!actionBitmaps) { throw new Error('actionBitmaps reference required'); }
         this.store = backingStore;
         this.actionBitmaps = actionBitmaps;
     }

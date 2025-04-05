@@ -28,6 +28,44 @@ class Bitmap extends RoaringBitmap32 {
         debug(`Bitmap "${this.key}" has ${this.size} objects`);
     }
 
+    // Explicit implementation of addMany in case inheritance issues
+    addMany(values) {
+        debug(`Adding ${Array.isArray(values) ? values.length : 'unknown number of'} values to bitmap "${this.key}"`);
+
+        if (Array.isArray(values)) {
+            // Add values one by one if array
+            for (const value of values) {
+                this.add(value);
+            }
+        } else if (values instanceof RoaringBitmap32) {
+            // Use or if it's another bitmap
+            this.orInPlace(values);
+        } else {
+            throw new Error(`Cannot add values of type ${typeof values} to bitmap`);
+        }
+
+        return this;
+    }
+
+    // Explicit implementation of removeMany
+    removeMany(values) {
+        debug(`Removing ${Array.isArray(values) ? values.length : 'unknown number of'} values from bitmap "${this.key}"`);
+
+        if (Array.isArray(values)) {
+            // Remove values one by one if array
+            for (const value of values) {
+                this.remove(value);
+            }
+        } else if (values instanceof RoaringBitmap32) {
+            // Use andNot if it's another bitmap
+            this.andNotInPlace(values);
+        } else {
+            throw new Error(`Cannot remove values of type ${typeof values} from bitmap`);
+        }
+
+        return this;
+    }
+
     tick(oid) {
         this.#validateOid(oid);
         this.add(oid);
@@ -68,6 +106,18 @@ class Bitmap extends RoaringBitmap32 {
 
         Bitmap.validateRange(oidArrayOrBitmap, options.rangeMin, options.rangeMax);
         return new Bitmap(oidArrayOrBitmap, options);
+    }
+
+    /**
+     * Static method to deserialize a buffer back into a Bitmap instance
+     * @param {Buffer} buffer - Serialized bitmap data
+     * @param {boolean} portable - Whether the serialization is portable
+     * @param {Object} options - Options for the bitmap
+     * @returns {Bitmap} - New bitmap instance
+     */
+    static deserialize(buffer, portable = true, options = {}) {
+        const roaring = RoaringBitmap32.deserialize(buffer, portable);
+        return new Bitmap(roaring, options);
     }
 
     static validateRange(inputData, rangeMin = MIN_OID, rangeMax = MAX_OID) {

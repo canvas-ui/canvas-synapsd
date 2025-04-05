@@ -105,21 +105,14 @@ class SynapsD extends EventEmitter {
 
         // Action bitmaps
         // TODO: Refactor || FIX!
-        this.actionBitmaps = {
-            created: this.bitmapIndex.createBitmap('internal/action/created'),
-            updated: this.bitmapIndex.createBitmap('internal/action/updated'),
-            deleted: this.bitmapIndex.createBitmap('internal/action/deleted'),
-        };
+        this.actionBitmaps = null;
 
         /**
          * Inverted indexes
          */
 
         this.#checksumIndex = new ChecksumIndex(this.#db.createDataset('checksums'));
-        this.#timestampIndex = new TimestampIndex(
-            this.#db.createDataset('timestamps'),
-            this.actionBitmaps,
-        );
+        this.#timestampIndex = null;
 
         // TODO: FTS index
         // TODO: Vector index
@@ -136,13 +129,10 @@ class SynapsD extends EventEmitter {
 
         // Instantiate the Tree view
         this.#tree = new ContextTree({
-            documentStore: this.documents,
-            metadataStore: this.metadata,
-            internalStore: this.system,
-            bitmapIndex: this.bitmapIndex,
+            dataStore: this.#internalStore
         });
 
-        this.#treeLayers = this.#tree.layers;
+        this.#treeLayers = null;
 
     }
 
@@ -177,7 +167,7 @@ class SynapsD extends EventEmitter {
     get db() { return this.#db; } // For testing only
     get tree() { return this.#tree; } // db.tree.insertPath()
     get layers() { return this.#treeLayers; } // db.tree.layers.renameLayer()
-    get bitmaps() { return this.bitmapIndex; } // db.bitmapIndex.createBitmap()
+    get bitmaps() { return this.bitmapIndex; } // db.bitmaps.createBitmap()
 
     /**
      * Service methods
@@ -186,10 +176,25 @@ class SynapsD extends EventEmitter {
     async start() {
         debug('Starting SynapsD');
         try {
-            // Initialize database backend
-            // Initialize index backends
 
+            // Initialize action bitmaps (TODO: Refactor/Remove)
+            this.actionBitmaps = {
+                created: this.bitmapIndex.createBitmap('internal/action/created'),
+                updated: this.bitmapIndex.createBitmap('internal/action/updated'),
+                deleted: this.bitmapIndex.createBitmap('internal/action/deleted'),
+            };
+
+            this.#timestampIndex = new TimestampIndex(
+                this.#db.createDataset('timestamps'),
+                this.actionBitmaps,
+            );
+
+            // Initialize context tree
+            await this.#tree.initialize();
+            this.#treeLayers = this.#tree.layers;
+            // Set status
             this.#status = 'running';
+
             this.emit('started');
             debug('SynapsD started');
         } catch (error) {
@@ -349,7 +354,7 @@ class SynapsD extends EventEmitter {
             // Update context bitmaps
             if (contextBitmapArray.length > 0) {
                 for (const context of contextBitmapArray) {
-                    this.bitmapIndex.tickSync(context, parsedDocument.id);
+                    await this.bitmapIndex.tick(context, parsedDocument.id);
                 }
             }
 
@@ -360,7 +365,7 @@ class SynapsD extends EventEmitter {
 
             // Update feature bitmaps
             for (const feature of featureBitmapArray) {
-                this.bitmapIndex.tickSync(feature, parsedDocument.id);
+                await this.bitmapIndex.tick(feature, parsedDocument.id);
             }
 
             return parsedDocument.id;
@@ -477,13 +482,13 @@ class SynapsD extends EventEmitter {
 
         // Apply context filters if provided
         if (contextBitmapArray.length > 0) {
-            resultBitmap = this.bitmapIndex.AND(contextBitmapArray);
+            resultBitmap = await this.bitmapIndex.AND(contextBitmapArray);
             filtersApplied = true; // AND result assigned
         }
 
         // Apply feature filters if provided
         if (featureBitmapArray.length > 0) {
-            const featureBitmap = this.bitmapIndex.OR(featureBitmapArray);
+            const featureBitmap = await this.bitmapIndex.OR(featureBitmapArray);
             if (filtersApplied) { // Check if resultBitmap holds a meaningful value
                 resultBitmap.andInPlace(featureBitmap);
             } else {
@@ -494,7 +499,7 @@ class SynapsD extends EventEmitter {
 
         // Apply additional filters if provided
         if (filterArray.length > 0) {
-            const filterBitmap = this.bitmapIndex.AND(filterArray);
+            const filterBitmap = await this.bitmapIndex.AND(filterArray);
             if (filtersApplied) {
                 resultBitmap.andInPlace(filterBitmap);
             } else {
@@ -597,7 +602,7 @@ class SynapsD extends EventEmitter {
         // Update context bitmaps if provided
         if (contextBitmapArray.length > 0) {
             for (const context of contextBitmapArray) {
-                this.bitmapIndex.tickSync(context, updatedDocument.id);
+                await this.bitmapIndex.tick(context, updatedDocument.id);
             }
         }
 
@@ -609,7 +614,7 @@ class SynapsD extends EventEmitter {
         // Update feature bitmaps if provided
         if (featureBitmapArray.length > 0) {
             for (const feature of featureBitmapArray) {
-                this.bitmapIndex.tickSync(feature, updatedDocument.id);
+                await this.bitmapIndex.tick(feature, updatedDocument.id);
             }
         }
 
@@ -662,10 +667,10 @@ class SynapsD extends EventEmitter {
         // Remove document will only remove the document from the supplied bitmaps
         // It will not delete the document from the database.
         if (contextBitmapArray.length > 0) {
-            this.bitmapIndex.untickManySync(contextBitmapArray, docId);
+            await this.bitmapIndex.untickMany(contextBitmapArray, docId);
         }
         if (featureBitmapArray.length > 0) {
-            this.bitmapIndex.untickManySync(featureBitmapArray, docId);
+            await this.bitmapIndex.untickMany(featureBitmapArray, docId);
         }
     }
 
