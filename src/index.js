@@ -21,10 +21,6 @@ import ContextLayerIndex from './indexes/context/index.js';
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
 
-// Views
-import Collection from './views/Collection.js';
-import ContextTree from './views/tree/index.js';
-
 // Constants
 const INTERNAL_BITMAP_ID_MIN = 0;
 const INTERNAL_BITMAP_ID_MAX = 100000;
@@ -83,7 +79,6 @@ class SynapsD extends EventEmitter {
             this.#bitmapCache,
         );
 
-        this.contextBitmapCollection = this.bitmapIndex.createCollection('context');
         this.deletedDocumentsBitmap = this.bitmapIndex.createBitmap('internal/gc/deleted');
 
         // Action bitmaps
@@ -374,37 +369,47 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(filterArray)) { throw new Error('Filter array must be an array'); }
         debug(`Listing documents with context: ${contextBitmapArray}, features: ${featureBitmapArray}, filters: ${filterArray}`);
 
-        // Initialize result bitmap
+        // Start with null, will hold RoaringBitmap32 instance if filters are applied
         let resultBitmap = null;
+        // Flag to track if any filters actually modified the initial empty bitmap
+        let filtersApplied = false;
 
         // Apply context filters if provided
         if (contextBitmapArray.length > 0) {
             resultBitmap = this.bitmapIndex.AND(contextBitmapArray);
+            filtersApplied = true; // AND result assigned
         }
 
         // Apply feature filters if provided
         if (featureBitmapArray.length > 0) {
             const featureBitmap = this.bitmapIndex.OR(featureBitmapArray);
-            if (resultBitmap) {
+            if (filtersApplied) { // Check if resultBitmap holds a meaningful value
                 resultBitmap.andInPlace(featureBitmap);
             } else {
                 resultBitmap = featureBitmap;
+                filtersApplied = true; // OR result assigned
             }
         }
 
         // Apply additional filters if provided
         if (filterArray.length > 0) {
             const filterBitmap = this.bitmapIndex.AND(filterArray);
-            if (resultBitmap) {
+            if (filtersApplied) {
                 resultBitmap.andInPlace(filterBitmap);
             } else {
                 resultBitmap = filterBitmap;
+                filtersApplied = true; // Modified by AND
             }
         }
 
-        // If no filters were applied or result is empty, get all documents
-        if (!resultBitmap || resultBitmap.isEmpty) {
+        // Convert the final bitmap result (which might be null) to an ID array
+        const finalDocumentIds = resultBitmap ? resultBitmap.toArray() : [];
+
+        // Case 1: No filters were effectively applied (bitmap is still initial empty state).
+        // We check filtersApplied flag instead of array lengths now.
+        if (!filtersApplied) {
             // Changed from listEntries to getRange for consistency
+            // TODO: Add limit support directly to getRange if possible
             const documents = [];
             for await (const { key, value } of this.documents.getRange()) {
                 documents.push(value);
@@ -412,15 +417,23 @@ class SynapsD extends EventEmitter {
             return options.limit ? documents.slice(0, options.limit) : documents;
         }
 
+        // Case 2: Filters were applied, but the resulting bitmap is null (e.g., ANDing non-existent keys) or empty.
+        if (finalDocumentIds.length === 0) {
+            debug('listDocuments: Resulting bitmap is null or empty after applying filters. Returning [].');
+            return []; // Return empty array, not all documents
+        }
+
         // Convert bitmap to array of document IDs
-        const documentIds = Array.from(resultBitmap);
+        const documentIds = finalDocumentIds;
 
         // Changed: Get documents one by one to avoid undefined entries
         // TODO: Change to getMany as its faaaaaaaster!
         const documents = [];
         for (const id of documentIds) {
-            const doc = await this.documents.get(id);
+            // Use getById to ensure proper parsing and instantiation
+            const doc = await this.getById(id);
             if (doc) {
+                // console.log(`DEBUG: Retrieved for ID ${id}:`, typeof doc, doc); // Keep for now if needed
                 documents.push(doc);
             }
         }
@@ -737,8 +750,10 @@ class SynapsD extends EventEmitter {
         return this.bitmapIndex.createBitmap(id, options);
     }
 
-    listBitmaps(collection) {
-        return this.bitmapIndex.listBitmaps(collection);
+    listBitmaps(prefix = '') {
+        // Ensure prefix is a string
+        const keyPrefix = typeof prefix === 'string' ? prefix : '';
+        return this.bitmapIndex.listBitmaps(keyPrefix);
     }
 
     getBitmap(id) {

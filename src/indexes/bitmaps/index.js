@@ -10,7 +10,6 @@ const require = createRequire(import.meta.url);
 // Includes
 const { RoaringBitmap32 } = require('roaring/RoaringBitmap32');
 import Bitmap from './lib/Bitmap.js';
-import BitmapCollection from './lib/BitmapCollection.js';
 
 // Constants
 const ALLOWED_PREFIXES = [
@@ -36,62 +35,7 @@ class BitmapIndex {
         this.rangeMin = options.rangeMin || 0;
         this.rangeMax = options.rangeMax || 4294967296; // 2^32
 
-        // If an emitter is passed in options, use it; otherwise create a new one.
-        this.emitter = options.emitter || new EventEmitter();
         debug(`BitmapIndex initialized with range ${this.rangeMin} - ${this.rangeMax}`);
-
-        // Collection Map
-        this.collections = new Map();
-
-        // Create a internal bitmap collection
-        this.system = this.createCollection('internal');
-    }
-
-    /**
-     * Collections
-     */
-
-    createCollection(collectionName, options = {}) {
-        if (!collectionName) { throw new Error('Collection name required'); }
-        if (!options.rangeMin) { options.rangeMin = this.rangeMin; }
-        if (!options.rangeMax) { options.rangeMax = this.rangeMax; }
-        if (this.collections.has(collectionName)) {
-            return this.collections.get(collectionName);
-        }
-
-        // Temporary, this is ugly
-        options.bitmapIndex = this;
-
-        debug(`Creating new BitmapCollection "${collectionName}"`);
-        this.collections.set(collectionName, new BitmapCollection(collectionName, this.store, options));
-
-        return this.collections.get(collectionName);
-    }
-
-    listCollections() {
-        return Array.from(this.collections.keys());
-    }
-
-    getCollection(collectionName) {
-        if (!collectionName) { throw new Error('Collection name required'); }
-        if (!this.collections.has(collectionName)) {
-            throw new Error(`BitmapCollection "${collectionName}" not found`);
-        }
-        return this.collections.get(collectionName);
-
-    }
-
-    hasCollection(collectionName) {
-        return this.collections.has(collectionName);
-    }
-
-    deleteCollection(collectionName) {
-        if (!collectionName) { throw new Error('Collection name required'); }
-        if (!this.collections.has(collectionName)) {
-            throw new Error(`BitmapCollection "${collectionName}" not found`);
-        }
-
-        return this.collections.delete(collectionName);
     }
 
     /**
@@ -204,7 +148,6 @@ class BitmapIndex {
 
         this.deleteBitmap(oldKey);
         this.#saveBitmap(newKey, bitmap);
-        this.emitBitmapUpdate(newKey);
 
         return bitmap;
     }
@@ -214,9 +157,6 @@ class BitmapIndex {
         debug(`Deleting bitmap "${key}"`);
         this.cache.delete(key);
         this.store.del(key);
-        if (this.emitter && typeof this.emitter.emit === 'function') {
-            this.emitter.emit('bitmap:deleted', key);
-        }
     }
 
     hasBitmap(key) {
@@ -256,7 +196,6 @@ class BitmapIndex {
 
         bitmap.addMany(validIds);
         this.#saveBitmap(key, bitmap);
-        this.emitBitmapUpdate(key);
         return bitmap;
     }
 
@@ -297,7 +236,6 @@ class BitmapIndex {
             return null;
         } else {
             this.#saveBitmap(key, bitmap);
-            this.emitBitmapUpdate(key);
             return bitmap;
         }
     }
@@ -337,7 +275,6 @@ class BitmapIndex {
             affectedKeys.push(key);
         }
 
-        if (affectedKeys.length) { this.emitBitmapUpdate(affectedKeys); }
         return affectedKeys;
     }
 
@@ -381,9 +318,6 @@ class BitmapIndex {
             affectedKeys.push(key);
         }
 
-        if (affectedKeys.length) {
-            this.emitBitmapUpdate(affectedKeys);
-        }
         return affectedKeys;
     }
 
@@ -432,9 +366,8 @@ class BitmapIndex {
             this.#saveBitmap(bitmap.key, bitmap);
         }
 
-
         if (affectedKeys.length) {
-            this.emitBitmapUpdate(affectedKeys);
+            return affectedKeys;
         }
         return affectedKeys;
     }
@@ -484,13 +417,6 @@ class BitmapIndex {
             this.deleteBitmap(key); // deleteBitmap already handles cache removal and event emission
         }
 
-
-        // Emit updates only for keys that were modified but not deleted
-        const updatedKeys = affectedKeys.filter(key => !keysToDelete.includes(key));
-        if (updatedKeys.length) {
-            this.emitBitmapUpdate(updatedKeys);
-        }
-
         // Return all keys that were affected (modified or deleted)
         return affectedKeys;
     }
@@ -535,7 +461,6 @@ class BitmapIndex {
             return null;
         } else {
             this.#saveBitmap(key, bitmap);
-            this.emitBitmapUpdate(key);
             return bitmap;
         }
     }
@@ -587,12 +512,23 @@ class BitmapIndex {
         if (positiveKeys.length) {
             // Start with the first bitmap
             BitmapIndex.validateKey(positiveKeys[0]);
-            partial = this.getBitmap(positiveKeys[0], true).clone();
+            const firstBitmap = this.getBitmap(positiveKeys[0], false); // Do NOT auto-create
+
+            // If the first key doesn't exist, the AND result must be empty
+            if (!firstBitmap) {
+                return new RoaringBitmap32();
+            }
+            partial = firstBitmap.clone();
 
             // AND with remaining bitmaps
             for (let i = 1; i < positiveKeys.length; i++) {
                 BitmapIndex.validateKey(positiveKeys[i]);
-                const bitmap = this.getBitmap(positiveKeys[i], true);
+                const bitmap = this.getBitmap(positiveKeys[i], false); // Do NOT auto-create
+
+                // If any subsequent key doesn't exist, the AND result must be empty
+                if (!bitmap) {
+                    return new RoaringBitmap32();
+                }
                 partial.andInPlace(bitmap);
             }
         } else {
@@ -708,14 +644,6 @@ class BitmapIndex {
         }
 
         return true;
-    }
-
-    // Emit an update event with one or more bitmap keys.
-    emitBitmapUpdate(keyOrKeys) {
-        if (this.emitter && typeof this.emitter.emit === 'function') {
-            const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
-            this.emitter.emit('bitmap:update', keys);
-        }
     }
 
     /**
