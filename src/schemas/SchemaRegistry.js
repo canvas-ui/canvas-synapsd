@@ -43,22 +43,20 @@ const SCHEMA_REGISTRY = {
     'internal/layers/workspace': Workspace,     // "Mountpoint" to a workspace
 };
 
-export function isDocument(obj) {
+export function isDocumentInstance(obj) {
     if (!obj || typeof obj !== 'object') {return false;}
 
     // Check for essential document properties
     return (
         obj.schema &&
         typeof obj.schema === 'string' &&
-        obj.schemaVersion &&
         obj.data !== undefined &&
-        obj.metadata &&
         obj instanceof BaseDocument
     ) || false;
 }
 
-export function isDocumentData(obj) {
-    if (!obj || typeof obj !== 'object') {return false;}
+export function isDocument(obj) {
+    if (!obj || typeof obj !== 'object') { return false; }
 
     // Check for minimal proto object properties
     return (
@@ -119,28 +117,6 @@ class SchemaRegistry {
      */
     listSchemas() {
         return Array.from(this.#schemas.keys());
-    }
-
-    /**
-     * Validate a full document against its schema
-     * @param {Object} document - The document to validate
-     * @returns {boolean} True if validation passes, false otherwise
-     * @private
-     */
-    #validateDocument(document) {
-        const SchemaClass = this.getSchema(document.schema);
-        return SchemaClass.validate(document);
-    }
-
-    /**
-     * Validate document data against its document schema
-     * @param {Object} data - The document data to validate
-     * @returns {boolean} True if validation passes, false otherwise
-     * @private
-     */
-    #validateDocumentData(data) {
-        const SchemaClass = this.getSchema(data.schema);
-        return SchemaClass.validateData(data);
     }
 
     /**

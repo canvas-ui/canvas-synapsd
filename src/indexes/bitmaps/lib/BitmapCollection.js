@@ -4,69 +4,53 @@
 import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd:bitmap-collection');
 
-export default class BitmapCollection {
+// Core
+import Collection from '../../core/Collection';
 
-    constructor(name, bitmapIndex, options = {}) {
+export default class BitmapCollection extends Collection {
+
+    constructor(name, dataset, options = {}) {
         if (!name) { throw new Error('BitmapCollection name required'); }
-        if (!bitmapIndex) { throw new Error('BitmapIndex instance required'); }
+        if (!dataset) { throw new Error('dataset instance required'); }
 
-        this.name = name;
-        this.bitmapIndex = bitmapIndex;
-        this.keyPrefix = `${name}/`;
+        // Bitmap specific options
+        if (!options.bitmapManager) { throw new Error('bitmapManager instance required'); }
+        this.bitmapIndex = options.bitmapManager;
 
-        debug(`BitmapCollection "${this.name}" initialized`);
+        // Initialize
+        super(name, dataset, options);
     }
 
-    /**
-     * Key management
-     */
-
-    makeKey(key) {
-        // Remove "!"" prefix (used for negation)
-        let normalizedKey = key.startsWith('!') ? key.slice(1) : key;
-
-        // Remove trailing slashes
-        normalizedKey = normalizedKey.endsWith('/') ? normalizedKey.slice(0, -1) : normalizedKey;
-
-        // Return full key
-        return `${this.keyPrefix}${normalizedKey}`;
-    }
 
     /**
      * Core operations
      */
 
     createBitmap(key, oidArrayOrBitmap) {
-        return this.bitmapIndex.createBitmap(this.makeKey(key), oidArrayOrBitmap);
+        return this.bitmapIndex.createBitmap(super.makeKey(key), oidArrayOrBitmap);
     }
 
     getBitmap(key, autoCreate) {
-        return this.bitmapIndex.getBitmap(this.makeKey(key), autoCreate);
+        return this.bitmapIndex.getBitmap(super.makeKey(key), autoCreate);
     }
 
     renameBitmap(oldKey, newKey) {
         return this.bitmapIndex.renameBitmap(
-            this.makeKey(oldKey),
-            this.makeKey(newKey),
+            super.makeKey(oldKey),
+            super.makeKey(newKey),
         );
     }
 
     deleteBitmap(key) {
-        return this.bitmapIndex.deleteBitmap(this.makeKey(key));
+        return this.bitmapIndex.deleteBitmap(super.makeKey(key));
     }
 
     hasBitmap(key) {
-        return this.bitmapIndex.hasBitmap(this.makeKey(key));
+        return this.bitmapIndex.hasBitmap(super.makeKey(key));
     }
 
-    async listBitmaps() {
-        const keys = [];
-        for await (const key of this.bitmapIndex.store.getKeys({
-            start: this.keyPrefix,
-            end: this.keyPrefix + '\uffff',
-        })) { keys.push(key); }
-
-        return keys;
+    listBitmaps() {
+        return super.listDocuments();
     }
 
 
@@ -75,12 +59,12 @@ export default class BitmapCollection {
      */
 
     async tickMany(keys, ids) {
-        const fullKeys = keys.map(key => this.makeKey(key));
+        const fullKeys = keys.map(key => super.makeKey(key));
         return this.bitmapIndex.tickMany(fullKeys, ids);
     }
 
     async untickMany(keys, ids) {
-        const fullKeys = keys.map(key => this.makeKey(key));
+        const fullKeys = keys.map(key => super.makeKey(key));
         return this.bitmapIndex.untickMany(fullKeys, ids);
     }
 
@@ -90,15 +74,15 @@ export default class BitmapCollection {
 
     async applyToMany(sourceKey, targetKeys) {
         return this.bitmapIndex.applyToMany(
-            this.makeKey(sourceKey),
-            targetKeys.map(key => this.makeKey(key)),
+            super.makeKey(sourceKey),
+            targetKeys.map(key => super.makeKey(key)),
         );
     }
 
     async subtractFromMany(sourceKey, targetKeys) {
         return this.bitmapIndex.subtractFromMany(
-            this.makeKey(sourceKey),
-            targetKeys.map(key => this.makeKey(key)),
+            super.makeKey(sourceKey),
+            targetKeys.map(key => super.makeKey(key)),
         );
     }
 

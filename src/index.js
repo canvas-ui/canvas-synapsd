@@ -12,14 +12,14 @@ import Db from './backends/lmdb/index.js';
 
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
-import { isDocument, isDocumentData } from './schemas/SchemaRegistry.js';
+import { isDocument, isDocumentInstance } from './schemas/SchemaRegistry.js';
 import BaseDocument from './schemas/BaseDocument.js';
 
 // Indexes
 import BitmapIndex from './indexes/bitmaps/index.js';
+import ContextLayerIndex from './indexes/context/index.js';
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
-import ContextLayerIndex from './indexes/context/index.js';
 
 // Views
 import Collection from './views/Collection.js';
@@ -83,10 +83,7 @@ class SynapsD extends EventEmitter {
             this.#bitmapCache,
         );
 
-        // Context bitmaps
         this.contextBitmapCollection = this.bitmapIndex.createCollection('context');
-
-        // Deleted documents bitmap
         this.deletedDocumentsBitmap = this.bitmapIndex.createBitmap('internal/gc/deleted');
 
         // Action bitmaps
@@ -200,47 +197,55 @@ class SynapsD extends EventEmitter {
      * Validation methods
      */
 
-    validateData(documentData) {
-        if (!documentData || typeof documentData !== 'object') {
-            debug('Invalid document data:', documentData);
-            return false;
-        }
-
-        try {
-            // Check if schema exists
-            if (!this.hasSchema(documentData.schema)) {
-                debug(`Schema ${documentData.schema} not found`);
-                return false;
-            }
-
-            // Get schema class and validate
-            const SchemaClass = this.getSchema(documentData.schema);
-            return SchemaClass.validateData(documentData);
-        } catch (error) {
-            debug('Validation error:', error);
-            return false;
+    validateDocument(document) {
+        if (isDocumentInstance(document)) {
+            return this.validateDocumentInstance(document);
+        } else if (isDocument(document)) {
+            return this.validateDocumentData(document);
+        } else {
+            throw new Error('Invalid document: must be a document instance or valid document data');
         }
     }
 
-    validateDocument(document) {
+    validateDocumentInstance(document) {
+        return document.validate();
+    }
+
+    validateDocumentData(document) {
         if (!document || typeof document !== 'object') {
+            debug('Document is not an object');
+            return false;
+        }
+
+        if (!document.schema) {
+            debug('Document does not have a schema property');
+            return false;
+        }
+
+        if (!document.data) {
+            debug('Document does not have a data property');
+            return false;
+        }
+
+        if (!this.hasSchema(document.schema)) {
+            debug(`Schema ${document.schema} not found`);
             return false;
         }
 
         try {
-            // Check if schema exists
-            if (!this.hasSchema(document.schema)) {
-                return false;
-            }
-
             // Get schema class and validate
             const SchemaClass = this.getSchema(document.schema);
-            return SchemaClass.validate(document);
+            return SchemaClass.validateData(document);
         } catch (error) {
-            debug('Validation error:', error);
+            debug('Data validation error:', error);
             return false;
         }
     }
+
+    /**
+     * Context tree abstraction (view)
+     */
+
 
 
     /**
@@ -775,30 +780,6 @@ class SynapsD extends EventEmitter {
     }
 
     /**
-     * Bitmap Collection methods
-     */
-
-    createCollection(id, options = {}) {
-        return this.bitmapIndex.createCollection(id, options);
-    }
-
-    listCollections() {
-        return this.bitmapIndex.listCollections();
-    }
-
-    getCollection(id) {
-        return this.bitmapIndex.getCollection(id);
-    }
-
-    hasCollection(id) {
-        return this.bitmapIndex.hasCollection(id);
-    }
-
-    deleteCollection(id) {
-        return this.bitmapIndex.deleteCollection(id);
-    }
-
-    /**
      * Utils
      */
 
@@ -854,8 +835,8 @@ class SynapsD extends EventEmitter {
 
     /**
      * Parse a document data object
-     * @param {Object} documentData - Document data object
-     * @returns {Object} Parsed document data object
+     * @param {String|Object} documentData - Document data as string or object
+     * @returns {Object} Parsed document data object (JSON parsed if string)
      * @private
      */
     #parseDocument(documentData) {
@@ -882,21 +863,26 @@ class SynapsD extends EventEmitter {
         if (!documentData) { throw new Error('Document data required'); }
         let doc;
 
-        // Make sure we have a document object
-        if (isDocumentData(documentData)) {
+        // If we have a document instance, return it
+        if (isDocumentInstance(documentData)) {
+            // Validate the document
+            this.validateDocumentInstance(documentData);
+
+            doc = documentData;
+
+            // Ensure checksums are generated
+            if (!doc.checksumArray || doc.checksumArray.length === 0) {
+                doc.checksumArray = doc.generateChecksumStrings();
+            }
+
+        // If we have a document data object, create a document instance from it
+        } else if (isDocument(documentData)) {
             // Get the schema class for the document
             const Schema = this.getSchema(documentData.schema);
             if (!Schema) { throw new Error(`Schema ${documentData.schema} not found`); }
 
             // Create a document instance from data
             doc = Schema.fromData(documentData);
-
-            // Ensure checksums are generated
-            if (!doc.checksumArray || doc.checksumArray.length === 0) {
-                doc.checksumArray = doc.generateChecksumStrings();
-            }
-        } else if (isDocument(documentData)) {
-            doc = documentData;
 
             // Ensure checksums are generated
             if (!doc.checksumArray || doc.checksumArray.length === 0) {

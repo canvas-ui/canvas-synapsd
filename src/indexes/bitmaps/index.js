@@ -59,8 +59,11 @@ class BitmapIndex {
             return this.collections.get(collectionName);
         }
 
+        // Temporary, this is ugly
+        options.bitmapIndex = this;
+
         debug(`Creating new BitmapCollection "${collectionName}"`);
-        this.collections.set(collectionName, new BitmapCollection(collectionName, this, options));
+        this.collections.set(collectionName, new BitmapCollection(collectionName, this.store, options));
 
         return this.collections.get(collectionName);
     }
@@ -381,6 +384,114 @@ class BitmapIndex {
         if (affectedKeys.length) {
             this.emitBitmapUpdate(affectedKeys);
         }
+        return affectedKeys;
+    }
+
+    async tickMany(keyArray, ids) {
+        // Simple async wrapper for now
+        return this.tickManySync(keyArray, ids);
+    }
+
+    async untickMany(keyArray, ids) {
+        // Simple async wrapper for now
+        return this.untickManySync(keyArray, ids);
+    }
+
+    async applyToMany(sourceKey, targetKeys) {
+        BitmapIndex.validateKey(sourceKey);
+        debug(`applyToMany(): Applying source "${sourceKey}" to targets: "${targetKeys}"`);
+
+        const sourceBitmap = this.getBitmap(sourceKey, false);
+        if (!sourceBitmap || sourceBitmap.isEmpty()) {
+            debug(`Source bitmap "${sourceKey}" not found or is empty, nothing to apply.`);
+            return [];
+        }
+
+        const affectedKeys = [];
+        const bitmapsToSave = []; // Collect bitmaps to save in batch if possible
+
+        for (const targetKey of targetKeys) {
+            BitmapIndex.validateKey(targetKey);
+            // Auto-create target if it doesn't exist when applying
+            const targetBitmap = this.getBitmap(targetKey, true);
+            const originalSize = targetBitmap.size;
+
+            targetBitmap.orInPlace(sourceBitmap);
+
+            // Only save and mark as affected if there was a change
+            if (targetBitmap.size !== originalSize) {
+                bitmapsToSave.push(targetBitmap); // Assuming Bitmap instance holds its key internally or we pair it later
+                affectedKeys.push(targetKey);
+            }
+        }
+
+        // Perform batch save (or individual saves if batching isn't implemented in store)
+        // Assuming #saveBitmap handles individual saves for now.
+        for (const bitmap of bitmapsToSave) {
+            // Need the key associated with the bitmap instance for saving
+            this.#saveBitmap(bitmap.key, bitmap);
+        }
+
+
+        if (affectedKeys.length) {
+            this.emitBitmapUpdate(affectedKeys);
+        }
+        return affectedKeys;
+    }
+
+    async subtractFromMany(sourceKey, targetKeys) {
+        BitmapIndex.validateKey(sourceKey);
+        debug(`subtractFromMany(): Subtracting source "${sourceKey}" from targets: "${targetKeys}"`);
+
+        const sourceBitmap = this.getBitmap(sourceKey, false);
+        if (!sourceBitmap || sourceBitmap.isEmpty()) {
+            debug(`Source bitmap "${sourceKey}" not found or is empty, nothing to subtract.`);
+            return [];
+        }
+
+        const affectedKeys = [];
+        const bitmapsToSave = []; // Collect bitmaps to save
+        const keysToDelete = []; // Collect keys for empty bitmaps
+
+        for (const targetKey of targetKeys) {
+            BitmapIndex.validateKey(targetKey);
+            // Do not auto-create target if it doesn't exist when subtracting
+            const targetBitmap = this.getBitmap(targetKey, false);
+            if (!targetBitmap) {
+                debug(`Target bitmap "${targetKey}" not found, skipping subtraction.`);
+                continue;
+            }
+
+            const originalSize = targetBitmap.size;
+            targetBitmap.andNotInPlace(sourceBitmap); // Subtract source from target
+
+            if (targetBitmap.size !== originalSize) {
+                 if (targetBitmap.isEmpty()) {
+                    debug(`Target bitmap "${targetKey}" is now empty after subtraction, scheduling for deletion.`);
+                    keysToDelete.push(targetKey);
+                } else {
+                    bitmapsToSave.push(targetBitmap);
+                }
+                affectedKeys.push(targetKey);
+            }
+        }
+
+        // Perform batch save/delete
+        for (const bitmap of bitmapsToSave) {
+             this.#saveBitmap(bitmap.key, bitmap);
+        }
+        for (const key of keysToDelete) {
+            this.deleteBitmap(key); // deleteBitmap already handles cache removal and event emission
+        }
+
+
+        // Emit updates only for keys that were modified but not deleted
+        const updatedKeys = affectedKeys.filter(key => !keysToDelete.includes(key));
+        if (updatedKeys.length) {
+            this.emitBitmapUpdate(updatedKeys);
+        }
+
+        // Return all keys that were affected (modified or deleted)
         return affectedKeys;
     }
 

@@ -13,7 +13,6 @@ import {
     isThisYear,
 } from 'date-fns';
 import { generateChecksum } from '../utils/crypto.js';
-import { debug } from 'console';
 
 // Document constants
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/document';
