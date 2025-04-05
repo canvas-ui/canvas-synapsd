@@ -4,8 +4,8 @@ import Layer from './BaseLayer.js';
 
 export default class Context extends Layer {
 
-    constructor(options = {}) {
-        super(options);
+    constructor(name, options = {}) {
+        super(name, options);
     }
 
 }

@@ -1,34 +1,28 @@
-
-
 import debugMessage from 'debug';
-const debug = debugMessage('canvas:tree:layer');
+const debug = debugMessage('synapsd:tree:layer');
 
 import { v4 as uuidv4 } from 'uuid';
-//import { LAYER_TYPES } from '../index.js';
 
 class Layer {
-    constructor(options) {
-        if (typeof options !== 'object') {
-            options = { name: options };
+    constructor(name, options = {}) {
+        if (typeof name === 'object') {
+            options = name;
+            name = options.name;
         }
 
         // Default options
         options = {
-            schemaVersion: '2.0',
             id: uuidv4(),
-            type: 'layer',
+            schemaVersion: '2.0',
+            type: 'context',
             color: null,
             ...options,
         };
 
-        if (!options.name || typeof options.name !== 'string' || !options.name.trim().length) {
-            throw new Error('Layer name must be a non-empty String');
-        }
-
         // TODO: This constructor needs a proper cleanup!
         this.id = options.id;
-        this.type = this.#validateType(options.type); // TODO: Move to LayerManager/dedicated file
-        this.name = this.#sanitizeName(options.name);
+        this.type = options.type ?? 'context';
+        this.name = this.#sanitizeName(name);
         this.label = options.label ? this.#sanitizeLabel(options.label) : this.name;
         this.description = options.description ? this.#sanitizeDescription(options.description) : 'Canvas layer';
         this.color = options?.color;
@@ -37,7 +31,7 @@ class Layer {
     }
 
     /**
-     * Setters
+     * Convenience methods
      */
 
     setName(name) {
@@ -68,14 +62,6 @@ class Layer {
      * Validators
      */
 
-    #validateType(type) {
-        /*if (!LAYER_TYPES.includes(type)) {
-            throw new Error('Unsupported layer type');
-        }*/
-        // Moved to Tree
-        return type;
-    }
-
     #sanitizeName(name) {
         if (typeof name !== 'string') {
             throw new Error('Name must be a string');
@@ -85,7 +71,13 @@ class Layer {
             throw new Error('Name must be less than 32 characters');
         }
 
-        return name.toLowerCase(); //name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+        // Remove all special characters except underscore, dash, dot and forward slash
+        name = name.replace(/[^a-zA-Z0-9_./\-]/g, '_');
+
+        // Convert to lowercase
+        name = name.toLowerCase();
+
+        return name;
     }
 
     #sanitizeLabel(label) {

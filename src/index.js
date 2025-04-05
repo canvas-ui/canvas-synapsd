@@ -17,9 +17,13 @@ import BaseDocument from './schemas/BaseDocument.js';
 
 // Indexes
 import BitmapIndex from './indexes/bitmaps/index.js';
-import ContextLayerIndex from './indexes/context/index.js';
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
+//import FtsIndex from './indexes/fts/index.js';
+//import VectorIndex from './indexes/vector/index.js';
+
+// Views / Abstractions
+import ContextTree from './views/tree/index.js';
 
 // Constants
 const INTERNAL_BITMAP_ID_MIN = 0;
@@ -31,14 +35,31 @@ const INTERNAL_BITMAP_ID_MAX = 100000;
 
 class SynapsD extends EventEmitter {
 
+    // Database Backend
     #dbBackend = 'lmdb';
-
     #rootPath;  // Root path of the database
     #db;        // Database backend instance
-    #status;    // Status of the database
 
-    #bitmapStore;
-    #bitmapCache;
+    // Internal KV store
+    #internalStore;
+
+    // Runtime
+    #status;
+
+    // Tree Abstraction
+    #tree;
+    #treeLayers;
+
+    // Bitmap Indexes
+    #bitmapStore;   // Bitmap store
+    #bitmapCache;   // In-memory cache for bitmap storage
+
+    // Inverted Indexes
+    #checksumIndex;
+    #timestampIndex;
+
+    // Collections
+    #collections;
 
     constructor(options = {
         backupOnOpen: false,
@@ -51,10 +72,11 @@ class SynapsD extends EventEmitter {
         debug('Initializing SynapsD');
         debug('DB Options:', options);
 
+        // Runtime
         this.#status = 'initializing';
-        this.#rootPath = options.rootPath ?? options.path;
 
         // Initialize database backend
+        this.#rootPath = options.rootPath ?? options.path;
         if (!this.#rootPath) { throw new Error('Database path required'); }
         this.#db = new Db({
             ...options,
@@ -65,15 +87,15 @@ class SynapsD extends EventEmitter {
         this.documents = this.#db.createDataset('documents');
         this.metadata = this.#db.createDataset('metadata');
 
-        // Internal data
-        this.system = this.#db.createDataset('system');
+        // Internal KV store
+        this.#internalStore = this.#db.createDataset('internal');
 
         /**
          * Bitmap indexes
          */
 
         this.#bitmapCache = options.bitmapCache ?? new Map();
-        this.#bitmapStore = this.#db.createDataset('bitmaps');
+        this.#bitmapStore = options.bitmapStore ?? this.#db.createDataset('bitmaps');
         this.bitmapIndex = new BitmapIndex(
             this.#bitmapStore,
             this.#bitmapCache,
@@ -93,8 +115,8 @@ class SynapsD extends EventEmitter {
          * Inverted indexes
          */
 
-        this.checksumIndex = new ChecksumIndex(this.#db.createDataset('checksums'));
-        this.timestampIndex = new TimestampIndex(
+        this.#checksumIndex = new ChecksumIndex(this.#db.createDataset('checksums'));
+        this.#timestampIndex = new TimestampIndex(
             this.#db.createDataset('timestamps'),
             this.actionBitmaps,
         );
@@ -102,8 +124,25 @@ class SynapsD extends EventEmitter {
         // TODO: FTS index
         // TODO: Vector index
 
-        // Collections
-        this.collections = new Map()
+        /**
+         * Collections (TODO: Implement an easy-to-use collection abstraction)
+         */
+
+        this.#collections = new Map();
+
+        /**
+         * Tree Abstraction
+         */
+
+        // Instantiate the Tree view
+        this.#tree = new ContextTree({
+            documentStore: this.documents,
+            metadataStore: this.metadata,
+            internalStore: this.system,
+            bitmapIndex: this.bitmapIndex,
+        });
+
+        this.#treeLayers = this.#tree.layers;
 
     }
 
@@ -111,7 +150,8 @@ class SynapsD extends EventEmitter {
      * Getters
      */
 
-    get path() { return this.#rootPath; }
+    get rootPath() { return this.#rootPath; }
+    get status() { return this.#status; }
     get stats() {
         return {
             dbBackend: this.#dbBackend,
@@ -121,8 +161,9 @@ class SynapsD extends EventEmitter {
             metadataCount: this.metadata.getCount(),
             bitmapCacheSize: this.#bitmapCache.size,
             bitmapStoreSize: this.#bitmapStore.getCount(),
-            checksumIndexSize: this.checksumIndex.getCount(),
-            timestampIndexSize: this.timestampIndex.getCount(),
+            checksumIndexSize: this.#checksumIndex.getCount(),
+            timestampIndexSize: this.#timestampIndex.getCount(),
+            // TODO: Refactor this away
             deletedDocumentsCount: this.deletedDocumentsBitmap.size,
             actionBitmaps: {
                 created: this.actionBitmaps.created.size,
@@ -132,8 +173,11 @@ class SynapsD extends EventEmitter {
         };
     }
 
-    get status() { return this.#status; }
-    get db() { return this.#db; } // Could be useful
+    // We need to simplify this growing mammoth interface with some delegation kung-fu
+    get db() { return this.#db; } // For testing only
+    get tree() { return this.#tree; } // db.tree.insertPath()
+    get layers() { return this.#treeLayers; } // db.tree.layers.renameLayer()
+    get bitmaps() { return this.bitmapIndex; } // db.bitmapIndex.createBitmap()
 
     /**
      * Service methods
@@ -155,6 +199,8 @@ class SynapsD extends EventEmitter {
         }
     }
 
+    async stop() { return this.shutdown(); }
+
     async shutdown() {
         debug('Shutting down SynapsD');
         try {
@@ -175,6 +221,10 @@ class SynapsD extends EventEmitter {
             debug('SynapsD database error during shutdown: ', error);
             throw error;
         }
+    }
+
+    restart() {
+        this.stop().then(() => this.start());
     }
 
     isRunning() { return this.#status === 'running'; }
@@ -238,21 +288,41 @@ class SynapsD extends EventEmitter {
     }
 
     /**
-     * Context tree abstraction (view)
-     */
-
-
-
-    /**
      * CRUD methods
      */
 
-    // TODO: A combined upsert method would be more appropriate here
-    async insertDocument(document, contextBitmapArray = [], featureBitmapArray = []) {
+    async insertDocument(document, contextSpec = null, featureBitmapArray = []) {
         if (!document) { throw new Error('Document is required'); }
-        if (!Array.isArray(contextBitmapArray)) { throw new Error('Context array must be an array'); }
+        // contextSpec can be a path string (e.g., "/foo/bar") or an array of bitmap keys
+        const isPathString = typeof contextSpec === 'string' && contextSpec.startsWith('/');
+        const isContextKeyArray = Array.isArray(contextSpec);
+        if (contextSpec !== null && !isPathString && !isContextKeyArray) {
+            throw new Error('Invalid contextSpec: Must be null, a path string starting with /, or an array of bitmap keys.');
+        }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
-        debug('insertDocument: ', document);
+
+        let contextBitmapArray = [];
+        if (isPathString) {
+            debug(`insertDocument with path: "${contextSpec}"`);
+            // Resolve path to keys, create nodes/bitmaps if they don't exist
+            // Use the new method that returns context keys directly
+            contextBitmapArray = await this.tree.getContextKeysForPath(contextSpec, true);
+        } else if (isContextKeyArray) {
+            debug('insertDocument with context array:', contextSpec);
+            contextBitmapArray = contextSpec; // Use the provided array directly
+        } else {
+            debug('insertDocument with no context.');
+            // Default to root layer if no context specified
+            const rootId = this.tree.getRootLayerId();
+            if (rootId) {
+                debug(`Defaulting document context to root layer ID: ${rootId}`);
+                contextBitmapArray = [`context/${rootId}`];
+            } else {
+                // This should not happen if tree initialization is correct
+                debug('Warning: Could not get root layer ID to default context.');
+                contextBitmapArray = []; // Proceed with no context
+            }
+        }
 
         const parsedDocument = this.#parseInitializeDocument(document);
         const storedDocument = await this.getByChecksumString(parsedDocument.checksumArray[0]);
@@ -260,7 +330,7 @@ class SynapsD extends EventEmitter {
         // If a checksum already exists, update the document
         if (storedDocument) {
             debug(`insertDocument: Document found by checksum ${parsedDocument.checksumArray[0]}, updating..`);
-            return this.updateDocument(storedDocument, contextBitmapArray, featureBitmapArray);
+            return this.updateDocument(storedDocument, contextSpec, featureBitmapArray);
         } else {
             debug(`insertDocument: Document not found by checksum ${parsedDocument.checksumArray[0]}, inserting`);
         }
@@ -270,10 +340,10 @@ class SynapsD extends EventEmitter {
             parsedDocument.id = this.#generateDocumentID(); // If checksum differs, always generate a new ID
             parsedDocument.validate();
             await this.documents.put(parsedDocument.id, parsedDocument);
-            await this.checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
-            await this.timestampIndex.insert('created', parsedDocument.createdAt || new Date().toISOString(), parsedDocument.id);
+            await this.#checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
+            await this.#timestampIndex.insert('created', parsedDocument.createdAt || new Date().toISOString(), parsedDocument.id);
             if (parsedDocument.updatedAt) {
-                await this.timestampIndex.insert('updated', parsedDocument.updatedAt, parsedDocument.id);
+                await this.#timestampIndex.insert('updated', parsedDocument.updatedAt, parsedDocument.id);
             }
 
             // Update context bitmaps
@@ -300,9 +370,8 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    async insertDocumentArray(docArray, contextBitmapArray = [], featureBitmapArray = []) {
+    async insertDocumentArray(docArray, contextSpec = null, featureBitmapArray = []) {
         if (!Array.isArray(docArray)) { docArray = [docArray]; }
-        if (!Array.isArray(contextBitmapArray)) { throw new Error('Context array must be an array'); }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
         // Collect errors
@@ -312,7 +381,7 @@ class SynapsD extends EventEmitter {
         // TODO: Insert with a batch operation
         for (const doc of docArray) {
             try {
-                await this.insertDocument(doc, contextBitmapArray, featureBitmapArray);
+                await this.insertDocument(doc, contextSpec, featureBitmapArray);
             } catch (error) {
                 errors[doc.id] = error;
             }
@@ -320,15 +389,30 @@ class SynapsD extends EventEmitter {
         return errors;
     }
 
-    async hasDocument(id, contextBitmapArray = [], featureBitmapArray = []) {
+    async hasDocument(id, contextSpec = null, featureBitmapArray = []) {
         if (!id) { throw new Error('Document id required'); }
-        if (!Array.isArray(contextBitmapArray)) { throw new Error('Context array required'); }
-        if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array required'); }
+        if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
         // First check if the document exists in the database
         if (!await this.documents.has(id)) {
             debug(`Document with ID "${id}" not found in the database`);
             return false;
+        }
+
+        // Handle contextSpec - convert to contextBitmapArray
+        let contextBitmapArray = [];
+        if (contextSpec) {
+            const isPathString = typeof contextSpec === 'string' && contextSpec.startsWith('/');
+            const isContextKeyArray = Array.isArray(contextSpec);
+
+            if (isPathString) {
+                // Convert path to context keys
+                contextBitmapArray = await this.tree.getContextKeysForPath(contextSpec, false);
+            } else if (isContextKeyArray) {
+                contextBitmapArray = contextSpec;
+            } else {
+                throw new Error('Invalid contextSpec: Must be null, a path string starting with /, or an array of bitmap keys.');
+            }
         }
 
         // If no context or feature filters, document exists
@@ -353,21 +437,38 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    async hasDocumentByChecksum(checksum) {
+    async hasDocumentByChecksum(checksum, contextSpec = null, featureBitmapArray = []) {
         if (!checksum) { throw new Error('Checksum required'); }
 
-        const id = await this.checksumIndex.checksumStringToId(checksum);
+        const id = await this.#checksumIndex.checksumStringToId(checksum);
         if (!id) { return false; }
 
-        return await this.documents.has(id);
+        return await this.hasDocument(id, contextSpec, featureBitmapArray);
     }
 
     // Returns documents from the main dataset + context and/or feature bitmaps
-    async listDocuments(contextBitmapArray = [], featureBitmapArray = [], filterArray = [], options = { limit: null }) {
-        if (!Array.isArray(contextBitmapArray)) { throw new Error('Context array must be an array'); }
+    async listDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { limit: null }) {
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
         if (!Array.isArray(filterArray)) { throw new Error('Filter array must be an array'); }
-        debug(`Listing documents with context: ${contextBitmapArray}, features: ${featureBitmapArray}, filters: ${filterArray}`);
+        debug(`Listing documents with contextSpec: ${contextSpec}, features: ${featureBitmapArray}, filters: ${filterArray}`);
+
+        // Handle contextSpec - convert to contextBitmapArray
+        let contextBitmapArray = [];
+        if (contextSpec) {
+            const isPathString = typeof contextSpec === 'string' && contextSpec.startsWith('/');
+            const isContextKeyArray = Array.isArray(contextSpec);
+
+            if (isPathString) {
+                // Convert path to context keys
+                debug(`listDocuments: Converting path "${contextSpec}" to context keys`);
+                contextBitmapArray = await this.tree.getContextKeysForPath(contextSpec, false);
+            } else if (isContextKeyArray) {
+                debug('listDocuments: Using provided context array');
+                contextBitmapArray = contextSpec;
+            } else {
+                throw new Error('Invalid contextSpec: Must be null, a path string starting with /, or an array of bitmap keys.');
+            }
+        }
 
         // Start with null, will hold RoaringBitmap32 instance if filters are applied
         let resultBitmap = null;
@@ -443,12 +544,29 @@ class SynapsD extends EventEmitter {
     }
 
     // Updates documents in context and/or feature bitmaps
-    async updateDocument(document, contextBitmapArray = [], featureBitmapArray = []) {
+    async updateDocument(document, contextSpec = null, featureBitmapArray = []) {
         if (!document) { throw new Error('Document required'); }
         if (!document.id) { throw new Error('Document must have an ID for update operations'); }
-        if (!Array.isArray(contextBitmapArray)) { throw new Error('Context array must be an array'); }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
         debug('updateDocument: ', document);
+
+        // Handle contextSpec - convert to contextBitmapArray
+        let contextBitmapArray = [];
+        if (contextSpec) {
+            const isPathString = typeof contextSpec === 'string' && contextSpec.startsWith('/');
+            const isContextKeyArray = Array.isArray(contextSpec);
+
+            if (isPathString) {
+                // Convert path to context keys
+                debug(`updateDocument: Converting path "${contextSpec}" to context keys`);
+                contextBitmapArray = await this.tree.getContextKeysForPath(contextSpec, true);
+            } else if (isContextKeyArray) {
+                debug('updateDocument: Using provided context array');
+                contextBitmapArray = contextSpec;
+            } else {
+                throw new Error('Invalid contextSpec: Must be null, a path string starting with /, or an array of bitmap keys.');
+            }
+        }
 
         const parsedDocument = this.#parseInitializeDocument(document);
         let updatedDocument = null;
@@ -470,8 +588,8 @@ class SynapsD extends EventEmitter {
             await this.documents.put(updatedDocument.id, updatedDocument);
 
             // Update checksum index
-            await this.checksumIndex.deleteArray(storedDocument.checksumArray);
-            await this.checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
+            await this.#checksumIndex.deleteArray(storedDocument.checksumArray);
+            await this.#checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
         } catch (error) {
             throw error;
         }
@@ -498,9 +616,8 @@ class SynapsD extends EventEmitter {
         return updatedDocument;
     }
 
-    async updateDocumentArray(docArray, contextBitmapArray = [], featureBitmapArray = []) {
+    async updateDocumentArray(docArray, contextSpec = null, featureBitmapArray = []) {
         if (!Array.isArray(docArray)) { docArray = [docArray]; }
-        if (!Array.isArray(contextBitmapArray)) { throw new Error('Context array must be an array'); }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
         // Collect errors
@@ -510,7 +627,7 @@ class SynapsD extends EventEmitter {
         // TODO: Update with a batch operation
         for (const doc of docArray) {
             try {
-                await this.updateDocument(doc, contextBitmapArray, featureBitmapArray);
+                await this.updateDocument(doc, contextSpec, featureBitmapArray);
             } catch (error) {
                 errors[doc.id] = error;
             }
@@ -520,10 +637,27 @@ class SynapsD extends EventEmitter {
     }
 
     // Removes documents from context and/or feature bitmaps
-    async removeDocument(docId, contextBitmapArray = [], featureBitmapArray = []) {
+    async removeDocument(docId, contextSpec = null, featureBitmapArray = []) {
         if (!docId) { throw new Error('Document id required'); }
-        if (!Array.isArray(contextBitmapArray)) { throw new Error('Context array must be an array'); }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
+
+        // Handle contextSpec - convert to contextBitmapArray
+        let contextBitmapArray = [];
+        if (contextSpec) {
+            const isPathString = typeof contextSpec === 'string' && contextSpec.startsWith('/');
+            const isContextKeyArray = Array.isArray(contextSpec);
+
+            if (isPathString) {
+                // Convert path to context keys
+                debug(`removeDocument: Converting path "${contextSpec}" to context keys`);
+                contextBitmapArray = await this.tree.getContextKeysForPath(contextSpec, false);
+            } else if (isContextKeyArray) {
+                debug('removeDocument: Using provided context array');
+                contextBitmapArray = contextSpec;
+            } else {
+                throw new Error('Invalid contextSpec: Must be null, a path string starting with /, or an array of bitmap keys.');
+            }
+        }
 
         // Remove document will only remove the document from the supplied bitmaps
         // It will not delete the document from the database.
@@ -535,9 +669,8 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    async removeDocumentArray(docIdArray, contextBitmapArray = [], featureBitmapArray = []) {
+    async removeDocumentArray(docIdArray, contextSpec = null, featureBitmapArray = []) {
         if (!Array.isArray(docIdArray)) { docIdArray = [docIdArray]; }
-        if (!Array.isArray(contextBitmapArray)) { throw new Error('Context array must be an array'); }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
         // Collect errors
@@ -546,7 +679,7 @@ class SynapsD extends EventEmitter {
         // TODO: Implement batch operation
         for (const id of docIdArray) {
             try {
-                await this.removeDocument(id, contextBitmapArray, featureBitmapArray);
+                await this.removeDocument(id, contextSpec, featureBitmapArray);
             } catch (error) {
                 errors[id] = error;
             }
@@ -574,7 +707,7 @@ class SynapsD extends EventEmitter {
             await this.bitmapIndex.delete(docId);
 
             // Delete document checksums from inverted index
-            await this.checksumIndex.deleteArray(document.checksumArray);
+            await this.#checksumIndex.deleteArray(document.checksumArray);
 
             // Add document ID to deleted documents bitmap
             await this.deletedDocumentsBitmap.tick(docId);
@@ -660,7 +793,7 @@ class SynapsD extends EventEmitter {
         if (!checksumString) { throw new Error('Checksum string required'); }
 
         // Get document ID from checksum index
-        const id = await this.checksumIndex.checksumStringToId(checksumString);
+        const id = await this.#checksumIndex.checksumStringToId(checksumString);
         if (!id) { return null; }
 
         // Use getById which now properly instantiates document objects
@@ -678,7 +811,7 @@ class SynapsD extends EventEmitter {
         const ids = [];
         for (const checksum of checksumStringArray) {
             try {
-                const id = await this.checksumIndex.checksumStringToId(checksum);
+                const id = await this.#checksumIndex.checksumStringToId(checksum);
                 if (id) {
                     ids.push(id);
                 }
@@ -741,75 +874,22 @@ class SynapsD extends EventEmitter {
         throw new Error('Transactions not implemented yet');
     }
 
-
-    /**
-     * Bitmap management methods
-     */
-
-    createBitmap(id, options = {}) {
-        return this.bitmapIndex.createBitmap(id, options);
-    }
-
-    listBitmaps(prefix = '') {
-        // Ensure prefix is a string
-        const keyPrefix = typeof prefix === 'string' ? prefix : '';
-        return this.bitmapIndex.listBitmaps(keyPrefix);
-    }
-
-    getBitmap(id) {
-        return this.bitmapIndex.getBitmap(id);
-    }
-
-    renameBitmap(oldId, newId) {
-        return this.bitmapIndex.renameBitmap(oldId, newId);
-    }
-
-    deleteBitmap(id) {
-        return this.bitmapIndex.deleteBitmap(id);
-    }
-
-    hasBitmap(id) {
-        return this.bitmapIndex.hasBitmap(id);
-    }
-
-    tickBitmaps(docIdArray, bitmapArray) {
-        if (!Array.isArray(docIdArray)) { docIdArray = [docIdArray]; }
-        if (!Array.isArray(bitmapArray)) { bitmapArray = [bitmapArray]; }
-
-        for (const bitmapId of bitmapArray) {
-            for (const docId of docIdArray) {
-                this.bitmapIndex.tickSync(bitmapId, docId);
-            }
-        }
-    }
-
-    untickBitmaps(docIdArray, bitmapArray) {
-        if (!Array.isArray(docIdArray)) { docIdArray = [docIdArray]; }
-        if (!Array.isArray(bitmapArray)) { bitmapArray = [bitmapArray]; }
-
-        for (const bitmapId of bitmapArray) {
-            for (const docId of docIdArray) {
-                this.bitmapIndex.untickSync(bitmapId, docId);
-            }
-        }
-    }
-
     /**
      * Utils
      */
 
-    async dumpDocuments(dstDir, contextBitmapArray = [], featureBitmapArray = [], filterArray = []) {
+    async dumpDocuments(dstDir, contextSpec = null, featureBitmapArray = [], filterArray = []) {
         if (!dstDir) { throw new Error('Destination directory required'); }
         if (typeof dstDir !== 'string') { throw new Error('Destination directory must be a string'); }
         debug('Dumping DB documents to directory: ', dstDir);
-        debug('Context bitmaps: ', contextBitmapArray);
+        debug('Context spec: ', contextSpec);
         debug('Feature bitmaps: ', featureBitmapArray);
 
         // Ensure the destination directory exists
         if (!fs.existsSync(dstDir)) { fs.mkdirSync(dstDir, { recursive: true }); }
 
         // Get all documents from the documents dataset
-        const documentArray = await this.listDocuments(contextBitmapArray, featureBitmapArray, filterArray);
+        const documentArray = await this.listDocuments(contextSpec, featureBitmapArray, filterArray);
         debug(`Found ${documentArray.length} documents to dump..`);
 
         // Loop through all documents in the returned array

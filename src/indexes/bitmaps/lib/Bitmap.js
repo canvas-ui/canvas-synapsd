@@ -9,6 +9,10 @@ const debug = debugInstance('canvas:synapsd:bitmap');
 // Includes
 const { RoaringBitmap32 } = require('roaring/RoaringBitmap32');
 
+// Constants
+const MIN_OID = 0;
+const MAX_OID = 4294967296;
+
 class Bitmap extends RoaringBitmap32 {
     constructor(oidArrayOrBitmap = [], options = {}) {
         super(oidArrayOrBitmap);
@@ -17,8 +21,8 @@ class Bitmap extends RoaringBitmap32 {
             throw new Error('Valid bitmap key string required');
         }
         this.key = options.key;
-        this.rangeMin = options.rangeMin ?? 0;
-        this.rangeMax = options.rangeMax ?? 4294967296;
+        this.rangeMin = options.rangeMin ?? MIN_OID;
+        this.rangeMax = options.rangeMax ?? MAX_OID;
 
         debug(`Bitmap "${this.key}" ID range: ${this.rangeMin} - ${this.rangeMax} initialized`);
         debug(`Bitmap "${this.key}" has ${this.size} objects`);
@@ -57,8 +61,8 @@ class Bitmap extends RoaringBitmap32 {
     static create(oidArrayOrBitmap, options = {}) {
         options = {
             type: 'static',
-            rangeMin: 0,
-            rangeMax: 4294967296,
+            rangeMin: MIN_OID,
+            rangeMax: MAX_OID,
             ...options,
         };
 
@@ -66,7 +70,7 @@ class Bitmap extends RoaringBitmap32 {
         return new Bitmap(oidArrayOrBitmap, options);
     }
 
-    static validateRange(inputData, rangeMin = 0, rangeMax = 4294967296) {
+    static validateRange(inputData, rangeMin = MIN_OID, rangeMax = MAX_OID) {
         if (rangeMin < 0 || rangeMax < 0 || rangeMin > rangeMax) {
             throw new Error(`Invalid range: ${rangeMin} - ${rangeMax}`);
         }

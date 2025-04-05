@@ -13,7 +13,6 @@ import Tab from './abstractions/Tab.js';
 import Todo from './abstractions/Todo.js';
 
 // Tree Abstractions
-import BaseLayer from './internal/layers/BaseLayer.js'; // Base class for all layers
 import Canvas from './internal/layers/Canvas.js';
 import Context from './internal/layers/Context.js';
 import Label from './internal/layers/Label.js';
@@ -24,7 +23,6 @@ import Workspace from './internal/layers/Workspace.js';
 // Default schema registry (for now hard-coded)
 const SCHEMA_REGISTRY = {
     // Data Abstractions
-    'data/abstraction/base': BaseDocument,
     'data/abstraction/document': Document,
     'data/abstraction/directory': Directory,
     'data/abstraction/email': Email,
@@ -34,7 +32,6 @@ const SCHEMA_REGISTRY = {
     'data/abstraction/todo': Todo,
 
     // Tree Abstractions
-    'internal/layers/base': BaseLayer,          // Base class for all layers
     'internal/layers/canvas': Canvas,           // Can store context, feature and filter bitmaps + dashboard / UI layouts
     'internal/layers/context': Context,         // Default context layer(linked to a bitmap)
     'internal/layers/label': Label,             // Label only (no associated bitmaps)

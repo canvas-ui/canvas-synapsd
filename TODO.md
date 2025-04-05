@@ -4,6 +4,7 @@
   - full
   - data+meta (data)
   - meta
+- Add zod validators to internal schemas
 
 ## Tree support? (big one)
 
@@ -17,5 +18,4 @@ $ROOT_FOLDER
         /db
         /config
         /data
-``` 
-    
+```

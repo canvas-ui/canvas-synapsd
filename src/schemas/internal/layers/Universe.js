@@ -4,8 +4,15 @@ import Layer from './BaseLayer.js';
 
 export default class Universe extends Layer {
 
-    constructor(options = {}) {
-        super(options);
+    constructor(name = '/', options = {
+        //id: '00000000-1000',
+        label: 'Universe',
+        type: 'universe',
+        description: 'And then there was geometry...',
+        locked: true,
+        color: '#fff',
+    }) {
+        super(name, options);
     }
 
 }
