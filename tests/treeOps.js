@@ -59,7 +59,7 @@ async function testTreeOperations() {
 
 
         console.log('\n--- Tree Structure After Inserts ---');
-        console.log(util.inspect(db.tree.jsonTree, { showHidden: false, depth: null, colors: true }));
+        console.log(util.inspect(db.tree.buildJsonTree(), { showHidden: false, depth: null, colors: true }));
 
         console.log('\n--- Listing Documents by Path ---');
 

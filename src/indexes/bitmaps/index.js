@@ -9,6 +9,7 @@ const require = createRequire(import.meta.url);
 // Includes
 const { RoaringBitmap32 } = require('roaring/RoaringBitmap32');
 import Bitmap from './lib/Bitmap.js';
+import BitmapCollection from './lib/BitmapCollection.js';
 
 // Constants
 const ALLOWED_PREFIXES = [
@@ -35,7 +36,28 @@ class BitmapIndex {
         this.rangeMin = options.rangeMin || 0;
         this.rangeMax = options.rangeMax || 4294967296; // 2^32
 
+        // Collections
+        this.collections = new Map();
+
         debug(`BitmapIndex initialized with range ${this.rangeMin} - ${this.rangeMax}`);
+    }
+
+    /**
+     * Collections
+     */
+
+    createCollection(name, options = {}) {
+        const collection = new BitmapCollection(name, this, options);
+        this.collections.set(name, collection);
+        return collection;
+    }
+
+    getCollection(name) {
+        return this.collections.get(name);
+    }
+
+    listCollections() {
+        return Array.from(this.collections.values());
     }
 
     /**
@@ -55,8 +77,9 @@ class BitmapIndex {
                 if (existingBitmap) {
                     return existingBitmap;
                 }
+
                 // If we get here, the bitmap exists but couldn't be loaded
-                debug(`Failed to load existing bitmap "${key}", will create a new one`);
+                throw new Error(`Failed to load existing bitmap "${key}"`);
             }
 
             // Parse input data
@@ -340,6 +363,11 @@ class BitmapIndex {
         }
 
         return affectedKeys;
+    }
+
+    async untickAll(ids) {
+        // Expensive operation, list all bitmaps and untick each one
+        return this.untickMany(await this.listBitmaps(), ids);
     }
 
     // For backward compatibility - these methods simply call the new async versions

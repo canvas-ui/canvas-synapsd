@@ -101,11 +101,12 @@ class SynapsD extends EventEmitter {
             this.#bitmapCache,
         );
 
-        this.deletedDocumentsBitmap = this.bitmapIndex.createBitmap('internal/gc/deleted');
-
         // Action bitmaps
         // TODO: Refactor || FIX!
         this.actionBitmaps = null;
+
+        // Bitmap Collections
+        this.contextBitmapCollection = this.bitmapIndex.createCollection('context');
 
         /**
          * Inverted indexes
@@ -127,7 +128,7 @@ class SynapsD extends EventEmitter {
          * Tree Abstraction
          */
 
-        // Instantiate the Tree view
+        // Instantiate Context Tree view
         this.#tree = new ContextTree({
             dataStore: this.#internalStore
         });
@@ -177,11 +178,14 @@ class SynapsD extends EventEmitter {
         debug('Starting SynapsD');
         try {
 
+            // Initialize deleted documents bitmap
+            this.deletedDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/gc/deleted');
+
             // Initialize action bitmaps (TODO: Refactor/Remove)
             this.actionBitmaps = {
-                created: this.bitmapIndex.createBitmap('internal/action/created'),
-                updated: this.bitmapIndex.createBitmap('internal/action/updated'),
-                deleted: this.bitmapIndex.createBitmap('internal/action/deleted'),
+                created: await this.bitmapIndex.createBitmap('internal/action/created'),
+                updated: await this.bitmapIndex.createBitmap('internal/action/updated'),
+                deleted: await this.bitmapIndex.createBitmap('internal/action/deleted'),
             };
 
             this.#timestampIndex = new TimestampIndex(
@@ -296,39 +300,10 @@ class SynapsD extends EventEmitter {
      * CRUD methods
      */
 
-    async insertDocument(document, contextSpec = null, featureBitmapArray = []) {
+    async insertDocument(document, contextSpec = '/', featureBitmapArray = []) {
         if (!document) { throw new Error('Document is required'); }
-        // contextSpec can be a path string (e.g., "/foo/bar") or an array of bitmap keys
-        const isPathString = typeof contextSpec === 'string' && contextSpec.startsWith('/');
-        const isContextKeyArray = Array.isArray(contextSpec);
-        if (contextSpec !== null && !isPathString && !isContextKeyArray) {
-            throw new Error('Invalid contextSpec: Must be null, a path string starting with /, or an array of bitmap keys.');
-        }
-        if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
-        let contextBitmapArray = [];
-        if (isPathString) {
-            debug(`insertDocument with path: "${contextSpec}"`);
-            // Resolve path to keys, create nodes/bitmaps if they don't exist
-            // Use the new method that returns context keys directly
-            contextBitmapArray = await this.tree.getContextKeysForPath(contextSpec, true);
-        } else if (isContextKeyArray) {
-            debug('insertDocument with context array:', contextSpec);
-            contextBitmapArray = contextSpec; // Use the provided array directly
-        } else {
-            debug('insertDocument with no context.');
-            // Default to root layer if no context specified
-            const rootId = this.tree.getRootLayerId();
-            if (rootId) {
-                debug(`Defaulting document context to root layer ID: ${rootId}`);
-                contextBitmapArray = [`context/${rootId}`];
-            } else {
-                // This should not happen if tree initialization is correct
-                debug('Warning: Could not get root layer ID to default context.');
-                contextBitmapArray = []; // Proceed with no context
-            }
-        }
-
+        const contextBitmapArray = this.#parseContextSpec(contextSpec);
         const parsedDocument = this.#parseInitializeDocument(document);
         const storedDocument = await this.getByChecksumString(parsedDocument.checksumArray[0]);
 
@@ -351,11 +326,12 @@ class SynapsD extends EventEmitter {
                 await this.#timestampIndex.insert('updated', parsedDocument.updatedAt, parsedDocument.id);
             }
 
+            // Make sure we update the context tree paths
+            this.tree.insertPath(contextBitmapArray.join('/'));
+
             // Update context bitmaps
-            if (contextBitmapArray.length > 0) {
-                for (const context of contextBitmapArray) {
-                    await this.bitmapIndex.tick(context, parsedDocument.id);
-                }
+            for (const context of contextBitmapArray) {
+                await this.contextBitmapCollection.tick(context, parsedDocument.id);
             }
 
             // If document.schema is not part of featureBitmapArray, add it
@@ -375,7 +351,7 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    async insertDocumentArray(docArray, contextSpec = null, featureBitmapArray = []) {
+    async insertDocumentArray(docArray, contextSpec = '/', featureBitmapArray = []) {
         if (!Array.isArray(docArray)) { docArray = [docArray]; }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
@@ -394,30 +370,15 @@ class SynapsD extends EventEmitter {
         return errors;
     }
 
-    async hasDocument(id, contextSpec = null, featureBitmapArray = []) {
+    async hasDocument(id, contextSpec = '/', featureBitmapArray = []) {
         if (!id) { throw new Error('Document id required'); }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
+        const contextBitmapArray = this.#parseContextSpec(contextSpec);
 
         // First check if the document exists in the database
         if (!await this.documents.has(id)) {
             debug(`Document with ID "${id}" not found in the database`);
             return false;
-        }
-
-        // Handle contextSpec - convert to contextBitmapArray
-        let contextBitmapArray = [];
-        if (contextSpec) {
-            const isPathString = typeof contextSpec === 'string' && contextSpec.startsWith('/');
-            const isContextKeyArray = Array.isArray(contextSpec);
-
-            if (isPathString) {
-                // Convert path to context keys
-                contextBitmapArray = await this.tree.getContextKeysForPath(contextSpec, false);
-            } else if (isContextKeyArray) {
-                contextBitmapArray = contextSpec;
-            } else {
-                throw new Error('Invalid contextSpec: Must be null, a path string starting with /, or an array of bitmap keys.');
-            }
         }
 
         // If no context or feature filters, document exists
@@ -426,8 +387,8 @@ class SynapsD extends EventEmitter {
         }
 
         // Apply context and feature filters
-        const contextBitmap = contextBitmapArray.length > 0 ? this.bitmapIndex.AND(contextBitmapArray) : null;
-        const featureBitmap = featureBitmapArray.length > 0 ? this.bitmapIndex.OR(featureBitmapArray) : null;
+        const contextBitmap = contextBitmapArray.length > 0 ? await this.contextBitmapCollection.AND(contextBitmapArray) : null;
+        const featureBitmap = featureBitmapArray.length > 0 ? await this.bitmapIndex.OR(featureBitmapArray) : null;
 
         // Check if the document matches the filters
         if (contextBitmap && featureBitmap) {
@@ -453,27 +414,10 @@ class SynapsD extends EventEmitter {
 
     // Returns documents from the main dataset + context and/or feature bitmaps
     async listDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { limit: null }) {
+        const contextBitmapArray = this.#parseContextSpec(contextSpec);
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
         if (!Array.isArray(filterArray)) { throw new Error('Filter array must be an array'); }
         debug(`Listing documents with contextSpec: ${contextSpec}, features: ${featureBitmapArray}, filters: ${filterArray}`);
-
-        // Handle contextSpec - convert to contextBitmapArray
-        let contextBitmapArray = [];
-        if (contextSpec) {
-            const isPathString = typeof contextSpec === 'string' && contextSpec.startsWith('/');
-            const isContextKeyArray = Array.isArray(contextSpec);
-
-            if (isPathString) {
-                // Convert path to context keys
-                debug(`listDocuments: Converting path "${contextSpec}" to context keys`);
-                contextBitmapArray = await this.tree.getContextKeysForPath(contextSpec, false);
-            } else if (isContextKeyArray) {
-                debug('listDocuments: Using provided context array');
-                contextBitmapArray = contextSpec;
-            } else {
-                throw new Error('Invalid contextSpec: Must be null, a path string starting with /, or an array of bitmap keys.');
-            }
-        }
 
         // Start with null, will hold RoaringBitmap32 instance if filters are applied
         let resultBitmap = null;
@@ -482,7 +426,7 @@ class SynapsD extends EventEmitter {
 
         // Apply context filters if provided
         if (contextBitmapArray.length > 0) {
-            resultBitmap = await this.bitmapIndex.AND(contextBitmapArray);
+            resultBitmap = await this.contextBitmapCollection.AND(contextBitmapArray);
             filtersApplied = true; // AND result assigned
         }
 
@@ -545,6 +489,7 @@ class SynapsD extends EventEmitter {
         }
 
         // Apply limit if specified
+        debug(`listDocuments: Returning ${documents.length} documents`);
         return options.limit ? documents.slice(0, options.limit) : documents;
     }
 
@@ -553,25 +498,12 @@ class SynapsD extends EventEmitter {
         if (!document) { throw new Error('Document required'); }
         if (!document.id) { throw new Error('Document must have an ID for update operations'); }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
+        const contextBitmapArray = this.#parseContextSpec(contextSpec);
+
+        // Make sure we update the context tree paths
+        this.tree.insertPath(contextBitmapArray.join('/'));
+
         debug('updateDocument: ', document);
-
-        // Handle contextSpec - convert to contextBitmapArray
-        let contextBitmapArray = [];
-        if (contextSpec) {
-            const isPathString = typeof contextSpec === 'string' && contextSpec.startsWith('/');
-            const isContextKeyArray = Array.isArray(contextSpec);
-
-            if (isPathString) {
-                // Convert path to context keys
-                debug(`updateDocument: Converting path "${contextSpec}" to context keys`);
-                contextBitmapArray = await this.tree.getContextKeysForPath(contextSpec, true);
-            } else if (isContextKeyArray) {
-                debug('updateDocument: Using provided context array');
-                contextBitmapArray = contextSpec;
-            } else {
-                throw new Error('Invalid contextSpec: Must be null, a path string starting with /, or an array of bitmap keys.');
-            }
-        }
 
         const parsedDocument = this.#parseInitializeDocument(document);
         let updatedDocument = null;
@@ -602,7 +534,7 @@ class SynapsD extends EventEmitter {
         // Update context bitmaps if provided
         if (contextBitmapArray.length > 0) {
             for (const context of contextBitmapArray) {
-                await this.bitmapIndex.tick(context, updatedDocument.id);
+                await this.contextBitmapCollection.tick(context, updatedDocument.id);
             }
         }
 
@@ -618,7 +550,7 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        return updatedDocument;
+        return updatedDocument.id;
     }
 
     async updateDocumentArray(docArray, contextSpec = null, featureBitmapArray = []) {
@@ -646,28 +578,12 @@ class SynapsD extends EventEmitter {
         if (!docId) { throw new Error('Document id required'); }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
-        // Handle contextSpec - convert to contextBitmapArray
-        let contextBitmapArray = [];
-        if (contextSpec) {
-            const isPathString = typeof contextSpec === 'string' && contextSpec.startsWith('/');
-            const isContextKeyArray = Array.isArray(contextSpec);
-
-            if (isPathString) {
-                // Convert path to context keys
-                debug(`removeDocument: Converting path "${contextSpec}" to context keys`);
-                contextBitmapArray = await this.tree.getContextKeysForPath(contextSpec, false);
-            } else if (isContextKeyArray) {
-                debug('removeDocument: Using provided context array');
-                contextBitmapArray = contextSpec;
-            } else {
-                throw new Error('Invalid contextSpec: Must be null, a path string starting with /, or an array of bitmap keys.');
-            }
-        }
+        const contextBitmapArray = this.#parseContextSpec(contextSpec);
 
         // Remove document will only remove the document from the supplied bitmaps
         // It will not delete the document from the database.
         if (contextBitmapArray.length > 0) {
-            await this.bitmapIndex.untickMany(contextBitmapArray, docId);
+            await this.contextBitmapCollection.untickMany(contextBitmapArray, docId);
         }
         if (featureBitmapArray.length > 0) {
             await this.bitmapIndex.untickMany(featureBitmapArray, docId);
@@ -709,7 +625,7 @@ class SynapsD extends EventEmitter {
             await this.documents.delete(docId);
 
             // Delete document from all bitmaps
-            await this.bitmapIndex.delete(docId);
+            await this.bitmapIndex.untickAll(docId);
 
             // Delete document checksums from inverted index
             await this.#checksumIndex.deleteArray(document.checksumArray);
@@ -932,6 +848,23 @@ class SynapsD extends EventEmitter {
     /**
      * Internal methods
      */
+
+    #parseContextSpec(contextSpec) {
+        if (!contextSpec) { return ['/']; }
+        if (Array.isArray(contextSpec)) { return contextSpec; }
+        if (typeof contextSpec === 'string') {
+            // If contextSpec includes a /, split it into an array of bitmap keys
+            if (contextSpec.includes('/')) {
+                return contextSpec.split('/').filter(Boolean);
+            } else {
+                // Otherwise, it's a single bitmap key
+                return [contextSpec];
+            }
+        } else {
+            throw new Error('Invalid contextSpec: Must be a path string starting with /, or an array of bitmap keys.');
+        }
+
+    }
 
     /**
      * Parse a document data object

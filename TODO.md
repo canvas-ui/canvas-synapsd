@@ -1,5 +1,7 @@
 # TODO
 
+- ! Create a collection abstraction, esp. for Bitmaps
+- ! Refactor those ***UGLY*** insert/updateDocument methods!!!
 - format option
   - full
   - data+meta (data)

@@ -113,6 +113,21 @@ class ContextTree extends EventEmitter {
         return this.#getNode(path) ? true : false;
     }
 
+    /**
+     * Convert a path to an array of layer IDs
+     * @param {string} path - Path to convert
+     * @returns {Array} - Array of layer IDs
+     */
+    pathToLayerIds(path) {
+        const layerIds = [];
+        const layerNames = path.split('/').filter(Boolean);
+        for (const layerName of layerNames) {
+            const layer = this.#layerIndex.getLayerByName(layerName);
+            if (layer) { layerIds.push(layer.id); }
+        }
+        return layerIds;
+    }
+
     async insertPath(path = '/', node, autoCreateLayers = true) {
         debug(`Inserting path "${path}" into the context tree`);
         if (path === '/' && !node) {
