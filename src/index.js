@@ -167,6 +167,7 @@ class SynapsD extends EventEmitter {
     // We need to simplify this growing mammoth interface with some delegation kung-fu
     get db() { return this.#db; } // For testing only
     get tree() { return this.#tree; } // db.tree.insertPath()
+    get jsonTree() { return this.#tree.buildJsonTree(); } // db.tree.layers.renameLayer()
     get layers() { return this.#treeLayers; } // db.tree.layers.renameLayer()
     get bitmaps() { return this.bitmapIndex; } // db.bitmaps.createBitmap()
 
