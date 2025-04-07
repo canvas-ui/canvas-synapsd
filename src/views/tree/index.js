@@ -46,6 +46,7 @@ class ContextTree extends EventEmitter {
     // Runtime state
     #initialized = false;
 
+    #db = null;
     #layerIndex;
 
     constructor(options = {}) {
@@ -54,8 +55,12 @@ class ContextTree extends EventEmitter {
         if (!options.dataStore) { throw new Error('ContextTree requires a dataStore reference'); }
         this.#dataStore = options.dataStore;
 
+
         // Initialize the layer index class
         this.#layerIndex = new LayerIndex(this.#dataStore, options);
+        if (options.db) {
+            this.#db = options.db;
+        }
 
         // Options
         this.#showHiddenLayers = options.showHiddenLayers || false;
@@ -395,6 +400,95 @@ class ContextTree extends EventEmitter {
         });
 
         return true;
+    }
+
+    /**
+     * Document CRUD (convenience) wrapper methods for the db backend
+     */
+
+    insertDocument(document, contextSpec = '/', featureBitmapArray = []) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.insertDocument(document, contextSpec, featureBitmapArray);
+    }
+
+    insertDocumentArray(docArray, contextSpec = '/', featureBitmapArray = []) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.insertDocumentArray(docArray, contextSpec, featureBitmapArray);
+    }
+
+    hasDocument(id, contextSpec = '/', featureBitmapArray = []) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.hasDocument(id, contextSpec, featureBitmapArray);
+    }
+
+    hasDocumentByChecksum(checksum, contextSpec = null, featureBitmapArray = []) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.hasDocumentByChecksum(checksum, contextSpec, featureBitmapArray);
+    }
+
+    listDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { limit: null }) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.listDocuments(contextSpec, featureBitmapArray, filterArray, options);
+    }
+
+    updateDocument(document, contextSpec = null, featureBitmapArray = []) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.updateDocument(document, contextSpec, featureBitmapArray);
+    }
+
+    updateDocumentArray(docArray, contextSpec = null, featureBitmapArray = []) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.updateDocumentArray(docArray, contextSpec, featureBitmapArray);
+    }
+
+    removeDocument(documentId, contextSpec = null, featureBitmapArray = []) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.removeDocument(documentId, contextSpec, featureBitmapArray);
+    }
+
+    removeDocumentArray(docIdArray, contextSpec = null, featureBitmapArray = []) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.removeDocumentArray(docIdArray, contextSpec, featureBitmapArray);
+    }
+
+    deleteDocument(documentId) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.deleteDocument(documentId);
+    }
+
+    deleteDocumentArray(docIdArray) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.deleteDocumentArray(docIdArray);
+    }
+
+    getById(id) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.getById(id);
+    }
+
+    getByIdArray(idArray) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.getByIdArray(idArray);
+    }
+
+    getByChecksumString(checksumString) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.getByChecksumString(checksumString);
+    }
+
+    getByChecksumStringArray(checksumStringArray) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.getByChecksumStringArray(checksumStringArray);
+    }
+
+    query(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.query(query, contextBitmapArray, featureBitmapArray, filterArray, metadataOnly);
+    }
+
+    ftsQuery(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.ftsQuery(query, contextBitmapArray, featureBitmapArray, filterArray, metadataOnly);
     }
 
     /**
