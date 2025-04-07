@@ -1,7 +1,7 @@
 import SynapsD from '../src/index.js'
 
 const db = new SynapsD({
-    path: '/tmp/testdb6'
+    path: '/tmp/synapsd-testdb'
 })
 
 import { isDocument, isDocumentInstance } from '../src/schemas/SchemaRegistry.js';

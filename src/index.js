@@ -984,7 +984,7 @@ class SynapsD extends EventEmitter {
             if (!this.deletedDocumentsBitmap || this.deletedDocumentsBitmap.isEmpty()) {
                 return null;
             }
-
+2
             // Get the minimum ID from the deleted documents bitmap
             const minId = this.deletedDocumentsBitmap.minimum();
 

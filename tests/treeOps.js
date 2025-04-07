@@ -4,7 +4,7 @@ import SynapsD from '../src/index.js';
 import util from 'util'; // For deep logging
 
 // Use the same DB path as _test.js to potentially reuse data/layers
-const DB_PATH = '/tmp/testdb6';
+const DB_PATH = '/tmp/synapsd-testdb';
 
 const db = new SynapsD({
     path: DB_PATH
@@ -41,14 +41,14 @@ async function testTreeOperations() {
 
         console.log('\n--- Inserting Documents with Paths ---');
 
-        const idA = await db.insertDocument(noteA, '/work/projectA/notes');
-        console.log(`Inserted Note A (ID: ${idA}) into path /work/projectA/notes`);
+        const idA = await db.insertDocument(noteA, '/work/projectA');
+        console.log(`Inserted Note A (ID: ${idA}) into path /work/projectB`);
 
-        const idB = await db.insertDocument(noteB, '/work/projectA/notes');
+        const idB = await db.insertDocument(noteB, '/work/project');
         console.log(`Inserted Note B (ID: ${idB}) into path /work/projectA/notes`);
 
-        const idC = await db.insertDocument(tabC, '/work/projectA/tabs');
-        console.log(`Inserted Tab C (ID: ${idC}) into path /work/projectA/tabs`);
+        const idC = await db.insertDocument(tabC, '/work/projectA');
+        console.log(`Inserted Tab C (ID: ${idC}) into path /work/projectA`);
 
         const idD = await db.insertDocument(noteD, '/personal/journal');
         console.log(`Inserted Note D (ID: ${idD}) into path /personal/journal`);
@@ -77,6 +77,8 @@ async function testTreeOperations() {
         await listAndLog('/non/existent'); // Expected: []
 
         console.log('\n--- Test Complete ---');
+
+        console.log(JSON.stringify(db.tree.buildJsonTree(), null, 2 ));
 
     } catch (error) {
         console.error("\n*** TEST FAILED ***");

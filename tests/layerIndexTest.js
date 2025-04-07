@@ -2,7 +2,7 @@ import Db from '../src/backends/lmdb/index.js'
 import LayerIndex from '../src/views/tree/lib/LayerIndex.js'
 
 const db = new Db({
-    path: '/tmp/testdb8'
+    path: '/tmp/synapsd-testdb'
 })
 
 const dataset = db.createDataset('internal');

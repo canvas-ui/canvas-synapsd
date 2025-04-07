@@ -25,6 +25,17 @@ class LayerIndex extends EventEmitter {
         this.#store = dataStore;
     }
 
+    /**
+     * Private utility to normalize layer names for consistent lookups and storage.
+     * Currently uses lowercase.
+     * @param {string} name - The layer name.
+     * @returns {string} - The normalized layer name.
+     */
+    #normalizeLayerName(name) {
+        // Return '/' as is, lowercase others
+        return name === '/' ? name : String(name).toLowerCase();
+    }
+
     async initializeIndex() {
         if (this.#initialized) { return; }
         debug(`Initializing layer index..`);
@@ -62,8 +73,8 @@ class LayerIndex extends EventEmitter {
         if (!this.#initialized) {
             throw new Error('Layer index not initialized');
         }
-
-        return this.#nameToLayerMap.get(name);
+        const normalizedName = this.#normalizeLayerName(name);
+        return this.#nameToLayerMap.get(normalizedName);
     }
 
     hasLayer(id) { return this.hasLayerID(id); }
@@ -78,8 +89,8 @@ class LayerIndex extends EventEmitter {
         if (!this.#initialized) {
             throw new Error('Layer index not initialized');
         }
-
-        return this.#nameToLayerMap.has(name);
+        const normalizedName = this.#normalizeLayerName(name);
+        return this.#nameToLayerMap.has(normalizedName);
     }
 
     nameToID(name) {
@@ -101,8 +112,10 @@ class LayerIndex extends EventEmitter {
     }
 
     isInternalLayerName(name) {
-        //const layer = this.getLayerByName(name);
-        return false //layer && builtInLayers.find((layer) => layer.name === name);
+        // Consider normalizing name here if needed for comparison
+        // const normalizedName = this.#normalizeLayerName(name);
+        // const layer = this.getLayerByName(normalizedName); // Use normalized lookup
+        return false //layer && builtInLayers.find((layer) => layer.name === normalizedName);
     }
 
     isInternalLayerID(id) {
@@ -130,22 +143,26 @@ class LayerIndex extends EventEmitter {
         type: 'context'
     }) {
         if (!this.#initialized) { throw new Error('Layer index not initialized'); }
-        debug(`Creating layer "${name}" with options ${JSON.stringify(options)}`);
+        const normalizedName = this.#normalizeLayerName(name);
+        debug(`Creating layer "${normalizedName}" (original: "${name}") with options ${JSON.stringify(options)}`);
 
         // Check if layer type is valid
         if (options.type && !SchemaRegistry.hasSchema(`internal/layers/${options.type}`)) {
             throw new Error(`Invalid layer type: ${options.type}`);
         }
 
-        // Check if layer already exists
+        // Check if layer already exists using the original name (hasLayerName normalizes internally)
         if (this.hasLayerName(name)) {
-            debug(`Layer already exists, updating..`);
-            //throw new Error(`Layer already exists: ${options.name}`);
-            return this.updateLayer(name, options);
+            debug(`Layer "${normalizedName}" already exists, returning existing or updating..`);
+            // If update is needed, use normalized name to fetch
+            // return this.updateLayer(normalizedName, options);
+            // For now, just return the existing layer if found
+             return this.getLayerByName(name); // getLayerByName normalizes internally
         }
 
         const LayerSchema = SchemaRegistry.getSchema(`internal/layers/${options.type}`);
-        const layer = new LayerSchema(name, options);
+        // Pass the *normalized* name to the schema constructor
+        const layer = new LayerSchema(normalizedName, options);
         if (!layer) { throw new Error(`Failed to create layer with options ${options}`); }
 
         await this.#dbStoreLayer(layer);
@@ -153,7 +170,8 @@ class LayerIndex extends EventEmitter {
     }
 
     async updateLayer(name, options) {
-        const layer = this.getLayerByName(name);
+        // Use normalized lookup
+        const layer = this.getLayerByName(name); // Normalizes internally
 
         if (!layer) { throw new Error(`Layer not found: ${name}`); }
         if (layer.locked) {
@@ -168,22 +186,27 @@ class LayerIndex extends EventEmitter {
     }
 
     async renameLayer(name, newName) {
-        const currentLayer = this.getLayerByName(name);
+        const normalizedName = this.#normalizeLayerName(name);
+        const normalizedNewName = this.#normalizeLayerName(newName);
+
+        const currentLayer = this.getLayerByName(normalizedName); // Use normalized lookup
         if (!currentLayer) {
-            throw new Error(`Layer not found: ${name}`);
+            throw new Error(`Layer not found: ${name} (normalized: ${normalizedName})`);
         }
 
         if (currentLayer.locked) {
             throw new Error('Layer is locked');
         }
 
-        if (this.getLayerByName(newName)) {
-            throw new Error(`Unable to rename layer, layer name already exists: ${newName}`);
+        if (this.getLayerByName(normalizedNewName)) { // Use normalized lookup
+            throw new Error(`Unable to rename layer, layer name already exists: ${newName} (normalized: ${normalizedNewName})`);
         }
 
         // First lets insert the "new" layer to the db
         const newLayer = currentLayer;
-        newLayer.setName(newName);
+        // Set the name using the normalized new name
+        newLayer.setName(normalizedNewName);
+        // Optionally set the label to the original newName if desired
         newLayer.setLabel(newName);
         try {
             await this.#dbStoreLayer(newLayer);
@@ -191,9 +214,9 @@ class LayerIndex extends EventEmitter {
             throw new Error(`Failed to store renamed layer into the database: ${newName}`);
         }
 
-        // Now lets remove the old layer from the db
+        // Now lets remove the old layer from the db using the old layer object
         try {
-            await this.#dbRemoveLayer(currentLayer);
+            await this.#dbRemoveLayer(currentLayer); // #dbRemoveLayer normalizes the name from layer object
         } catch (error) {
             throw new Error(`Failed to remove existing layer: ${newName}`);
         }
@@ -203,7 +226,7 @@ class LayerIndex extends EventEmitter {
 
     async removeLayer(layer) {
         if (layer.locked) { throw new Error('Layer is locked'); }
-        await this.#dbRemoveLayer(layer);
+        await this.#dbRemoveLayer(layer); // Normalizes internally
     }
 
     async removeLayerByID(id) {
@@ -220,7 +243,13 @@ class LayerIndex extends EventEmitter {
     }
 
     async removeLayerByName(name) {
-        const layer = this.getLayerByName(name);
+        const layer = this.getLayerByName(name); // Normalizes internally
+        if (!layer) {
+            // It's possible the layer doesn't exist, handle gracefully or re-throw
+            debug(`Layer not found by name "${name}", cannot remove.`);
+            return; // Or throw new Error(`Layer not found: ${name}`);
+        }
+
         if (layer.locked) {
             throw new Error('Layer is locked');
         }
@@ -237,17 +266,28 @@ class LayerIndex extends EventEmitter {
     }
 
     async #dbStoreLayer(layer, persistent = true) {
+        if (!layer || !layer.name || !layer.id) {
+            console.error('Invalid layer object passed to #dbStoreLayer:', layer);
+            throw new Error('Cannot store invalid layer object.');
+        }
         if (persistent) {
             await this.#store.put(this.#constructLayerKey(layer.id), layer);
         }
-
-        this.#nameToLayerMap.set(layer.name, layer);
+        const normalizedName = this.#normalizeLayerName(layer.name);
+        this.#nameToLayerMap.set(normalizedName, layer);
+        debug(`Stored layer ${layer.id} in DB and map with normalized name: ${normalizedName}`);
         return true;
     }
 
     async #dbRemoveLayer(layer) {
+        if (!layer || !layer.name || !layer.id) {
+            console.error('Invalid layer object passed to #dbRemoveLayer:', layer);
+            throw new Error('Cannot remove invalid layer object.');
+        }
         await this.#store.remove(this.#constructLayerKey(layer.id));
-        this.#nameToLayerMap.delete(layer.name);
+        const normalizedName = this.#normalizeLayerName(layer.name);
+        this.#nameToLayerMap.delete(normalizedName);
+        debug(`Removed layer ${layer.id} from DB and map using normalized name: ${normalizedName}`);
         return true;
     }
 
@@ -273,11 +313,24 @@ class LayerIndex extends EventEmitter {
     }
 
     async #initNameToLayerMap() {
+        this.#nameToLayerMap.clear(); // Ensure map is empty before init
         const layers = await this.listLayers();
         for (const layerId of layers) {
-            debug(`Initializing layer ${layerId}`);
-            const layer = this.getLayerByID(layerId);
-            this.#nameToLayerMap.set(layer.name, layer);
+            try {
+                debug(`Initializing layer ${layerId}`);
+                const layer = await this.getLayerByID(layerId); // Make sure this returns a promise if async
+                 if (layer && layer.name) {
+                    const normalizedName = this.#normalizeLayerName(layer.name);
+                    this.#nameToLayerMap.set(normalizedName, layer);
+                    debug(`Added layer ${layerId} to map with normalized name: ${normalizedName}`);
+                } else {
+                     debug(`Skipping layer ${layerId} during map init: Invalid layer object retrieved.`);
+                     console.warn(`Layer data for ID ${layerId} seems invalid or lacks a name.`);
+                 }
+            } catch (error) {
+                console.error(`Error initializing layer ${layerId}:`, error);
+                // Decide if we should continue or stop initialization
+            }
         }
     }
 }

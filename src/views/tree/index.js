@@ -131,7 +131,12 @@ class ContextTree extends EventEmitter {
     async insertPath(path = '/', node, autoCreateLayers = true) {
         debug(`Inserting path "${path}" into the context tree`);
         if (path === '/' && !node) {
-            return [];
+            return [this.rootLayer.id];
+        }
+
+        if (this.pathExists(path)) {
+            debug(`Path "${path}" already exists, skipping`);
+            return this.pathToLayerIds(path);
         }
 
         let currentNode = this.root;
