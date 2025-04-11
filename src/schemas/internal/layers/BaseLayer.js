@@ -26,8 +26,23 @@ class Layer {
         this.label = options.label ? this.#sanitizeLabel(options.label) : this.name;
         this.description = options.description ? this.#sanitizeDescription(options.description) : 'Canvas layer';
         this.color = options?.color;
-        this.locked = options?.locked || false;
+        this.lockedBy = options?.lockedBy || [];
         this.metadata = options.metadata || {};
+    }
+
+    /**
+     * Getters
+     */
+
+    get isLocked() {
+        return this.lockedBy.length > 0;
+    }
+
+    isLockedBy(lockBy) {
+        if (!lockBy) {
+            return false;
+        }
+        return this.lockedBy.includes(lockBy);
     }
 
     /**
@@ -35,7 +50,7 @@ class Layer {
      */
 
     setName(name) {
-        if (this.locked) {
+        if (this.isLocked) {
             throw new Error('Layer is locked');
         }
         this.name = this.#sanitizeName(name);
@@ -43,7 +58,7 @@ class Layer {
     }
 
     setLabel(label) {
-        if (this.locked) {
+        if (this.isLocked) {
             throw new Error('Layer is locked');
         }
         this.label = this.#sanitizeLabel(label);
@@ -51,11 +66,33 @@ class Layer {
     }
 
     setDescription(description) {
-        if (this.locked) {
+        if (this.isLocked) {
             throw new Error('Layer is locked');
         }
         this.description = this.#sanitizeDescription(description);
         return this;
+    }
+
+    lock(lockBy) {
+        if (!lockBy) {
+            throw new Error('Locking layer requires a lockBy parameter');
+        }
+
+        if (!this.lockedBy.includes(lockBy)) {
+            this.lockedBy.push(lockBy);
+        }
+
+        return true;
+    }
+
+    unlock(lockBy) {
+        if (!lockBy) {
+            throw new Error('Unlocking layer requires a lockBy parameter');
+        }
+
+        this.lockedBy = this.lockedBy.filter(context => context !== lockBy);
+
+        return this.isLocked;
     }
 
     /**
@@ -119,7 +156,8 @@ class Layer {
             label: this.label,
             description: this.description,
             color: this.color,
-            locked: this.locked,
+            locked: this.isLocked,
+            lockedBy: this.lockedBy,
             metadata: this.metadata,
         };
     }
@@ -134,11 +172,12 @@ class Layer {
             label: json.label,
             description: json.description,
             color: json.color,
-            locked: json.locked,
+            lockedBy: json.lockedBy || [],
             metadata: json.metadata,
         });
         return layer;
     }
+
 }
 
 export default Layer;

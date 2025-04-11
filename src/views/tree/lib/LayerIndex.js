@@ -65,7 +65,43 @@ class LayerIndex extends EventEmitter {
         const normalizedId = id.startsWith('layer/') ? id : `layer/${id}`;
 
         debug(`Getting layer ID ${normalizedId} from store..`);
-        return this.#store.get(normalizedId);
+        const layerData = this.#store.get(normalizedId);
+
+        if (!layerData) {
+            debug(`Layer data not found for ID ${normalizedId}`);
+            return undefined; // Or null
+        }
+
+        // Reconstruct the Layer instance from the raw data
+        // Assuming BaseLayer has a suitable constructor or static fromJSON method
+        // We need to import the BaseLayer class here.
+        // TODO: Add import for BaseLayer
+        try {
+            // Determine the correct Layer class based on the stored type
+            const layerType = layerData.type || 'context'; // Default to 'context' if type is missing?
+            const schemaName = `internal/layers/${layerType}`;
+            if (!SchemaRegistry.hasSchema(schemaName)) {
+                 console.error(`Cannot reconstruct layer ID ${normalizedId}: No schema registered for type "${layerType}" (schema: ${schemaName}).`);
+                 throw new Error(`Schema not found for layer type "${layerType}"`);
+            }
+
+            const LayerClass = SchemaRegistry.getSchema(schemaName);
+            if (!LayerClass || typeof LayerClass.fromJSON !== 'function') {
+                 console.error(`Cannot reconstruct layer ID ${normalizedId}: Schema ${schemaName} exists but is invalid or lacks a static fromJSON method.`);
+                 throw new Error(`Invalid schema class for layer type "${layerType}"`);
+            }
+
+             // return new LayerClass(layerData); // If constructor handles object
+             return LayerClass.fromJSON(layerData); // Use static method from the correct class
+        } catch (error) {
+            debug(`Error reconstructing layer instance for ID ${normalizedId}: ${error.message}`);
+            console.error(`Failed to reconstruct layer from data:`, layerData);
+            // Return the raw data or throw, depending on desired handling
+            // Returning raw data might lead to errors later, like the one we saw.
+            // Throwing might be safer.
+            throw new Error(`Failed to reconstruct layer instance for ID ${normalizedId}`);
+            // return layerData; // Less safe
+        }
     }
 
     getLayerByName(name) {
@@ -258,6 +294,22 @@ class LayerIndex extends EventEmitter {
     }
 
     /**
+     * Persistence
+     */
+
+    async persistLayer(layer) {
+        if (!layer || !layer.id || !layer.name) {
+            throw new Error('Cannot persist invalid layer object.');
+        }
+        // We assume the layer object passed in is the source of truth.
+        // Let #dbStoreLayer handle DB persistence and map update.
+        // Note: #dbStoreLayer already normalizes the name before map update.
+        await this.#dbStoreLayer(layer);
+        debug(`Persisted layer ${layer.id} changes.`);
+        return true;
+    }
+
+    /**
      * Private(internal) methods
      */
 
@@ -313,7 +365,7 @@ class LayerIndex extends EventEmitter {
     }
 
     async #initNameToLayerMap() {
-        this.#nameToLayerMap.clear(); // Ensure map is empty before init
+        this.#nameToLayerMap.clear(); // Ensure map is empty before initialization
         const layers = await this.listLayers();
         for (const layerId of layers) {
             try {

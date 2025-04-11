@@ -130,7 +130,8 @@ class SynapsD extends EventEmitter {
 
         // Instantiate Context Tree view
         this.#tree = new ContextTree({
-            dataStore: this.#internalStore
+            dataStore: this.#internalStore,
+            db: this, // Pass the SynapsD instance for document operations
         });
 
         this.#treeLayers = null;
@@ -583,11 +584,23 @@ class SynapsD extends EventEmitter {
 
         // Remove document will only remove the document from the supplied bitmaps
         // It will not delete the document from the database.
-        if (contextBitmapArray.length > 0) {
-            await this.contextBitmapCollection.untickMany(contextBitmapArray, docId);
-        }
-        if (featureBitmapArray.length > 0) {
-            await this.bitmapIndex.untickMany(featureBitmapArray, docId);
+        try {
+            if (contextBitmapArray.length > 0) {
+                await this.contextBitmapCollection.untickMany(contextBitmapArray, docId);
+            }
+            if (featureBitmapArray.length > 0) {
+                await this.bitmapIndex.untickMany(featureBitmapArray, docId);
+            }
+
+            // If the operations completed without throwing, return the ID.
+            // This signals the removal *attempt* was successful.
+            return docId;
+
+        } catch (error) {
+            // Catch unexpected errors (DB connection, etc.)
+            debug(`Error during removeDocument for ID ${docId}: ${error.message}`);
+            // Re-throw the error so callers know something went wrong
+            throw error;
         }
     }
 
@@ -984,7 +997,7 @@ class SynapsD extends EventEmitter {
             if (!this.deletedDocumentsBitmap || this.deletedDocumentsBitmap.isEmpty()) {
                 return null;
             }
-2
+
             // Get the minimum ID from the deleted documents bitmap
             const minId = this.deletedDocumentsBitmap.minimum();
 

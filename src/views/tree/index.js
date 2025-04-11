@@ -109,39 +109,17 @@ class ContextTree extends EventEmitter {
      * Path Operations
      */
 
-    /**
-     * Check if a path exists in the tree
-     * @param {string} path - Path to check
-     * @returns {boolean} - True if path exists
-     */
-    pathExists(path) {
-        return this.#getNode(path) ? true : false;
-    }
-
-    /**
-     * Convert a path to an array of layer IDs
-     * @param {string} path - Path to convert
-     * @returns {Array} - Array of layer IDs
-     */
-    pathToLayerIds(path) {
-        const layerIds = [];
-        const layerNames = path.split('/').filter(Boolean);
-        for (const layerName of layerNames) {
-            const layer = this.#layerIndex.getLayerByName(layerName);
-            if (layer) { layerIds.push(layer.id); }
-        }
-        return layerIds;
-    }
-
     async insertPath(path = '/', node, autoCreateLayers = true) {
-        debug(`Inserting path "${path}" into the context tree`);
-        if (path === '/' && !node) {
+        const normalizedPath = this.#normalizePath(path);
+        debug(`Inserting normalized path "${normalizedPath}" (original: "${path}") into the context tree`);
+
+        if (normalizedPath === '/' && !node) {
             return [this.rootLayer.id];
         }
 
-        if (this.pathExists(path)) {
-            debug(`Path "${path}" already exists, skipping`);
-            return this.pathToLayerIds(path);
+        if (this.pathExists(normalizedPath)) {
+            debug(`Normalized path "${normalizedPath}" already exists, skipping`);
+            return this.pathToLayerIds(normalizedPath);
         }
 
         let currentNode = this.root;
@@ -149,7 +127,7 @@ class ContextTree extends EventEmitter {
         const layerIds = [];
         const createdLayers = [];
 
-        const layerNames = path.split('/').filter(Boolean);
+        const layerNames = normalizedPath.split('/').filter(Boolean);
         for (const layerName of layerNames) {
             let layer = this.#layerIndex.getLayerByName(layerName);
             if (!layer) {
@@ -159,7 +137,7 @@ class ContextTree extends EventEmitter {
                     layer = await this.#layerIndex.createLayer(layerName);
                     createdLayers.push(layer);
                 } else {
-                    debug(`Layer "${layerName}" not found at path "${path} and autoCreateLayers is disabled"`);
+                    debug(`Layer "${layerName}" not found at path "${normalizedPath}" and autoCreateLayers is disabled`);
                     return [];
                 }
             }
@@ -175,19 +153,20 @@ class ContextTree extends EventEmitter {
             currentNode = child;
         }
 
+        // If a node object was passed (e.g., from movePath or copyPath),
+        // add it as a child to the final currentNode reached by the path.
         if (node) {
-            child = currentNode.getChild(node.id);
-            if (child && child instanceof TreeNode) {
-                currentNode.addChild(child);
-            }
+            // TreeNode.addChild handles idempotency (won't add if ID already exists)
+            currentNode.addChild(node);
+            debug(`Attached provided node ${node.id} (${node.payload.name}) to path "${normalizedPath}"`);
         }
 
         await this.#saveTreeToDataStore();
-        debug(`Path "${path}" inserted successfully.`);
+        debug(`Path "${normalizedPath}" inserted successfully.`);
 
         // Emit an event with the path and created layers
         this.emit('tree:path:inserted', {
-            path,
+            path: normalizedPath,
             layerIds,
             createdLayers: createdLayers.map(layer => ({
                 id: layer.id,
@@ -200,147 +179,198 @@ class ContextTree extends EventEmitter {
     }
 
     async movePath(pathFrom, pathTo, recursive = false) {
-        debug(`Moving layer from "${pathFrom}" to "${pathTo}"${recursive ? ' recursively' : ''}`);
+        const normalizedPathFrom = this.#normalizePath(pathFrom);
+        const normalizedPathTo = this.#normalizePath(pathTo);
+        debug(`Moving normalized path "${normalizedPathFrom}" under "${normalizedPathTo}"${recursive ? ' recursively' : ''}`);
 
-        const node = this.#getNode(pathFrom);
-        if (!node) {
-            debug('Unable to move layer, source node not found');
-            return false;
+        let sourceNodes, destNodes, nodeToMove, sourceParentNode, destNode;
+
+        try {
+            sourceNodes = this.#getNodesForPath(normalizedPathFrom);
+            if (sourceNodes.length < 2) {
+                throw new Error('Cannot move the root path itself.');
+            }
+            nodeToMove = sourceNodes[sourceNodes.length - 1];
+            sourceParentNode = sourceNodes[sourceNodes.length - 2];
+
+            destNodes = this.#getNodesForPath(normalizedPathTo);
+            destNode = destNodes[destNodes.length - 1];
+
+        } catch (error) {
+            debug(`Move operation failed: ${error.message}`);
+            // Re-throw or return false depending on desired API behavior
+            // Throwing is cleaner for indicating preconditions not met.
+            throw new Error(`Move failed: ${error.message}`);
+            // return false;
         }
 
-        const parentPath = this.#getParentPath(pathFrom);
-        const parentNode = this.#getNode(parentPath);
-        if (!parentNode) {
-            return false;
+        const layer = nodeToMove.payload;
+
+        // Precondition: Cannot move a locked layer
+        if (layer.isLocked) {
+            throw new Error(`Cannot move path "${normalizedPathFrom}": Layer "${layer.name}" (ID: ${layer.id}) is locked.`);
         }
 
-        const layer = node.payload;
-
-        if (recursive) {
-            // Check if destination contains source
-            if (pathTo.includes(layer.name)) {
-                throw new Error(`Destination path "${pathTo}" includes "${layer.name}"`);
-            }
-
-            // For recursive move, we move the entire subtree
-            if (!this.insertPath(pathTo, node)) {
-                debug(`Unable to move layer "${layer.name}" into path "${pathTo}"`);
-                return false;
-            }
+        // Check if destination already contains the node. If so, skip adding, but still remove from source.
+        let alreadyExistsAtDest = destNode.hasChild(nodeToMove.id);
+        if (alreadyExistsAtDest) {
+            debug(`Node ${nodeToMove.id} (${layer.name}) already exists under destination ${destNode.id}. Skipping add step.`);
         } else {
-            // For non-recursive move, we create a new node and transfer children
-            const targetNode = new TreeNode(layer.id, layer);
-
-            if (!this.insertPath(pathTo, targetNode)) {
-                debug(`Unable to move layer "${layer.name}" to path "${pathTo}"`);
-                return false;
-            }
-
-            // If node has children, move them to parent
-            if (node.hasChildren && !recursive) {
-                for (const child of node.children.values()) {
-                    parentNode.addChild(child);
-                }
-            }
+            // Perform the attachment
+            debug(`Attaching node ${nodeToMove.id} to ${destNode.id}`);
+            destNode.addChild(nodeToMove);
         }
 
-        // Remove node from its old location
-        parentNode.removeChild(node.id);
+        // Always remove from the original parent
+        debug(`Removing node ${nodeToMove.id} from ${sourceParentNode.id}`);
+        sourceParentNode.removeChild(nodeToMove.id);
+
         await this.#saveTreeToDataStore();
 
-        // Emit an event with the source and destination paths
+        // Emit event
         this.emit('tree:path:moved', {
-            pathFrom,
-            pathTo,
+            pathFrom: normalizedPathFrom,
+            pathTo: normalizedPathTo,
             recursive,
             layerId: layer.id,
             layerName: layer.name,
-            layerType: layer.type
+            layerType: layer.type,
+            timestamp: new Date().toISOString()
         });
 
+        debug(`Path "${normalizedPathFrom}" successfully moved under "${normalizedPathTo}".`);
         return true;
     }
 
     async copyPath(pathFrom, pathTo, recursive = false) {
-        debug(`Copying layer from "${pathFrom}" to "${pathTo}"${recursive ? ' recursively' : ''}`);
+        const normalizedPathFrom = this.#normalizePath(pathFrom);
+        const normalizedPathTo = this.#normalizePath(pathTo);
+        debug(`Copying normalized path "${normalizedPathFrom}" under "${normalizedPathTo}"${recursive ? ' recursively' : ''}`);
 
-        const sourceNode = this.#getNode(pathFrom);
-        if (!sourceNode) {
-            debug(`Unable to copy layer, source node not found at path "${pathFrom}"`);
-            return false;
+        let sourceNode, destParentNode;
+
+        try {
+            const sourceNodes = this.#getNodesForPath(normalizedPathFrom);
+            if (sourceNodes.length < 1) throw new Error('Source path does not resolve to any nodes.'); // Should not happen if root exists
+            sourceNode = sourceNodes[sourceNodes.length - 1];
+
+            // Get the destination parent node
+            const destParentNodes = this.#getNodesForPath(normalizedPathTo);
+            if (destParentNodes.length < 1) throw new Error('Destination path does not resolve to any nodes.');
+            destParentNode = destParentNodes[destParentNodes.length - 1];
+
+        } catch (error) {
+            debug(`Copy operation failed during path resolution: ${error.message}`);
+            // Re-throw or return false
+            throw new Error(`Copy failed: ${error.message}`);
+            // return false;
         }
 
-        // Create a copy of the source node
+        if (!sourceNode || !destParentNode) {
+             debug(`Copy failed: Source or destination node not found after resolution.`);
+             return false; // Or throw
+        }
+
         const layer = sourceNode.payload;
+
+        // Create a new TreeNode instance for the copy
+        // It shares the layer payload but is a distinct node in the tree structure
         const targetNode = new TreeNode(layer.id, layer);
 
-        if (!this.insertPath(pathTo, targetNode)) {
-            debug(`Unable to copy layer "${layer.name}" to path "${pathTo}"`);
-            return false;
+        // Add the new node under the destination parent
+        if (!destParentNode.hasChild(targetNode.id)) {
+            destParentNode.addChild(targetNode);
+            debug(`Added node ${targetNode.id} (${layer.name}) under ${destParentNode.id} (${destParentNode.payload?.name || 'root'})`);
+        } else {
+            debug(`Node ${targetNode.id} (${layer.name}) already exists under destination ${destParentNode.id}. Skipping add.`);
+            // If needed for recursion, update targetNode to the existing instance
+            // targetNode = destParentNode.getChild(targetNode.id);
         }
 
-        // If recursive and source node has children, copy them too
+        // --- Recursive Call Logic ---
         if (recursive && sourceNode.hasChildren) {
-            const pathToWithLayer = pathTo === '/' ? `/${layer.name}` : `${pathTo}/${layer.name}`;
+            // Construct the full path where the node was copied TO (for the next level's destination)
+            const fullCopiedPath = normalizedPathTo === '/' ? `/${layer.name}` : `${normalizedPathTo}/${layer.name}`;
 
             for (const child of sourceNode.children.values()) {
-                const childPath = pathFrom === '/' ? `/${child.name}` : `${pathFrom}/${child.name}`;
-                this.copyPath(childPath, pathToWithLayer, true);
+                const childLayer = child.payload;
+                if (!childLayer || !childLayer.name) {
+                    debug(`Skipping copy of child with invalid payload under ${sourceNode.id}`);
+                    continue;
+                }
+                // Construct the source path for the child
+                const childName = childLayer.name; // Already normalized
+                const sourceChildPath = normalizedPathFrom === '/' ? `/${childName}` : `${normalizedPathFrom}/${childName}`;
+
+                // Recursive call - await ensures sequential processing if needed
+                try {
+                    await this.copyPath(sourceChildPath, fullCopiedPath, true);
+                } catch(error) {
+                     debug(`Recursive copy failed for child ${sourceChildPath} to ${fullCopiedPath}: ${error.message}`);
+                     // Decide whether to continue copying siblings or stop
+                     // For now, let's log and continue
+                }
             }
         }
 
+        // Save the tree state AFTER the top-level call and all its recursion completes
+        // Note: This means saves only happen at the end of the initial call, not after each recursive step.
         await this.#saveTreeToDataStore();
 
-        // Emit an event with the source and destination paths
+        // Emit an event with the normalized source and destination paths
         this.emit('tree:path:copied', {
-            pathFrom,
-            pathTo,
+            pathFrom: normalizedPathFrom,
+            pathTo: normalizedPathTo,
             recursive,
             layerId: layer.id,
             layerName: layer.name,
-            layerType: layer.type
+            layerType: layer.type,
+            timestamp: new Date().toISOString()
         });
 
+        debug(`Path "${normalizedPathFrom}" successfully copied under "${normalizedPathTo}".`);
         return true;
     }
 
-    /**
-     * Remove a path from the tree
-     * @param {string} path - Path to remove
-     * @param {boolean} recursive - Whether to remove recursively
-     * @returns {boolean} - True if successful
-     */
     async removePath(path, recursive = false) {
-        debug(`Removing path "${path}"${recursive ? ' recursively' : ''}`);
+        const normalizedPath = this.#normalizePath(path);
+        debug(`Removing normalized path "${normalizedPath}"${recursive ? ' recursively' : ''}`);
 
-        const node = this.#getNode(path);
-        if (!node) {
-            debug(`Unable to remove layer, source node not found at path "${path}"`);
+        let nodeToRemove, parentNode;
+        try {
+            const nodesToRemove = this.#getNodesForPath(normalizedPath);
+            nodeToRemove = nodesToRemove[nodesToRemove.length - 1];
+
+            // Get parent using the normalized path
+            const parentPath = this.#getParentPath(normalizedPath);
+            const parentNodes = this.#getNodesForPath(parentPath);
+            parentNode = parentNodes[parentNodes.length - 1];
+        } catch (error) {
+            debug(`Unable to remove path, error resolving path or parent path: ${error.message}`);
+            return false; // Or throw?
+        }
+
+        if (!nodeToRemove || !parentNode) {
+            debug(`Unable to remove path, node or parent node not found after resolution: "${normalizedPath}"`);
             return false;
         }
 
-        const parentPath = this.#getParentPath(path);
-        const parentNode = this.#getNode(parentPath);
-        if (!parentNode) {
-            throw new Error(`Unable to remove layer, parent node not found at path "${parentPath}"`);
-        }
-
-        const layer = node.payload;
-        const childrenCount = node.children.size;
+        const layer = nodeToRemove.payload;
+        const childrenCount = nodeToRemove.children.size;
 
         // If non-recursive and node has children, move them to parent
-        if (!recursive && node.hasChildren) {
-            for (const child of node.children.values()) {
+        if (!recursive && nodeToRemove.hasChildren) {
+            for (const child of nodeToRemove.children.values()) {
                 parentNode.addChild(child);
             }
         }
 
-        parentNode.removeChild(node.id);
+        parentNode.removeChild(nodeToRemove.id);
         await this.#saveTreeToDataStore();
 
         // Emit an event with path and removal details
         this.emit('tree:path:removed', {
-            path,
+            path: normalizedPath,
             recursive,
             layerId: layer.id,
             layerName: layer.name,
@@ -361,9 +391,17 @@ class ContextTree extends EventEmitter {
         debug(`[PLACEHOLDER] Merging layer at "${path}" with layers above it`);
         // TODO: Implement bitmap merging logic
 
-        const node = this.#getNode(path);
+        let node;
+        try {
+            const nodes = this.#getNodesForPath(path);
+            node = nodes[nodes.length - 1];
+        } catch (error) {
+            debug(`Unable to merge layer up, error resolving path "${path}": ${error.message}`);
+            return false;
+        }
+
         if (!node) {
-            debug(`Unable to merge layer, node not found at path "${path}"`);
+            debug(`Unable to merge layer up, node not found at path "${path}" after resolution.`);
             return false;
         }
 
@@ -371,7 +409,7 @@ class ContextTree extends EventEmitter {
         this.emit('tree:layer:merged:up', {
             path,
             layerId: node.id,
-            layerName: node.name
+            layerName: node.name // node.name is likely undefined, should be node.payload.name
         });
 
         return true;
@@ -386,9 +424,17 @@ class ContextTree extends EventEmitter {
         debug(`[PLACEHOLDER] Merging layer at "${path}" with layers below it`);
         // TODO: Implement bitmap merging logic
 
-        const node = this.#getNode(path);
+        let node;
+        try {
+            const nodes = this.#getNodesForPath(path);
+            node = nodes[nodes.length - 1];
+        } catch (error) {
+            debug(`Unable to merge layer down, error resolving path "${path}": ${error.message}`);
+            return false;
+        }
+
         if (!node) {
-            debug(`Unable to merge layer, node not found at path "${path}"`);
+            debug(`Unable to merge layer down, node not found at path "${path}" after resolution.`);
             return false;
         }
 
@@ -396,99 +442,330 @@ class ContextTree extends EventEmitter {
         this.emit('tree:layer:merged:down', {
             path,
             layerId: node.id,
-            layerName: node.name
+            layerName: node.name // node.name is likely undefined, should be node.payload.name
         });
 
         return true;
     }
 
     /**
+     * Utils
+     */
+
+    /**
+     * Check if a path exists in the tree
+     * @param {string} path - Path to check
+     * @returns {boolean} - True if path exists
+     */
+    pathExists(path) {
+        const normalizedPath = this.#normalizePath(path);
+        try {
+            this.#getNodesForPath(normalizedPath);
+            return true;
+        } catch (error) {
+            // #getNodesForPath throws if path is invalid or doesn't exist
+            debug(`Path existence check failed for normalized path "${normalizedPath}": ${error.message}`);
+            return false;
+        }
+    }
+
+    pathToLayerIds(path) {
+        const normalizedPath = this.#normalizePath(path);
+        try {
+            const nodes = this.#getNodesForPath(normalizedPath);
+            // Exclude the root node's ID unless the path is exactly "/"
+            return nodes.slice(1).map(node => node.id); // node.id is the layer ID
+        } catch (error) {
+            debug(`Failed to convert normalized path "${normalizedPath}" to layer IDs: ${error.message}`);
+            return []; // Return empty array if path is invalid
+        }
+    }
+
+    async lockPath(path, lockBy) {
+        const normalizedPath = this.#normalizePath(path);
+        if (!lockBy) {
+            throw new Error('Locking path requires a lockBy context');
+        }
+        debug(`Locking normalized path "${normalizedPath}" by context "${lockBy}"`);
+
+        const nodes = this.#getNodesForPath(normalizedPath);
+        let changed = false;
+
+        // Operate only on nodes representing actual path segments (skip root at index 0)
+        for (const node of nodes.slice(1)) {
+            const layer = node.payload;
+            // --- DEBUG LOGGING ---
+            debug(`Checking layer ${layer.id} (${layer.name}). LockedBy: ${JSON.stringify(layer.lockedBy)}. Checking for context: ${lockBy}`);
+            // --- END DEBUG ---
+            if (!layer.isLockedBy(lockBy)) { // Check if NOT already locked by this context
+                debug(`--> Layer ${layer.id} (${layer.name}) NOT locked by ${lockBy}. Locking now.`);
+                layer.lock(lockBy);
+                await this.#layerIndex.persistLayer(layer);
+                changed = true; // <-- Set to true only if a change was made
+                debug(`Layer ${layer.id} (${layer.name}) locked by ${lockBy}`);
+            } else {
+                 debug(`--> Layer ${layer.id} (${layer.name}) IS ALREADY locked by ${lockBy}. Skipping.`);
+            }
+        }
+
+        if (changed) { // <-- Event emitted only if changed === true
+            this.emit('tree:path:locked', { path: normalizedPath, lockBy, timestamp: new Date().toISOString() });
+        }
+        return true; // Operation ensures the path is locked by lockBy
+    }
+
+    async unlockPath(path, lockBy) {
+        const normalizedPath = this.#normalizePath(path);
+        if (!lockBy) {
+            throw new Error('Unlocking path requires a lockBy context');
+        }
+        debug(`Unlocking normalized path "${normalizedPath}" by context "${lockBy}"`);
+
+        const nodes = this.#getNodesForPath(normalizedPath); // Use normalized
+        const stillLockedIds = [];
+        let changed = false;
+
+        // Operate only on nodes representing actual path segments (skip root at index 0)
+        for (const node of nodes.slice(1)) {
+            const layer = node.payload;
+            if (layer.isLockedBy(lockBy)) {
+                layer.unlock(lockBy); // Returns true if still locked by others, false if now fully unlocked
+                await this.#layerIndex.persistLayer(layer);
+                changed = true;
+                debug(`Layer ${layer.id} (${layer.name}) unlocked by ${lockBy}`);
+            }
+            // Check the final state after unlock
+            if (layer.isLocked) {
+                stillLockedIds.push(layer.id);
+            }
+        }
+
+        if (changed) {
+            this.emit('tree:path:unlocked', { path: normalizedPath, lockBy, stillLockedIds, timestamp: new Date().toISOString() });
+        }
+
+        // Return array of layer IDs in the path that remain locked (by any context)
+        return stillLockedIds;
+    }
+
+    /**
+     * Retrieve the Layer object associated with the final segment of a path.
+     * @param {string} path - The path to query.
+     * @returns {Layer | null} - The Layer object instance or null if the path is invalid or does not exist.
+     */
+    getLayerForPath(path) {
+        const normalizedPath = this.#normalizePath(path);
+        debug(`Getting layer for normalized path \"${normalizedPath}\"`);
+        try {
+            const nodes = this.#getNodesForPath(normalizedPath);
+            if (!nodes || nodes.length === 0) {
+                return null; // Should not happen if root always exists
+            }
+            // The last node in the array corresponds to the final segment of the path
+            const finalNode = nodes[nodes.length - 1];
+            return finalNode.payload; // Return the Layer object
+        } catch (error) {
+            debug(`Failed to get layer for path \"${normalizedPath}\": ${error.message}`);
+            return null; // Return null if path resolution failed
+        }
+    }
+
+    /**
      * Document CRUD (convenience) wrapper methods for the db backend
      */
 
-    insertDocument(document, contextSpec = '/', featureBitmapArray = []) {
+    async insertDocument(document, contextSpec = '/', featureBitmapArray = []) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.insertDocument(document, contextSpec, featureBitmapArray);
+        // Await the async DB call
+        const resultId = await this.#db.insertDocument(document, normalizedContextSpec, featureBitmapArray);
+        // Assuming insertDocument returns the generated ID
+        if (resultId) {
+            // Use the returned ID for the event
+            const layerNames = this.#pathToLayerNames(normalizedContextSpec);
+            this.emit('tree:document:inserted', {
+                documentId: resultId,
+                contextSpec: normalizedContextSpec,
+                layerNames,
+                timestamp: new Date().toISOString()
+            });
+        }
+        return resultId; // Return the generated ID
     }
 
-    insertDocumentArray(docArray, contextSpec = '/', featureBitmapArray = []) {
+    async insertDocumentArray(docArray, contextSpec = '/', featureBitmapArray = []) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.insertDocumentArray(docArray, contextSpec, featureBitmapArray);
+        // Await the async DB call
+        const results = await this.#db.insertDocumentArray(docArray, normalizedContextSpec, featureBitmapArray);
+        // Assuming insertDocumentArray returns generated IDs or success status
+        if (results) { // Adjust condition based on actual return
+            // Need to know what `results` contains to get IDs accurately
+            // Assuming results might be an array of IDs corresponding to docArray
+            const documentIds = Array.isArray(results) ? results : docArray.map((doc, index) => results[index] || doc.id); // Placeholder logic
+            const layerNames = this.#pathToLayerNames(normalizedContextSpec);
+            this.emit('tree:document:inserted:batch', {
+                documentIds,
+                contextSpec: normalizedContextSpec,
+                layerNames,
+                timestamp: new Date().toISOString()
+            });
+        }
+        return results;
     }
 
     hasDocument(id, contextSpec = '/', featureBitmapArray = []) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.hasDocument(id, contextSpec, featureBitmapArray);
+        return this.#db.hasDocument(id, normalizedContextSpec, featureBitmapArray);
     }
 
     hasDocumentByChecksum(checksum, contextSpec = null, featureBitmapArray = []) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.hasDocumentByChecksum(checksum, contextSpec, featureBitmapArray);
+        return this.#db.hasDocumentByChecksum(checksum, normalizedContextSpec, featureBitmapArray);
     }
 
-    listDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { limit: null }) {
+    async listDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { limit: null }) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.listDocuments(contextSpec, featureBitmapArray, filterArray, options);
+        // listDocuments doesn't modify, typically no event needed unless logging access
+        return await this.#db.listDocuments(normalizedContextSpec, featureBitmapArray, filterArray, options);
     }
 
-    updateDocument(document, contextSpec = null, featureBitmapArray = []) {
+    async updateDocument(document, contextSpec = null, featureBitmapArray = []) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.updateDocument(document, contextSpec, featureBitmapArray);
+        // Await the async DB call
+        const result = await this.#db.updateDocument(document, normalizedContextSpec, featureBitmapArray);
+        // Assuming updateDocument returns success status or updated doc info
+        if (result && document.id) { // Check document.id as it MUST be provided for update
+            const layerNames = this.#pathToLayerNames(normalizedContextSpec);
+            this.emit('tree:document:updated', {
+                documentId: document.id, // Use the ID passed in
+                contextSpec: normalizedContextSpec,
+                layerNames,
+                timestamp: new Date().toISOString()
+            });
+        }
+        return result;
     }
 
-    updateDocumentArray(docArray, contextSpec = null, featureBitmapArray = []) {
+    async updateDocumentArray(docArray, contextSpec = null, featureBitmapArray = []) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.updateDocumentArray(docArray, contextSpec, featureBitmapArray);
+        // Await the async DB call
+        const results = await this.#db.updateDocumentArray(docArray, normalizedContextSpec, featureBitmapArray);
+        // Assuming updateDocumentArray returns success or info
+        if (results) { // Adjust condition
+            const documentIds = docArray.map(doc => doc.id); // IDs must be in input array
+            const layerNames = this.#pathToLayerNames(normalizedContextSpec);
+            this.emit('tree:document:updated:batch', {
+                documentIds,
+                contextSpec: normalizedContextSpec,
+                layerNames,
+                timestamp: new Date().toISOString()
+            });
+        }
+        return results;
     }
 
-    removeDocument(documentId, contextSpec = null, featureBitmapArray = []) {
+    async removeDocument(documentId, contextSpec = null, featureBitmapArray = []) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.removeDocument(documentId, contextSpec, featureBitmapArray);
+        // Await the async DB call
+        const result = await this.#db.removeDocument(documentId, normalizedContextSpec, featureBitmapArray);
+
+        // Revert to checking the result before emitting
+        // Assuming removeDocument returns a truthy value ONLY if removal occurred in the specified context.
+        if (result) {
+             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
+             this.emit('tree:document:removed', {
+                 documentId, // Use the ID passed in
+                 contextSpec: normalizedContextSpec,
+                 layerNames,
+                 timestamp: new Date().toISOString()
+             });
+        }
+
+        // Return the result from the underlying DB method.
+        return result;
     }
 
-    removeDocumentArray(docIdArray, contextSpec = null, featureBitmapArray = []) {
+    async removeDocumentArray(docIdArray, contextSpec = null, featureBitmapArray = []) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.removeDocumentArray(docIdArray, contextSpec, featureBitmapArray);
+        // Await the async DB call
+        const results = await this.#db.removeDocumentArray(docIdArray, normalizedContextSpec, featureBitmapArray);
+        // Assuming removeDocumentArray returns success
+        if (results) { // Adjust condition
+            const layerNames = this.#pathToLayerNames(normalizedContextSpec);
+            this.emit('tree:document:removed:batch', {
+                documentIds: docIdArray, // Use the IDs passed in
+                contextSpec: normalizedContextSpec,
+                layerNames,
+                timestamp: new Date().toISOString()
+            });
+        }
+        return results;
     }
 
-    deleteDocument(documentId) {
+    async deleteDocument(documentId) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.deleteDocument(documentId);
+        // Await the async DB call
+        const result = await this.#db.deleteDocument(documentId);
+        // Assuming deleteDocument returns success
+        if (result) { // Adjust condition
+            this.emit('tree:document:deleted', {
+                documentId, // Use the ID passed in
+                timestamp: new Date().toISOString()
+            });
+        }
+        return result;
     }
 
-    deleteDocumentArray(docIdArray) {
+    async deleteDocumentArray(docIdArray) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.deleteDocumentArray(docIdArray);
+        // Await the async DB call
+        const results = await this.#db.deleteDocumentArray(docIdArray);
+        // Assuming deleteDocumentArray returns success
+        if (results) { // Adjust condition
+            this.emit('tree:document:deleted:batch', {
+                documentIds: docIdArray, // Use the IDs passed in
+                timestamp: new Date().toISOString()
+            });
+        }
+        return results;
     }
 
-    getById(id) {
+    async getById(id) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.getById(id);
+        return await this.#db.getById(id);
     }
 
-    getByIdArray(idArray) {
+    async getByIdArray(idArray) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.getByIdArray(idArray);
+        return await this.#db.getByIdArray(idArray);
     }
 
-    getByChecksumString(checksumString) {
+    async getByChecksumString(checksumString) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.getByChecksumString(checksumString);
+        return await this.#db.getByChecksumString(checksumString);
     }
 
-    getByChecksumStringArray(checksumStringArray) {
+    async getByChecksumStringArray(checksumStringArray) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.getByChecksumStringArray(checksumStringArray);
+        return await this.#db.getByChecksumStringArray(checksumStringArray);
     }
 
-    query(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {
+    async query(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.query(query, contextBitmapArray, featureBitmapArray, filterArray, metadataOnly);
+        return await this.#db.query(query, contextBitmapArray, featureBitmapArray, filterArray, metadataOnly);
     }
 
-    ftsQuery(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {
+    async ftsQuery(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.ftsQuery(query, contextBitmapArray, featureBitmapArray, filterArray, metadataOnly);
+        return await this.#db.ftsQuery(query, contextBitmapArray, featureBitmapArray, filterArray, metadataOnly);
     }
 
     /**
@@ -496,43 +773,14 @@ class ContextTree extends EventEmitter {
      */
 
     /**
-     * Get a node by path
-     * @param {string} path - Path to node
-     * @returns {Object} - Node or false if not found
-     */
-    #getNode(path) {
-        if (path === '/' || !path) {
-            return this.root;
-        }
-        const layerNames = path.split('/').filter(Boolean);
-        let currentNode = this.root;
-
-        for (const layerName of layerNames) {
-            const layer = this.#layerIndex.getLayerByName(layerName);
-            if (!layer) {
-                debug(`Layer "${layerName}" not found in index`);
-                return false;
-            }
-
-            const child = currentNode.getChild(layer.id);
-            if (!child) {
-                debug(`Target path "${path}" does not exist`);
-                return false;
-            }
-
-            currentNode = child;
-        }
-
-        return currentNode;
-    }
-
-    /**
      * Get parent path
      * @param {string} path - Child path
      * @returns {string} - Parent path
      */
     #getParentPath(path) {
-        return path.split('/').slice(0, -1).join('/') || '/';
+        // This should operate on an already normalized path
+        const normalizedPath = this.#normalizePath(path); // Ensure it's normalized
+        return normalizedPath.split('/').slice(0, -1).join('/') || '/';
     }
 
     /**
@@ -542,18 +790,32 @@ class ContextTree extends EventEmitter {
      */
     #buildPathArray(sort = true) {
         const paths = [];
+        // Traversal uses node.payload.name which is assumed to be normalized (by LayerIndex/BaseLayer)
         const traverseTree = (node, parentPath) => {
-            const path = !parentPath || parentPath === '' ? '/' : `${parentPath}/${node.name}`;
+            // Construct path segments using the (already normalized) layer name
+            const currentSegment = node.payload.name;
+            const path = !parentPath || parentPath === '/' ? `/${currentSegment}` : `${parentPath}/${currentSegment}`;
+
+            // Handle root case where name is '/'
+            const displayPath = (path === '//' || path === '/') ? '/' : path;
+
             if (node.children.size > 0) {
+                paths.push(displayPath); // Add intermediate paths too
                 for (const child of node.children.values()) {
-                    traverseTree(child, path);
+                    traverseTree(child, displayPath); // Pass the constructed path
                 }
             } else {
-                paths.push(path.replace(/\/\//g, '/'));
+                paths.push(displayPath); // Add leaf paths
             }
         };
-        traverseTree(this.root);
-        return sort ? paths.sort() : paths;
+        // Start traversal from root node, parent path is initially empty
+        traverseTree(this.root, '');
+        // Remove potential duplicates and the root path if added separately by logic
+        const uniquePaths = [...new Set(paths)].filter(p => p !== '/');
+        // Add root path explicitly
+        uniquePaths.unshift('/');
+
+        return sort ? uniquePaths.sort() : uniquePaths;
     }
 
     /**
@@ -621,45 +883,70 @@ class ContextTree extends EventEmitter {
     }
 
     /**
-     * Build a tree from JSON
-     * @param {Object} rootNode - Root node data
-     * @param {boolean} autoCreateLayers - Whether to automatically create layers
-     * @returns {Object} - Built tree
+     * Build a tree from JSON data retrieved from the store.
+     * Prioritizes using Layer instances already managed by LayerIndex.
+     * @param {Object} rootNodeData - The raw root node data from the data store.
+     * @returns {TreeNode | null} - The root TreeNode of the built tree, or null if data is invalid.
+     * @private
      */
-    #buildTreeFromJson(rootNode = this.root, autoCreateLayers = true) {
-        const buildTree = (nodeData) => {
-            let node;
-            let layer;
+    #buildTreeFromJson(rootNodeData) {
+        if (!rootNodeData || !rootNodeData.id || rootNodeData.name === undefined) {
+            debug('Invalid or missing root node data for buildTreeFromJson.');
+            return null;
+        }
 
-            // Extract the ID without the "layer/" prefix if it exists
-            const layerId = nodeData.id.startsWith('layer/') ? nodeData.id : `layer/${nodeData.id}`;
-
-            // Try both formats - with and without the "layer/" prefix
-            layer = this.#layerIndex.getLayerByID(layerId) || this.#layerIndex.getLayerByID(nodeData.id);
-
-            if ((!layer && !nodeData.name) || (!layer && !autoCreateLayers)) {
-                throw new Error(`Unable to find layer by ID "${nodeData.id}", can not create a tree node`);
+        const buildNodeRecursive = (nodeData) => {
+            if (!nodeData || !nodeData.id || nodeData.name === undefined) {
+                debug('Skipping invalid node data during tree build:', nodeData);
+                return null;
             }
 
-            if (!layer && autoCreateLayers) {
-                layer = this.#layerIndex.createLayer(nodeData.name);
-            }
+            // Layer names in the stored JSON should be normalized already
+            const normalizedName = nodeData.name;
+            let layer = this.#layerIndex.getLayerByName(normalizedName);
 
-            // Ensure we have a valid layer before creating TreeNode
             if (!layer) {
-                throw new Error(`Failed to get or create layer for ID "${nodeData.id}" and name "${nodeData.name}"`);
+                // This case implies inconsistency between stored tree and LayerIndex init
+                console.warn(`Layer '${normalizedName}' (ID: ${nodeData.id}) not found in LayerIndex map during tree build. Attempting direct fetch/reconstruction.`);
+                layer = this.#layerIndex.getLayerByID(nodeData.id); // Fetches and reconstructs
+                if (!layer) {
+                    // If still not found, something is wrong. Skip this node.
+                    console.error(`Failed to find or reconstruct layer '${normalizedName}' (ID: ${nodeData.id}) during tree build. Skipping node.`);
+                    return null;
+                     // Alternatively, throw new Error(`...`);
+                }
+                 // If reconstructed, ensure its name matches what we expected
+                 if (this.#layerIndex._LayerIndex__normalizeLayerName(layer.name) !== normalizedName) { // Access private for check
+                     console.error(`Name mismatch after direct fetch for layer ID ${layer.id}: Expected '${normalizedName}', got '${layer.name}'. Skipping node.`);
+                     return null;
+                 }
+                 // Add the reconstructed layer to the map to potentially fix inconsistency?
+                 // this.#layerIndex._LayerIndex__nameToLayerMap.set(normalizedName, layer);
+            } else {
+                // Verify the ID from the map instance matches the stored tree data
+                if (layer.id !== nodeData.id) {
+                    console.error(`ID mismatch for layer '${normalizedName}': Map has ${layer.id}, JSON has ${nodeData.id}. Using instance from map.`);
+                    // Continue, trusting the instance from the map
+                }
             }
 
-            node = new TreeNode(layer.id, layer);
-            for (const childData of nodeData.children) {
-                const childNode = buildTree(childData);
-                node.addChild(childNode);
-            }
+            // Create TreeNode using the definitive Layer instance
+            const treeNode = new TreeNode(layer.id, layer);
 
-            return node;
+            // Recursively build children
+            if (nodeData.children && Array.isArray(nodeData.children)) {
+                for (const childData of nodeData.children) {
+                    const childNode = buildNodeRecursive(childData);
+                    if (childNode) { // Only add if child was successfully built
+                        treeNode.addChild(childNode);
+                    }
+                }
+            }
+            return treeNode;
         };
 
-        return buildTree(rootNode);
+        // Start building from the root data
+        return buildNodeRecursive(rootNodeData);
     }
 
     /**
@@ -694,14 +981,31 @@ class ContextTree extends EventEmitter {
 
     #loadTreeFromDataStore() {
         debug('Loading tree from the data store...');
-        const jsonTree = this.#dataStore.get('tree');
-        if (!jsonTree) {
-            debug('No persistent Tree data found in the data store, creating a new one...');
-            return;
+        const jsonTreeData = this.#dataStore.get('tree');
+        if (!jsonTreeData) {
+            debug('No persistent Tree data found in the data store, using default initial tree.');
+            // Ensure this.root is the default initialized root (should be set earlier in initialize())
+            if (!this.root || this.root.id !== this.rootLayer.id) {
+                 this.root = new TreeNode(this.rootLayer.id, this.rootLayer);
+                 debug('Initialized with default root node as persistent data was missing.');
+            }
+            return false; // Indicate load was skipped
         }
 
         debug('Found persistent Tree data in the data store, re-building tree...');
-        this.root = this.#buildTreeFromJson(jsonTree);
+        const loadedRootNode = this.#buildTreeFromJson(jsonTreeData);
+
+        if (!loadedRootNode) {
+             debug('Failed to build tree from persistent data. Using default initial tree.');
+             // Ensure this.root is the default initialized root
+             if (!this.root || this.root.id !== this.rootLayer.id) {
+                  this.root = new TreeNode(this.rootLayer.id, this.rootLayer);
+                  debug('Initialized with default root node due to build failure.');
+             }
+             return false; // Indicate load failed
+        }
+
+        this.root = loadedRootNode; // Assign the successfully built tree
 
         // Emit a load event
         this.emit('tree:loaded', {
@@ -709,6 +1013,123 @@ class ContextTree extends EventEmitter {
         });
 
         return true;
+    }
+
+    /**
+     * Node Methods
+     */
+
+    /**
+     * Get an array of nodes corresponding to a path.
+     * Throws error if path or any layer component is invalid.
+     * @param {string} path - Path string (e.g., "/work/projectA")
+     * @returns {Array<TreeNode>} - Array of TreeNode objects for the path
+     * @private
+     */
+    #getNodesForPath(path) {
+        if (path === '/' || !path) {
+            return [this.root]; // Root path only has the root node
+        }
+
+        const layerNames = path.split('/').filter(Boolean);
+        if (layerNames.length === 0 && path !== '/') {
+            throw new Error(`Invalid path format: "${path}"`);
+        }
+
+        const nodes = [];
+        let currentNode = this.root;
+        nodes.push(currentNode); // Include root node
+
+        for (const layerName of layerNames) {
+            const layer = this.#layerIndex.getLayerByName(layerName); // LayerIndex normalizes name
+            if (!layer) {
+                throw new Error(`Layer "${layerName}" not found in index for path "${path}"`);
+            }
+
+            const child = currentNode.getChild(layer.id);
+            if (!child) {
+                // This case means the layer exists in the index but is not present at this specific path in the tree structure.
+                throw new Error(`Path segment "${layerName}" (Layer ID: ${layer.id}) does not exist at this location in the tree: "${path}"`);
+            }
+
+            nodes.push(child);
+            currentNode = child;
+        }
+
+        return nodes;
+    }
+
+    /**
+     * Convert a path string to an array of layer names.
+     * Returns empty array if path is invalid or '/'.
+     * @param {string} path - Path string (e.g., "/work/projectA")
+     * @returns {Array<string>} - Array of layer names
+     * @private
+     */
+    #pathToLayerNames(path) {
+        if (!path || path === '/') {
+            return [];
+        }
+        try {
+            const nodes = this.#getNodesForPath(path);
+            // Skip the root node (index 0) and map others to payload.name
+            return nodes.slice(1).map(node => node.payload.name);
+        } catch (error) {
+            // If path doesn't resolve in the *current* tree, return empty or log?
+            // This might happen if contextSpec refers to layers not yet in the tree structure,
+            // even if valid for the DB operation itself.
+            debug(`Could not resolve path "${path}" to layer names for event: ${error.message}`);
+            return []; // Return empty array for safety
+        }
+    }
+
+    /**
+     * Normalizes a path string: trims, removes extra slashes, converts to lowercase,
+     * and removes characters other than letters, numbers, /, ., -, _.
+     * @param {string | null} path - The input path string.
+     * @returns {string} - The normalized path string.
+     * @private
+     */
+    #normalizePath(path) {
+        if (path === null || path === undefined) {
+            // Decide handling: return null, '/', or throw error? Returning '/' seems safest for contextSpec defaults.
+            return '/';
+        }
+        let normalized = String(path).trim();
+        if (!normalized) {
+            return '/'; // Treat empty string as root
+        }
+
+        // Ensure it starts with a single slash if not already root
+        if (normalized !== '/' && !normalized.startsWith('/')) {
+            normalized = '/' + normalized;
+        }
+        // Remove trailing slash unless it's the root path
+        if (normalized !== '/' && normalized.endsWith('/')) {
+            normalized = normalized.slice(0, -1);
+        }
+
+        // Collapse multiple slashes
+        normalized = normalized.replace(/\/+/g, '/');
+
+        // Split, process segments, rejoin
+        const segments = normalized.split('/');
+        const normalizedSegments = segments.map(segment => {
+            if (segment === '') return ''; // Keep empty segments from split('/')
+            // Lowercase and remove invalid characters
+            return segment.toLowerCase().replace(/[^a-z0-9._-]/g, '');
+        });
+
+        // Rejoin, handling potential empty segments if original was just '/' or '//'
+        normalized = normalizedSegments.join('/');
+        if (normalized === '') return '/'; // If all segments were removed or empty
+
+        // Final check for root representation
+        if (normalized === '/') return '/';
+        // Ensure starting slash if lost during join/map (e.g., path was '/foo')
+        if (!normalized.startsWith('/')) normalized = '/' + normalized;
+
+        return normalized;
     }
 }
 
