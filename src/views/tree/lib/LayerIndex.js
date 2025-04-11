@@ -73,9 +73,6 @@ class LayerIndex extends EventEmitter {
         }
 
         // Reconstruct the Layer instance from the raw data
-        // Assuming BaseLayer has a suitable constructor or static fromJSON method
-        // We need to import the BaseLayer class here.
-        // TODO: Add import for BaseLayer
         try {
             // Determine the correct Layer class based on the stored type
             const layerType = layerData.type || 'context'; // Default to 'context' if type is missing?
@@ -91,13 +88,10 @@ class LayerIndex extends EventEmitter {
                  throw new Error(`Invalid schema class for layer type "${layerType}"`);
             }
 
-             // return new LayerClass(layerData); // If constructor handles object
              return LayerClass.fromJSON(layerData); // Use static method from the correct class
         } catch (error) {
             debug(`Error reconstructing layer instance for ID ${normalizedId}: ${error.message}`);
             console.error(`Failed to reconstruct layer from data:`, layerData);
-            // Return the raw data or throw, depending on desired handling
-            // Returning raw data might lead to errors later, like the one we saw.
             // Throwing might be safer.
             throw new Error(`Failed to reconstruct layer instance for ID ${normalizedId}`);
             // return layerData; // Less safe

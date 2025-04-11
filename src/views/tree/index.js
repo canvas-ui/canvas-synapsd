@@ -636,9 +636,7 @@ class ContextTree extends EventEmitter {
     async updateDocument(document, contextSpec = null, featureBitmapArray = []) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        // Await the async DB call
         const result = await this.#db.updateDocument(document, normalizedContextSpec, featureBitmapArray);
-        // Assuming updateDocument returns success status or updated doc info
         if (result && document.id) { // Check document.id as it MUST be provided for update
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
             this.emit('tree:document:updated', {
@@ -656,7 +654,6 @@ class ContextTree extends EventEmitter {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         // Await the async DB call
         const results = await this.#db.updateDocumentArray(docArray, normalizedContextSpec, featureBitmapArray);
-        // Assuming updateDocumentArray returns success or info
         if (results) { // Adjust condition
             const documentIds = docArray.map(doc => doc.id); // IDs must be in input array
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
@@ -676,8 +673,6 @@ class ContextTree extends EventEmitter {
         // Await the async DB call
         const result = await this.#db.removeDocument(documentId, normalizedContextSpec, featureBitmapArray);
 
-        // Revert to checking the result before emitting
-        // Assuming removeDocument returns a truthy value ONLY if removal occurred in the specified context.
         if (result) {
              const layerNames = this.#pathToLayerNames(normalizedContextSpec);
              this.emit('tree:document:removed', {
@@ -697,7 +692,6 @@ class ContextTree extends EventEmitter {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         // Await the async DB call
         const results = await this.#db.removeDocumentArray(docIdArray, normalizedContextSpec, featureBitmapArray);
-        // Assuming removeDocumentArray returns success
         if (results) { // Adjust condition
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
             this.emit('tree:document:removed:batch', {
@@ -714,7 +708,6 @@ class ContextTree extends EventEmitter {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         // Await the async DB call
         const result = await this.#db.deleteDocument(documentId);
-        // Assuming deleteDocument returns success
         if (result) { // Adjust condition
             this.emit('tree:document:deleted', {
                 documentId, // Use the ID passed in
@@ -728,7 +721,6 @@ class ContextTree extends EventEmitter {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         // Await the async DB call
         const results = await this.#db.deleteDocumentArray(docIdArray);
-        // Assuming deleteDocumentArray returns success
         if (results) { // Adjust condition
             this.emit('tree:document:deleted:batch', {
                 documentIds: docIdArray, // Use the IDs passed in
@@ -920,8 +912,7 @@ class ContextTree extends EventEmitter {
                      console.error(`Name mismatch after direct fetch for layer ID ${layer.id}: Expected '${normalizedName}', got '${layer.name}'. Skipping node.`);
                      return null;
                  }
-                 // Add the reconstructed layer to the map to potentially fix inconsistency?
-                 // this.#layerIndex._LayerIndex__nameToLayerMap.set(normalizedName, layer);
+
             } else {
                 // Verify the ID from the map instance matches the stored tree data
                 if (layer.id !== nodeData.id) {
