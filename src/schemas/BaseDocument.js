@@ -31,7 +31,6 @@ const documentDataSchema = z.object({
 // Full document schema definition (for internal storage)
 const documentSchema = z.object({
     // Base
-    id: z.number().int().positive().optional(),
     schema: z.string(),
     schemaVersion: z.string(),
 
@@ -97,7 +96,7 @@ class BaseDocument {
      */
     constructor(options = {}) {
         // Base
-        this.id = options.id ?? 1;
+        this.id = options.id ?? null;
         this.schema = options.schema ?? DOCUMENT_SCHEMA_NAME;
         this.schemaVersion = options.schemaVersion ?? DOCUMENT_SCHEMA_VERSION;
 
@@ -248,11 +247,6 @@ class BaseDocument {
         try {
             // Validate using Zod schema
             BaseDocument.schema.parse(this);
-
-            // Additional validation
-            if (!this.id) {
-                throw new Error('Document ID is required');
-            }
 
             if (!this.data) {
                 throw new Error('Document data is required');

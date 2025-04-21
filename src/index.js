@@ -340,7 +340,7 @@ class SynapsD extends EventEmitter {
         try {
             // Assign ID *only* if it wasn't pre-assigned (e.g., during parsing/init) AND checksum check failed
             if (!parsedDocument.id) {
-                parsedDocument.id = this.#generateDocumentID();
+                parsedDocument.id = await this.#generateDocumentID();
                 debug(`insertDocument: Generated new document ID: ${parsedDocument.id}`);
             } else {
                  debug(`insertDocument: Using pre-existing ID from parsed document: ${parsedDocument.id}`);
@@ -1227,11 +1227,11 @@ class SynapsD extends EventEmitter {
         return initializedDoc; // Return the fully validated and initialized BaseDocument instance
     }
 
-    #documentCount() {
-        return this.documents.getCount();
+    async #documentCount() {
+        return await this.documents.getCount();
     }
 
-    #generateDocumentID() {
+    async #generateDocumentID() {
         try {
             // Try to get a recycled ID first
             const recycledId = this.#popDeletedId();
@@ -1241,11 +1241,12 @@ class SynapsD extends EventEmitter {
             }
 
             // Generate a new ID based on the document count
-            let count = this.#documentCount();
+            let count = await this.#documentCount();
             // Ensure count is a number
             count = typeof count === 'number' ? count : 0;
             const newId = INTERNAL_BITMAP_ID_MAX + count + 1;
             debug(`Generated new document ID: ${newId}`);
+            console.log(`Generated new document ID: ${newId}`);
             return newId;
         } catch (error) {
             debug(`Error generating document ID: ${error.message}`);
