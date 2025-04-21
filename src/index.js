@@ -884,7 +884,7 @@ class SynapsD extends EventEmitter {
         }
 
         // Return a JS object
-        return this.#parseDocument(rawDocData);
+        return this.#parseInitializeDocument(rawDocData); // Use parseInitialize to get an instance
     }
 
     /**
