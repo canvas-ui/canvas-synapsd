@@ -78,6 +78,8 @@ class SynapsD extends EventEmitter {
         // Initialize database backend
         this.#rootPath = options.rootPath ?? options.path;
         if (!this.#rootPath) { throw new Error('Database path required'); }
+
+        debug('Database path:', this.#rootPath);
         this.#db = new Db({
             ...options,
             path: this.#rootPath,
@@ -293,7 +295,7 @@ class SynapsD extends EventEmitter {
             const SchemaClass = this.getSchema(document.schema);
             return SchemaClass.validateData(document);
         } catch (error) {
-            debug('Data validation error:', error);
+            debug('Data validation error for schema %s:', document.schema, error.message); // More specific debug
             return false;
         }
     }
@@ -304,51 +306,93 @@ class SynapsD extends EventEmitter {
 
     async insertDocument(document, contextSpec = '/', featureBitmapArray = []) {
         if (!document) { throw new Error('Document is required'); }
+        if (!Array.isArray(featureBitmapArray)) { featureBitmapArray = [featureBitmapArray]; }
+        debug(`insertDocument: Attempting to insert document with contextSpec: ${contextSpec}, features: [${featureBitmapArray.join(', ')}]`);
+
+        let parsedDocument;
+        try {
+            parsedDocument = this.#parseInitializeDocument(document);
+            debug(`insertDocument: Document parsed and initialized. Schema: ${parsedDocument.schema}, ID: ${parsedDocument.id ?? 'Not Set'}`);
+        } catch (error) {
+            debug(`insertDocument: Failed to parse or initialize document. Error: ${error.message}`);
+            // Re-throw the specific parsing/initialization error
+            throw new Error(`Failed to parse/initialize document: ${error.message}`);
+        }
 
         const contextBitmapArray = this.#parseContextSpec(contextSpec);
-        const parsedDocument = this.#parseInitializeDocument(document);
+        debug(`insertDocument: Context spec parsed: ${contextBitmapArray}`);
+
+        // Checksum lookup needs to happen *after* parsing/initialization
         const storedDocument = await this.getByChecksumString(parsedDocument.checksumArray[0]);
 
         // If a checksum already exists, update the document
         if (storedDocument) {
-            debug(`insertDocument: Document found by checksum ${parsedDocument.checksumArray[0]}, updating..`);
-            return this.updateDocument(storedDocument, contextSpec, featureBitmapArray);
+            debug(`insertDocument: Document found by checksum ${parsedDocument.checksumArray[0]}, updating existing document ID: ${storedDocument.id}`);
+            // Pass the *original* document data (or instance) and the FOUND storedDocument ID for update
+            // NOTE: The updateDocument signature was changed in the previous edit attempt, let's adjust it here too.
+            // It now expects (docIdToUpdate, updateData, contextSpec, featureBitmapArray)
+            return this.updateDocument(storedDocument.id, document, contextSpec, featureBitmapArray);
         } else {
-            debug(`insertDocument: Document not found by checksum ${parsedDocument.checksumArray[0]}, inserting`);
+            debug(`insertDocument: Document not found by checksum ${parsedDocument.checksumArray[0]}, proceeding with new insertion.`);
         }
 
         // Checksum not found in the index, insert as a new document
         try {
-            parsedDocument.id = this.#generateDocumentID(); // If checksum differs, always generate a new ID
-            parsedDocument.validate();
+            // Assign ID *only* if it wasn't pre-assigned (e.g., during parsing/init) AND checksum check failed
+            if (!parsedDocument.id) {
+                parsedDocument.id = this.#generateDocumentID();
+                debug(`insertDocument: Generated new document ID: ${parsedDocument.id}`);
+            } else {
+                 debug(`insertDocument: Using pre-existing ID from parsed document: ${parsedDocument.id}`);
+            }
+
+            // Validate the final state before saving
+            parsedDocument.validate(); // Validation should happen on the final instance
+            debug(`insertDocument: Document validated successfully. ID: ${parsedDocument.id}`);
+
+            // --- Database Operations ---
             await this.documents.put(parsedDocument.id, parsedDocument);
+            debug(`insertDocument: Document ${parsedDocument.id} saved to 'documents' dataset.`);
+
             await this.#checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
+            debug(`insertDocument: Checksums for document ${parsedDocument.id} added to index.`);
+
             await this.#timestampIndex.insert('created', parsedDocument.createdAt || new Date().toISOString(), parsedDocument.id);
             if (parsedDocument.updatedAt) {
                 await this.#timestampIndex.insert('updated', parsedDocument.updatedAt, parsedDocument.id);
             }
+            debug(`insertDocument: Timestamps for document ${parsedDocument.id} added.`);
 
-            // Make sure we update the context tree paths
-            this.tree.insertPath(contextBitmapArray.join('/'));
+            // --- Context Tree & Bitmap Updates ---
+            this.tree.insertPath(contextBitmapArray.join('/')); // Use the parsed context array
+            debug(`insertDocument: Context path '${contextBitmapArray.join('/')}' ensured in tree.`);
 
-            // Update context bitmaps
             for (const context of contextBitmapArray) {
                 await this.contextBitmapCollection.tick(context, parsedDocument.id);
             }
+            debug(`insertDocument: Document ${parsedDocument.id} added to context bitmaps: [${contextBitmapArray.join(', ')}]`);
+
 
             // If document.schema is not part of featureBitmapArray, add it
             if (!featureBitmapArray.includes(parsedDocument.schema)) {
                 featureBitmapArray.push(parsedDocument.schema);
+                debug(`insertDocument: Added document schema '${parsedDocument.schema}' to feature list.`);
             }
 
-            // Update feature bitmaps
             for (const feature of featureBitmapArray) {
                 await this.bitmapIndex.tick(feature, parsedDocument.id);
             }
+            debug(`insertDocument: Document ${parsedDocument.id} added to feature bitmaps: [${featureBitmapArray.join(', ')}]`);
+            // --- End Updates ---
 
+            this.emit('documentInserted', { id: parsedDocument.id, document: parsedDocument });
+            debug(`insertDocument: Successfully inserted document ID: ${parsedDocument.id}`);
             return parsedDocument.id;
         } catch (error) {
-            debug(`Error inserting document: ${error.message}`);
+            // Catch errors during DB ops, validation, or indexing
+            debug(`insertDocument: Error during insertion process for document (potential ID ${parsedDocument.id}): ${error.message}`, error);
+            // Clean up potentially partially inserted data? (More complex, depends on desired atomicity)
+            // For now, just re-throw the error after logging.
             throw error;
         }
     }
@@ -366,7 +410,7 @@ class SynapsD extends EventEmitter {
             try {
                 await this.insertDocument(doc, contextSpec, featureBitmapArray);
             } catch (error) {
-                errors[doc.id] = error;
+                errors.push(error); // doc.id may not be set yet
             }
         }
         return errors;
@@ -496,63 +540,210 @@ class SynapsD extends EventEmitter {
     }
 
     // Updates documents in context and/or feature bitmaps
-    async updateDocument(document, contextSpec = null, featureBitmapArray = []) {
-        if (!document) { throw new Error('Document required'); }
-        if (!document.id) { throw new Error('Document must have an ID for update operations'); }
-        if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
+    async updateDocument(docIdentifier, updateDataOrContext = null, contextOrFeatures = null, featureArray = []) {
+        let docIdToUpdate;
+        let updateData;
+        let contextSpec = null;
+        let featureBitmapArray = [];
+
+        // --- Argument Parsing ---
+        // Case 1: updateDocument(id, updateData, contextSpec, featureBitmapArray)
+        if ( (typeof docIdentifier === 'string' || typeof docIdentifier === 'number') &&
+             updateDataOrContext !== null && typeof updateDataOrContext === 'object' &&
+             (contextOrFeatures === null || typeof contextOrFeatures === 'string' || Array.isArray(contextOrFeatures)) &&
+             Array.isArray(featureArray) ) {
+            docIdToUpdate = docIdentifier;
+            updateData = updateDataOrContext;
+            contextSpec = contextOrFeatures;
+            featureBitmapArray = featureArray;
+             debug(`updateDocument (Case 1): ID=${docIdToUpdate}, Data Provided, Context=${contextSpec}, Features=[${featureBitmapArray.join(',')}]`);
+        }
+        // Case 2: updateDocument(id, updateData, contextSpec) - features default to []
+        else if ( (typeof docIdentifier === 'string' || typeof docIdentifier === 'number') &&
+                  updateDataOrContext !== null && typeof updateDataOrContext === 'object' &&
+                  (contextOrFeatures === null || typeof contextOrFeatures === 'string' || Array.isArray(contextOrFeatures)) &&
+                   featureArray.length === 0 && arguments.length <= 3) { // Check arguments length helps distinguish
+            docIdToUpdate = docIdentifier;
+            updateData = updateDataOrContext;
+            contextSpec = contextOrFeatures;
+            // featureBitmapArray defaults to []
+             debug(`updateDocument (Case 2): ID=${docIdToUpdate}, Data Provided, Context=${contextSpec}, Features=Default`);
+        }
+        // Case 3: updateDocument(id, updateData) - context/features default
+        else if ( (typeof docIdentifier === 'string' || typeof docIdentifier === 'number') &&
+                   updateDataOrContext !== null && typeof updateDataOrContext === 'object' &&
+                   arguments.length <= 2) {
+            docIdToUpdate = docIdentifier;
+            updateData = updateDataOrContext;
+             // contextSpec defaults to null, featureBitmapArray defaults to []
+             debug(`updateDocument (Case 3): ID=${docIdToUpdate}, Data Provided, Context/Features=Default`);
+        }
+         // Case 4: updateDocument(id, contextSpec, featureBitmapArray) - updateData needs fetching
+         else if ( (typeof docIdentifier === 'string' || typeof docIdentifier === 'number') &&
+                   (updateDataOrContext === null || typeof updateDataOrContext === 'string' || Array.isArray(updateDataOrContext)) &&
+                   Array.isArray(contextOrFeatures) && arguments.length <= 3) {
+             docIdToUpdate = docIdentifier;
+             updateData = null; // Signal that data needs fetching
+             contextSpec = updateDataOrContext;
+             featureBitmapArray = contextOrFeatures;
+             debug(`updateDocument (Case 4): ID=${docIdToUpdate}, Data needs fetch, Context=${contextSpec}, Features=[${featureBitmapArray.join(',')}]`);
+         }
+        // Case 5: updateDocument(id, contextSpec) - data fetch, features default
+        else if ( (typeof docIdentifier === 'string' || typeof docIdentifier === 'number') &&
+                  (updateDataOrContext === null || typeof updateDataOrContext === 'string' || Array.isArray(updateDataOrContext)) &&
+                   arguments.length <= 2) {
+             docIdToUpdate = docIdentifier;
+             updateData = null; // Signal that data needs fetching
+             contextSpec = updateDataOrContext;
+             // featureBitmapArray defaults to []
+             debug(`updateDocument (Case 5): ID=${docIdToUpdate}, Data needs fetch, Context=${contextSpec}, Features=Default`);
+        }
+        // Case 6: updateDocument(docObjectOrInstance, contextSpec, featureBitmapArray)
+        else if (typeof docIdentifier === 'object' && docIdentifier !== null && (isDocument(docIdentifier) || isDocumentInstance(docIdentifier)) &&
+                  (updateDataOrContext === null || typeof updateDataOrContext === 'string' || Array.isArray(updateDataOrContext)) &&
+                  Array.isArray(contextOrFeatures) && arguments.length <= 3) {
+             let tempParsed = this.#parseInitializeDocument(docIdentifier); // Parse first to get ID and validate structure
+             if (!tempParsed.id) throw new Error('updateDocument: Document object/instance provided must have an ID.');
+             docIdToUpdate = tempParsed.id;
+             updateData = tempParsed; // Use the provided, parsed object as update data
+             contextSpec = updateDataOrContext;
+             featureBitmapArray = contextOrFeatures;
+             debug(`updateDocument (Case 6): Doc Object Provided (ID=${docIdToUpdate}), Context=${contextSpec}, Features=[${featureBitmapArray.join(',')}]`);
+        }
+        // Case 7: updateDocument(docObjectOrInstance, contextSpec) - features default
+         else if (typeof docIdentifier === 'object' && docIdentifier !== null && (isDocument(docIdentifier) || isDocumentInstance(docIdentifier)) &&
+                  (updateDataOrContext === null || typeof updateDataOrContext === 'string' || Array.isArray(updateDataOrContext)) &&
+                   arguments.length <= 2) {
+             let tempParsed = this.#parseInitializeDocument(docIdentifier);
+             if (!tempParsed.id) throw new Error('updateDocument: Document object/instance provided must have an ID.');
+             docIdToUpdate = tempParsed.id;
+             updateData = tempParsed;
+             contextSpec = updateDataOrContext;
+             // featureBitmapArray defaults to []
+              debug(`updateDocument (Case 7): Doc Object Provided (ID=${docIdToUpdate}), Context=${contextSpec}, Features=Default`);
+         }
+        // Case 8: updateDocument(docObjectOrInstance) - context/features default
+        else if (typeof docIdentifier === 'object' && docIdentifier !== null && (isDocument(docIdentifier) || isDocumentInstance(docIdentifier)) &&
+                  arguments.length <= 1) {
+            let tempParsed = this.#parseInitializeDocument(docIdentifier);
+             if (!tempParsed.id) throw new Error('updateDocument: Document object/instance provided must have an ID.');
+             docIdToUpdate = tempParsed.id;
+             updateData = tempParsed;
+            // contextSpec defaults to null, featureBitmapArray defaults to []
+             debug(`updateDocument (Case 8): Doc Object Provided (ID=${docIdToUpdate}), Context/Features=Default`);
+        }
+        // Default/Error Case
+        else {
+             debug(`updateDocument: Invalid argument combination. docIdentifier type: ${typeof docIdentifier}, updateDataOrContext type: ${typeof updateDataOrContext}, contextOrFeatures type: ${typeof contextOrFeatures}, featureArray type: ${typeof featureArray}, args length: ${arguments.length}`);
+            throw new Error('updateDocument: Invalid arguments. Provide ID + optional data/context/features, or a Document object + optional context/features.');
+        }
+        // --- End Argument Parsing ---
+
+        // --- Validation & Fetching ---
+        if (!docIdToUpdate) { throw new Error('updateDocument: Could not determine Document ID for update operation.'); }
+        if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array.'); } // Should be caught by arg parsing, but defensive check
+
+        // Fetch data if it wasn't provided directly
+        if (updateData === null) {
+             debug(`updateDocument: Fetching existing document data for ID ${docIdToUpdate} as none was provided.`);
+            updateData = await this.getById(docIdToUpdate); // Fetch existing data
+            if (!updateData) {
+                 throw new Error(`updateDocument: Cannot update. Document with ID "${docIdToUpdate}" not found.`);
+            }
+             debug(`updateDocument: Successfully fetched existing document data for ID ${docIdToUpdate}.`);
+        } else {
+             // If updateData *was* provided, ensure it's at least a parsed object
+             // (If it came from Case 6/7/8, it's already an instance)
+             if (!isDocumentInstance(updateData)) {
+                 try {
+                    // Use parseInitialize to ensure it's valid and has checksums etc.
+                    // This is important if the input was just a plain data object.
+                    updateData = this.#parseInitializeDocument(updateData);
+                     debug(`updateDocument: Provided update data parsed and initialized. Schema: ${updateData.schema}`);
+                 } catch (parseError) {
+                     throw new Error(`updateDocument: Provided update data is invalid: ${parseError.message}`);
+                 }
+             }
+        }
+
+
         const contextBitmapArray = this.#parseContextSpec(contextSpec);
+        // Ensure context tree paths exist for the *target* context, even if updating
+        if (contextBitmapArray.length > 0) {
+            this.tree.insertPath(contextBitmapArray.join('/'));
+            debug(`updateDocument: Ensured context path '${contextBitmapArray.join('/')}' exists in tree.`);
+        }
 
-        // Make sure we update the context tree paths
-        this.tree.insertPath(contextBitmapArray.join('/'));
-
-        debug('updateDocument: ', document);
-
-        const parsedDocument = this.#parseInitializeDocument(document);
         let updatedDocument = null;
 
         try {
-            // Get stored document (now returns a proper document instance)
-            const storedDocumentData = await this.getById(parsedDocument.id);
-            if (!storedDocumentData) {
-                throw new Error(`updateDocument: Document not found based on ID ${parsedDocument.id}`);
+            // --- Fetch Stored Instance ---
+            // Get the currently stored document *instance* to compare against and perform the update on
+            const storedDocumentInstance = await this.getById(docIdToUpdate);
+            if (!storedDocumentInstance) {
+                 // This should ideally be caught by the fetch check earlier if updateData was null,
+                 // but it's a safety check if somehow ID exists but getById fails later.
+                 throw new Error(`updateDocument: Stored document with ID ${docIdToUpdate} disappeared before update could proceed.`);
             }
+             debug(`updateDocument: Fetched stored document instance for ID ${docIdToUpdate}. Schema: ${storedDocumentInstance.schema}`);
 
-            const storedDocument = this.#parseInitializeDocument(storedDocumentData);
-            debug('updateDocument > Stored document: ', storedDocument);
-            updatedDocument = storedDocument.update(parsedDocument);
-            debug('updateDocument > Updated document: ', updatedDocument);
+            // --- Perform Update ---
+            // Perform the update using the instance's method.
+            // updateData here is guaranteed to be a parsed/initialized document (either fetched or provided)
+            updatedDocument = storedDocumentInstance.update(updateData); // Use the BaseDocument's update logic
+            debug(`updateDocument: Document instance updated in memory. New checksums: [${updatedDocument.checksumArray.join(', ')}]`);
 
-            // Validate and save
-            updatedDocument.validate();
-            await this.documents.put(updatedDocument.id, updatedDocument);
 
-            // Update checksum index
-            await this.#checksumIndex.deleteArray(storedDocument.checksumArray);
+            // --- Validate and Save ---
+            updatedDocument.validate(); // Validate the merged result
+            debug(`updateDocument: Updated document ${updatedDocument.id} validated successfully.`);
+
+            await this.documents.put(updatedDocument.id, updatedDocument); // Save the updated instance
+             debug(`updateDocument: Updated document ${updatedDocument.id} saved to 'documents' dataset.`);
+
+            // --- Update Checksum Index ---
+            // Use checksums from the *original* stored instance for deletion
+            await this.#checksumIndex.deleteArray(storedDocumentInstance.checksumArray);
+            // Use checksums from the *newly updated* instance for insertion
             await this.#checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
+            debug(`updateDocument: Checksum index updated for document ${updatedDocument.id}.`);
+
+             // --- Update Timestamp Index ---
+             // Always update the 'updated' timestamp on any update
+            await this.#timestampIndex.insert('updated', updatedDocument.updatedAt, updatedDocument.id);
+            debug(`updateDocument: 'updated' timestamp updated for document ${updatedDocument.id}.`);
+
         } catch (error) {
-            throw error;
+            debug(`updateDocument: Error during update process for document ID ${docIdToUpdate}: ${error.message}`, error);
+            throw error; // Re-throw after logging
         }
 
-        // Update context bitmaps if provided
+        // --- Context & Feature Bitmap Updates ---
+        // Apply context/feature ticks *after* successful data update
         if (contextBitmapArray.length > 0) {
             for (const context of contextBitmapArray) {
                 await this.contextBitmapCollection.tick(context, updatedDocument.id);
             }
+            debug(`updateDocument: Document ${updatedDocument.id} ticked in context bitmaps: [${contextBitmapArray.join(', ')}]`);
         }
 
-        // If document.schema is not part of featureBitmapArray, add it
+        // Ensure schema is included in features
         if (!featureBitmapArray.includes(updatedDocument.schema)) {
             featureBitmapArray.push(updatedDocument.schema);
+             debug(`updateDocument: Added schema '${updatedDocument.schema}' to feature list for update.`);
         }
 
-        // Update feature bitmaps if provided
         if (featureBitmapArray.length > 0) {
             for (const feature of featureBitmapArray) {
                 await this.bitmapIndex.tick(feature, updatedDocument.id);
             }
+            debug(`updateDocument: Document ${updatedDocument.id} ticked in feature bitmaps: [${featureBitmapArray.join(', ')}]`);
         }
+        // --- End Updates ---
 
-        return updatedDocument.id;
+        this.emit('documentUpdated', { id: updatedDocument.id, document: updatedDocument });
+        debug(`updateDocument: Successfully updated document ID: ${updatedDocument.id}`);
+        return updatedDocument.id; // Return the ID of the updated document
     }
 
     async updateDocumentArray(docArray, contextSpec = null, featureBitmapArray = []) {
@@ -887,17 +1078,51 @@ class SynapsD extends EventEmitter {
      * @private
      */
     #parseDocument(documentData) {
-        if (!documentData) { throw new Error('Document data required'); }
-        if (typeof documentData === 'string') {
-            try {
-                documentData = JSON.parse(documentData);
-            } catch (error) {
-                debug(`Error parsing document data: ${error.message}`);
-                throw error;
-            }
+        debug('#parseDocument: Received data type:', typeof documentData);
+        if (!documentData) {
+            debug('#parseDocument: Error - Document data is required but received falsy value.');
+            throw new Error('Document data required');
         }
 
-        return documentData;
+        let parsedData = documentData;
+
+        if (typeof documentData === 'string') {
+            try {
+                parsedData = JSON.parse(documentData);
+                debug('#parseDocument: JSON parsed successfully.');
+            } catch (error) {
+                debug(`#parseDocument: Error parsing JSON string: ${error.message}`);
+                // Throw a more specific error
+                throw new Error(`Invalid JSON data provided: ${error.message}`);
+            }
+        } else if (typeof documentData === 'object' && documentData !== null) {
+             // No parsing needed if it's already an object (and not null)
+        } else {
+            debug('#parseDocument: Error - Input data is not a string or object:', typeof documentData);
+            throw new Error(`Invalid document data type: Expected string or object, got ${typeof documentData}`);
+        }
+
+        // Basic sanity check for schema and data properties after potential parsing
+        if (typeof parsedData !== 'object' || parsedData === null) {
+             // Check if it might be a BaseDocument instance already
+             if(!(parsedData instanceof BaseDocument)) {
+                 debug('#parseDocument: Error - Parsed data is not a non-null object.');
+                 throw new Error('Parsed document data must be a non-null object.');
+             } else {
+                  debug('#parseDocument: Parsed data appears to be a BaseDocument instance (skipping schema/data check here).');
+             }
+        } else if (!parsedData.schema || parsedData.data === undefined) {
+             // If it's an object, *then* check for schema/data (unless it's already an instance)
+             if(!(parsedData instanceof BaseDocument)) {
+                 debug('#parseDocument: Error - Parsed object lacks required schema or data property.');
+                 throw new Error('Parsed document data must have "schema" and "data" properties.');
+             } else {
+                  debug('#parseDocument: Parsed data is an instance, skipping schema/data check here.');
+             }
+        }
+
+        debug('#parseDocument: Returning parsed data.');
+        return parsedData;
     }
 
     /**
@@ -907,38 +1132,62 @@ class SynapsD extends EventEmitter {
      * @private
      */
     #initializeDocument(documentData) {
-        if (!documentData) { throw new Error('Document data required'); }
-        let doc;
-
-        // If we have a document instance, return it
-        if (isDocumentInstance(documentData)) {
-            // Validate the document
-            this.validateDocumentInstance(documentData);
-
-            doc = documentData;
-
-            // Ensure checksums are generated
-            if (!doc.checksumArray || doc.checksumArray.length === 0) {
-                doc.checksumArray = doc.generateChecksumStrings();
-            }
-
-        // If we have a document data object, create a document instance from it
-        } else if (isDocument(documentData)) {
-            // Get the schema class for the document
-            const Schema = this.getSchema(documentData.schema);
-            if (!Schema) { throw new Error(`Schema ${documentData.schema} not found`); }
-
-            // Create a document instance from data
-            doc = Schema.fromData(documentData);
-
-            // Ensure checksums are generated
-            if (!doc.checksumArray || doc.checksumArray.length === 0) {
-                doc.checksumArray = doc.generateChecksumStrings();
-            }
-        } else {
-            throw new Error('Invalid document: must be a document instance or valid document data');
+        debug('#initializeDocument: Initializing document. Input type:', typeof documentData, 'Is instance:', isDocumentInstance(documentData));
+        if (!documentData || typeof documentData !== 'object') {
+            debug('#initializeDocument: Error - Document data must be a non-null object.');
+            throw new Error('Document data required for initialization (must be an object)');
         }
 
+        let doc;
+
+        try {
+            // Case 1: Already a document instance
+            if (isDocumentInstance(documentData)) {
+                debug('#initializeDocument: Input is already a Document instance.');
+                // Perform validation on the existing instance
+                this.validateDocumentInstance(documentData); // This might throw if invalid
+                doc = documentData;
+                debug('#initializeDocument: Document instance validated.');
+
+            // Case 2: A plain data object that conforms to the basic document structure
+            } else if (isDocument(documentData)) {
+                debug(`#initializeDocument: Input is a plain data object. Schema: ${documentData.schema}`);
+                // Get the schema class for the document
+                const Schema = this.getSchema(documentData.schema); // This throws if schema not found
+                if (!Schema) { /* Redundant due to getSchema throwing, but belts and suspenders */ throw new Error(`Schema ${documentData.schema} not found`); }
+                debug(`#initializeDocument: Found Schema class for ${documentData.schema}.`);
+
+                // Create a document instance *from* the data using the specific class's factory
+                doc = Schema.fromData(documentData); // This handles setting defaults, etc.
+                debug(`#initializeDocument: Created new Document instance from data. ID: ${doc.id ?? 'Not Set'}, CreatedAt: ${doc.createdAt}. running vaidation..`);
+
+                // It's crucial to validate the *newly created instance*
+                doc.validate(); // This uses the instance's validation logic
+                debug('#initializeDocument: New Document instance validated.');
+
+            // Case 3: Invalid input type
+            } else {
+                debug('#initializeDocument: Error - Invalid document data structure. Not an instance and lacks required properties.');
+                throw new Error('Invalid document data: must be a BaseDocument instance or a plain object with "schema" and "data" properties.');
+            }
+
+            // Ensure checksums are generated *after* potential creation/validation
+            if (!doc.checksumArray || doc.checksumArray.length === 0) {
+                debug(`#initializeDocument: Generating checksums for document ID: ${doc.id ?? 'Not Set'}.`);
+                doc.checksumArray = doc.generateChecksumStrings();
+                debug(`#initializeDocument: Checksums generated: [${doc.checksumArray.join(', ')}]`);
+            } else {
+                debug(`#initializeDocument: Using existing checksums for document ID: ${doc.id ?? 'Not Set'}: [${doc.checksumArray.join(', ')}]`);
+            }
+
+        } catch (error) {
+            // Catch errors from validation, schema lookup, or checksum generation
+            debug(`#initializeDocument: Error during initialization: ${error.message}`, error);
+            // Re-throw to be caught by the caller (e.g., #parseInitializeDocument)
+            throw new Error(`Document initialization failed: ${error.message}`);
+        }
+
+        debug(`#initializeDocument: Initialization complete. Returning document instance. ID: ${doc.id ?? 'Not Set'}, Schema: ${doc.schema}`);
         return doc;
     }
 
@@ -949,16 +1198,33 @@ class SynapsD extends EventEmitter {
      * @private
      */
     #parseInitializeDocument(documentData) {
-        if (!documentData) { throw new Error('Document data required'); }
-        let doc;
+        debug('#parseInitializeDocument: Starting parse and initialization.');
+        if (!documentData) {
+             debug('#parseInitializeDocument: Error - Input document data is required.');
+             throw new Error('Document data required');
+        }
 
-        // Ensure we are dealing with a JS object
-        documentData = this.#parseDocument(documentData);
+        let parsedData;
+        let initializedDoc;
 
-        // Initialize the document
-        doc = this.#initializeDocument(documentData);
+        try {
+            // Step 1: Parse the input (handles strings, ensures basic object structure)
+            parsedData = this.#parseDocument(documentData);
+            debug('#parseInitializeDocument: Document parsed successfully.');
 
-        return doc;
+            // Step 2: Initialize the document (creates instance if needed, validates, generates checksums)
+            initializedDoc = this.#initializeDocument(parsedData);
+            debug('#parseInitializeDocument: Document initialized successfully.');
+
+        } catch (error) {
+             // Catch errors from either #parseDocument or #initializeDocument
+             debug(`#parseInitializeDocument: Failed during parse/initialize chain: ${error.message}`);
+             // Re-throw the error with context
+             throw new Error(`Failed to parse and initialize document: ${error.message}`);
+        }
+
+        debug('#parseInitializeDocument: Parse and initialization complete. Returning document instance.');
+        return initializedDoc; // Return the fully validated and initialized BaseDocument instance
     }
 
     #documentCount() {

@@ -97,7 +97,7 @@ class BaseDocument {
      */
     constructor(options = {}) {
         // Base
-        this.id = options.id ?? null;
+        this.id = options.id ?? 1;
         this.schema = options.schema ?? DOCUMENT_SCHEMA_NAME;
         this.schemaVersion = options.schemaVersion ?? DOCUMENT_SCHEMA_VERSION;
 
