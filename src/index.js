@@ -402,7 +402,7 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
         // Collect errors
-        const errors = {};
+        let errors = [];
 
         // Insert documents
         // TODO: Insert with a batch operation
@@ -751,7 +751,7 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
         // Collect errors
-        const errors = {};
+        let errors = [];
 
         // Update documents
         // TODO: Update with a batch operation
@@ -759,7 +759,7 @@ class SynapsD extends EventEmitter {
             try {
                 await this.updateDocument(doc, contextSpec, featureBitmapArray);
             } catch (error) {
-                errors[doc.id] = error;
+                errors.push(error); // doc.id may not be set yet
             }
         }
 
@@ -800,7 +800,7 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
 
         // Collect errors
-        const errors = {};
+        let errors = [];
 
         // TODO: Implement batch operation
         for (const id of docIdArray) {
@@ -850,14 +850,14 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(docIdArray)) { docIdArray = [docIdArray]; }
 
         // Collect errors
-        const errors = {};
+        let errors = [];
 
         // TODO: Implement batch operation
         for (const id of docIdArray) {
             try {
                 await this.deleteDocument(id);
             } catch (error) {
-                errors[id] = error;
+                errors.push(error); // doc.id may not be set yet
             }
         }
 
