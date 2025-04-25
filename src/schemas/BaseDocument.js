@@ -446,7 +446,7 @@ class BaseDocument {
      * @returns {string} JSON representation of the document
      */
     toJSON() {
-        return JSON.stringify({
+        return {
             id: this.id,
             schema: this.schema,
             schemaVersion: this.schemaVersion,
@@ -461,7 +461,7 @@ class BaseDocument {
             versions: this.versions,
             versionNumber: this.versionNumber,
             latestVersion: this.latestVersion,
-        }, null);
+        };
     }
 
     /**
