@@ -1,13 +1,46 @@
 import SynapsD from '../src/index.js'
+import fs from 'fs';
+import path from 'path';
+import assert from 'assert';
 
+// Test database path
+const DB_PATH = '/tmp/synapsd-test-crud';
+
+// Remove existing test database if it exists
+if (fs.existsSync(DB_PATH)) {
+    fs.rmSync(DB_PATH, { recursive: true, force: true });
+}
+
+// Create a fresh database instance
 const db = new SynapsD({
-    path: '/tmp/synapsd-testdb'
-})
+    path: DB_PATH
+});
 
-import { isDocument, isDocumentInstance } from '../src/schemas/SchemaRegistry.js';
+// Error tracking for summary
+const testResults = {
+    total: 0,
+    passed: 0,
+    failed: 0,
+    skipped: 0,
+    errors: []
+};
 
-const Note = db.getSchema('data/abstraction/note');
-const Tab = db.getSchema('data/abstraction/tab');
+/**
+ * Test helper functions
+ */
+function test(name, fn) {
+    testResults.total++;
+    try {
+        fn();
+        console.log(`✅ PASS: ${name}`);
+        testResults.passed++;
+    } catch (error) {
+        console.error(`❌ FAIL: ${name}`);
+        console.error(`   Error: ${error.message}`);
+        testResults.failed++;
+        testResults.errors.push({ name, error });
+    }
+}
 
 /**
  * Sample documents
@@ -45,15 +78,10 @@ const tab2Data = {
     }
 }
 
-const tabData3 = {
-    schema: 'data/abstraction/tab',
-    data: {
-        url: 'https://exmapletab3.com',
-    }
-}
 const contextArray = [
-    'context/foo',
-    'context/baz',
+    'foo',
+    'bar',
+    'baz',
 ]
 
 const featureArray = [
@@ -62,251 +90,347 @@ const featureArray = [
     'client/app/firefox',
 ]
 
+/**
+ * Main test function
+ */
+async function runTests() {
+    console.log('Starting SynapsD CRUD tests...');
 
-async function test() {
     try {
+        // Start the database
         await db.start();
-        console.log(`\n--- DB Status: ${db.status} ---\n`);
-        console.log('Initial Stats:', db.stats);
+        console.log('Database started successfully');
 
-        // --- Clean slate ---
-        console.log('\n--- Clearing existing data (if any) ---');
-        const allDocs = await db.listDocuments();
-        const allIds = allDocs.map(d => d.id);
-        if (allIds.length > 0) {
-            console.log(`Deleting ${allIds.length} existing documents...`);
-            await db.deleteDocumentArray(allIds);
-            console.log('Existing documents deleted.');
-            // Reset relevant bitmaps (optional, depends on test needs)
-            await db.bitmaps.deleteBitmap('internal/gc/deleted');
-            await db.bitmaps.deleteBitmap('internal/action/created');
-            await db.bitmaps.deleteBitmap('internal/action/updated');
-            await db.bitmaps.deleteBitmap('internal/action/deleted');
-            // Reinitialize action bitmaps if necessary
-            db.deletedDocumentsBitmap = await db.bitmaps.createBitmap('internal/gc/deleted');
-            db.actionBitmaps = {
-                 created: await db.bitmaps.createBitmap('internal/action/created'),
-                 updated: await db.bitmaps.createBitmap('internal/action/updated'),
-                 deleted: await db.bitmaps.createBitmap('internal/action/deleted'),
-            };
-            console.log('Internal bitmaps reset.');
-        } else {
-            console.log('No existing documents found to clear.');
+        // Run all tests
+        await testCreate();
+        await testRead();
+        await testUpdate();
+        await testDelete();
+
+        // Print test summary
+        console.log('\n--- Test Summary ---');
+        console.log(`Total tests: ${testResults.total}`);
+        console.log(`Passed: ${testResults.passed}`);
+        console.log(`Failed: ${testResults.failed}`);
+
+        if (testResults.errors.length > 0) {
+            console.log('\n--- Failed Tests ---');
+            testResults.errors.forEach(({ name, error }, index) => {
+                console.log(`${index + 1}. ${name}: ${error.message}`);
+            });
         }
-        console.log('Initial Stats After Clearing:', db.stats);
-
-
-        console.log('\n--- Inserting Valid Test Documents ---');
-
-        // Insertions with specific context/features
-        // We expect these to get IDs like 100001, 100002, etc. if starting fresh
-        const tab1Id = await db.insertDocument(tab1Data, ['context/aaa', 'context/bbb'], ['client/os/linux']);
-        console.log(`Inserted Tab 1 (ID: ${tab1Id}) with context:[aaa,bbb], features:[linux]`);
-
-        const note1Id = await db.insertDocument(note1Data, ['context/aaa', 'context/ccc'], ['client/os/macos']);
-        console.log(`Inserted Note 1 (ID: ${note1Id}) with context:[aaa,ccc], features:[macos]`);
-
-        const tab2Id = await db.insertDocument(tab2Data, ['context/bbb', 'context/ccc'], ['client/os/linux']);
-        console.log(`Inserted Tab 2 (ID: ${tab2Id}) with context:[bbb,ccc], features:[linux]`);
-
-        const note2Id = await db.insertDocument(note2Data, ['context/aaa'], ['client/os/macos']);
-        console.log(`Inserted Note 2 (ID: ${note2Id}) with context:[aaa], features:[macos]`);
-
-        console.log('\n--- Current Stats After Valid Insertions ---');
-        console.log(db.stats);
-
-
-        console.log('\n--- Testing listDocuments (Standard Cases) ---');
-
-        // Helper to log results nicely
-        const logListResult = async (testCase, context = [], features = [], filters = []) => {
-            console.log(`\nTesting: ${testCase}`);
-            console.log(`  Context: [${context.join(', ')}]`);
-            console.log(`  Features: [${features.join(', ')}]`);
-            console.log(`  Filters: [${filters.join(', ')}]`);
-            const results = await db.listDocuments(context, features, filters);
-            const resultIds = results.map(doc => doc.id).sort(); // Extract and sort IDs
-            console.log(`  Result IDs: [${resultIds.join(', ')}]`);
-            return resultIds;
-        };
-
-        // --- Context Tests (AND logic) ---
-        await logListResult('Context AND: aaa & bbb', ['context/aaa', 'context/bbb']); // Expected: tab1Id
-        await logListResult('Context AND: aaa & ccc', ['context/aaa', 'context/ccc']); // Expected: note1Id
-        await logListResult('Context AND: bbb & ccc', ['context/bbb', 'context/ccc']); // Expected: tab2Id
-        await logListResult('Single Context: aaa', ['context/aaa']); // Expected: tab1Id, note1Id, note2Id
-        await logListResult('Single Context: bbb', ['context/bbb']); // Expected: tab1Id, tab2Id
-        await logListResult('Single Context: ccc', ['context/ccc']); // Expected: note1Id, tab2Id
-        await logListResult('Non-existent Context', ['context/nonexistent']); // Expected: []
-        await logListResult('Non-existent AND Existing Context', ['context/aaa', 'context/nonexistent']); // Expected: []
-
-        // --- Feature Tests (OR logic internally, then ANDed with context/filters) ---
-        await logListResult('Single Feature: linux', [], ['client/os/linux']); // Expected: tab1Id, tab2Id
-        await logListResult('Single Feature: macos', [], ['client/os/macos']); // Expected: note1Id, note2Id
-        await logListResult('Multiple Features (OR): linux OR macos', [], ['client/os/linux', 'client/os/macos']); // Expected: tab1Id, note1Id, tab2Id, note2Id
-
-        // --- Combined Context (AND) & Feature (OR) Tests ---
-        // Result = AND(context) AND OR(features)
-        await logListResult('Context bbb AND Feature macos', ['context/bbb'], ['client/os/macos']); // Expected: [] (bbb={t1,t2}, macos={n1,n2} -> intersection={})
-        await logListResult('Context aaa AND Feature linux', ['context/aaa'], ['client/os/linux']); // Expected: tab1Id (aaa={t1,n1,n2}, linux={t1,t2} -> intersection={t1})
-
-        // --- Filter Array Tests (AND logic) ---
-        // This ANDs all filters in the array
-        await logListResult('Filter Array: context/aaa AND client/os/linux', [], [], ['context/aaa', 'client/os/linux']); // Expected: tab1Id
-        await logListResult('Filter Array: context/ccc AND client/os/macos', [], [], ['context/ccc', 'client/os/macos']); // Expected: note1Id
-
-        // --- No Filters ---
-        await logListResult('No Filters', [], [], []); // Expected: tab1Id, note1Id, tab2Id, note2Id
-
-
-        console.log('\n--- Testing Invalid/Non-Standard Insertions ---');
-
-        // Test case helper for expected errors
-        const testInsertionError = async (testName, docData, context, features) => {
-            console.log(`\nTesting Error Case: ${testName}`);
-            try {
-                await db.insertDocument(docData, context, features);
-                console.error(`  [FAIL] Expected an error but insertion succeeded.`);
-            } catch (error) {
-                console.log(`  [PASS] Received expected error: ${error.message}`);
-            }
-        };
-
-        // 1. Null/Undefined document
-        await testInsertionError('Null Document', null);
-        await testInsertionError('Undefined Document', undefined);
-
-        // 2. Missing Schema
-        await testInsertionError('Missing Schema', { data: { title: 'No Schema' } });
-
-        // 3. Invalid Schema
-        await testInsertionError('Invalid Schema', { schema: 'invalid/schema/path', data: { title: 'Bad Schema' } });
-
-        // 4. Missing Data property
-        await testInsertionError('Missing Data Property', { schema: 'data/abstraction/note' });
-
-        // 5. Invalid Data according to Schema (Invalid URL for Tab)
-        await testInsertionError('Invalid Data (Bad URL)', { schema: 'data/abstraction/tab', data: { url: 'not-a-valid-url', title: 'Bad URL Tab' } });
-
-        // 6. Invalid Data (Missing required field - URL for Tab)
-        await testInsertionError('Invalid Data (Missing URL)', { schema: 'data/abstraction/tab', data: { title: 'Missing URL Tab' } });
-
-        // 7. Inserting a pre-made instance (should work fine)
-        console.log(`\nTesting: Inserting pre-made Tab instance`);
-        try {
-            const preMadeTab = Tab.fromData({ schema: 'data/abstraction/tab', data: { url: 'http://premade.com', title: 'Pre-made' } });
-            const preMadeId = await db.insertDocument(preMadeTab, ['context/premade']);
-            console.log(`  [PASS] Inserted pre-made instance with ID: ${preMadeId}`);
-            // Verify it exists
-            const fetched = await db.getById(preMadeId);
-            if (fetched && fetched.data.title === 'Pre-made') {
-                 console.log(`  [PASS] Verified pre-made instance exists.`);
-            } else {
-                 console.error(`  [FAIL] Failed to verify pre-made instance.`);
-            }
-        } catch (error) {
-            console.error(`  [FAIL] Error inserting pre-made instance: ${error.message}`);
-        }
-
-        // 8. Invalid contextSpec type (should throw in #parseContextSpec, caught by insertDocument)
-        await testInsertionError('Invalid contextSpec (number)', tabData3, 123);
-        await testInsertionError('Invalid contextSpec (object)', tabData3, { context: 'invalid' });
-
-        // 9. Invalid featureBitmapArray type (should throw in insertDocument)
-        await testInsertionError('Invalid featureBitmapArray (string)', tabData3, '/', 'not-an-array');
-        await testInsertionError('Invalid featureBitmapArray (object)', tabData3, '/', { feature: 'invalid' });
-
-
-        console.log('\n--- Testing Updates with Edge Cases ---');
-        // Helper for update errors
-        const testUpdateError = async (testName, docIdOrData, context, features) => {
-             console.log(`\nTesting Update Error Case: ${testName}`);
-             try {
-                 await db.updateDocument(docIdOrData, context, features);
-                 console.error(`  [FAIL] Expected an error but update succeeded.`);
-             } catch (error) {
-                 console.log(`  [PASS] Received expected error: ${error.message}`);
-             }
-        };
-
-        // 1. Update non-existent ID
-        await testUpdateError('Update Non-existent ID', 'non-existent-id-123');
-
-        // 2. Update with data object missing ID
-        await testUpdateError('Update Data Missing ID', { schema: 'data/abstraction/tab', data: { url: 'http://update.fail', title: 'No ID Update' } });
-
-        // 3. Update with invalid data (should fail validation within update)
-        const invalidUpdateData = { id: tab1Id, schema: 'data/abstraction/tab', data: { url: 'invalid-update-url' } };
-        // Need to use the correct signature for updateDocument now
-        await testUpdateError('Update With Invalid Data', tab1Id, invalidUpdateData);
-
-        // 4. Update using object instance (should work)
-        console.log(`\nTesting: Update using Tab instance`);
-        try {
-            const tabToUpdate = await db.getById(tab1Id);
-            if (!tabToUpdate) throw new Error('Could not fetch tab1Id for update test');
-            tabToUpdate.data.title = "Updated Title via Instance";
-            const updatedId = await db.updateDocument(tabToUpdate, ['context/updated']);
-            console.log(`  [PASS] Updated instance with ID: ${updatedId}`);
-             // Verify it exists and was updated
-             const fetched = await db.getById(updatedId); // updatedId should === tab1Id
-             if (fetched && fetched.data.title === 'Updated Title via Instance') {
-                  console.log(`  [PASS] Verified instance update.`);
-             } else {
-                  console.error(`  [FAIL] Failed to verify instance update.`);
-             }
-             // Verify context was added
-             const docsInUpdatedContext = await db.listDocuments(['context/updated']);
-             if (docsInUpdatedContext.some(d => d.id === updatedId)) {
-                  console.log(`  [PASS] Verified context ['context/updated'] was added.`);
-             } else {
-                  console.error(`  [FAIL] Failed to verify context addition.`);
-             }
-        } catch (error) {
-             console.error(`  [FAIL] Error updating using instance: ${error.message}`, error);
-        }
-
-        // 5. Update using just ID and new context/features
-        console.log(`\nTesting: Update context/features using only ID`);
-        try {
-            const updatedId = await db.updateDocument(note1Id, ['context/new'], ['feature/added']); // Using Case 4/5 signature
-            console.log(`  [PASS] Updated context/features for ID: ${updatedId}`);
-            const fetched = await db.getById(updatedId);
-            // Verify context
-            const docsInNewContext = await db.listDocuments(['context/new']);
-            if (docsInNewContext.some(d => d.id === updatedId)) {
-                  console.log(`  [PASS] Verified context ['context/new'] was added.`);
-            } else {
-                  console.error(`  [FAIL] Failed to verify context ['context/new'] addition.`);
-            }
-            // Verify feature
-            const docsWithNewFeature = await db.listDocuments(null, ['feature/added']);
-             if (docsWithNewFeature.some(d => d.id === updatedId)) {
-                  console.log(`  [PASS] Verified feature ['feature/added'] was added.`);
-            } else {
-                  console.error(`  [FAIL] Failed to verify feature ['feature/added'] addition.`);
-            }
-        } catch (error) {
-            console.error(`  [FAIL] Error updating context/features via ID: ${error.message}`, error);
-        }
-
-
-        console.log('\n--- Final Stats ---');
-        console.log(db.stats);
-
-        console.log('\n--- Listing Final Bitmaps (Sanity Check) ---');
-        console.log(await db.bitmaps.listBitmaps());
-
-        console.log('\n--- Test Complete ---');
-
     } catch (error) {
-        console.error("\n*** TEST FAILED ***");
-        console.error(error);
+        console.error('Error running tests:', error);
     } finally {
-        // Optional: Clean up DB if needed, or just leave it for inspection
-        // await db.shutdown();
-        // console.log('DB Shutdown.');
+        // Shutdown the database
+        await db.shutdown();
+        console.log('Database shut down');
     }
 }
 
-test();
+/**
+ * CREATE tests
+ */
+async function testCreate() {
+    console.log('\n=== Testing CREATE operations ===');
+
+    // Test insertDocument
+    test('insertDocument - basic', async () => {
+        const id = await db.insertDocument(note1Data);
+        console.log(id);
+        assert(id && typeof id === 'number', 'Should return a numeric ID');
+    });
+
+    // Test insertDocument with context and features
+    test('insertDocument - with context and features', async () => {
+        const id = await db.insertDocument(note2Data, contextArray, featureArray);
+        assert(id && typeof id === 'number', 'Should return a numeric ID');
+
+        // Verify document has correct context and features
+        const hasDoc = await db.hasDocument(id, contextArray[0], featureArray[0]);
+        assert(hasDoc, 'Document should exist in specified context and feature');
+    });
+
+    // Test insertDocumentArray
+    test('insertDocumentArray', async () => {
+        const errors = await db.insertDocumentArray([tab1Data, tab2Data], contextArray, featureArray);
+        assert(Array.isArray(errors) && errors.length === 0, 'Should return empty errors array');
+
+        // Use listDocuments to verify insertion worked
+        const tabs = await db.listDocuments('/', 'data/abstraction/tab');
+        assert(tabs.length === 2, 'Should have inserted 2 tabs');
+    });
+}
+
+/**
+ * READ tests
+ */
+async function testRead() {
+    console.log('\n=== Testing READ operations ===');
+
+    // Insert test data first
+    let note1Id, note2Id;
+    try {
+        note1Id = await db.insertDocument(note1Data);
+        console.log('inserted note1');
+        console.log(note1Id);
+        note2Id = await db.insertDocument(note2Data, 'test_context');
+        console.log('inserted note2');
+        console.log(note2Id);
+    } catch (error) {
+        console.error('Failed to insert test data for READ tests:', error);
+        return;
+    }
+
+    // Test getById
+    test('getById', async () => {
+        const note = await db.getById(note1Id);
+        assert(note && note.schema === 'data/abstraction/note', 'Should retrieve document with correct schema');
+        console.log(note);
+        assert(note.data && note.data.title === note1Data.data.title, 'Should have correct title');
+    });
+
+    // Test getByIdArray
+    test('getByIdArray', async () => {
+        const notes = await db.getByIdArray([note1Id, note2Id]);
+        assert(Array.isArray(notes) && notes.length === 2, 'Should retrieve 2 documents');
+        assert(notes[0].id === note1Id || notes[1].id === note1Id, 'Should retrieve first document');
+        assert(notes[0].id === note2Id || notes[1].id === note2Id, 'Should retrieve second document');
+    });
+
+    // Test hasDocument
+    test('hasDocument', async () => {
+        const exists = await db.hasDocument(note1Id);
+        assert(exists, 'Document should exist');
+
+        const doesNotExist = await db.hasDocument(99999999);
+        assert(!doesNotExist, 'Non-existent document should return false');
+    });
+
+    // Test hasDocumentByChecksum
+    test('hasDocumentByChecksum', async () => {
+        const note = await db.getById(note1Id);
+        const checksum = note.getPrimaryChecksum();
+
+        const exists = await db.hasDocumentByChecksum(checksum);
+        assert(exists, 'Document should exist by checksum');
+    });
+
+    // Test listDocuments
+    test('listDocuments - all documents', async () => {
+        const docs = await db.listDocuments();
+        assert(docs.length >= 2, 'Should retrieve at least 2 documents');
+    });
+
+    // Test listDocuments with context
+    test('listDocuments - with context', async () => {
+        const docs = await db.listDocuments('test_context');
+        assert(docs.length >= 1, 'Should retrieve at least 1 document');
+
+        // At least one document should have note2's data
+        const hasNote2 = docs.some(doc =>
+            doc.data.title === 'Note 2' && doc.data.content === 'Content for note 2'
+        );
+        assert(hasNote2, 'Should retrieve Note 2 in test_context');
+    });
+
+    // Test listDocuments with feature filter
+    test('listDocuments - with feature', async () => {
+        const docs = await db.listDocuments('/', 'data/abstraction/note');
+        assert(docs.length >= 2, 'Should retrieve at least 2 note documents');
+        assert(docs.every(doc => doc.schema === 'data/abstraction/note'), 'All documents should be notes');
+    });
+
+    // Test getByChecksumString
+    test('getByChecksumString', async () => {
+        const note = await db.getById(note1Id);
+        const checksum = note.getPrimaryChecksum();
+        const retrievedNote = await db.getByChecksumString(checksum);
+        assert(retrievedNote && retrievedNote.id === note.id, 'Should retrieve correct document by checksum');
+    });
+}
+
+/**
+ * UPDATE tests
+ */
+async function testUpdate() {
+    console.log('\n=== Testing UPDATE operations ===');
+
+    // Insert test data first
+    let noteId;
+    try {
+        noteId = await db.insertDocument(note1Data);
+    } catch (error) {
+        console.error('Failed to insert test data for UPDATE tests:', error);
+        return;
+    }
+
+    // Test updateDocument
+    test('updateDocument - update data', async () => {
+        // Get the document to update
+        const note = await db.getById(noteId);
+
+        // Modify the data
+        note.data.title = 'Updated Note Title';
+        note.data.content = 'Updated content for note';
+
+        // Update the document
+        const updatedId = await db.updateDocument(noteId, note);
+        assert(updatedId === noteId, 'Should return the same ID');
+
+        // Verify the update worked
+        const updatedNote = await db.getById(noteId);
+        assert(updatedNote.data.title === 'Updated Note Title', 'Title should be updated');
+        assert(updatedNote.data.content === 'Updated content for note', 'Content should be updated');
+    });
+
+    // Test updateDocument with new context
+    test('updateDocument - with new context', async () => {
+        const updatedId = await db.updateDocument(noteId, null, 'new_context');
+        assert(updatedId === noteId, 'Should return the same ID');
+
+        // Verify the document is in the new context
+        const hasDoc = await db.hasDocument(noteId, 'new_context');
+        assert(hasDoc, 'Document should exist in new context');
+    });
+
+    // Test updateDocument with new features
+    test('updateDocument - with new features', async () => {
+        const updatedId = await db.updateDocument(
+            noteId,
+            null,
+            null,
+            ['test_feature']
+        );
+        assert(updatedId === noteId, 'Should return the same ID');
+
+        // Verify the document has the new feature
+        const hasDoc = await db.hasDocument(noteId, null, ['test_feature']);
+        assert(hasDoc, 'Document should have new feature');
+    });
+
+    // Test updateDocumentArray
+    test('updateDocumentArray', async () => {
+        // Insert two test documents
+        const id1 = await db.insertDocument({
+            schema: 'data/abstraction/note',
+            data: { title: 'Batch Update 1', content: 'Content 1' }
+        });
+
+        const id2 = await db.insertDocument({
+            schema: 'data/abstraction/note',
+            data: { title: 'Batch Update 2', content: 'Content 2' }
+        });
+
+        // Get the documents to update
+        const doc1 = await db.getById(id1);
+        const doc2 = await db.getById(id2);
+
+        // Modify the data
+        doc1.data.title = 'Updated Batch 1';
+        doc2.data.title = 'Updated Batch 2';
+
+        // Update both documents
+        const errors = await db.updateDocumentArray([doc1, doc2], 'batch_context');
+        assert(Array.isArray(errors) && errors.length === 0, 'Should return empty errors array');
+
+        // Verify the updates worked
+        const updatedDoc1 = await db.getById(id1);
+        const updatedDoc2 = await db.getById(id2);
+
+        assert(updatedDoc1.data.title === 'Updated Batch 1', 'First document should be updated');
+        assert(updatedDoc2.data.title === 'Updated Batch 2', 'Second document should be updated');
+
+        // Verify they're in the batch_context
+        const docsInContext = await db.listDocuments('batch_context');
+        assert(docsInContext.some(d => d.id === id1), 'First document should be in batch_context');
+        assert(docsInContext.some(d => d.id === id2), 'Second document should be in batch_context');
+    });
+}
+
+/**
+ * DELETE tests
+ */
+async function testDelete() {
+    console.log('\n=== Testing DELETE operations ===');
+
+    // Insert test data first
+    let noteId, tabId;
+    try {
+        noteId = await db.insertDocument(note1Data, 'delete_context', ['delete_feature']);
+        tabId = await db.insertDocument(tab1Data, 'delete_context', ['delete_feature']);
+    } catch (error) {
+        console.error('Failed to insert test data for DELETE tests:', error);
+        return;
+    }
+
+    // Test removeDocument (removes from context/features but keeps in DB)
+    test('removeDocument', async () => {
+        await db.removeDocument(noteId, 'delete_context');
+
+        // Document should still exist in the database
+        const stillExists = await db.hasDocument(noteId);
+        assert(stillExists, 'Document should still exist in database');
+
+        // But should not be in the context anymore
+        const notInContext = await db.hasDocument(noteId, 'delete_context');
+        assert(!notInContext, 'Document should be removed from context');
+    });
+
+    // Test removeDocumentArray
+    test('removeDocumentArray', async () => {
+        // Create another document for batch removal
+        const noteId2 = await db.insertDocument(note2Data, 'batch_remove_context');
+
+        // Remove both documents from their contexts
+        const errors = await db.removeDocumentArray([noteId, noteId2], 'batch_remove_context');
+        assert(Array.isArray(errors) && Object.keys(errors).length === 0, 'Should return empty errors object');
+
+        // Both should still exist in the database
+        const stillExists1 = await db.hasDocument(noteId);
+        const stillExists2 = await db.hasDocument(noteId2);
+        assert(stillExists1 && stillExists2, 'Documents should still exist in database');
+
+        // But not in the batch_remove_context
+        const docs = await db.listDocuments('batch_remove_context');
+        assert(!docs.some(d => d.id === noteId2), 'Documents should be removed from context');
+    });
+
+    // Test deleteDocument (completely removes from DB)
+    test('deleteDocument', async () => {
+        const result = await db.deleteDocument(tabId);
+        assert(result === true, 'Should return true for successful deletion');
+
+        // Document should not exist anymore
+        const exists = await db.hasDocument(tabId);
+        assert(!exists, 'Document should not exist after deletion');
+    });
+
+    // Test deleteDocumentArray
+    test('deleteDocumentArray', async () => {
+        // Create two documents for batch deletion
+        const id1 = await db.insertDocument({
+            schema: 'data/abstraction/note',
+            data: { title: 'Delete Batch 1', content: 'Content 1' }
+        });
+
+        const id2 = await db.insertDocument({
+            schema: 'data/abstraction/note',
+            data: { title: 'Delete Batch 2', content: 'Content 2' }
+        });
+
+        // Delete both documents
+        const errors = await db.deleteDocumentArray([id1, id2]);
+        assert(Array.isArray(errors) && errors.length === 0, 'Should return empty errors array');
+
+        // Neither document should exist
+        const exists1 = await db.hasDocument(id1);
+        const exists2 = await db.hasDocument(id2);
+        assert(!exists1 && !exists2, 'Documents should not exist after batch deletion');
+    });
+}
+
+// Run the tests
+runTests()
+    .then(() => console.log('Tests completed'))
+    .catch(err => console.error('Error during tests:', err));

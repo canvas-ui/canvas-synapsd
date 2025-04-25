@@ -52,7 +52,7 @@ export function isDocumentInstance(obj) {
     ) || false;
 }
 
-export function isDocument(obj) {
+export function isDocumentData(obj) {
     if (!obj || typeof obj !== 'object') { return false; }
 
     // Check for minimal proto object properties

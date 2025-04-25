@@ -18,6 +18,10 @@ import { generateChecksum } from '../utils/crypto.js';
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/document';
 const DOCUMENT_SCHEMA_VERSION = '2.0';
 const DOCUMENT_DATA_CHECKSUM_ALGORITHMS = ['sha1', 'sha256'];
+const DOCUMENT_DATA_CHECKSUM_ALGORITHM_DEFAULT = DOCUMENT_DATA_CHECKSUM_ALGORITHMS[0];
+const DOCUMENT_DATA_CHECKSUM_FIELDS = ['data'];
+const DOCUMENT_DATA_FTS_SEARCH_FIELDS = ['data'];
+const DOCUMENT_DATA_VECTOR_EMBEDDING_FIELDS = ['data'];
 const DEFAULT_DOCUMENT_DATA_TYPE = 'application/json';
 const DEFAULT_DOCUMENT_DATA_ENCODING = 'utf8';
 
@@ -103,9 +107,11 @@ class BaseDocument {
         // Internal index configuration
         this.indexOptions = {
             checksumAlgorithms: options.indexOptions?.checksumAlgorithms || DOCUMENT_DATA_CHECKSUM_ALGORITHMS,
-            checksumFields: options.indexOptions?.checksumFields || ['data'],
-            ftsSearchFields: options.indexOptions?.ftsSearchFields || ['data'],
-            vectorEmbeddingFields: options.indexOptions?.vectorEmbeddingFields || ['data'],
+            // Maybe we should just take the first one in the array?
+            primaryChecksumAlgorithm: options.indexOptions?.primaryChecksumAlgorithm || DOCUMENT_DATA_CHECKSUM_ALGORITHM_DEFAULT,
+            checksumFields: options.indexOptions?.checksumFields || DOCUMENT_DATA_CHECKSUM_FIELDS,
+            ftsSearchFields: options.indexOptions?.ftsSearchFields || DOCUMENT_DATA_FTS_SEARCH_FIELDS,
+            vectorEmbeddingFields: options.indexOptions?.vectorEmbeddingFields || DOCUMENT_DATA_VECTOR_EMBEDDING_FIELDS,
             ...options.indexOptions,
             embeddingOptions: {
                 ...options.indexOptions?.embeddingOptions,
@@ -195,25 +201,6 @@ class BaseDocument {
             };
         }
 
-        // Update index options if provided
-        if (data.indexOptions) {
-            this.indexOptions = {
-                ...this.indexOptions,
-                ...data.indexOptions,
-                // Preserve nested objects with proper merging
-                embeddingOptions: {
-                    ...this.indexOptions.embeddingOptions,
-                    ...data.indexOptions.embeddingOptions,
-                    // Preserve chunking options with proper merging
-                    chunking: data.indexOptions.embeddingOptions?.chunking ? {
-                        ...this.indexOptions.embeddingOptions.chunking,
-                        ...data.indexOptions.embeddingOptions.chunking,
-                    } : this.indexOptions.embeddingOptions.chunking,
-                },
-            };
-            dataUpdated = true;
-        }
-
         // Update checksums and embeddings if explicitly provided
         if (data.checksumArray) {
             this.checksumArray = data.checksumArray;
@@ -272,6 +259,14 @@ class BaseDocument {
         return BaseDocument.schema.parse(document);
     }
 
+    validateData() {
+        return BaseDocument.dataSchema.parse({
+            schema: this.schema,
+            schemaVersion: this.schemaVersion,
+            data: this.data
+        });
+    }
+
     /**
      * Validate document data against the schema
      * @param {Object} data - Document data to validate
@@ -305,6 +300,15 @@ class BaseDocument {
     /**
      * Utils
      */
+
+    /**
+     * Get the primary checksum for the document
+     * @returns {string} Primary checksum
+     * TODO: Implement with DEFAULT_DOCUMENT_DATA_CHECKSUM_ALGORITHM?
+     */
+    getPrimaryChecksum() {
+        return this.checksumArray[0];
+    }
 
     /**
      * Generate checksum strings for the document

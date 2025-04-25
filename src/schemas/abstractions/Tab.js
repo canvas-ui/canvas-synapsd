@@ -51,8 +51,16 @@ export default class Tab extends Document {
         return documentSchema;
     }
 
+    validate() {
+        super.validate();
+    }
+
     static validate(document) {
         return documentSchema.parse(document);
+    }
+
+    validateData() {
+        super.validateData();
     }
 
     static validateData(documentData) {

@@ -123,22 +123,30 @@ class BitmapIndex {
     }
 
     async getBitmap(key, autoCreateBitmap = false) {
-        BitmapIndex.validateKey(key);
+        try {
+            BitmapIndex.validateKey(key);
+        } catch (error) {
+            if (autoCreateBitmap) {
+                debug(`Key "${key}" is invalid, but auto-create is enabled. Throwing error.`);
+                throw new Error(`Invalid bitmap key "${key}": ${error.message}`);
+            } else {
+                debug(`Key "${key}" is invalid, returning null`);
+                return null;
+            }
+        }
+
         key = BitmapIndex.normalizeKey(key);
 
         // First check the cache
         if (this.cache.has(key)) {
             debug(`Returning Bitmap key "${key}" from cache`);
-            const cachedBitmap = this.cache.get(key);
-            debug(`Bitmap type: ${cachedBitmap.constructor.name}, has addMany: ${typeof cachedBitmap.addMany === 'function'}`);
-            return cachedBitmap;
+            return this.cache.get(key);;
         }
 
         // Then try to load from store
         if (this.hasBitmap(key)) {
             const bitmap = this.#loadBitmapSync(key);
             if (bitmap) {
-                debug(`Bitmap type: ${bitmap.constructor.name}, has addMany: ${typeof bitmap.addMany === 'function'}`);
                 return bitmap;
             }
             debug(`Failed to load bitmap "${key}" from store`);
@@ -156,7 +164,7 @@ class BitmapIndex {
             throw new Error(`Unable to create bitmap with key ID "${key}"`);
         }
 
-        debug(`Created bitmap type: ${bitmap.constructor.name}, has addMany: ${typeof bitmap.addMany === 'function'}`);
+        debug(`Created bitmap type: ${bitmap.constructor.name}`);
         return bitmap;
     }
 
@@ -213,11 +221,11 @@ class BitmapIndex {
 
         // Await the bitmap promise
         const bitmap = await this.getBitmap(key, true);
-
-        debug(`In tick, bitmap type: ${bitmap ? bitmap.constructor.name : 'null'}, has addMany: ${bitmap ? (typeof bitmap.addMany === 'function') : 'N/A'}`);
+        if (!bitmap) {
+            throw new Error(`Unable to create or load bitmap with key ID "${key}"`);
+        }
 
         const idsArray = Array.isArray(ids) ? ids : [ids];
-
         if (idsArray.length === 0) {
             debug('No IDs to tick for bitmap key', key);
             return bitmap;
@@ -292,7 +300,7 @@ class BitmapIndex {
 
         if (idsArray.length === 0) {
             debug('No IDs to tick for keyArray', keyArray);
-            return affectedKeys;
+            return null;
         }
 
         // Ensure all IDs are valid numbers
@@ -307,7 +315,7 @@ class BitmapIndex {
 
         if (validIds.length === 0) {
             debug('No valid IDs to tick for keyArray', keyArray);
-            return affectedKeys;
+            return null;
         }
 
         // Process keys in batch
@@ -330,7 +338,7 @@ class BitmapIndex {
 
         if (idsArray.length === 0) {
             debug('No IDs to untick for keyArray', keyArray);
-            return affectedKeys;
+            return null;
         }
 
         // Ensure all IDs are valid numbers
@@ -345,7 +353,7 @@ class BitmapIndex {
 
         if (validIds.length === 0) {
             debug('No valid IDs to untick for keyArray', keyArray);
-            return affectedKeys;
+            return null;
         }
 
         // Process keys in batch
@@ -503,11 +511,12 @@ class BitmapIndex {
         let partial = null;
         if (positiveKeys.length) {
             // Start with the first bitmap
-            BitmapIndex.validateKey(positiveKeys[0]);
+            //BitmapIndex.validateKey(positiveKeys[0]);
             const firstBitmap = await this.getBitmap(positiveKeys[0], false); // Do NOT auto-create
 
             // If the first key doesn't exist, the AND result must be empty
             if (!firstBitmap) {
+                debug(`AND(): First bitmap "${positiveKeys[0]}" not found, returning empty bitmap`);
                 return new RoaringBitmap32();
             }
             partial = firstBitmap.clone();
@@ -519,28 +528,34 @@ class BitmapIndex {
 
                 // If any subsequent key doesn't exist, the AND result must be empty
                 if (!bitmap) {
+                    debug(`AND(): Bitmap "${positiveKeys[i]}" not found, returning empty bitmap`);
                     return new RoaringBitmap32();
                 }
                 partial.andInPlace(bitmap);
             }
         } else {
             // If no positive keys, start with a full bitmap
+            debug(`AND(): No positive keys, starting with a full bitmap`);
             partial = new RoaringBitmap32();
             partial.addRange(this.rangeMin, this.rangeMax);
         }
 
         if (negativeKeys.length) {
+            debug(`AND(): Subtracting negative keys: "${negativeKeys}"`);
             const negativeUnion = new RoaringBitmap32();
             for (const key of negativeKeys) {
                 BitmapIndex.validateKey(key);
                 const nbitmap = await this.getBitmap(key, false);
                 if (nbitmap) {
+                    debug(`AND(): Adding negative bitmap "${key}" to union`);
                     negativeUnion.orInPlace(nbitmap);
                 }
             }
+            debug(`AND(): Subtracting negative union from partial bitmap`);
             partial.andNotInPlace(negativeUnion);
         }
 
+        debug(`AND(): Returning ${partial ? 'partial of size ' + partial.size : 'new RoaringBitmap32()'}`);
         return partial || new RoaringBitmap32();
     }
 
