@@ -110,8 +110,8 @@ class SchemaRegistry {
      * List all registered schemas
      * @returns {Array<string>} Array of schema IDs
      */
-    listSchemas() {
-        return Array.from(this.#schemas.keys());
+    listSchemas(prefix = '') {
+        return Array.from(this.#schemas.keys()).filter(schemaId => schemaId.startsWith(prefix));
     }
 
     /**
