@@ -2,12 +2,14 @@
 
 // Utils
 import debugInstance from 'debug';
-const debug = debugInstance('synapsd:index:bitmaps');
+const debug = debugInstance('canvas:synapsd:bitmap-index');
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
 // Includes
-const { RoaringBitmap32 } = require('roaring/RoaringBitmap32');
+// const { RoaringBitmap32 } = require('roaring/RoaringBitmap32'); // Old
+const Roaring = require('roaring'); // New
+const { RoaringBitmap32 } = Roaring; // New
 import Bitmap from './lib/Bitmap.js';
 import BitmapCollection from './lib/BitmapCollection.js';
 
@@ -219,7 +221,6 @@ class BitmapIndex {
         key = BitmapIndex.normalizeKey(key);
         debug('Ticking bitmap key', key, ids);
 
-        // Await the bitmap promise
         const bitmap = await this.getBitmap(key, true);
         if (!bitmap) {
             throw new Error(`Unable to create or load bitmap with key ID "${key}"`);
@@ -231,15 +232,22 @@ class BitmapIndex {
             return bitmap;
         }
 
-        // Ensure all IDs are valid numbers
-        const validIds = idsArray.filter(id => {
-            const numId = Number(id);
-            if (typeof id !== 'number' && (isNaN(numId) || !Number.isInteger(numId) || numId <= 0)) {
-                debug(`Invalid ID: ${id}, skipping`);
+        const validIds = idsArray
+            .map(id => Number(id))
+            .filter(numId => {
+                if (Number.isInteger(numId) && numId > 0) {
+                    return true;
+                }
+                // Find original value for logging, robustly handling non-numeric originals
+                const originalValue = idsArray.find(originalId => {
+                    const numOriginalId = Number(originalId);
+                    if (!isNaN(numOriginalId) && numOriginalId === numId) return true; // Matched via number conversion
+                    if (isNaN(numOriginalId) && isNaN(numId)) return true; // Both NaN, could be same non-numeric string
+                    return String(originalId) === String(numId); // Fallback to string comparison for edge cases
+                }) ?? numId; // Fallback to numId if original not found (should not happen)
+                debug(`Invalid ID for tick: ${numId} (original: ${originalValue}), skipping`);
                 return false;
-            }
-            return true;
-        }).map(id => typeof id === 'number' ? id : Number(id));
+            });
 
         if (validIds.length === 0) {
             debug('No valid IDs to tick for bitmap key', key);
@@ -253,6 +261,7 @@ class BitmapIndex {
 
     async untick(key, ids) {
         BitmapIndex.validateKey(key);
+        key = BitmapIndex.normalizeKey(key); // Normalize key for untick as well
         debug('Unticking bitmap key', key, ids);
 
         const bitmap = await this.getBitmap(key, false);
@@ -265,24 +274,38 @@ class BitmapIndex {
             return bitmap;
         }
 
-        // Ensure all IDs are valid numbers
-        const validIds = idsArray.filter(id => {
-            const numId = Number(id);
-            if (typeof id !== 'number' && (isNaN(numId) || !Number.isInteger(numId) || numId <= 0)) {
-                debug(`Invalid ID: ${id}, skipping`);
-                return false;
-            }
-            return true;
-        }).map(id => typeof id === 'number' ? id : Number(id));
+        const validIds = idsArray
+            .map(id => Number(id))
+            .filter(numId => {
+                if (Number.isInteger(numId) && numId > 0) {
+                    return true;
+                }
+                const originalValue = idsArray.find(originalId => {
+                    const numOriginalId = Number(originalId);
+                    if (!isNaN(numOriginalId) && numOriginalId === numId) return true;
+                    if (isNaN(numOriginalId) && isNaN(numId)) return true;
+                    return String(originalId) === String(numId);
+                }) ?? numId;
+                debug(`Invalid ID for untick: ${numId} (original: ${originalValue}), skipping filtering for untick`);
+                // For untick, we might want to attempt to remove whatever is given if it exists,
+                // rather than filtering. RoaringBitmap handles non-existent removes gracefully.
+                // However, to be consistent with tick's filtering, let's keep it for now.
+                // If OIDs are strictly positive integers, then filtering here is fine.
+                return false; // Assuming we only operate on valid OIDs for removal too
+            });
 
-        if (validIds.length === 0) {
-            debug('No valid IDs to untick for bitmap key', key);
-            return bitmap;
+        if (validIds.length === 0 && idsArray.length > 0) {
+            debug('No valid IDs to untick for bitmap key', key, 'Original IDs:', idsArray);
+            // If all IDs were invalid, but there were IDs, return current bitmap
+            return bitmap.isEmpty ? null : bitmap; // Check if it was already empty
+        }
+        if (validIds.length === 0 && idsArray.length === 0) { // No IDs at all
+             return bitmap.isEmpty ? null : bitmap;
         }
 
         bitmap.removeMany(validIds);
 
-        if (bitmap.isEmpty()) {
+        if (bitmap.isEmpty) {
             debug('Bitmap is now empty, deleting', key);
             await this.deleteBitmap(key);
             return null;
@@ -365,9 +388,21 @@ class BitmapIndex {
                 continue;
             }
 
+            const originalSize = bitmap.size;
             bitmap.removeMany(validIds);
-            await this.#saveBitmap(key, bitmap);
-            affectedKeys.push(key);
+
+            if (bitmap.isEmpty) {
+                if (originalSize > 0) { // It became empty due to this operation
+                    debug(`Bitmap at key "${key}" is now empty, deleting.`);
+                    await this.deleteBitmap(key);
+                    affectedKeys.push(key);
+                }
+                // If it was already empty (originalSize === 0), and still is, no change, not affected by this logic block.
+            } else if (bitmap.size !== originalSize) { // Not empty, but size changed
+                await this.#saveBitmap(key, bitmap);
+                affectedKeys.push(key);
+            }
+            // If not empty and size didn't change, or was empty and stayed empty, it's not considered affected by unticking.
         }
 
         return affectedKeys;
@@ -404,7 +439,7 @@ class BitmapIndex {
         debug(`applyToMany(): Applying source "${sourceKey}" to targets: "${targetKeys}"`);
 
         const sourceBitmap = await this.getBitmap(sourceKey, false);
-        if (!sourceBitmap || sourceBitmap.isEmpty()) {
+        if (!sourceBitmap || sourceBitmap.isEmpty) {
             debug(`Source bitmap "${sourceKey}" not found or is empty, nothing to apply.`);
             return [];
         }
@@ -431,7 +466,7 @@ class BitmapIndex {
         // Assuming #saveBitmap handles individual saves for now.
         for (const bitmap of bitmapsToSave) {
             // Need the key associated with the bitmap instance for saving
-            this.#saveBitmap(bitmap.key, bitmap);
+            await this.#saveBitmap(bitmap.key, bitmap);
         }
 
         if (affectedKeys.length) {
@@ -445,7 +480,7 @@ class BitmapIndex {
         debug(`subtractFromMany(): Subtracting source "${sourceKey}" from targets: "${targetKeys}"`);
 
         const sourceBitmap = await this.getBitmap(sourceKey, false);
-        if (!sourceBitmap || sourceBitmap.isEmpty()) {
+        if (!sourceBitmap || sourceBitmap.isEmpty) {
             debug(`Source bitmap "${sourceKey}" not found or is empty, nothing to subtract.`);
             return [];
         }
@@ -456,7 +491,6 @@ class BitmapIndex {
 
         for (const targetKey of targetKeys) {
             BitmapIndex.validateKey(targetKey);
-            // Do not auto-create target if it doesn't exist when subtracting
             const targetBitmap = await this.getBitmap(targetKey, false);
             if (!targetBitmap) {
                 debug(`Target bitmap "${targetKey}" not found, skipping subtraction.`);
@@ -467,7 +501,7 @@ class BitmapIndex {
             targetBitmap.andNotInPlace(sourceBitmap); // Subtract source from target
 
             if (targetBitmap.size !== originalSize) {
-                 if (targetBitmap.isEmpty()) {
+                 if (targetBitmap.isEmpty) {
                     debug(`Target bitmap "${targetKey}" is now empty after subtraction, scheduling for deletion.`);
                     keysToDelete.push(targetKey);
                 } else {
@@ -479,10 +513,10 @@ class BitmapIndex {
 
         // Perform batch save/delete
         for (const bitmap of bitmapsToSave) {
-             this.#saveBitmap(bitmap.key, bitmap);
+             await this.#saveBitmap(bitmap.key, bitmap);
         }
         for (const key of keysToDelete) {
-            this.deleteBitmap(key); // deleteBitmap already handles cache removal and event emission
+            await this.deleteBitmap(key); // Ensure this line has await
         }
 
         // Return all keys that were affected (modified or deleted)
@@ -526,12 +560,11 @@ class BitmapIndex {
                 BitmapIndex.validateKey(positiveKeys[i]);
                 const bitmap = await this.getBitmap(positiveKeys[i], false); // Do NOT auto-create
 
-                // If any subsequent key doesn't exist, the AND result must be empty
                 if (!bitmap) {
                     debug(`AND(): Bitmap "${positiveKeys[i]}" not found, returning empty bitmap`);
                     return new RoaringBitmap32();
                 }
-                partial.andInPlace(bitmap);
+                partial = RoaringBitmap32.and(partial, bitmap); // New: static AND
             }
         } else {
             // If no positive keys, start with a full bitmap
@@ -552,7 +585,7 @@ class BitmapIndex {
                 }
             }
             debug(`AND(): Subtracting negative union from partial bitmap`);
-            partial.andNotInPlace(negativeUnion);
+            partial = RoaringBitmap32.andNot(partial, negativeUnion); // New: static ANDNOT
         }
 
         debug(`AND(): Returning ${partial ? 'partial of size ' + partial.size : 'new RoaringBitmap32()'}`);
@@ -579,7 +612,9 @@ class BitmapIndex {
         for (const key of positiveKeys) {
             BitmapIndex.validateKey(key);
             const bmp = await this.getBitmap(key, true);
-            result.orInPlace(bmp);
+            if (bmp) {
+                result.orInPlace(bmp); // Reverted to instance method
+            }
         }
 
         if (negativeKeys.length) {
@@ -588,10 +623,10 @@ class BitmapIndex {
                 BitmapIndex.validateKey(key);
                 const bmp = await this.getBitmap(key, false);
                 if (bmp) {
-                    negativeUnion.orInPlace(bmp);
+                    negativeUnion.orInPlace(bmp); // Reverted to instance method
                 }
             }
-            result.andNotInPlace(negativeUnion);
+            result.andNotInPlace(negativeUnion); // Reverted to instance method
         }
         return result;
     }
@@ -616,7 +651,11 @@ class BitmapIndex {
             BitmapIndex.validateKey(key);
             const bmp = await this.getBitmap(key, false);
             if (bmp) {
-                result = result ? result.xor(bmp) : bmp.clone();
+                if (result) {
+                    result = RoaringBitmap32.xor(result, bmp); // Static xor, returns new bitmap
+                } else {
+                    result = bmp.clone(); // Clone first bitmap to be the initial result
+                }
             }
         }
         result = result || new RoaringBitmap32();
@@ -653,18 +692,28 @@ class BitmapIndex {
     }
 
     static normalizeKey(key) {
-        if (!key) { return null; }
+        if (key === null || key === undefined) { return null; }
         if (typeof key !== 'string') { throw new Error('Bitmap key must be a string'); }
 
         // Replace backslashes with forward slashes
         key = key.replace(/\\/g, '/');
 
-        // Remove all special characters except underscore, dash, exclamation marks and forward slashes
-        key = key.replace(/[^a-zA-Z0-9_\-!\/]/g, '');
-
-        // Remove exclamation marks if they are not at the beginning of the key
+        // Handle leading exclamation mark for negation (store it, remove from key for now)
+        let isNegated = false;
         if (key.startsWith('!')) {
+            isNegated = true;
             key = key.slice(1);
+        }
+
+        // Remove disallowed characters. Allowed: a-z, A-Z, 0-9, underscore, dash, dot, forward slash.
+        key = key.replace(/[^a-zA-Z0-9_\-\.\/]/g, '');
+
+        // Collapse multiple slashes to single slashes
+        key = key.replace(/\/+/g, '/');
+
+        // Prepend '!' if it was originally negated
+        if (isNegated) {
+            key = '!' + key;
         }
 
         return key;
@@ -707,7 +756,7 @@ class BitmapIndex {
             }
 
             const serializedBitmap = bitmap.serialize(true);
-            this.dataset.put(key, serializedBitmap);
+            await this.dataset.put(key, serializedBitmap);
             this.cache.set(key, bitmap);
             debug(`Bitmap "${key}" saved successfully with ${bitmap.size} elements`);
         } catch (error) {

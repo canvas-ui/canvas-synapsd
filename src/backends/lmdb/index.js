@@ -55,6 +55,7 @@ class Db {
         } else {
             this.db = options;
             this.#dataset = dataset;
+            // Ensure no debug log here related to dataset name initialization
             debug(`LMDB dataset "${dataset}" initialized`);
         }
 
@@ -68,6 +69,10 @@ class Db {
             backupOnClose: options.backupOnClose,
             compact: options.backupCompact,
         };
+
+        if (this.db && dataset) { // Check if it's a dataset instance
+            this.#dataset = dataset;
+        }
 
         // This is even more so
         if (this.backupOptions.backupOnOpen) {
@@ -83,6 +88,9 @@ class Db {
 
     get path() { return this.#path; }
     get backupPath() { return this.backupOptions.backupPath; }
+
+    // Getter for the dataset name
+    get name() { return this.#dataset; }
 
     // Returns the status of the underlying database / dataset
     get status() { return this.db.status; }
@@ -351,8 +359,13 @@ class Db {
         }
 
         debug(`Backing up database "${this.#path}" to "${backupPath}"`);
-        // TODO: Rework, backup() is async
-        this.db.backup(backupPath, compact);
+        // this.db.backup(backupPath, compact); // Old call
+        return this.db.backup(backupPath, compact); // backup() is async, so return its Promise
+                                                    // or await if the calling context supports it and needs completion.
+                                                    // Since #backupDatabase is called from constructor context for backupOnOpen,
+                                                    // making it fully async would require constructor to be async or use .then()
+                                                    // For now, returning the promise is the minimal change.
+                                                    // If backupOnOpen needs to *complete* before proceeding, more changes are needed.
     }
 
     #generateBackupFolderPath() {

@@ -3,7 +3,7 @@
 // Utils
 import EventEmitter from 'eventemitter2';
 import debugInstance from 'debug';
-const debug = debugInstance('synapsd:context-tree:layer-index');
+const debug = debugInstance('canvas:synapsd:context-tree:layer-index');
 
 // Modules
 import SchemaRegistry from '../../../schemas/SchemaRegistry.js';

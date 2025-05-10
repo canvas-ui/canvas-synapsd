@@ -3,7 +3,7 @@
 // Utils
 import EventEmitter from 'eventemitter2';
 import debugInstance from 'debug';
-const debug = debugInstance('synapsd:context-tree');
+const debug = debugInstance('canvas:synapsd:context-tree');
 
 // Node.js Crypto for UUIDs
 import crypto from 'crypto';
@@ -626,11 +626,11 @@ class ContextTree extends EventEmitter {
         return this.#db.hasDocumentByChecksum(checksum, normalizedContextSpec, featureBitmapArray);
     }
 
-    async listDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { limit: null }) {
+    async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { limit: null }) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        // listDocuments doesn't modify, typically no event needed unless logging access
-        return await this.#db.listDocuments(normalizedContextSpec, featureBitmapArray, filterArray, options);
+        // findDocuments doesn't modify, typically no event needed unless logging access
+        return await this.#db.findDocuments(normalizedContextSpec, featureBitmapArray, filterArray, options);
     }
 
     async updateDocument(document, contextSpec = null, featureBitmapArray = []) {
@@ -728,26 +728,6 @@ class ContextTree extends EventEmitter {
             });
         }
         return results;
-    }
-
-    async getById(id) {
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return await this.#db.getById(id);
-    }
-
-    async getByIdArray(idArray) {
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return await this.#db.getByIdArray(idArray);
-    }
-
-    async getByChecksumString(checksumString) {
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return await this.#db.getByChecksumString(checksumString);
-    }
-
-    async getByChecksumStringArray(checksumStringArray) {
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return await this.#db.getByChecksumStringArray(checksumStringArray);
     }
 
     async query(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {

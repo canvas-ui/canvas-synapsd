@@ -44,7 +44,7 @@ async function testTreeOperations() {
         const idA = await db.insertDocument(noteA, '/work/projectA');
         console.log(`Inserted Note A (ID: ${idA}) into path /work/projectB`);
 
-        const idB = await db.insertDocument(noteB, '/work/project');
+        const idB = await db.insertDocument(noteB, ' /work/projectA/notes');
         console.log(`Inserted Note B (ID: ${idB}) into path /work/projectA/notes`);
 
         const idC = await db.insertDocument(tabC, '/work/projectA');

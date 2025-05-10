@@ -2,7 +2,7 @@
 
 // Utils
 import debugInstance from 'debug';
-const debug = debugInstance('synapsd:bitmap-collection');
+const debug = debugInstance('canvas:synapsd:bitmap-collection');
 
 export default class BitmapCollection {
 
@@ -30,17 +30,32 @@ export default class BitmapCollection {
      */
 
     makeKey(key) {
-        // Remove "!"" prefix (used for negation)
-        let normalizedKey = key.startsWith('!') ? key.slice(1) : key;
+        // If the input key segment is already '/', it refers to the root of this collection.
+        // this.keyPrefix (e.g., 'context/') already correctly represents this root path.
+        if (key === '/') {
+            debug(`makeKey: segment is '/', returning keyPrefix directly: ${this.keyPrefix}`);
+            return this.keyPrefix;
+        }
 
-        // Remove special characters except underscore, dash and dot
-        normalizedKey = normalizedKey.replace(/[^a-zA-Z0-9_\-\.]/g, '');
+        // Handle negation prefix before other normalizations
+        const isNegated = key.startsWith('!');
+        let normalizedSegment = isNegated ? key.slice(1) : key;
 
-        // Remove trailing slashes
-        normalizedKey = normalizedKey.endsWith('/') ? normalizedKey.slice(0, -1) : normalizedKey;
+        // Sanitize the segment:
+        // Remove disallowed characters. Allowed: a-z, A-Z, 0-9, underscore, dash, dot, forward slash.
+        // Preserves forward slashes
+        normalizedSegment = normalizedSegment.replace(/[^a-zA-Z0-9_\-\.\/]/g, '');
 
-        // Return full key
-        return `${this.keyPrefix}${normalizedKey}`;
+        if (normalizedSegment === '') {
+            console.log(`makeKey: segment '${key}' normalized to empty, returning keyPrefix: ${this.keyPrefix}`);
+            return this.keyPrefix;
+        }
+
+        // Prepend '!' if it was originally negated
+        if (isNegated) { normalizedSegment = '!' + normalizedSegment; }
+
+        const constructedKey = `${this.keyPrefix}${normalizedSegment}`;
+        return this.bitmapIndex.constructor.normalizeKey(constructedKey);
     }
 
     /**
@@ -89,6 +104,7 @@ export default class BitmapCollection {
 
     tickMany(keys, ids) {
         const fullKeys = keys.map(key => this.makeKey(key));
+        console.log(`tickMany: ${fullKeys} => ${ids}`);
         return this.bitmapIndex.tickMany(fullKeys, ids);
     }
 

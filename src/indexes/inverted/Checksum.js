@@ -2,9 +2,9 @@
 
 export default class ChecksumIndex {
 
-    constructor(backingStore) {
-        if (!backingStore) { throw new Error('backingStore reference required'); }
-        this.store = backingStore;
+    constructor(dataset) {
+        if (!dataset) { throw new Error('ChecksumIndex dataset required'); }
+        this.dataset = dataset;
     }
 
     /**
@@ -12,34 +12,58 @@ export default class ChecksumIndex {
      * @returns {number} The number of documents in the index
      */
     getCount() {
-        return this.store.getCount();
+        return this.dataset.getCount();
     }
 
-    async insert(checksum, id) {
-        return await this.store.set(checksum, id);
-    }
-
-    async insertArray(checksumArray, id) {
-        if (!Array.isArray(checksumArray)) { checksumArray = [checksumArray]; }
-        for (const checksum of checksumArray) {
-            await this.store.set(checksum, id);
+    insert(checksum, id) {
+        if (Array.isArray(checksum)) {
+            for (const cs of checksum) {
+                this.dataset.set(cs, id);
+            }
+        } else {
+            this.dataset.set(checksum, id);
         }
+        return true;
     }
 
-    async delete(checksum) {
-        const res = await this.store.delete(checksum);
-        return res;
-    }
-
-    async deleteArray(checksumArray) {
-        if (!Array.isArray(checksumArray)) { checksumArray = [checksumArray]; }
+    insertArray(checksumArray, id) {
         for (const checksum of checksumArray) {
-            await this.store.delete(checksum);
+            this.dataset.set(checksum, id);
         }
+        return true;
+    }
+
+    async get(checksum) {
+        if (!checksum) { throw new Error('Checksum is required'); }
+        return await this.dataset.get(checksum);
+    }
+
+    async getId(checksum) {
+        return await this.get(checksum);
+    }
+
+    async checksumToId(checksumString) {
+        return await this.get(checksumString);
+    }
+
+    async checksumStringToId(checksumString) {
+        return await this.get(checksumString);
+    }
+
+    delete(checksum) {
+        if (!checksum) { throw new Error('Checksum is required'); }
+        return this.dataset.delete(checksum);
+    }
+
+    deleteArray(checksumArray) {
+        for (const checksum of checksumArray) {
+            this.dataset.delete(checksum);
+        }
+        return true;
     }
 
     has(checksum) {
-        return this.store.has(checksum);
+        return this.dataset.has(checksum);
     }
 
     async list(algorithm = 'sha256') {
@@ -52,7 +76,7 @@ export default class ChecksumIndex {
         const checksums = [];
 
         // Using "start" and "end" options per lmdb's range query API.
-        for await (const { key } of this.store.getRange({ start: lowerBound, end: upperBound })) {
+        for await (const { key } of this.dataset.getRange({ start: lowerBound, end: upperBound })) {
             checksums.push(key);
         }
 
@@ -61,26 +85,10 @@ export default class ChecksumIndex {
 
     async listAll() {
         const checksums = [];
-        for await (const { key } of this.store.getRange()) {
+        for await (const { key } of this.dataset.getRange()) {
             checksums.push(key);
         }
         return checksums;
-    }
-
-    async checksumToId(algo, checksum) {
-        if (!algo || !checksum) {
-            throw new Error('Algorithm and checksum are required');
-        }
-
-        return await this.store.get(`${algo}/${checksum}`);
-    }
-
-    async checksumStringToId(checksum) {
-        if (typeof checksum !== 'string') {
-            throw new Error('Checksum must be a string');
-        }
-
-        return await this.store.get(checksum);
     }
 
     async checksumArrayToIds(algo, checksums) {
@@ -89,7 +97,7 @@ export default class ChecksumIndex {
         }
 
         return await Promise.all(
-            checksums.map(checksum => this.checksumToId(algo, checksum)),
+            checksums.map(checksum => this.checksumToId(checksum)),
         );
     }
 

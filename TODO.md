@@ -1,6 +1,6 @@
 # TODO
 
-- ! Create a *propper* collection abstraction, esp. for Bitmaps
+- ! Create a *proper* collection abstraction, esp. for Bitmaps
 - ! Refactor those ***UGLY*** insert/updateDocument methods!!!
 - format option
   - full

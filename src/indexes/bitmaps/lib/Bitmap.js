@@ -7,7 +7,9 @@ import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd:bitmap');
 
 // Includes
-const { RoaringBitmap32 } = require('roaring/RoaringBitmap32');
+// const { RoaringBitmap32 } = require('roaring/RoaringBitmap32'); // Old
+const Roaring = require('roaring');
+const { RoaringBitmap32 } = Roaring;
 
 // Constants
 const MIN_OID = 0;

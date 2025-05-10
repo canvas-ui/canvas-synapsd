@@ -2,9 +2,9 @@
 
 // Utils
 import EventEmitter from 'eventemitter2';
-import debugInstance from 'debug';
 import fs from 'fs';
 import path from 'path';
+import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd');
 
 // DB Backend
@@ -103,10 +103,6 @@ class SynapsD extends EventEmitter {
             this.#bitmapCache,
         );
 
-        // Action bitmaps
-        // TODO: Refactor || FIX!, we can use a root ['/'] bitmap to track
-        this.deletedDocumentsBitmap = null
-
         // Bitmap Collections
         this.contextBitmapCollection = this.bitmapIndex.createCollection('context');
 
@@ -121,7 +117,7 @@ class SynapsD extends EventEmitter {
         // TODO: Vector index
 
         /**
-         * Collections (TODO: Implement an easy-to-use collection abstraction)
+         * Collections Map (TODO: Implement an easy-to-use collection abstraction)
          */
 
         this.#collections = new Map();
@@ -171,8 +167,10 @@ class SynapsD extends EventEmitter {
     get db() { return this.#db; } // For testing only
     get tree() { return this.#tree; } // db.tree.insertPath()
     get jsonTree() { return this.#tree.buildJsonTree(); } // db.tree.layers.renameLayer()
-    get layers() { return this.#treeLayers; } // db.tree.layers.renameLayer()
-    get bitmaps() { return this.bitmapIndex; } // db.bitmaps.createBitmap()
+
+    // Inverted indexes
+    get checksumIndex() { return this.#checksumIndex; }
+    get timestampIndex() { return this.#timestampIndex; }
 
     /**
      * Service methods
@@ -181,16 +179,14 @@ class SynapsD extends EventEmitter {
     async start() {
         debug('Starting SynapsD');
         try {
-
-            // Initialize deleted documents bitmap
-            this.deletedDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/gc/deleted');
-
-            // Initialize action bitmaps (TODO: Refactor/Remove)
+            // Initialize action bitmaps
             this.actionBitmaps = {
                 created: await this.bitmapIndex.createBitmap('internal/action/created'),
                 updated: await this.bitmapIndex.createBitmap('internal/action/updated'),
                 deleted: await this.bitmapIndex.createBitmap('internal/action/deleted'),
             };
+            // Initialize deletedDocumentsBitmap here
+            this.deletedDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/gc/deleted');
 
             this.#timestampIndex = new TimestampIndex(
                 this.#db.createDataset('timestamps'),
@@ -248,7 +244,7 @@ class SynapsD extends EventEmitter {
     getSchema(schemaId) { return schemaRegistry.getSchema(schemaId); }
     getDataSchema(schemaId) { return schemaRegistry.getDataSchema(schemaId); }
     hasSchema(schemaId) { return schemaRegistry.hasSchema(schemaId); }
-    listSchemas() { return schemaRegistry.listSchemas(); }
+    listSchemas(prefix = null) { return schemaRegistry.listSchemas(prefix); }
 
     /**
      * Validation methods
@@ -321,7 +317,7 @@ class SynapsD extends EventEmitter {
 
         // Lets check if we are dealing with an update or a new document
         const primaryChecksum = parsedDocument.getPrimaryChecksum();
-        const storedDocument = await this.getByChecksumString(primaryChecksum);
+        const storedDocument = await this.getDocumentByChecksumString(primaryChecksum);
 
         if (storedDocument) {
             debug(`insertDocument: Document found by checksum ${primaryChecksum}, setting existing document ID: ${storedDocument.id}`);
@@ -382,7 +378,7 @@ class SynapsD extends EventEmitter {
         // TODO: Implement sending document ID to the embedding vector worker queue
 
         // Avoid emitting if we update multiple documents in a batch operation(e.g., insertDocumentArray)
-        if (emitEvent) { this.emit('documentInserted', { id: parsedDocument.id, document: parsedDocument }); }
+        if (emitEvent) { this.emit('document:inserted', { id: parsedDocument.id, document: parsedDocument }); }
         debug(`insertDocument: Successfully inserted document ID: ${parsedDocument.id}`);
 
         return parsedDocument.id;
@@ -422,40 +418,79 @@ class SynapsD extends EventEmitter {
         return errors;
     }
 
-    async hasDocument(id, contextSpec = '/', featureBitmapArray = []) {
+    async hasDocument(id, contextSpec, featureBitmapArrayInput) {
         if (!id) { throw new Error('Document id required'); }
-        if (!Array.isArray(featureBitmapArray)) { featureBitmapArray = [featureBitmapArray]; }
-        const contextBitmapArray = this.#parseContextSpec(contextSpec);
 
-        // First check if the document exists in the database
         if (!await this.documents.has(id)) {
-            debug(`Document with ID "${id}" not found in the database`);
+            debug(`hasDocument: Document with ID "${id}" not found in the main 'documents' store.`);
             return false;
         }
 
-        // If no context or feature filters, document exists
-        if (contextBitmapArray.length === 0 && featureBitmapArray.length === 0) {
+        // If the caller did not provide any specific context or feature filters,
+        // then existence in the main document store is sufficient.
+        const noContextFilterWanted = contextSpec === undefined || contextSpec === null || contextSpec.length === 0;
+        const noFeatureFilterWanted = featureBitmapArrayInput === undefined || featureBitmapArrayInput === null || featureBitmapArrayInput.length === 0;
+
+        if (noContextFilterWanted && noFeatureFilterWanted) {
+            debug(`hasDocument: Document ID "${id}" exists in store, and no specific filters were provided by the caller.`);
             return true;
         }
 
-        // Apply context and feature filters
-        const contextBitmap = contextBitmapArray.length > 0 ? await this.contextBitmapCollection.AND(contextBitmapArray) : null;
-        const featureBitmap = featureBitmapArray.length > 0 ? await this.bitmapIndex.OR(featureBitmapArray) : null;
+        // At least one filter criterion was provided or will be defaulted if only one part of the filter was given.
+        const effectiveContextSpec = noContextFilterWanted ? '/' : contextSpec;
+        const effectiveFeatureArray = noFeatureFilterWanted ? [] : featureBitmapArrayInput;
 
-        // Check if the document matches the filters
-        if (contextBitmap && featureBitmap) {
-            contextBitmap.andInPlace(featureBitmap);
-            return contextBitmap.has(id);
-        } else if (contextBitmap) {
-            return contextBitmap.has(id);
-        } else if (featureBitmap) {
-            return featureBitmap.has(id);
-        } else {
-            return true;
+        const parsedContextKeys = this.#parseContextSpec(effectiveContextSpec);
+        const parsedFeatureKeys = this.#parseBitmapArray(effectiveFeatureArray);
+
+        let resultBitmap = null;
+        let contextFilterApplied = false;
+
+        // Apply context filter if caller actually wanted one OR if it defaulted to '/' but features are also specified.
+        if (!noContextFilterWanted || (noContextFilterWanted && !noFeatureFilterWanted) ) {
+            // This condition means: apply context filter if context was specified,
+            // OR if context was not specified (defaulting to '/') BUT features were specified.
+            resultBitmap = await this.contextBitmapCollection.AND(parsedContextKeys);
+            contextFilterApplied = true;
+            // If context filter results in null/empty, and it was a specific request, then fail early.
+            if (!resultBitmap || resultBitmap.isEmpty) {
+                 if (!noContextFilterWanted) { // only fail early if context was explicitly requested and yielded no results
+                    debug(`hasDocument: Doc ${id} - explicit context filter ${JSON.stringify(parsedContextKeys)} yielded no results.`);
+                    return false;
+                 }
+            }
         }
+
+        if (!noFeatureFilterWanted && parsedFeatureKeys.length > 0) {
+            const featureOpBitmap = await this.bitmapIndex.OR(parsedFeatureKeys);
+            if (!featureOpBitmap || featureOpBitmap.isEmpty) {
+                debug(`hasDocument: Doc ${id} - explicit feature filter ${JSON.stringify(parsedFeatureKeys)} yielded no results.`);
+                return false; // Feature filter must yield results if specified
+            }
+
+            if (contextFilterApplied && resultBitmap) {
+                resultBitmap.andInPlace(featureOpBitmap);
+            } else {
+                resultBitmap = featureOpBitmap; // RoaringBitmap32.or(new RoaringBitmap32(), featureOpBitmap) for a new instance if needed
+            }
+        } else if (contextFilterApplied && (!resultBitmap || resultBitmap.isEmpty   ) && !noContextFilterWanted) {
+            // If context filter was applied (explicitly), was the only filter, and yielded no results.
+            debug(`hasDocument: Doc ${id} - explicit context filter (as only filter) ${JSON.stringify(parsedContextKeys)} yielded no results.`);
+            return false;
+        }
+
+        // If resultBitmap is null here, it means no filters were effectively run that produced a bitmap
+        // (e.g. context was default '/' and no features). In this case, existence is enough (already checked).
+        // However, if filters *were* run, resultBitmap must exist.
+        if (noContextFilterWanted && noFeatureFilterWanted) {
+             // This should have been caught by the top check, but as a safeguard:
+             return true;
+        }
+
+        return resultBitmap ? resultBitmap.has(id) : false;
     }
 
-    async hasDocumentByChecksum(checksum, contextSpec = '/', featureBitmapArray = []) {
+    async hasDocumentByChecksum(checksum, contextSpec, featureBitmapArray) {
         if (!checksum) { throw new Error('Checksum required'); }
 
         const id = await this.#checksumIndex.checksumStringToId(checksum);
@@ -464,8 +499,13 @@ class SynapsD extends EventEmitter {
         return await this.hasDocument(id, contextSpec, featureBitmapArray);
     }
 
-    // Returns documents from the main dataset + context and/or feature bitmaps
-    async listDocuments(contextSpec = '/', featureBitmapArray = [], filterArray = [], options = { limit: null }) {
+    // Legacy API, now alias for findDocuments,
+    // TODO: Implement for metedata retrieval only
+    async listDocuments(contextSpec = '/', featureBitmapArray = [], filterArray = [], options = { parse: true }) {
+        return await this.findDocuments(contextSpec, featureBitmapArray, filterArray, options);
+    }
+
+    async findDocuments(contextSpec = '/', featureBitmapArray = [], filterArray = [], options = { parse: true }) {
         const contextBitmapArray = this.#parseContextSpec(contextSpec);
         if (!Array.isArray(featureBitmapArray) && typeof featureBitmapArray === 'string') { featureBitmapArray = [featureBitmapArray]; }
         if (!Array.isArray(filterArray) && typeof filterArray === 'string') { filterArray = [filterArray]; }
@@ -521,7 +561,7 @@ class SynapsD extends EventEmitter {
 
         // Case 2: Filters were applied, but the resulting bitmap is null (e.g., ANDing non-existent keys) or empty.
         if (finalDocumentIds.length === 0) {
-            debug('listDocuments: Resulting bitmap is null or empty after applying filters. Returning [].');
+            debug('findDocuments: Resulting bitmap is null or empty after applying filters. Returning [].');
             return []; // Return empty array, not all documents
         }
 
@@ -531,31 +571,22 @@ class SynapsD extends EventEmitter {
             documentIds = documentIds.slice(0, options.limit);
         }
 
-        // Get documents one by one to avoid undefined entries
-        // TODO: Change to getMany as its faaaaaaaster!
+        //
         const documents = await this.documents.getMany(documentIds);
-        let initializedDocuments = [];
-        for (const doc of documents) {
-            initializedDocuments.push(this.#parseInitializeDocument(doc));
+        if (options.limit) {
+            documents = documents.slice(0, options.limit);
         }
 
-        return initializedDocuments;
-
-
-        /*const documents = [];
-        for (const id of documentIds) {
-            // Use getById to ensure proper parsing and instantiation
-            const doc = await this.getById(id);
-            if (doc) {
-                // console.log(`DEBUG: Retrieved for ID ${id}:`, typeof doc, doc); // Keep for now if needed
-                documents.push(doc);
+        if (options.parse) {
+            let initializedDocuments = [];
+            for (const doc of documents) {
+                initializedDocuments.push(this.#parseInitializeDocument(doc));
             }
+            return initializedDocuments;
+        } else {
+            return documents;
         }
 
-        // Apply limit if specified
-        debug(`listDocuments: Returning ${documents.length} documents`);
-        return options.limit ? documents.slice(0, options.limit) : documents;
-        */
     }
 
     async updateDocument(docIdentifier, updateData = null, contextSpec = null, featureBitmapArray = []) {
@@ -576,7 +607,7 @@ class SynapsD extends EventEmitter {
         debug(`updateDocument: Context bitmaps: ${contextBitmaps}, Feature bitmaps: ${featureBitmaps}`);
 
         // Get the stored document
-        const storedDocument = await this.getById(docId);
+        const storedDocument = await this.getDocumentById(docId);
         if (!storedDocument) {
             throw new Error(`Document with ID "${docId}" not found`);
         }
@@ -633,7 +664,7 @@ class SynapsD extends EventEmitter {
             await this.bitmapIndex.tickMany(featureBitmaps, updatedDocument.id);
 
             // Emit event
-            this.emit('documentUpdated', { id: updatedDocument.id, document: updatedDocument });
+            this.emit('document:updated', { id: updatedDocument.id, document: updatedDocument });
             debug(`updateDocument: Successfully updated document ID: ${updatedDocument.id}`);
 
             return updatedDocument.id;
@@ -682,6 +713,7 @@ class SynapsD extends EventEmitter {
 
             // If the operations completed without throwing, return the ID.
             // This signals the removal *attempt* was successful.
+            this.emit('document:removed', { id: docId, contextArray: contextSpec, featureArray: featureBitmapArray });
             return docId;
 
         } catch (error) {
@@ -739,6 +771,7 @@ class SynapsD extends EventEmitter {
             await this.#timestampIndex.insert('deleted', document.updatedAt, docId);
 
             debug(`Document with ID "${docId}" deleted`);
+            this.emit('document:deleted', { id: docId });
             return true;
         } catch (error) {
             debug(`Error deleting document ${docId}: `, error);
@@ -768,12 +801,21 @@ class SynapsD extends EventEmitter {
      * Convenience methods
      */
 
+    async getDocument(docId, options = { parse: true }) {
+        if (!docId) { throw new Error('Document id required'); }
+        if (options.parse) {
+            return await this.getDocumentById(docId);
+        } else {
+            return await this.documents.get(docId);
+        }
+    }
+
     /**
      * Get a document by ID and return a properly instantiated document object
      * @param {string|number} id - Document ID
      * @returns {BaseDocument|null} Document instance or null if not found
      */
-    async getById(id) {
+    async getDocumentById(id, options = { parse: true }) {
         if (!id) { throw new Error('Document id required'); }
         debug(`getById: Searching for document with ID ${id}`);
         // Get raw document data from database
@@ -784,29 +826,34 @@ class SynapsD extends EventEmitter {
         }
 
         // Return a JS object
-        return this.#parseInitializeDocument(rawDocData); // Use parseInitialize to get an instance
+        return options.parse ? this.#parseInitializeDocument(rawDocData) : rawDocData;
     }
 
     /**
      * Get multiple documents by ID and return properly instantiated document objects
      * @param {Array<string|number>} idArray - Array of document IDs
+     * @param {Object} options - Options object
+     * @param {boolean} options.parse - Whether to parse the documents
+     * @param {number} options.limit - Maximum number of documents to return
+     * TODO: Support proper pagination!
      * @returns {Array<BaseDocument>} Array of document instances
      */
-    async getByIdArray(idArray) {
+    async getDocumentsByIdArray(idArray, options = { parse: true, limit: null }) {
         if (!Array.isArray(idArray)) { idArray = [idArray]; }
 
-        const documents = [];
-        for (const id of idArray) {
-            try {
-                // Use getById which now properly instantiates document objects
-                const doc = await this.getById(id);
-                if (doc) {
-                    documents.push(doc);
-                }
-            } catch (error) {
-                debug(`Error getting document with ID ${id}: ${error.message}`);
-            }
+        const documents = await this.documents.getMany(idArray);
+        if (options.limit) {
+            documents = documents.slice(0, options.limit);
         }
+
+        if (options.parse) {
+            const initializedDocuments = [];
+            for (const doc of documents) {
+                initializedDocuments.push(this.#parseInitializeDocument(doc));
+            }
+            return initializedDocuments;
+        }
+
         return documents;
     }
 
@@ -815,16 +862,16 @@ class SynapsD extends EventEmitter {
      * @param {string} checksumString - Checksum string
      * @returns {BaseDocument|null} Document instance or null if not found
      */
-    async getByChecksumString(checksumString) {
+    async getDocumentByChecksumString(checksumString, options = { parse: true }) {
         if (!checksumString) { throw new Error('Checksum string required'); }
-        debug(`getByChecksumString: Searching for document with checksum ${checksumString}`);
+        debug(`getDocumentByChecksumString: Searching for document with checksum ${checksumString}`);
 
         // Get document ID from checksum index
         const id = await this.#checksumIndex.checksumStringToId(checksumString);
         if (!id) { return null; }
 
         // Return the document instance
-        return await this.getById(id);
+        return await this.getDocumentById(id, options);
     }
 
     /**
@@ -832,7 +879,7 @@ class SynapsD extends EventEmitter {
      * @param {Array<string>} checksumStringArray - Array of checksum strings
      * @returns {Array<BaseDocument>} Array of document instances
      */
-    async getByChecksumStringArray(checksumStringArray) {
+    async getDocumentsByChecksumStringArray(checksumStringArray, options = { parse: true }) {
         if (!Array.isArray(checksumStringArray)) { checksumStringArray = [checksumStringArray]; }
 
         const ids = [];
@@ -847,8 +894,8 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        // Use getByIdArray which now properly instantiates document objects
-        return await this.getByIdArray(ids);
+        // Use getDocumentsByIdArray which now properly instantiates document objects
+        return await this.getDocumentsByIdArray(ids, options);
     }
 
     async setDocumentArrayFeatures(docIdArray, featureBitmapArray) {
@@ -916,32 +963,6 @@ class SynapsD extends EventEmitter {
     }
 
     /**
-     * Stateful transactions (used by Contexts)
-     */
-
-    createTransaction() {
-        debug('Transactions not implemented yet');
-        throw new Error('Transactions not implemented yet');
-    }
-
-    commitTransaction(id) {
-        if (!id) { throw new Error('Transaction ID required'); }
-        debug('Transactions not implemented yet');
-        throw new Error('Transactions not implemented yet');
-    }
-
-    abortTransaction(id) {
-        if (!id) { throw new Error('Transaction ID required'); }
-        debug('Transactions not implemented yet');
-        throw new Error('Transactions not implemented yet');
-    }
-
-    listTransactions() {
-        debug('Transactions not implemented yet');
-        throw new Error('Transactions not implemented yet');
-    }
-
-    /**
      * Utils
      */
 
@@ -956,7 +977,7 @@ class SynapsD extends EventEmitter {
         if (!fs.existsSync(dstDir)) { fs.mkdirSync(dstDir, { recursive: true }); }
 
         // Get all documents from the documents dataset
-        const documentArray = await this.listDocuments(contextSpec, featureBitmapArray, filterArray);
+        const documentArray = await this.findDocuments(contextSpec, featureBitmapArray, filterArray);
         debug(`Found ${documentArray.length} documents to dump..`);
 
         // Loop through all documents in the returned array
@@ -1004,7 +1025,7 @@ class SynapsD extends EventEmitter {
             if (!str) return ['/'];
             if (str === '/') return ['/'];
             // Split the string and filter empty elements
-            const parts = str.split('/').filter(Boolean);
+            const parts = str.split('/').map(part => part.trim()).filter(Boolean);
             // Ensure '/' is at the beginning
             return ['/', ...parts];
         };
@@ -1182,9 +1203,7 @@ class SynapsD extends EventEmitter {
      */
     #popDeletedId() {
         try {
-            if (!this.deletedDocumentsBitmap ||
-                (typeof this.deletedDocumentsBitmap.isEmpty() !== 'function') ||
-                this.deletedDocumentsBitmap.isEmpty()) {
+            if (!this.deletedDocumentsBitmap || this.deletedDocumentsBitmap.isEmpty) {
                 return null;
             }
 
