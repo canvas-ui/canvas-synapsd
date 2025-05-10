@@ -5,7 +5,6 @@ import BaseDocument from './BaseDocument.js';
 
 // Document Schemas
 import Document from './abstractions/Document.js';
-import Directory from './abstractions/Directory.js';
 import Email from './abstractions/Email.js';
 import File from './abstractions/File.js';
 import Note from './abstractions/Note.js';
@@ -24,7 +23,6 @@ import Workspace from './internal/layers/Workspace.js';
 const SCHEMA_REGISTRY = {
     // Data Abstractions
     'data/abstraction/document': Document,
-    'data/abstraction/directory': Directory,
     'data/abstraction/email': Email,
     'data/abstraction/file': File,
     'data/abstraction/note': Note,
