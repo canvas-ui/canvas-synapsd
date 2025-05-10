@@ -47,7 +47,6 @@ export default class BitmapCollection {
         normalizedSegment = normalizedSegment.replace(/[^a-zA-Z0-9_\-\.\/]/g, '');
 
         if (normalizedSegment === '') {
-            console.log(`makeKey: segment '${key}' normalized to empty, returning keyPrefix: ${this.keyPrefix}`);
             return this.keyPrefix;
         }
 
@@ -104,7 +103,6 @@ export default class BitmapCollection {
 
     tickMany(keys, ids) {
         const fullKeys = keys.map(key => this.makeKey(key));
-        console.log(`tickMany: ${fullKeys} => ${ids}`);
         return this.bitmapIndex.tickMany(fullKeys, ids);
     }
 

@@ -1188,7 +1188,6 @@ class SynapsD extends EventEmitter {
             count = typeof count === 'number' ? count : 0;
             const newId = INTERNAL_BITMAP_ID_MAX + count + 1;
             debug(`Generated new document ID: ${newId}`);
-            console.log(`Generated new document ID: ${newId}`);
             return newId;
         } catch (error) {
             debug(`Error generating document ID: ${error.message}`);
