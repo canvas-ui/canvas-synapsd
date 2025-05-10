@@ -1,6 +1,6 @@
 'use strict';
 
-import Document, { documentSchema } from '../BaseDocument.js';
+import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/email';
@@ -57,11 +57,11 @@ export default class Email extends Document {
     }
 
     static get schema() {
-        return documentSchema;
+        return baseDocumentSchema;
     }
 
     static validate(document) {
-        return documentSchema.parse(document);
+        return baseDocumentSchema.parse(document);
     }
 
     static validateData(documentData) {

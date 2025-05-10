@@ -1,6 +1,6 @@
 'use strict';
 
-import Document, { documentSchema } from '../BaseDocument.js';
+import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/file';
@@ -13,15 +13,26 @@ const documentDataSchema = z.object({
     data: z.object({
         name: z.string(),
         path: z.string(),
-        mimeType: z.string(),
-        size: z.number(),
+        mimeType: z.string().optional(),
+        size: z.number().optional(),
         lastModified: z.string().datetime().optional(),
     }).passthrough(),
     metadata: z.object().optional(),
+
+});
+
+// Schema for the full File document, making checksumArray mandatory
+const fileDocumentSchema = baseDocumentSchema.extend({
+    checksumArray: z.array(z.string()).nonempty({ message: "checksumArray cannot be empty and must be provided for File documents" }),
 });
 
 export default class File extends Document {
     constructor(options = {}) {
+        // Ensure checksumArray is provided and non-empty before calling super
+        if (!options.checksumArray || !Array.isArray(options.checksumArray) || options.checksumArray.length === 0) {
+            throw new Error('File documents require a non-empty, pre-computed checksumArray in the options object.');
+        }
+
         // Set schema before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
@@ -32,8 +43,7 @@ export default class File extends Document {
         this.indexOptions = {
             ...this.indexOptions,
             ftsSearchFields: ['data.name', 'data.path'],
-            vectorEmbeddingFields: ['data.name', 'data.path', 'data.mimeType'],
-            checksumFields: ['data.name', 'data.path', 'data.size', 'data.lastModified', 'data.deviceId'],
+            vectorEmbeddingFields: ['data.name', 'data.path'],
         };
     }
 
@@ -52,11 +62,11 @@ export default class File extends Document {
     }
 
     static get schema() {
-        return documentSchema;
+        return fileDocumentSchema;
     }
 
     static validate(document) {
-        return documentSchema.parse(document);
+        return fileDocumentSchema.parse(document);
     }
 
     static validateData(documentData) {

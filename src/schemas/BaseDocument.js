@@ -233,7 +233,7 @@ class BaseDocument {
     validate() {
         try {
             // Validate using Zod schema
-            BaseDocument.schema.parse(this);
+            this.constructor.schema.parse(this);
 
             if (!this.data) {
                 throw new Error('Document data is required');
@@ -260,7 +260,7 @@ class BaseDocument {
     }
 
     validateData() {
-        return BaseDocument.dataSchema.parse({
+        return this.constructor.dataSchema.parse({
             schema: this.schema,
             schemaVersion: this.schemaVersion,
             data: this.data

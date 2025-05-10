@@ -851,6 +851,46 @@ class SynapsD extends EventEmitter {
         return await this.getByIdArray(ids);
     }
 
+    async setDocumentArrayFeatures(docIdArray, featureBitmapArray) {
+        if (!docIdArray) { throw new Error('Document ID array required'); }
+        if (!Array.isArray(docIdArray)) {
+            docIdArray = [docIdArray];
+        }
+        if (!featureBitmapArray) { throw new Error('Feature bitmap array required'); }
+        if (!Array.isArray(featureBitmapArray)) {
+            featureBitmapArray = [featureBitmapArray];
+        }
+
+        for (const docId of docIdArray) {
+            if (!docId) {
+                console.warn('setDocumentArrayFeatures: Skipping invalid document ID.');
+                continue;
+            }
+            // Update the document's feature bitmaps
+            await this.bitmapIndex.tickMany(featureBitmapArray, docId);
+        }
+    }
+
+    async unsetDocumentArrayFeatures(docIdArray, featureBitmapArray) {
+        if (!docIdArray) { throw new Error('Document ID array required'); }
+        if (!Array.isArray(docIdArray)) {
+            docIdArray = [docIdArray];
+        }
+        if (!featureBitmapArray) { throw new Error('Feature bitmap array required'); }
+        if (!Array.isArray(featureBitmapArray)) {
+            featureBitmapArray = [featureBitmapArray];
+        }
+
+        for (const docId of docIdArray) {
+            if (!docId) {
+                console.warn('unsetDocumentArrayFeatures: Skipping invalid document ID.');
+                continue;
+            }
+            // Update the document's feature bitmaps
+            await this.bitmapIndex.untickMany(featureBitmapArray, docId);
+        }
+    }
+
     /**
      * Query methods
      */

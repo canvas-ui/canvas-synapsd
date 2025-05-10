@@ -31,6 +31,15 @@ export default class Note extends Document {
             vectorEmbeddingFields: ['data.title', 'data.content'],
             checksumFields: ['data.title', 'data.content'],
         };
+
+        if (!this.data.title) {
+            // If Note has no title, we'll use YYYYMMDD, subject to change
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = (now.getMonth() + 1).toString().padStart(2, '0');
+            const day = now.getDate().toString().padStart(2, '0');
+            this.data.title = `${year}${month}${day}`;
+        }
     }
 
     /**
