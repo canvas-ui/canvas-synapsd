@@ -413,7 +413,7 @@ class SynapsD extends EventEmitter {
 
         debug(`insertDocumentArray: Inserted ${successfulInsertions.length} of ${docArray.length} documents`);
         if (errors.length > 0) {
-            debug(`insertDocumentArray: Failed to insert ${errors.length} documents`);
+            throw new Error(`insertDocumentArray: Failed to insert ${errors.length} documents`);
         }
 
         return errors;
