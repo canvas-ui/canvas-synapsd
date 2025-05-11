@@ -173,6 +173,13 @@ class BaseDocument {
         return documentSchema;
     }
 
+    static get jsonSchema() {
+        return {
+            schema: DOCUMENT_SCHEMA_NAME,
+            data: {}
+        }
+    }
+
     /**
      * Update the document with new data
      * @param {Object} data - New data to update the document with

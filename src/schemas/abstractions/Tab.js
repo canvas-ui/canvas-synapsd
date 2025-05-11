@@ -51,6 +51,16 @@ export default class Tab extends Document {
         return documentSchema;
     }
 
+    static get jsonSchema() {
+        return {
+            schema: DOCUMENT_SCHEMA_NAME,
+            data: {
+                url: 'string',
+                title: 'string',
+            }
+        }
+    }
+
     validate() {
         super.validate();
     }

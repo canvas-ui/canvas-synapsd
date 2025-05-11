@@ -53,6 +53,15 @@ export default class Todo extends Document {
         return baseDocumentSchema;
     }
 
+    static get jsonSchema() {
+        return {
+            schema: DOCUMENT_SCHEMA_NAME,
+            data: {
+                title: 'string',
+            },
+        }
+    }
+
     static validate(document) {
         return baseDocumentSchema.parse(document);
     }

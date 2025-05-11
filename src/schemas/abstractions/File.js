@@ -18,7 +18,7 @@ const documentDataSchema = z.object({
         lastModified: z.string().datetime().optional(),
     }).passthrough(),
     metadata: z.object().optional(),
-
+    checksumArray: z.array(z.string()),
 });
 
 // Schema for the full File document, making checksumArray mandatory
@@ -63,6 +63,18 @@ export default class File extends Document {
 
     static get schema() {
         return fileDocumentSchema;
+    }
+
+    static get jsonSchema() {
+        return {
+            schema: DOCUMENT_SCHEMA_NAME,
+            data: {
+                name: 'string',
+                path: 'string',
+            },
+            metadata: {},
+            checksumArray: [],
+        }
     }
 
     static validate(document) {

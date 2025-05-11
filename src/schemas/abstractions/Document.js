@@ -43,6 +43,13 @@ export default class Document extends BaseDocument {
         return documentSchema;
     }
 
+    static get jsonSchema() {
+        return {
+            schema: DOCUMENT_SCHEMA_NAME,
+            data: {},
+        }
+    }
+
     validate() {
         super.validate();
     }

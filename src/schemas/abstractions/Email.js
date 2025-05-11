@@ -60,6 +60,13 @@ export default class Email extends Document {
         return baseDocumentSchema;
     }
 
+    static get jsonSchema() {
+        return {
+            schema: DOCUMENT_SCHEMA_NAME,
+            data: {}
+        }
+    }
+
     static validate(document) {
         return baseDocumentSchema.parse(document);
     }

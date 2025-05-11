@@ -60,6 +60,16 @@ export default class Note extends Document {
         return documentSchema;
     }
 
+    static get jsonSchema() {
+        return {
+            schema: DOCUMENT_SCHEMA_NAME,
+            data: {
+                title: 'string',
+                content: 'string',
+            },
+        }
+    }
+
     static validate(document) {
         return documentSchema.parse(document);
     }
