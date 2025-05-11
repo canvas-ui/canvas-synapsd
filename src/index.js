@@ -1215,7 +1215,7 @@ class SynapsD extends EventEmitter {
 
         // Basic sanity check for schema and data properties after potential parsing
          if (!parsedData.schema || parsedData.data === undefined) {
-            throw new Error('Parsed document data must have a schema and data property.');
+            throw new Error('Parsed document data must have a schema and data property.', parsedData);
         }
 
         debug('#parseDocumentData: Returning parsed data.');
