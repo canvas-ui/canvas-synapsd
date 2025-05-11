@@ -43,8 +43,7 @@ async function test() {
     console.log(await db.findDocuments('/foo/baf'));*/
 
     console.log(await db.findDocuments('/newpath'));
-    test = 100001
-    console.log(await db.getDocumentById('100001'));
+
 
 }
 
