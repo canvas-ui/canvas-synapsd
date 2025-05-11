@@ -1017,12 +1017,14 @@ class SynapsD extends EventEmitter {
      */
 
     #parseContextSpec(contextSpec) {
+        debug('#parseContextSpec: Received contextSpec:', contextSpec);
         if (!contextSpec || contextSpec == '' || contextSpec == '/' || contextSpec == null) {
-            return ['/'];
+            //debug('#parseContextSpec: Context spec is invalid, returning default: /');
+            //return ['/'];
+            throw new Error('Invalid contextSpec: Must be a path string or an array of strings.');
         }
 
         const processString = (str) => {
-            if (!str) return ['/'];
             if (str === '/') return ['/'];
             // Split the string and filter empty elements
             const parts = str.split('/').map(part => part.trim()).filter(Boolean);
@@ -1031,6 +1033,11 @@ class SynapsD extends EventEmitter {
         };
 
         if (Array.isArray(contextSpec)) {
+            if (contextSpec.length == 0) {
+                debug('#parseContextSpec: Context spec array is empty, returning default: /');
+                return ['/'];
+            }
+
             const result = contextSpec.flatMap(processString);
             // Remove duplicate '/' if they exist
             const uniqueResult = Array.from(new Set(result));
