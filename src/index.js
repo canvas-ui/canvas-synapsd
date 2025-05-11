@@ -891,7 +891,8 @@ class SynapsD extends EventEmitter {
      */
     async getDocumentById(id, options = { parse: true }) {
         if (!id) { throw new Error('Document id required'); }
-        debug(`getById: Searching for document with ID ${id}`);
+        if (typeof id === 'string') { id = parseInt(id); }
+        debug(`getById: Searching for document with ID ${id} of type ${typeof id}`);
         // Get raw document data from database
         const rawDocData = await this.documents.get(id);
         if (!rawDocData) {
@@ -916,8 +917,11 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(idArray)) {
             throw new Error('Document ID array must be an array');
         }
-        debug(`getDocumentsByIdArray: Getting ${idArray.length} documents`);
 
+        // Convert all ids to numbers if they are strings
+        idArray = idArray.map(id => typeof id === 'string' ? parseInt(id) : id);
+
+        debug(`getDocumentsByIdArray: Getting ${idArray.length} documents`);
         try {
             const documents = await this.documents.getMany(idArray);
             const limitedDocs = options.limit ? documents.slice(0, options.limit) : documents;
