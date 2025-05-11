@@ -113,69 +113,89 @@ class ContextTree extends EventEmitter {
         const normalizedPath = this.#normalizePath(path);
         debug(`Inserting normalized path "${normalizedPath}" (original: "${path}") into the context tree`);
 
-        if (normalizedPath === '/' && !node) {
-            return [this.rootLayer.id];
-        }
+        try {
+            if (normalizedPath === '/' && !node) {
+                return {
+                    data: [this.rootLayer.id],
+                    count: 1,
+                    error: null
+                };
+            }
 
-        if (this.pathExists(normalizedPath)) {
-            debug(`Normalized path "${normalizedPath}" already exists, skipping`);
-            return this.pathToLayerIds(normalizedPath);
-        }
+            if (this.pathExists(normalizedPath)) {
+                debug(`Normalized path "${normalizedPath}" already exists, skipping`);
+                return {
+                    data: this.pathToLayerIds(normalizedPath),
+                    count: this.pathToLayerIds(normalizedPath).length,
+                    error: null
+                };
+            }
 
-        let currentNode = this.root;
-        let child;
-        const layerIds = [];
-        const createdLayers = [];
+            let currentNode = this.root;
+            let child;
+            const layerIds = [];
+            const createdLayers = [];
 
-        const layerNames = normalizedPath.split('/').filter(Boolean);
-        for (const layerName of layerNames) {
-            let layer = this.#layerIndex.getLayerByName(layerName);
-            if (!layer) {
-                debug(`Layer "${layerName}" not found in layerIndex`);
-                if (autoCreateLayers) {
-                    debug(`Creating layer "${layerName}"`);
-                    layer = await this.#layerIndex.createLayer(layerName);
-                    createdLayers.push(layer);
-                } else {
-                    debug(`Layer "${layerName}" not found at path "${normalizedPath}" and autoCreateLayers is disabled`);
-                    return [];
+            const layerNames = normalizedPath.split('/').filter(Boolean);
+            for (const layerName of layerNames) {
+                let layer = this.#layerIndex.getLayerByName(layerName);
+                if (!layer) {
+                    debug(`Layer "${layerName}" not found in layerIndex`);
+                    if (autoCreateLayers) {
+                        debug(`Creating layer "${layerName}"`);
+                        layer = await this.#layerIndex.createLayer(layerName);
+                        createdLayers.push(layer);
+                    } else {
+                        return {
+                            data: [],
+                            count: 0,
+                            error: `Layer "${layerName}" not found at path "${normalizedPath}" and autoCreateLayers is disabled`
+                        };
+                    }
                 }
+
+                layerIds.push(layer.id);
+                child = currentNode.getChild(layer.id);
+
+                if (!child) {
+                    child = new TreeNode(layer.id, layer);
+                    currentNode.addChild(child);
+                }
+
+                currentNode = child;
             }
 
-            layerIds.push(layer.id);
-            child = currentNode.getChild(layer.id);
-
-            if (!child) {
-                child = new TreeNode(layer.id, layer);
-                currentNode.addChild(child);
+            if (node) {
+                currentNode.addChild(node);
+                debug(`Attached provided node ${node.id} (${node.payload.name}) to path "${normalizedPath}"`);
             }
 
-            currentNode = child;
+            await this.#saveTreeToDataStore();
+            debug(`Path "${normalizedPath}" inserted successfully.`);
+
+            this.emit('tree:path:inserted', {
+                path: normalizedPath,
+                layerIds,
+                createdLayers: createdLayers.map(layer => ({
+                    id: layer.id,
+                    name: layer.name,
+                    type: layer.type
+                }))
+            });
+
+            return {
+                data: layerIds,
+                count: layerIds.length,
+                error: null
+            };
+        } catch (error) {
+            debug(`Error inserting path "${normalizedPath}": ${error.message}`);
+            return {
+                data: [],
+                count: 0,
+                error: error.message
+            };
         }
-
-        // If a node object was passed (e.g., from movePath or copyPath),
-        // add it as a child to the final currentNode reached by the path.
-        if (node) {
-            // TreeNode.addChild handles idempotency (won't add if ID already exists)
-            currentNode.addChild(node);
-            debug(`Attached provided node ${node.id} (${node.payload.name}) to path "${normalizedPath}"`);
-        }
-
-        await this.#saveTreeToDataStore();
-        debug(`Path "${normalizedPath}" inserted successfully.`);
-
-        // Emit an event with the path and created layers
-        this.emit('tree:path:inserted', {
-            path: normalizedPath,
-            layerIds,
-            createdLayers: createdLayers.map(layer => ({
-                id: layer.id,
-                name: layer.name,
-                type: layer.type
-            }))
-        });
-
-        return layerIds;
     }
 
     async movePath(pathFrom, pathTo, recursive = false) {
@@ -183,63 +203,85 @@ class ContextTree extends EventEmitter {
         const normalizedPathTo = this.#normalizePath(pathTo);
         debug(`Moving normalized path "${normalizedPathFrom}" under "${normalizedPathTo}"${recursive ? ' recursively' : ''}`);
 
-        let sourceNodes, destNodes, nodeToMove, sourceParentNode, destNode;
-
         try {
-            sourceNodes = this.#getNodesForPath(normalizedPathFrom);
-            if (sourceNodes.length < 2) {
-                throw new Error('Cannot move the root path itself.');
+            let sourceNodes, destNodes, nodeToMove, sourceParentNode, destNode;
+
+            try {
+                sourceNodes = this.#getNodesForPath(normalizedPathFrom);
+                if (sourceNodes.length < 2) {
+                    throw new Error('Cannot move the root path itself.');
+                }
+                nodeToMove = sourceNodes[sourceNodes.length - 1];
+                sourceParentNode = sourceNodes[sourceNodes.length - 2];
+
+                destNodes = this.#getNodesForPath(normalizedPathTo);
+                destNode = destNodes[destNodes.length - 1];
+
+            } catch (error) {
+                return {
+                    data: null,
+                    count: 0,
+                    error: `Move failed: ${error.message}`
+                };
             }
-            nodeToMove = sourceNodes[sourceNodes.length - 1];
-            sourceParentNode = sourceNodes[sourceNodes.length - 2];
 
-            destNodes = this.#getNodesForPath(normalizedPathTo);
-            destNode = destNodes[destNodes.length - 1];
+            const layer = nodeToMove.payload;
 
+            // Precondition: Cannot move a locked layer
+            if (layer.isLocked) {
+                return {
+                    data: null,
+                    count: 0,
+                    error: `Cannot move path "${normalizedPathFrom}": Layer "${layer.name}" (ID: ${layer.id}) is locked.`
+                };
+            }
+
+            // Check if destination already contains the node. If so, skip adding, but still remove from source.
+            let alreadyExistsAtDest = destNode.hasChild(nodeToMove.id);
+            if (alreadyExistsAtDest) {
+                debug(`Node ${nodeToMove.id} (${layer.name}) already exists under destination ${destNode.id}. Skipping add step.`);
+            } else {
+                // Perform the attachment
+                debug(`Attaching node ${nodeToMove.id} to ${destNode.id}`);
+                destNode.addChild(nodeToMove);
+            }
+
+            // Always remove from the original parent
+            debug(`Removing node ${nodeToMove.id} from ${sourceParentNode.id}`);
+            sourceParentNode.removeChild(nodeToMove.id);
+
+            await this.#saveTreeToDataStore();
+
+            // Emit event
+            this.emit('tree:path:moved', {
+                pathFrom: normalizedPathFrom,
+                pathTo: normalizedPathTo,
+                recursive,
+                layerId: layer.id,
+                layerName: layer.name,
+                layerType: layer.type,
+                timestamp: new Date().toISOString()
+            });
+
+            debug(`Path "${normalizedPathFrom}" successfully moved under "${normalizedPathTo}".`);
+            return {
+                data: {
+                    pathFrom: normalizedPathFrom,
+                    pathTo: normalizedPathTo,
+                    layerId: layer.id,
+                    layerName: layer.name
+                },
+                count: 1,
+                error: null
+            };
         } catch (error) {
-            debug(`Move operation failed: ${error.message}`);
-            // Re-throw or return false depending on desired API behavior
-            // Throwing is cleaner for indicating preconditions not met.
-            throw new Error(`Move failed: ${error.message}`);
-            // return false;
+            debug(`Error moving path "${normalizedPathFrom}" to "${normalizedPathTo}": ${error.message}`);
+            return {
+                data: null,
+                count: 0,
+                error: error.message
+            };
         }
-
-        const layer = nodeToMove.payload;
-
-        // Precondition: Cannot move a locked layer
-        if (layer.isLocked) {
-            throw new Error(`Cannot move path "${normalizedPathFrom}": Layer "${layer.name}" (ID: ${layer.id}) is locked.`);
-        }
-
-        // Check if destination already contains the node. If so, skip adding, but still remove from source.
-        let alreadyExistsAtDest = destNode.hasChild(nodeToMove.id);
-        if (alreadyExistsAtDest) {
-            debug(`Node ${nodeToMove.id} (${layer.name}) already exists under destination ${destNode.id}. Skipping add step.`);
-        } else {
-            // Perform the attachment
-            debug(`Attaching node ${nodeToMove.id} to ${destNode.id}`);
-            destNode.addChild(nodeToMove);
-        }
-
-        // Always remove from the original parent
-        debug(`Removing node ${nodeToMove.id} from ${sourceParentNode.id}`);
-        sourceParentNode.removeChild(nodeToMove.id);
-
-        await this.#saveTreeToDataStore();
-
-        // Emit event
-        this.emit('tree:path:moved', {
-            pathFrom: normalizedPathFrom,
-            pathTo: normalizedPathTo,
-            recursive,
-            layerId: layer.id,
-            layerName: layer.name,
-            layerType: layer.type,
-            timestamp: new Date().toISOString()
-        });
-
-        debug(`Path "${normalizedPathFrom}" successfully moved under "${normalizedPathTo}".`);
-        return true;
     }
 
     async copyPath(pathFrom, pathTo, recursive = false) {
@@ -336,50 +378,75 @@ class ContextTree extends EventEmitter {
         const normalizedPath = this.#normalizePath(path);
         debug(`Removing normalized path "${normalizedPath}"${recursive ? ' recursively' : ''}`);
 
-        let nodeToRemove, parentNode;
         try {
-            const nodesToRemove = this.#getNodesForPath(normalizedPath);
-            nodeToRemove = nodesToRemove[nodesToRemove.length - 1];
+            let nodeToRemove, parentNode;
+            try {
+                const nodesToRemove = this.#getNodesForPath(normalizedPath);
+                nodeToRemove = nodesToRemove[nodesToRemove.length - 1];
 
-            // Get parent using the normalized path
-            const parentPath = this.#getParentPath(normalizedPath);
-            const parentNodes = this.#getNodesForPath(parentPath);
-            parentNode = parentNodes[parentNodes.length - 1];
-        } catch (error) {
-            debug(`Unable to remove path, error resolving path or parent path: ${error.message}`);
-            return false; // Or throw?
-        }
-
-        if (!nodeToRemove || !parentNode) {
-            debug(`Unable to remove path, node or parent node not found after resolution: "${normalizedPath}"`);
-            return false;
-        }
-
-        const layer = nodeToRemove.payload;
-        const childrenCount = nodeToRemove.children.size;
-
-        // If non-recursive and node has children, move them to parent
-        if (!recursive && nodeToRemove.hasChildren) {
-            for (const child of nodeToRemove.children.values()) {
-                parentNode.addChild(child);
+                // Get parent using the normalized path
+                const parentPath = this.#getParentPath(normalizedPath);
+                const parentNodes = this.#getNodesForPath(parentPath);
+                parentNode = parentNodes[parentNodes.length - 1];
+            } catch (error) {
+                return {
+                    data: null,
+                    count: 0,
+                    error: `Unable to remove path, error resolving path or parent path: ${error.message}`
+                };
             }
+
+            if (!nodeToRemove || !parentNode) {
+                return {
+                    data: null,
+                    count: 0,
+                    error: `Unable to remove path, node or parent node not found after resolution: "${normalizedPath}"`
+                };
+            }
+
+            const layer = nodeToRemove.payload;
+            const childrenCount = nodeToRemove.children.size;
+
+            // If non-recursive and node has children, move them to parent
+            if (!recursive && nodeToRemove.hasChildren) {
+                for (const child of nodeToRemove.children.values()) {
+                    parentNode.addChild(child);
+                }
+            }
+
+            parentNode.removeChild(nodeToRemove.id);
+            await this.#saveTreeToDataStore();
+
+            // Emit an event with path and removal details
+            this.emit('tree:path:removed', {
+                path: normalizedPath,
+                recursive,
+                layerId: layer.id,
+                layerName: layer.name,
+                layerType: layer.type,
+                hadChildren: childrenCount > 0,
+                childrenCount
+            });
+
+            return {
+                data: {
+                    path: normalizedPath,
+                    layerId: layer.id,
+                    layerName: layer.name,
+                    hadChildren: childrenCount > 0,
+                    childrenCount
+                },
+                count: 1,
+                error: null
+            };
+        } catch (error) {
+            debug(`Error removing path "${normalizedPath}": ${error.message}`);
+            return {
+                data: null,
+                count: 0,
+                error: error.message
+            };
         }
-
-        parentNode.removeChild(nodeToRemove.id);
-        await this.#saveTreeToDataStore();
-
-        // Emit an event with path and removal details
-        this.emit('tree:path:removed', {
-            path: normalizedPath,
-            recursive,
-            layerId: layer.id,
-            layerName: layer.name,
-            layerType: layer.type,
-            hadChildren: childrenCount > 0,
-            childrenCount
-        });
-
-        return true;
     }
 
     /**
@@ -391,28 +458,51 @@ class ContextTree extends EventEmitter {
         debug(`[PLACEHOLDER] Merging layer at "${path}" with layers above it`);
         // TODO: Implement bitmap merging logic
 
-        let node;
         try {
-            const nodes = this.#getNodesForPath(path);
-            node = nodes[nodes.length - 1];
+            let node;
+            try {
+                const nodes = this.#getNodesForPath(path);
+                node = nodes[nodes.length - 1];
+            } catch (error) {
+                return {
+                    data: null,
+                    count: 0,
+                    error: `Unable to merge layer up, error resolving path "${path}": ${error.message}`
+                };
+            }
+
+            if (!node) {
+                return {
+                    data: null,
+                    count: 0,
+                    error: `Unable to merge layer up, node not found at path "${path}" after resolution.`
+                };
+            }
+
+            // Emit an event for the merge operation
+            this.emit('tree:layer:merged:up', {
+                path,
+                layerId: node.id,
+                layerName: node.payload.name
+            });
+
+            return {
+                data: {
+                    path,
+                    layerId: node.id,
+                    layerName: node.payload.name
+                },
+                count: 1,
+                error: null
+            };
         } catch (error) {
-            debug(`Unable to merge layer up, error resolving path "${path}": ${error.message}`);
-            return false;
+            debug(`Error merging layer up at path "${path}": ${error.message}`);
+            return {
+                data: null,
+                count: 0,
+                error: error.message
+            };
         }
-
-        if (!node) {
-            debug(`Unable to merge layer up, node not found at path "${path}" after resolution.`);
-            return false;
-        }
-
-        // Emit an event for the merge operation
-        this.emit('tree:layer:merged:up', {
-            path,
-            layerId: node.id,
-            layerName: node.name // node.name is likely undefined, should be node.payload.name
-        });
-
-        return true;
     }
 
     /**
@@ -424,28 +514,51 @@ class ContextTree extends EventEmitter {
         debug(`[PLACEHOLDER] Merging layer at "${path}" with layers below it`);
         // TODO: Implement bitmap merging logic
 
-        let node;
         try {
-            const nodes = this.#getNodesForPath(path);
-            node = nodes[nodes.length - 1];
+            let node;
+            try {
+                const nodes = this.#getNodesForPath(path);
+                node = nodes[nodes.length - 1];
+            } catch (error) {
+                return {
+                    data: null,
+                    count: 0,
+                    error: `Unable to merge layer down, error resolving path "${path}": ${error.message}`
+                };
+            }
+
+            if (!node) {
+                return {
+                    data: null,
+                    count: 0,
+                    error: `Unable to merge layer down, node not found at path "${path}" after resolution.`
+                };
+            }
+
+            // Emit an event for the merge operation
+            this.emit('tree:layer:merged:down', {
+                path,
+                layerId: node.id,
+                layerName: node.payload.name
+            });
+
+            return {
+                data: {
+                    path,
+                    layerId: node.id,
+                    layerName: node.payload.name
+                },
+                count: 1,
+                error: null
+            };
         } catch (error) {
-            debug(`Unable to merge layer down, error resolving path "${path}": ${error.message}`);
-            return false;
+            debug(`Error merging layer down at path "${path}": ${error.message}`);
+            return {
+                data: null,
+                count: 0,
+                error: error.message
+            };
         }
-
-        if (!node) {
-            debug(`Unable to merge layer down, node not found at path "${path}" after resolution.`);
-            return false;
-        }
-
-        // Emit an event for the merge operation
-        this.emit('tree:layer:merged:down', {
-            path,
-            layerId: node.id,
-            layerName: node.name // node.name is likely undefined, should be node.payload.name
-        });
-
-        return true;
     }
 
     /**
@@ -484,68 +597,115 @@ class ContextTree extends EventEmitter {
     async lockPath(path, lockBy) {
         const normalizedPath = this.#normalizePath(path);
         if (!lockBy) {
-            throw new Error('Locking path requires a lockBy context');
+            return {
+                data: null,
+                count: 0,
+                error: 'Locking path requires a lockBy context'
+            };
         }
         debug(`Locking normalized path "${normalizedPath}" by context "${lockBy}"`);
 
-        const nodes = this.#getNodesForPath(normalizedPath);
-        let changed = false;
+        try {
+            const nodes = this.#getNodesForPath(normalizedPath);
+            let changed = false;
+            const lockedLayerIds = [];
 
-        // Operate only on nodes representing actual path segments (skip root at index 0)
-        for (const node of nodes.slice(1)) {
-            const layer = node.payload;
-            // --- DEBUG LOGGING ---
-            debug(`Checking layer ${layer.id} (${layer.name}). LockedBy: ${JSON.stringify(layer.lockedBy)}. Checking for context: ${lockBy}`);
-            // --- END DEBUG ---
-            if (!layer.isLockedBy(lockBy)) { // Check if NOT already locked by this context
-                debug(`--> Layer ${layer.id} (${layer.name}) NOT locked by ${lockBy}. Locking now.`);
-                layer.lock(lockBy);
-                await this.#layerIndex.persistLayer(layer);
-                changed = true; // <-- Set to true only if a change was made
-                debug(`Layer ${layer.id} (${layer.name}) locked by ${lockBy}`);
-            } else {
-                 debug(`--> Layer ${layer.id} (${layer.name}) IS ALREADY locked by ${lockBy}. Skipping.`);
+            // Operate only on nodes representing actual path segments (skip root at index 0)
+            for (const node of nodes.slice(1)) {
+                const layer = node.payload;
+                // --- DEBUG LOGGING ---
+                debug(`Checking layer ${layer.id} (${layer.name}). LockedBy: ${JSON.stringify(layer.lockedBy)}. Checking for context: ${lockBy}`);
+                // --- END DEBUG ---
+                if (!layer.isLockedBy(lockBy)) { // Check if NOT already locked by this context
+                    debug(`--> Layer ${layer.id} (${layer.name}) NOT locked by ${lockBy}. Locking now.`);
+                    layer.lock(lockBy);
+                    await this.#layerIndex.persistLayer(layer);
+                    changed = true; // <-- Set to true only if a change was made
+                    lockedLayerIds.push(layer.id);
+                    debug(`Layer ${layer.id} (${layer.name}) locked by ${lockBy}`);
+                } else {
+                    debug(`--> Layer ${layer.id} (${layer.name}) IS ALREADY locked by ${lockBy}. Skipping.`);
+                }
             }
-        }
 
-        if (changed) { // <-- Event emitted only if changed === true
-            this.emit('tree:path:locked', { path: normalizedPath, lockBy, timestamp: new Date().toISOString() });
+            if (changed) { // <-- Event emitted only if changed === true
+                this.emit('tree:path:locked', { path: normalizedPath, lockBy, timestamp: new Date().toISOString() });
+            }
+
+            return {
+                data: {
+                    path: normalizedPath,
+                    lockBy,
+                    layerIds: lockedLayerIds
+                },
+                count: lockedLayerIds.length,
+                error: null
+            };
+        } catch (error) {
+            debug(`Error locking path "${normalizedPath}": ${error.message}`);
+            return {
+                data: null,
+                count: 0,
+                error: error.message
+            };
         }
-        return true; // Operation ensures the path is locked by lockBy
     }
 
     async unlockPath(path, lockBy) {
         const normalizedPath = this.#normalizePath(path);
         if (!lockBy) {
-            throw new Error('Unlocking path requires a lockBy context');
+            return {
+                data: null,
+                count: 0,
+                error: 'Unlocking path requires a lockBy context'
+            };
         }
         debug(`Unlocking normalized path "${normalizedPath}" by context "${lockBy}"`);
 
-        const nodes = this.#getNodesForPath(normalizedPath); // Use normalized
-        const stillLockedIds = [];
-        let changed = false;
+        try {
+            const nodes = this.#getNodesForPath(normalizedPath); // Use normalized
+            const stillLockedIds = [];
+            const unlockedLayerIds = [];
+            let changed = false;
 
-        // Operate only on nodes representing actual path segments (skip root at index 0)
-        for (const node of nodes.slice(1)) {
-            const layer = node.payload;
-            if (layer.isLockedBy(lockBy)) {
-                layer.unlock(lockBy); // Returns true if still locked by others, false if now fully unlocked
-                await this.#layerIndex.persistLayer(layer);
-                changed = true;
-                debug(`Layer ${layer.id} (${layer.name}) unlocked by ${lockBy}`);
+            // Operate only on nodes representing actual path segments (skip root at index 0)
+            for (const node of nodes.slice(1)) {
+                const layer = node.payload;
+                if (layer.isLockedBy(lockBy)) {
+                    layer.unlock(lockBy); // Returns true if still locked by others, false if now fully unlocked
+                    await this.#layerIndex.persistLayer(layer);
+                    changed = true;
+                    unlockedLayerIds.push(layer.id);
+                    debug(`Layer ${layer.id} (${layer.name}) unlocked by ${lockBy}`);
+                }
+                // Check the final state after unlock
+                if (layer.isLocked) {
+                    stillLockedIds.push(layer.id);
+                }
             }
-            // Check the final state after unlock
-            if (layer.isLocked) {
-                stillLockedIds.push(layer.id);
+
+            if (changed) {
+                this.emit('tree:path:unlocked', { path: normalizedPath, lockBy, stillLockedIds, timestamp: new Date().toISOString() });
             }
-        }
 
-        if (changed) {
-            this.emit('tree:path:unlocked', { path: normalizedPath, lockBy, stillLockedIds, timestamp: new Date().toISOString() });
+            return {
+                data: {
+                    path: normalizedPath,
+                    lockBy,
+                    unlockedLayerIds,
+                    stillLockedIds
+                },
+                count: unlockedLayerIds.length,
+                error: null
+            };
+        } catch (error) {
+            debug(`Error unlocking path "${normalizedPath}": ${error.message}`);
+            return {
+                data: null,
+                count: 0,
+                error: error.message
+            };
         }
-
-        // Return array of layer IDs in the path that remain locked (by any context)
-        return stillLockedIds;
     }
 
     /**

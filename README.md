@@ -56,6 +56,138 @@ The following bitmap index prefixes are enforced to organize and filter document
 - `tag/` - Generic tag bitmaps
 - `custom/` - Throw what you need here
 
+## API Documentation
+
+### API Patterns
+
+SynapsD follows a hybrid API pattern - for better or worse - 
+
+#### Single Document Operations
+
+Single document operations:
+
+```javascript
+try {
+    const docId = await db.insertDocument(doc);
+    // Success case
+} catch (error) {
+    // Error handling
+}
+```
+
+Available single document operations:
+
+- `insertDocument(doc, contextSpec, featureBitmapArray)`
+- `updateDocument(docId, updateData, contextSpec, featureBitmapArray)`
+- `deleteDocument(docId)`
+- `getDocument(docId)`
+- `getDocumentById(id)`
+- `getDocumentByChecksumString(checksumString)`
+
+#### Batch Operations
+
+Batch operations return a result object:
+
+```javascript
+const result = await db.insertDocumentArray(docs);
+if (result.failed.length > 0) {
+    // Handle partial failures
+}
+// Access successful operations
+const successfulIds = result.successful.map(s => s.id);
+
+// Using findDocuments
+const result = await db.findDocuments('/some/path', ['feature1'], ['filter1']);
+if (result.error) {
+    console.error('Query failed:', result.error);
+} else {
+    console.log(`Found ${result.count} documents:`, result.data);
+}
+
+// Using query
+const queryResult = await db.query('some query', ['context1'], ['feature1']);
+if (queryResult.error) {
+    console.error('Query failed:', queryResult.error);
+} else {
+    console.log(`Found ${queryResult.count} documents:`, queryResult.data);
+}
+```
+
+Result object structure:
+
+```typescript
+interface BatchResult {
+    successful: Array<{
+        index: number;    // Original array index
+        id: number;       // Document ID
+    }>;
+    failed: Array<{
+        index: number;    // Original array index
+        error: string;    // Error message
+        doc: any;        // Original document
+    }>;
+    total: number;       // Total number of operations
+}
+```
+
+Available batch operations:
+
+- `insertDocumentArray(docs, contextSpec, featureBitmapArray)`
+- `updateDocumentArray(docs, contextSpec, featureBitmapArray)`
+- `deleteDocumentArray(docIds)`
+- `getDocumentsByIdArray(ids)`
+- `getDocumentsByChecksumStringArray(checksums)`
+
+#### Query Operations
+
+Query operations return a result object:
+
+```javascript
+const result = await db.findDocuments(contextSpec, featureBitmapArray);
+if (result.error) {
+    // Handle error
+}
+// Access data
+const documents = result.data;
+```
+
+Result object structure:
+```typescript
+interface QueryResult {
+    data: Array<any>;    // Array of documents
+    count: number;       // Total count
+    error: string|null;  // Error if any
+}
+```
+
+Available query operations:
+
+- `findDocuments(contextSpec, featureBitmapArray, filterArray)`
+- `query(query, contextBitmapArray, featureBitmapArray, filterArray)`
+- `ftsQuery(query, contextBitmapArray, featureBitmapArray, filterArray)`
+
+### Error Handling
+
+SynapsD uses standard JavaScript Error objects with specific error types:
+
+- `ValidationError`: Document validation failed
+- `NotFoundError`: Document not found
+- `DuplicateError`: Document already exists
+- `DatabaseError`: General database errors
+
+Example:
+```javascript
+try {
+    await db.insertDocument(doc);
+} catch (error) {
+    if (error instanceof ValidationError) {
+        // Handle validation error
+    } else if (error instanceof DatabaseError) {
+        // Handle database error
+    }
+}
+```
+
 ## TODO
 
 - add support for chunking

@@ -7,6 +7,9 @@ import path from 'path';
 import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd');
 
+// Errors
+import { ValidationError, NotFoundError, DuplicateError, DatabaseError } from './utils/errors.js';
+
 // DB Backend
 import Db from './backends/lmdb/index.js';
 
@@ -385,13 +388,20 @@ class SynapsD extends EventEmitter {
     }
 
     async insertDocumentArray(docArray, contextSpec = '/', featureBitmapArray = []) {
-        if (!Array.isArray(docArray)) { docArray = [docArray]; }
-        if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
+        if (!Array.isArray(docArray)) {
+            throw new Error('Document array must be an array');
+        }
+        if (!Array.isArray(featureBitmapArray)) {
+            throw new Error('Feature array must be an array');
+        }
         debug(`insertDocumentArray: Inserting ${docArray.length} documents with contextSpec: ${contextSpec} and featureBitmapArray: ${featureBitmapArray}`);
 
-        // Collect errors
-        let errors = [];
-        let successfulInsertions = [];
+        // Collect results
+        const result = {
+            successful: [], // Array of { index, id } objects
+            failed: [],    // Array of { index, error, doc } objects
+            count: docArray.length
+        };
 
         // Insert documents
         // TODO: Insert with a batch operation
@@ -399,24 +409,25 @@ class SynapsD extends EventEmitter {
             const doc = docArray[i];
             try {
                 const id = await this.insertDocument(doc, contextSpec, featureBitmapArray, false);
-                successfulInsertions.push({ index: i, id: id });
+                result.successful.push({ index: i, id: id });
                 debug(`insertDocumentArray: Successfully inserted document at index ${i}, ID: ${id}`);
             } catch (error) {
                 debug(`insertDocumentArray: Error inserting document at index ${i}: ${error.message}`);
-                errors.push({
+                result.failed.push({
                     index: i,
                     error: error.message || 'Unknown error',
-                    doc: doc
+                    doc: doc,
+                    errorType: error.name // Add error type for better error handling
                 });
             }
         }
 
-        debug(`insertDocumentArray: Inserted ${successfulInsertions.length} of ${docArray.length} documents`);
-        if (errors.length > 0) {
-            throw new Error(`insertDocumentArray: Failed to insert ${errors.length} documents`);
+        debug(`insertDocumentArray: Inserted ${result.successful.length} of ${result.count} documents`);
+        if (result.failed.length > 0) {
+            debug(`insertDocumentArray: Failed to insert ${result.failed.length} documents`);
         }
 
-        return errors;
+        return result;
     }
 
     async hasDocument(id, contextSpec, featureBitmapArrayInput) {
@@ -512,82 +523,92 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(filterArray) && typeof filterArray === 'string') { filterArray = [filterArray]; }
         debug(`Listing documents with contextArray: ${contextBitmapArray}, features: ${featureBitmapArray}, filters: ${filterArray}`);
 
-        // Start with null, will hold RoaringBitmap32 instance if filters are applied
-        let resultBitmap = null;
-        // Flag to track if any filters actually modified the initial empty bitmap
-        let filtersApplied = false;
+        try {
+            // Start with null, will hold RoaringBitmap32 instance if filters are applied
+            let resultBitmap = null;
+            // Flag to track if any filters actually modified the initial empty bitmap
+            let filtersApplied = false;
 
-        // Apply context filters if provided
-        if (contextBitmapArray.length > 0) {
-            resultBitmap = await this.contextBitmapCollection.AND(contextBitmapArray);
-            filtersApplied = true; // AND result assigned
-        }
-
-        // Apply feature filters if provided
-        if (featureBitmapArray.length > 0) {
-            const featureBitmap = await this.bitmapIndex.OR(featureBitmapArray);
-            if (filtersApplied) { // Check if resultBitmap holds a meaningful value
-                resultBitmap.andInPlace(featureBitmap);
-            } else {
-                resultBitmap = featureBitmap;
-                filtersApplied = true; // OR result assigned
+            // Apply context filters if provided
+            if (contextBitmapArray.length > 0) {
+                resultBitmap = await this.contextBitmapCollection.AND(contextBitmapArray);
+                filtersApplied = true; // AND result assigned
             }
-        }
 
-        // Apply additional filters if provided
-        if (filterArray.length > 0) {
-            const filterBitmap = await this.bitmapIndex.AND(filterArray);
-            if (filtersApplied) {
-                resultBitmap.andInPlace(filterBitmap);
-            } else {
-                resultBitmap = filterBitmap;
-                filtersApplied = true; // Modified by AND
+            // Apply feature filters if provided
+            if (featureBitmapArray.length > 0) {
+                const featureBitmap = await this.bitmapIndex.OR(featureBitmapArray);
+                if (filtersApplied) { // Check if resultBitmap holds a meaningful value
+                    resultBitmap.andInPlace(featureBitmap);
+                } else {
+                    resultBitmap = featureBitmap;
+                    filtersApplied = true; // OR result assigned
+                }
             }
-        }
 
-        // Convert the final bitmap result (which might be null) to an ID array
-        const finalDocumentIds = resultBitmap ? resultBitmap.toArray() : [];
-
-        // Case 1: No filters were effectively applied (bitmap is still initial empty state).
-        // We check filtersApplied flag instead of array lengths now.
-        if (!filtersApplied) {
-            // Changed from listEntries to getRange for consistency
-            // TODO: Add limit support directly to getRange if possible
-            const documents = [];
-            for await (const { key, value } of this.documents.getRange()) {
-                documents.push(value);
+            // Apply additional filters if provided
+            if (filterArray.length > 0) {
+                const filterBitmap = await this.bitmapIndex.AND(filterArray);
+                if (filtersApplied) {
+                    resultBitmap.andInPlace(filterBitmap);
+                } else {
+                    resultBitmap = filterBitmap;
+                    filtersApplied = true; // Modified by AND
+                }
             }
-            return options.limit ? documents.slice(0, options.limit) : documents;
-        }
 
-        // Case 2: Filters were applied, but the resulting bitmap is null (e.g., ANDing non-existent keys) or empty.
-        if (finalDocumentIds.length === 0) {
-            debug('findDocuments: Resulting bitmap is null or empty after applying filters. Returning [].');
-            return []; // Return empty array, not all documents
-        }
+            // Convert the final bitmap result (which might be null) to an ID array
+            const finalDocumentIds = resultBitmap ? resultBitmap.toArray() : [];
 
-        // Convert bitmap to array of document IDs
-        const documentIds = finalDocumentIds;
-        if (options.limit) {
-            documentIds = documentIds.slice(0, options.limit);
-        }
+            // Case 1: No filters were effectively applied
+            if (!filtersApplied) {
+                const documents = [];
+                for await (const { key, value } of this.documents.getRange()) {
+                    documents.push(value);
+                }
+                const limitedDocs = options.limit ? documents.slice(0, options.limit) : documents;
 
-        //
-        const documents = await this.documents.getMany(documentIds);
-        if (options.limit) {
-            documents = documents.slice(0, options.limit);
-        }
-
-        if (options.parse) {
-            let initializedDocuments = [];
-            for (const doc of documents) {
-                initializedDocuments.push(this.#parseInitializeDocument(doc));
+                return {
+                    data: options.parse ? limitedDocs.map(doc => this.#parseInitializeDocument(doc)) : limitedDocs,
+                    count: documents.length,
+                    error: null
+                };
             }
-            return initializedDocuments;
-        } else {
-            return documents;
-        }
 
+            // Case 2: Filters were applied, but the resulting bitmap is null or empty
+            if (finalDocumentIds.length === 0) {
+                debug('findDocuments: Resulting bitmap is null or empty after applying filters.');
+                return {
+                    data: [],
+                    count: 0,
+                    error: null
+                };
+            }
+
+            // Convert bitmap to array of document IDs
+            let documentIds = finalDocumentIds;
+            if (options.limit) {
+                documentIds = documentIds.slice(0, options.limit);
+            }
+
+            // Get documents from database
+            const documents = await this.documents.getMany(documentIds);
+            const limitedDocs = options.limit ? documents.slice(0, options.limit) : documents;
+
+            return {
+                data: options.parse ? limitedDocs.map(doc => this.#parseInitializeDocument(doc)) : limitedDocs,
+                count: finalDocumentIds.length,
+                error: null
+            };
+
+        } catch (error) {
+            debug(`Error in findDocuments: ${error.message}`);
+            return {
+                data: [],
+                count: 0,
+                error: error.message
+            };
+        }
     }
 
     async updateDocument(docIdentifier, updateData = null, contextSpec = null, featureBitmapArray = []) {
@@ -676,23 +697,46 @@ class SynapsD extends EventEmitter {
     }
 
     async updateDocumentArray(docArray, contextSpec = null, featureBitmapArray = []) {
-        if (!Array.isArray(docArray)) { docArray = [docArray]; }
-        if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
+        if (!Array.isArray(docArray)) {
+            throw new Error('Document array must be an array');
+        }
+        if (!Array.isArray(featureBitmapArray)) {
+            throw new Error('Feature array must be an array');
+        }
+        debug(`updateDocumentArray: Updating ${docArray.length} documents`);
 
-        // Collect errors
-        let errors = [];
+        // Collect results
+        const result = {
+            successful: [], // Array of { index, id } objects
+            failed: [],    // Array of { index, error, doc } objects
+            count: docArray.length
+        };
 
         // Update documents
         // TODO: Update with a batch operation
-        for (const doc of docArray) {
+        for (let i = 0; i < docArray.length; i++) {
+            const doc = docArray[i];
             try {
-                await this.updateDocument(doc, contextSpec, featureBitmapArray);
+                const id = await this.updateDocument(doc, contextSpec, featureBitmapArray);
+                result.successful.push({ index: i, id: id });
+                debug(`updateDocumentArray: Successfully updated document at index ${i}, ID: ${id}`);
             } catch (error) {
-                errors.push(error); // doc.id may not be set yet
+                debug(`updateDocumentArray: Error updating document at index ${i}: ${error.message}`);
+                result.failed.push({
+                    index: i,
+                    error: error.message || 'Unknown error',
+                    doc: doc,
+                    errorType: error.name
+                });
             }
         }
 
-        return errors;
+        debug(`updateDocumentArray: Updated ${result.successful.length} of ${result.count} documents`);
+        if (result.failed.length > 0) {
+            debug(`updateDocumentArray: Failed to update ${result.failed.length} documents`);
+        }
+
+        return result;
     }
 
     // Removes documents from context and/or feature bitmaps
@@ -781,21 +825,50 @@ class SynapsD extends EventEmitter {
     }
 
     async deleteDocumentArray(docIdArray) {
-        if (!Array.isArray(docIdArray)) { docIdArray = [docIdArray]; }
+        if (!Array.isArray(docIdArray)) {
+            throw new Error('Document ID array must be an array');
+        }
+        debug(`deleteDocumentArray: Deleting ${docIdArray.length} documents`);
 
-        // Collect errors
-        let errors = [];
+        // Collect results
+        const result = {
+            successful: [], // Array of { index, id } objects
+            failed: [],    // Array of { index, error, id } objects
+            count: docIdArray.length
+        };
 
-        // TODO: Implement batch operation
-        for (const id of docIdArray) {
+        // Delete documents
+        // TODO: Delete with a batch operation
+        for (let i = 0; i < docIdArray.length; i++) {
+            const id = docIdArray[i];
             try {
-                await this.deleteDocument(id);
+                const success = await this.deleteDocument(id);
+                if (success) {
+                    result.successful.push({ index: i, id: id });
+                    debug(`deleteDocumentArray: Successfully deleted document at index ${i}, ID: ${id}`);
+                } else {
+                    result.failed.push({
+                        index: i,
+                        error: 'Document not found or already deleted',
+                        id: id
+                    });
+                }
             } catch (error) {
-                errors.push(error); // doc.id may not be set yet
+                debug(`deleteDocumentArray: Error deleting document at index ${i}: ${error.message}`);
+                result.failed.push({
+                    index: i,
+                    error: error.message || 'Unknown error',
+                    id: id
+                });
             }
         }
 
-        return errors;
+        debug(`deleteDocumentArray: Deleted ${result.successful.length} of ${result.count} documents`);
+        if (result.failed.length > 0) {
+            debug(`deleteDocumentArray: Failed to delete ${result.failed.length} documents`);
+        }
+
+        return result;
     }
 
     /**
@@ -840,22 +913,28 @@ class SynapsD extends EventEmitter {
      * @returns {Array<BaseDocument>} Array of document instances
      */
     async getDocumentsByIdArray(idArray, options = { parse: true, limit: null }) {
-        if (!Array.isArray(idArray)) { idArray = [idArray]; }
-
-        const documents = await this.documents.getMany(idArray);
-        if (options.limit) {
-            documents = documents.slice(0, options.limit);
+        if (!Array.isArray(idArray)) {
+            throw new Error('Document ID array must be an array');
         }
+        debug(`getDocumentsByIdArray: Getting ${idArray.length} documents`);
 
-        if (options.parse) {
-            const initializedDocuments = [];
-            for (const doc of documents) {
-                initializedDocuments.push(this.#parseInitializeDocument(doc));
-            }
-            return initializedDocuments;
+        try {
+            const documents = await this.documents.getMany(idArray);
+            const limitedDocs = options.limit ? documents.slice(0, options.limit) : documents;
+
+            return {
+                data: options.parse ? limitedDocs.map(doc => this.#parseInitializeDocument(doc)) : limitedDocs,
+                count: documents.length,
+                error: null
+            };
+        } catch (error) {
+            debug(`Error in getDocumentsByIdArray: ${error.message}`);
+            return {
+                data: [],
+                count: 0,
+                error: error.message
+            };
         }
-
-        return documents;
     }
 
     /**
@@ -881,22 +960,34 @@ class SynapsD extends EventEmitter {
      * @returns {Array<BaseDocument>} Array of document instances
      */
     async getDocumentsByChecksumStringArray(checksumStringArray, options = { parse: true }) {
-        if (!Array.isArray(checksumStringArray)) { checksumStringArray = [checksumStringArray]; }
-
-        const ids = [];
-        for (const checksum of checksumStringArray) {
-            try {
-                const id = await this.#checksumIndex.checksumStringToId(checksum);
-                if (id) {
-                    ids.push(id);
-                }
-            } catch (error) {
-                debug(`Error getting ID for checksum ${checksum}: ${error.message}`);
-            }
+        if (!Array.isArray(checksumStringArray)) {
+            throw new Error('Checksum string array must be an array');
         }
+        debug(`getDocumentsByChecksumStringArray: Getting ${checksumStringArray.length} documents`);
 
-        // Use getDocumentsByIdArray which now properly instantiates document objects
-        return await this.getDocumentsByIdArray(ids, options);
+        try {
+            const ids = [];
+            for (const checksum of checksumStringArray) {
+                try {
+                    const id = await this.#checksumIndex.checksumStringToId(checksum);
+                    if (id) {
+                        ids.push(id);
+                    }
+                } catch (error) {
+                    debug(`Error getting ID for checksum ${checksum}: ${error.message}`);
+                }
+            }
+
+            // Use getDocumentsByIdArray which now properly returns a result object
+            return await this.getDocumentsByIdArray(ids, options);
+        } catch (error) {
+            debug(`Error in getDocumentsByChecksumStringArray: ${error.message}`);
+            return {
+                data: [],
+                count: 0,
+                error: error.message
+            };
+        }
     }
 
     async setDocumentArrayFeatures(docIdArray, featureBitmapArray) {
@@ -944,23 +1035,47 @@ class SynapsD extends EventEmitter {
      */
 
     async query(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {
-        if (typeof query !== 'string') { throw new Error('Query must be a string'); }
-        if (!Array.isArray(contextBitmapArray)) { throw new Error('Context array must be an array'); }
-        if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
-        if (!Array.isArray(filterArray)) { throw new Error('Filter array must be an array'); }
+        if (typeof query !== 'string') {
+            throw new ArgumentError('Query must be a string', 'query');
+        }
+        if (!Array.isArray(contextBitmapArray)) {
+            throw new ArgumentError('Context array must be an array', 'contextBitmapArray');
+        }
+        if (!Array.isArray(featureBitmapArray)) {
+            throw new ArgumentError('Feature array must be an array', 'featureBitmapArray');
+        }
+        if (!Array.isArray(filterArray)) {
+            throw new ArgumentError('Filter array must be an array', 'filterArray');
+        }
 
         debug('Query not implemented yet');
-        throw new Error('Query method not implemented yet');
+        return {
+            data: [],
+            count: 0,
+            error: 'Query method not implemented yet'
+        };
     }
 
     async ftsQuery(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {
-        if (typeof query !== 'string') { throw new Error('Query must be a string'); }
-        if (!Array.isArray(contextBitmapArray)) { throw new Error('Context array must be an array'); }
-        if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
-        if (!Array.isArray(filterArray)) { throw new Error('Filter array must be an array'); }
+        if (typeof query !== 'string') {
+            throw new ArgumentError('Query must be a string', 'query');
+        }
+        if (!Array.isArray(contextBitmapArray)) {
+            throw new ArgumentError('Context array must be an array', 'contextBitmapArray');
+        }
+        if (!Array.isArray(featureBitmapArray)) {
+            throw new ArgumentError('Feature array must be an array', 'featureBitmapArray');
+        }
+        if (!Array.isArray(filterArray)) {
+            throw new ArgumentError('Filter array must be an array', 'filterArray');
+        }
 
         debug('FTS Query not implemented yet');
-        throw new Error('FTS Query method not implemented yet');
+        return {
+            data: [],
+            count: 0,
+            error: 'FTS Query method not implemented yet'
+        };
     }
 
     /**
