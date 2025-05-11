@@ -246,6 +246,7 @@ class SynapsD extends EventEmitter {
 
     getSchema(schemaId) { return schemaRegistry.getSchema(schemaId); }
     getDataSchema(schemaId) { return schemaRegistry.getDataSchema(schemaId); }
+    getJsonSchema(schemaId) { return schemaRegistry.getJsonSchema(schemaId); }
     hasSchema(schemaId) { return schemaRegistry.hasSchema(schemaId); }
     listSchemas(prefix = null) { return schemaRegistry.listSchemas(prefix); }
 

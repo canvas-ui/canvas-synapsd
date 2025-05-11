@@ -98,6 +98,16 @@ class SchemaRegistry {
     }
 
     /**
+     * Get JSON schema definition by ID (for frontend/API validation)
+     * @param {string} schemaId Schema identifier
+     * @returns {object} JSON schema definition
+     */
+    getJsonSchema(schemaId) {
+        const SchemaClass = this.getSchema(schemaId);
+        return SchemaClass.jsonSchema;
+    }
+
+    /**
      * Check if schema is registered
      * @param {string} schemaId Schema identifier
      * @returns {boolean} True if schema is registered, false otherwise
