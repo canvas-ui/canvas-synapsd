@@ -1019,12 +1019,13 @@ class SynapsD extends EventEmitter {
 
     #parseContextSpec(contextSpec) {
         debug('#parseContextSpec: Received contextSpec:', contextSpec);
-        if (!contextSpec || contextSpec == '' || contextSpec == '/' || contextSpec == null) {
-            //debug('#parseContextSpec: Context spec is invalid, returning default: /');
-            //return ['/'];
-            throw new Error('Invalid contextSpec: Must be a path string or an array of strings.');
+
+        // Handle null/undefined/empty cases
+        if (!contextSpec || contextSpec === '') {
+            return ['/'];
         }
 
+        // Process a single path string
         const processString = (str) => {
             if (str === '/') return ['/'];
             // Split the string and filter empty elements
@@ -1033,22 +1034,30 @@ class SynapsD extends EventEmitter {
             return ['/', ...parts];
         };
 
+        // Handle array input
         if (Array.isArray(contextSpec)) {
-            if (contextSpec.length == 0) {
-                debug('#parseContextSpec: Context spec array is empty, returning default: /');
+            // Flatten the array and filter out empty/null values
+            const flattened = contextSpec.flat().filter(Boolean);
+            if (flattened.length === 0) {
                 return ['/'];
             }
 
-            const result = contextSpec.flatMap(processString);
-            // Remove duplicate '/' if they exist
-            const uniqueResult = Array.from(new Set(result));
-            // Ensure '/' is at the beginning (moving it if needed)
-            if (uniqueResult.includes('/')) {
-                uniqueResult.splice(uniqueResult.indexOf('/'), 1);
+            // Process each path and collect unique parts
+            const allParts = new Set();
+            flattened.forEach(path => {
+                const parts = processString(path);
+                parts.forEach(part => allParts.add(part));
+            });
+
+            // Convert to array and ensure root is first
+            const result = Array.from(allParts);
+            if (result.includes('/')) {
+                result.splice(result.indexOf('/'), 1);
             }
-            return uniqueResult.length ? ['/', ...uniqueResult] : ['/'];
+            return result.length ? ['/', ...result] : ['/'];
         }
 
+        // Handle string input
         if (typeof contextSpec === 'string') {
             return processString(contextSpec);
         }
