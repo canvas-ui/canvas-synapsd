@@ -387,6 +387,7 @@ class SynapsD extends EventEmitter {
     async insertDocumentArray(docArray, contextSpec = '/', featureBitmapArray = []) {
         if (!Array.isArray(docArray)) { docArray = [docArray]; }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
+        debug(`insertDocumentArray: Inserting ${docArray.length} documents with contextSpec: ${contextSpec} and featureBitmapArray: ${featureBitmapArray}`);
 
         // Collect errors
         let errors = [];
