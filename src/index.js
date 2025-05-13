@@ -395,40 +395,33 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(featureBitmapArray)) {
             throw new Error('Feature array must be an array');
         }
-        debug(`insertDocumentArray: Inserting ${docArray.length} documents with contextSpec: ${contextSpec} and featureBitmapArray: ${featureBitmapArray}`);
+        debug(`insertDocumentArray: Attempting to insert ${docArray.length} documents with contextSpec: ${contextSpec} and featureBitmapArray: ${featureBitmapArray}`);
 
-        // Collect results
-        const result = {
-            successful: [], // Array of { index, id } objects
-            failed: [],    // Array of { index, error, doc } objects
-            count: docArray.length
-        };
-
-        // Insert documents
-        // TODO: Insert with a batch operation
+        const insertedIds = [];
+        // TODO: Implement actual batch/transactional operation in the backend if possible
         for (let i = 0; i < docArray.length; i++) {
             const doc = docArray[i];
             try {
+                // Pass emitEvent = false to prevent multiple events
                 const id = await this.insertDocument(doc, contextSpec, featureBitmapArray, false);
-                result.successful.push({ index: i, id: id });
+                insertedIds.push(id);
                 debug(`insertDocumentArray: Successfully inserted document at index ${i}, ID: ${id}`);
             } catch (error) {
-                debug(`insertDocumentArray: Error inserting document at index ${i}: ${error.message}`);
-                result.failed.push({
-                    index: i,
-                    error: error.message || 'Unknown error',
-                    doc: doc,
-                    errorType: error.name // Add error type for better error handling
-                });
+                debug(`insertDocumentArray: Error inserting document at index ${i} (ID: ${doc.id ?? 'N/A'}). Aborting batch. Error: ${error.message}`);
+                // Re-throw the error to stop the batch operation immediately
+                // Add context about the failed item
+                error.message = `Failed to insert document at index ${i}: ${error.message}`;
+                error.failedItem = doc;
+                error.failedIndex = i;
+                throw error;
             }
         }
 
-        debug(`insertDocumentArray: Inserted ${result.successful.length} of ${result.count} documents`);
-        if (result.failed.length > 0) {
-            debug(`insertDocumentArray: Failed to insert ${result.failed.length} documents`);
-        }
-
-        return result;
+        // If loop completes, all documents were inserted successfully
+        debug(`insertDocumentArray: Successfully inserted all ${insertedIds.length} documents.`);
+        // Emit a single event for the batch success if needed (optional)
+        // this.emit('document:inserted:batch', { ids: insertedIds, count: insertedIds.length });
+        return insertedIds; // Return array of IDs on full success
     }
 
     async hasDocument(id, contextSpec, featureBitmapArrayInput) {
@@ -704,40 +697,39 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(featureBitmapArray)) {
             throw new Error('Feature array must be an array');
         }
-        debug(`updateDocumentArray: Updating ${docArray.length} documents`);
+        debug(`updateDocumentArray: Attempting to update ${docArray.length} documents`);
 
-        // Collect results
-        const result = {
-            successful: [], // Array of { index, id } objects
-            failed: [],    // Array of { index, error, doc } objects
-            count: docArray.length
-        };
-
-        // Update documents
-        // TODO: Update with a batch operation
+        const updatedIds = [];
+        // TODO: Implement actual batch/transactional operation
         for (let i = 0; i < docArray.length; i++) {
-            const doc = docArray[i];
+            const docUpdate = docArray[i]; // Assuming docArray contains { id, updateData } or just the full document to update
+            if (!docUpdate || typeof docUpdate.id !== 'number') {
+                 // Add context about the failed item
+                const error = new Error(`Invalid document data at index ${i}: Missing or invalid ID.`);
+                error.failedItem = docUpdate;
+                error.failedIndex = i;
+                throw error;
+            }
             try {
-                const id = await this.updateDocument(doc, contextSpec, featureBitmapArray);
-                result.successful.push({ index: i, id: id });
+                // Assuming updateDocument returns the ID and handles its own event emission logic for individual updates
+                // For batch, we might want to suppress individual events and emit one batch event
+                const id = await this.updateDocument(docUpdate.id, docUpdate.data, contextSpec, featureBitmapArray);
+                updatedIds.push(id);
                 debug(`updateDocumentArray: Successfully updated document at index ${i}, ID: ${id}`);
             } catch (error) {
-                debug(`updateDocumentArray: Error updating document at index ${i}: ${error.message}`);
-                result.failed.push({
-                    index: i,
-                    error: error.message || 'Unknown error',
-                    doc: doc,
-                    errorType: error.name
-                });
+                debug(`updateDocumentArray: Error updating document at index ${i} (ID: ${docUpdate.id}). Aborting batch. Error: ${error.message}`);
+                // Add context about the failed item
+                error.message = `Failed to update document at index ${i} (ID: ${docUpdate.id}): ${error.message}`;
+                error.failedItem = docUpdate;
+                error.failedIndex = i;
+                throw error;
             }
         }
 
-        debug(`updateDocumentArray: Updated ${result.successful.length} of ${result.count} documents`);
-        if (result.failed.length > 0) {
-            debug(`updateDocumentArray: Failed to update ${result.failed.length} documents`);
-        }
-
-        return result;
+        debug(`updateDocumentArray: Successfully updated all ${updatedIds.length} documents.`);
+        // Emit a single event for the batch success if needed (optional)
+        // this.emit('document:updated:batch', { ids: updatedIds, count: updatedIds.length });
+        return updatedIds; // Return array of IDs on full success
     }
 
     // Removes documents from context and/or feature bitmaps
@@ -771,22 +763,50 @@ class SynapsD extends EventEmitter {
     }
 
     async removeDocumentArray(docIdArray, contextSpec = '/', featureBitmapArray = []) {
-        if (!Array.isArray(docIdArray)) { docIdArray = [docIdArray]; }
-        if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
+        if (!Array.isArray(docIdArray)) {
+            throw new Error('Document ID array must be an array');
+        }
+        if (!Array.isArray(featureBitmapArray)) {
+            throw new Error('Feature array must be an array');
+        }
+        debug(`removeDocumentArray: Attempting to remove ${docIdArray.length} documents from context/features`);
 
-        // Collect errors
-        let errors = [];
+        const result = {
+            successful: [], // Array of { index: number, id: number }
+            failed: [],    // Array of { index: number, id: number, error: string }
+            count: docIdArray.length
+        };
 
-        // TODO: Implement batch operation
-        for (const id of docIdArray) {
+        // TODO: Implement actual batch/transactional operation
+        for (let i = 0; i < docIdArray.length; i++) {
+            const id = docIdArray[i];
+            if (typeof id !== 'number') {
+                result.failed.push({
+                    index: i,
+                    id: id,
+                    error: 'Invalid document ID: Must be a number.'
+                });
+                continue;
+            }
             try {
-                await this.removeDocument(id, contextSpec, featureBitmapArray);
+                // removeDocument returns the ID on success, throws on failure
+                const removedId = await this.removeDocument(id, contextSpec, featureBitmapArray);
+                result.successful.push({ index: i, id: removedId });
+                debug(`removeDocumentArray: Successfully removed document ID ${id} (index ${i}) from context/features.`);
             } catch (error) {
-                errors[id] = error;
+                // Errors during removeDocument (e.g., DB error) are collected
+                debug(`removeDocumentArray: Error removing document at index ${i} (ID: ${id}). Error: ${error.message}`);
+                result.failed.push({
+                    index: i,
+                    id: id,
+                    error: error.message || 'Unknown error'
+                });
             }
         }
 
-        return errors;
+        debug(`removeDocumentArray: Processed ${result.count} requests. Successful: ${result.successful.length}, Failed: ${result.failed.length}`);
+        // Emit event based on outcome (optional)
+        return result; // Return the detailed result object
     }
 
     // Deletes documents from all bitmaps and the main dataset
@@ -829,47 +849,55 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(docIdArray)) {
             throw new Error('Document ID array must be an array');
         }
-        debug(`deleteDocumentArray: Deleting ${docIdArray.length} documents`);
+        debug(`deleteDocumentArray: Attempting to delete ${docIdArray.length} documents`);
 
-        // Collect results
         const result = {
-            successful: [], // Array of { index, id } objects
-            failed: [],    // Array of { index, error, id } objects
+            successful: [], // Array of { index: number, id: number }
+            failed: [],    // Array of { index: number, id: number, error: string }
             count: docIdArray.length
         };
 
-        // Delete documents
-        // TODO: Delete with a batch operation
+        // TODO: Implement actual batch/transactional operation
         for (let i = 0; i < docIdArray.length; i++) {
             const id = docIdArray[i];
+            if (typeof id !== 'number') {
+                result.failed.push({
+                    index: i,
+                    id: id,
+                    error: 'Invalid document ID: Must be a number.'
+                });
+                continue; // Skip to the next ID
+            }
             try {
+                // deleteDocument returns true on success, false if not found, throws on other errors
                 const success = await this.deleteDocument(id);
                 if (success) {
                     result.successful.push({ index: i, id: id });
-                    debug(`deleteDocumentArray: Successfully deleted document at index ${i}, ID: ${id}`);
+                    debug(`deleteDocumentArray: Successfully deleted document ID ${id} (index ${i}).`);
                 } else {
+                    // Document not found is considered a failure in this context for reporting,
+                    // but doesn't stop the batch.
                     result.failed.push({
                         index: i,
-                        error: 'Document not found or already deleted',
-                        id: id
+                        id: id,
+                        error: 'Document not found or already deleted'
                     });
+                     debug(`deleteDocumentArray: Document not found or already deleted (ID: ${id}, index ${i}).`);
                 }
             } catch (error) {
-                debug(`deleteDocumentArray: Error deleting document at index ${i}: ${error.message}`);
+                debug(`deleteDocumentArray: Error deleting document at index ${i} (ID: ${id}). Error: ${error.message}`);
                 result.failed.push({
                     index: i,
-                    error: error.message || 'Unknown error',
-                    id: id
+                    id: id,
+                    error: error.message || 'Unknown error'
                 });
             }
         }
 
-        debug(`deleteDocumentArray: Deleted ${result.successful.length} of ${result.count} documents`);
-        if (result.failed.length > 0) {
-            debug(`deleteDocumentArray: Failed to delete ${result.failed.length} documents`);
-        }
-
-        return result;
+        debug(`deleteDocumentArray: Processed ${result.count} requests. Successful: ${result.successful.length}, Failed: ${result.failed.length}`);
+        // Emit event based on outcome (optional)
+        // if (result.failed.length === 0) ... else ...
+        return result; // Return the detailed result object
     }
 
     /**
@@ -996,43 +1024,93 @@ class SynapsD extends EventEmitter {
     }
 
     async setDocumentArrayFeatures(docIdArray, featureBitmapArray) {
-        if (!docIdArray) { throw new Error('Document ID array required'); }
         if (!Array.isArray(docIdArray)) {
-            docIdArray = [docIdArray];
+            throw new Error('Document ID array must be an array');
         }
-        if (!featureBitmapArray) { throw new Error('Feature bitmap array required'); }
-        if (!Array.isArray(featureBitmapArray)) {
-            featureBitmapArray = [featureBitmapArray];
+        if (!Array.isArray(featureBitmapArray) || featureBitmapArray.length === 0) {
+            throw new Error('Feature bitmap array must be a non-empty array');
         }
+        // Ensure all features are strings
+        if (!featureBitmapArray.every(f => typeof f === 'string')) {
+            throw new Error('All items in feature bitmap array must be strings');
+        }
+        debug(`setDocumentArrayFeatures: Setting features [${featureBitmapArray.join(', ')}] for ${docIdArray.length} documents`);
 
-        for (const docId of docIdArray) {
-            if (!docId) {
-                console.warn('setDocumentArrayFeatures: Skipping invalid document ID.');
+        const result = {
+            successful: [], // Array of { index: number, id: number }
+            failed: [],    // Array of { index: number, id: number, error: string }
+            count: docIdArray.length
+        };
+
+        for (let i = 0; i < docIdArray.length; i++) {
+            const id = docIdArray[i];
+            if (typeof id !== 'number') {
+                result.failed.push({ index: i, id: id, error: 'Invalid document ID: Must be a number.' });
                 continue;
             }
-            // Update the document's feature bitmaps
-            await this.bitmapIndex.tickMany(featureBitmapArray, docId);
+            try {
+                // tickMany doesn't explicitly return success/failure per ID easily,
+                // but it should throw if the operation fails for the ID (e.g., DB error).
+                // Assuming success if no error is thrown.
+                await this.bitmapIndex.tickMany(featureBitmapArray, id);
+                result.successful.push({ index: i, id: id });
+                debug(`setDocumentArrayFeatures: Successfully set features for document ID ${id} (index ${i}).`);
+            } catch (error) {
+                debug(`setDocumentArrayFeatures: Error setting features for document ID ${id} (index ${i}). Error: ${error.message}`);
+                result.failed.push({
+                    index: i,
+                    id: id,
+                    error: error.message || 'Unknown error'
+                });
+            }
         }
+
+        debug(`setDocumentArrayFeatures: Processed ${result.count} requests. Successful: ${result.successful.length}, Failed: ${result.failed.length}`);
+        return result;
     }
 
     async unsetDocumentArrayFeatures(docIdArray, featureBitmapArray) {
-        if (!docIdArray) { throw new Error('Document ID array required'); }
         if (!Array.isArray(docIdArray)) {
-            docIdArray = [docIdArray];
+            throw new Error('Document ID array must be an array');
         }
-        if (!featureBitmapArray) { throw new Error('Feature bitmap array required'); }
-        if (!Array.isArray(featureBitmapArray)) {
-            featureBitmapArray = [featureBitmapArray];
+        if (!Array.isArray(featureBitmapArray) || featureBitmapArray.length === 0) {
+            throw new Error('Feature bitmap array must be a non-empty array');
         }
+        // Ensure all features are strings
+        if (!featureBitmapArray.every(f => typeof f === 'string')) {
+            throw new Error('All items in feature bitmap array must be strings');
+        }
+        debug(`unsetDocumentArrayFeatures: Unsetting features [${featureBitmapArray.join(', ')}] for ${docIdArray.length} documents`);
 
-        for (const docId of docIdArray) {
-            if (!docId) {
-                console.warn('unsetDocumentArrayFeatures: Skipping invalid document ID.');
+        const result = {
+            successful: [], // Array of { index: number, id: number }
+            failed: [],    // Array of { index: number, id: number, error: string }
+            count: docIdArray.length
+        };
+
+        for (let i = 0; i < docIdArray.length; i++) {
+            const id = docIdArray[i];
+            if (typeof id !== 'number') {
+                result.failed.push({ index: i, id: id, error: 'Invalid document ID: Must be a number.' });
                 continue;
             }
-            // Update the document's feature bitmaps
-            await this.bitmapIndex.untickMany(featureBitmapArray, docId);
+            try {
+                // untickMany, like tickMany, is assumed to throw on operational failure.
+                await this.bitmapIndex.untickMany(featureBitmapArray, id);
+                result.successful.push({ index: i, id: id });
+                debug(`unsetDocumentArrayFeatures: Successfully unset features for document ID ${id} (index ${i}).`);
+            } catch (error) {
+                debug(`unsetDocumentArrayFeatures: Error unsetting features for document ID ${id} (index ${i}). Error: ${error.message}`);
+                result.failed.push({
+                    index: i,
+                    id: id,
+                    error: error.message || 'Unknown error'
+                });
+            }
         }
+
+        debug(`unsetDocumentArrayFeatures: Processed ${result.count} requests. Successful: ${result.successful.length}, Failed: ${result.failed.length}`);
+        return result;
     }
 
     /**
@@ -1366,5 +1444,7 @@ class SynapsD extends EventEmitter {
 }
 
 export default SynapsD;
+
+
 
 
