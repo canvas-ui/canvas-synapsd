@@ -810,10 +810,24 @@ class SynapsD extends EventEmitter {
     }
 
     // Deletes documents from all bitmaps and the main dataset
-    async deleteDocument(docId) {
+    async deleteDocument(docId, contextSpec = null) {
         if (!docId) { throw new Error('Document id required'); }
-        if (!await this.documents.has(docId)) { return false; }
-        debug(`deleteDocument: Document with ID "${docId}" found, deleting..`);
+
+        if (contextSpec) {
+            const isInContext = await this.hasDocument(docId, contextSpec);
+            if (!isInContext) {
+                debug(`deleteDocument: Document ID ${docId} not found in contextSpec: ${contextSpec}. Deletion aborted.`);
+                return false; // Document not in the specified context, or doesn't exist
+            }
+            debug(`deleteDocument: Document ID ${docId} confirmed in contextSpec: ${contextSpec}. Proceeding with deletion.`);
+        } else {
+            // If no contextSpec, ensure document exists before attempting to get its data for checksum removal etc.
+            if (!await this.documents.has(docId)) {
+                debug(`deleteDocument: Document with ID "${docId}" not found in store. Deletion aborted.`);
+                return false;
+            }
+        }
+        debug(`deleteDocument: Document with ID "${docId}" found (or context check passed), proceeding to delete..`);
 
         try {
             // Get document before deletion
@@ -845,11 +859,11 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    async deleteDocumentArray(docIdArray) {
+    async deleteDocumentArray(docIdArray, contextSpec = null) {
         if (!Array.isArray(docIdArray)) {
             throw new Error('Document ID array must be an array');
         }
-        debug(`deleteDocumentArray: Attempting to delete ${docIdArray.length} documents`);
+        debug(`deleteDocumentArray: Attempting to delete ${docIdArray.length} documents` + (contextSpec ? ` within context: ${contextSpec}` : ''));
 
         const result = {
             successful: [], // Array of { index: number, id: number }
@@ -868,9 +882,25 @@ class SynapsD extends EventEmitter {
                 });
                 continue; // Skip to the next ID
             }
+
+            if (contextSpec) {
+                const isInContext = await this.hasDocument(id, contextSpec);
+                if (!isInContext) {
+                    debug(`deleteDocumentArray: Document ID ${id} (index ${i}) not found in contextSpec: ${contextSpec}. Skipping deletion.`);
+                    result.failed.push({
+                        index: i,
+                        id: id,
+                        error: 'Document not found in specified context'
+                    });
+                    continue; // Skip to the next ID
+                }
+                debug(`deleteDocumentArray: Document ID ${id} (index ${i}) confirmed in contextSpec: ${contextSpec}.`);
+            }
+
             try {
-                // deleteDocument returns true on success, false if not found, throws on other errors
-                const success = await this.deleteDocument(id);
+                // deleteDocument returns true on success, false if not found (or not in context if spec was passed to it, but here we check context first)
+                // Pass null for contextSpec to deleteDocument as we've already done the check for the array method.
+                const success = await this.deleteDocument(id, null); // Context check already done for the array method
                 if (success) {
                     result.successful.push({ index: i, id: id });
                     debug(`deleteDocumentArray: Successfully deleted document ID ${id} (index ${i}).`);
@@ -904,24 +934,38 @@ class SynapsD extends EventEmitter {
      * Convenience methods
      */
 
-    async getDocument(docId, options = { parse: true }) {
+    async getDocument(docId, contextSpec = null, options = { parse: true }) {
         if (!docId) { throw new Error('Document id required'); }
         if (options.parse) {
             return await this.getDocumentById(docId);
         } else {
-            return await this.documents.get(docId);
+            return await this.documents.get(docId, contextSpec, options);
         }
     }
 
     /**
      * Get a document by ID and return a properly instantiated document object
      * @param {string|number} id - Document ID
+     * @param {string|null} contextSpec - Optional context specification
+     * @param {Object} options - Options object
+     * @param {boolean} options.parse - Whether to parse the documents
      * @returns {BaseDocument|null} Document instance or null if not found
      */
-    async getDocumentById(id, options = { parse: true }) {
+    async getDocumentById(id, contextSpec = null, options = { parse: true }) {
         if (!id) { throw new Error('Document id required'); }
         if (typeof id === 'string') { id = parseInt(id); }
         debug(`getById: Searching for document with ID ${id} of type ${typeof id}`);
+
+        // If contextSpec is provided, check if the document is in that context first
+        if (contextSpec) {
+            const isInContext = await this.hasDocument(id, contextSpec);
+            if (!isInContext) {
+                debug(`getDocumentById: Document ID ${id} not found in contextSpec: ${contextSpec}`);
+                return null; // Document not in the specified context
+            }
+            debug(`getDocumentById: Document ID ${id} confirmed in contextSpec: ${contextSpec}`);
+        }
+
         // Get raw document data from database
         const rawDocData = await this.documents.get(id);
         if (!rawDocData) {
@@ -936,28 +980,54 @@ class SynapsD extends EventEmitter {
     /**
      * Get multiple documents by ID and return properly instantiated document objects
      * @param {Array<string|number>} idArray - Array of document IDs
+     * @param {string|null} contextSpec - Optional context specification
      * @param {Object} options - Options object
      * @param {boolean} options.parse - Whether to parse the documents
      * @param {number} options.limit - Maximum number of documents to return
      * TODO: Support proper pagination!
      * @returns {Array<BaseDocument>} Array of document instances
      */
-    async getDocumentsByIdArray(idArray, options = { parse: true, limit: null }) {
+    async getDocumentsByIdArray(idArray, contextSpec = null, options = { parse: true, limit: null }) {
         if (!Array.isArray(idArray)) {
             throw new Error('Document ID array must be an array');
         }
 
         // Convert all ids to numbers if they are strings
-        idArray = idArray.map(id => typeof id === 'string' ? parseInt(id) : id);
+        let processedIdArray = idArray.map(id => typeof id === 'string' ? parseInt(id) : id);
 
-        debug(`getDocumentsByIdArray: Getting ${idArray.length} documents`);
+        if (contextSpec) {
+            debug(`getDocumentsByIdArray: Filtering ${processedIdArray.length} IDs against contextSpec: ${contextSpec}`);
+            const idsInContext = [];
+            for (const id of processedIdArray) {
+                if (await this.hasDocument(id, contextSpec)) {
+                    idsInContext.push(id);
+                }
+            }
+            debug(`getDocumentsByIdArray: ${idsInContext.length} IDs remain after context filter.`);
+            processedIdArray = idsInContext;
+        }
+
+        if (processedIdArray.length === 0) {
+            debug('getDocumentsByIdArray: No IDs to fetch after context filter (if applied).ନ');
+            return {
+                data: [],
+                count: 0, // Count is 0 as no documents will be fetched that match criteria
+                error: null
+            };
+        }
+
+        debug(`getDocumentsByIdArray: Getting ${processedIdArray.length} documents from DB.`);
         try {
-            const documents = await this.documents.getMany(idArray);
+            const documents = await this.documents.getMany(processedIdArray);
+            // The `count` should reflect how many documents were found that matched the criteria (including context)
+            // If limit is applied, count still refers to total potential matches, not just the returned slice.
+            const totalMatchingCount = documents.length;
+
             const limitedDocs = options.limit ? documents.slice(0, options.limit) : documents;
 
             return {
                 data: options.parse ? limitedDocs.map(doc => this.#parseInitializeDocument(doc)) : limitedDocs,
-                count: documents.length,
+                count: totalMatchingCount, // This is the count of documents found for the (possibly context-filtered) IDs
                 error: null
             };
         } catch (error) {
@@ -975,16 +1045,16 @@ class SynapsD extends EventEmitter {
      * @param {string} checksumString - Checksum string
      * @returns {BaseDocument|null} Document instance or null if not found
      */
-    async getDocumentByChecksumString(checksumString, options = { parse: true }) {
+    async getDocumentByChecksumString(checksumString, contextSpec = null, options = { parse: true }) {
         if (!checksumString) { throw new Error('Checksum string required'); }
-        debug(`getDocumentByChecksumString: Searching for document with checksum ${checksumString}`);
+        debug(`getDocumentByChecksumString: Searching for document with checksum ${checksumString}` + (contextSpec ? ` in context ${contextSpec}` : ''));
 
         // Get document ID from checksum index
         const id = await this.#checksumIndex.checksumStringToId(checksumString);
         if (!id) { return null; }
 
-        // Return the document instance
-        return await this.getDocumentById(id, options);
+        // Return the document instance, passing the contextSpec through
+        return await this.getDocumentById(id, contextSpec, options);
     }
 
     /**
@@ -992,11 +1062,11 @@ class SynapsD extends EventEmitter {
      * @param {Array<string>} checksumStringArray - Array of checksum strings
      * @returns {Array<BaseDocument>} Array of document instances
      */
-    async getDocumentsByChecksumStringArray(checksumStringArray, options = { parse: true }) {
+    async getDocumentsByChecksumStringArray(checksumStringArray, contextSpec = null, options = { parse: true }) {
         if (!Array.isArray(checksumStringArray)) {
             throw new Error('Checksum string array must be an array');
         }
-        debug(`getDocumentsByChecksumStringArray: Getting ${checksumStringArray.length} documents`);
+        debug(`getDocumentsByChecksumStringArray: Getting ${checksumStringArray.length} documents` + (contextSpec ? ` within context ${contextSpec}` : ''));
 
         try {
             const ids = [];
@@ -1012,7 +1082,8 @@ class SynapsD extends EventEmitter {
             }
 
             // Use getDocumentsByIdArray which now properly returns a result object
-            return await this.getDocumentsByIdArray(ids, options);
+            // Pass the contextSpec through
+            return await this.getDocumentsByIdArray(ids, contextSpec, options);
         } catch (error) {
             debug(`Error in getDocumentsByChecksumStringArray: ${error.message}`);
             return {
