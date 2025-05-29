@@ -224,6 +224,33 @@ class Db {
     **/
     putSync(key, value, version) { return this.db.putSync(key, value, version); }
 
+    /**
+    * Synchronously store the provided value with options
+    * @param key The key for the entry
+    * @param value The value to store
+    * @param options The options for the put operation (including noOverwrite, version, etc.)
+    **/
+    putSyncWithOptions(key, value, options = {}) { return this.db.putSync(key, value, options); }
+
+    /**
+    * Execute a transaction asynchronously
+    * @param action The function to execute within the transaction
+    **/
+    transaction(action) { return this.db.transaction(action); }
+
+    /**
+    * Execute a transaction synchronously
+    * @param action The function to execute within the transaction
+    * @param flags Additional flags specifying transaction behavior
+    **/
+    transactionSync(action, flags) { return this.db.transactionSync(action, flags); }
+
+    /**
+    * Execute writes conditionally if the key doesn't exist
+    * @param key Key to check for non-existence
+    * @param action Function to execute if key doesn't exist
+    **/
+    ifNoExists(key, action) { return this.db.ifNoExists(key, action); }
 
     /**
     * Synchronously remove the entry with the provided id/key

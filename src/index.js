@@ -1453,7 +1453,7 @@ class SynapsD extends EventEmitter {
     }
 
     async #documentCount() {
-        const count = await this.documents.getStats().entryCount; // await this.documents.getCount();
+        const count = this.documents.getCount(); // Direct LMDB count method
         debug(`#documentCount: ${count}`);
         return count;
     }
@@ -1467,14 +1467,51 @@ class SynapsD extends EventEmitter {
                 return recycledId;
             }
 
-            // Generate a new ID based on the document count
-            let count = await this.#documentCount();
-            debug(`Document count: ${count}`);
-            // Ensure count is a number
-            count = typeof count === 'number' ? count : 0;
-            const newId = INTERNAL_BITMAP_ID_MAX + count + 1;
-            debug(`Generated new document ID: ${newId}`);
-            return newId;
+            // Use synchronous transaction for atomic ID generation
+            const counterKey = 'internal/document-id-counter';
+
+            return await this.#internalStore.transaction(async () => {
+                // Get current counter within transaction
+                let currentCounter = await this.#internalStore.get(counterKey);
+
+                // Initialize counter if it doesn't exist
+                if (currentCounter === undefined || currentCounter === null) {
+                    const docCount = this.documents.getCount();
+                    currentCounter = Math.max(0, docCount);
+                    debug(`Initializing document ID counter to: ${currentCounter}`);
+                }
+
+                // Find the next available ID
+                let attempts = 0;
+                const maxAttempts = 50;
+
+                while (attempts < maxAttempts) {
+                    const nextCounter = currentCounter + 1;
+                    const newId = INTERNAL_BITMAP_ID_MAX + nextCounter;
+
+                    // Check if this ID is available
+                    if (!this.documents.has(newId)) {
+                        // ID is available, increment counter and reserve it
+                        await this.#internalStore.put(counterKey, nextCounter);
+
+                        // Reserve the ID immediately within the transaction
+                        this.documents.putSync(newId, { __reserved: true, __timestamp: Date.now() });
+
+                        debug(`Generated and reserved document ID: ${newId} (counter: ${nextCounter})`);
+                        return newId;
+                    }
+
+                    // ID exists, try next one
+                    currentCounter = nextCounter;
+                    attempts++;
+
+                    if (attempts % 10 === 0) {
+                        debug(`ID search attempt ${attempts}: trying ID ${newId + 1}`);
+                    }
+                }
+
+                throw new Error(`Failed to find available document ID after ${maxAttempts} attempts`);
+            });
         } catch (error) {
             debug(`Error generating document ID: ${error.message}`);
             throw error;
