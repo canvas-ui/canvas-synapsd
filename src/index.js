@@ -336,47 +336,53 @@ class SynapsD extends EventEmitter {
         parsedDocument.validate();
         debug(`insertDocument: Document validated successfully. ID: ${parsedDocument.id}`);
 
-        // Insert document into the main datasets
+        // Wrap all database operations in a single transaction for atomicity
         try {
-            // Main documents dataset
-            await this.documents.put(parsedDocument.id, parsedDocument);
-            debug(`insertDocument: Document ${parsedDocument.id} saved to 'documents' dataset.`);
+            await this.#db.transaction(async () => {
+                // Main documents dataset
+                await this.documents.put(parsedDocument.id, parsedDocument);
+                debug(`insertDocument: Document ${parsedDocument.id} saved to 'documents' dataset.`);
 
-            // Inverted indexes: Checksums
-            await this.#checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
-            debug(`insertDocument: Checksums for document ${parsedDocument.id} added to index.`);
+                // Inverted indexes: Checksums
+                await this.#checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
+                debug(`insertDocument: Checksums for document ${parsedDocument.id} added to index.`);
 
-            // Inverted indexes: Timestamps
-            await this.#timestampIndex.insert('created', parsedDocument.createdAt || new Date().toISOString(), parsedDocument.id);
-            await this.#timestampIndex.insert('updated', parsedDocument.updatedAt, parsedDocument.id);
-            debug(`insertDocument: Timestamps for document ${parsedDocument.id} added.`);
+                // Inverted indexes: Timestamps
+                await this.#timestampIndex.insert('created', parsedDocument.createdAt || new Date().toISOString(), parsedDocument.id);
+                await this.#timestampIndex.insert('updated', parsedDocument.updatedAt, parsedDocument.id);
+                debug(`insertDocument: Timestamps for document ${parsedDocument.id} added.`);
 
+                // Ensure context tree paths exist for the *target* context
+                if (!this.tree.insertPath(contextBitmaps.join('/'))) { // Use the parsed context array
+                    throw new Error(`insertDocument: Failed to ensure context path '${contextBitmaps.join('/')}' in tree.`);
+                }
+                debug(`insertDocument: Context path '${contextBitmaps.join('/')}' ensured in tree.`);
+
+                // Update context bitmaps
+                const contextResult = await this.contextBitmapCollection.tickMany(contextBitmaps, parsedDocument.id);
+                if (!contextResult) {
+                    throw new Error(`insertDocument: Failed to update context bitmaps for document ${parsedDocument.id}`);
+                }
+                debug(`insertDocument: Context bitmaps updated for document ${parsedDocument.id}.`);
+
+                // Update feature bitmaps
+                if (!featureBitmaps.includes(parsedDocument.schema)) {
+                    featureBitmaps.push(parsedDocument.schema);
+                    debug(`insertDocument: Added document schema '${parsedDocument.schema}' to feature array.`);
+                }
+
+                const featureResult = await this.bitmapIndex.tickMany(featureBitmaps, parsedDocument.id);
+                if (!featureResult) {
+                    throw new Error(`insertDocument: Failed to update feature bitmaps for document ${parsedDocument.id}`);
+                }
+                debug(`insertDocument: Feature bitmaps updated for document ${parsedDocument.id}.`);
+            });
+
+            debug(`insertDocument: All operations completed atomically for document ID: ${parsedDocument.id}`);
         } catch (error) {
-            throw new Error('Error inserting document into main datasets: ' + error.message);
+            debug(`insertDocument: Transaction failed for document ID: ${parsedDocument.id}, error: ${error.message}`);
+            throw new Error('Error inserting document atomically: ' + error.message);
         }
-
-        // Ensure context tree paths exist for the *target* context
-        if (!this.tree.insertPath(contextBitmaps.join('/'))) { // Use the parsed context array
-            throw new Error(`insertDocument: Failed to ensure context path '${contextBitmaps.join('/')}' in tree.`);
-        }
-        debug(`insertDocument: Context path '${contextBitmaps.join('/')}' ensured in tree.`);
-
-        // Update context bitmaps
-        if (!this.contextBitmapCollection.tickMany(contextBitmaps, parsedDocument.id)) {
-            throw new Error(`insertDocument: Failed to update context bitmaps for document ${parsedDocument.id}`);
-        }
-        debug(`insertDocument: Context bitmaps updated for document ${parsedDocument.id}.`);
-
-        // Update feature bitmaps
-        if (!featureBitmaps.includes(parsedDocument.schema)) {
-            featureBitmaps.push(parsedDocument.schema);
-            debug(`insertDocument: Added document schema '${parsedDocument.schema}' to feature array.`);
-        }
-
-        if (!this.bitmapIndex.tickMany(featureBitmaps, parsedDocument.id)) {
-            throw new Error(`insertDocument: Failed to update feature bitmaps for document ${parsedDocument.id}`);
-        }
-        debug(`insertDocument: Feature bitmaps updated for document ${parsedDocument.id}.`);
 
         // Send document ID to the embedding vector worker queue
         // TODO: Implement sending document ID to the embedding vector worker queue
