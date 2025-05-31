@@ -883,7 +883,7 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(docIdArray)) {
             throw new Error('Document ID array must be an array');
         }
-        debug(`deleteDocumentArray: Attempting to delete ${docIdArray.length} documents` + (contextSpec ? ` within context: ${contextSpec}` : ''));
+        debug(`deleteDocumentArray: Attempting to delete ${docIdArray.length} documents`);
 
         const result = {
             successful: [], // Array of { index: number, id: number }

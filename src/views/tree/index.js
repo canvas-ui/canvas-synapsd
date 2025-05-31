@@ -561,6 +561,30 @@ class ContextTree extends EventEmitter {
         }
     }
 
+    async lockPath(path, lockBy) {
+        const normalizedPath = this.#normalizePath(path);
+        if (!lockBy) {
+            return {
+                data: null,
+                count: 0,
+                error: 'Locking path requires a lockBy context'
+            };
+        }
+        debug(`Locking normalized path "${normalizedPath}" by context "${lockBy}"`);
+    }
+
+    async unlockPath(path, lockBy) {
+        const normalizedPath = this.#normalizePath(path);
+        if (!lockBy) {
+            return {
+                data: null,
+                count: 0,
+                error: 'Unlocking path requires a lockBy context'
+            };
+        }
+        debug(`Unlocking normalized path "${normalizedPath}" by context "${lockBy}"`);
+    }
+
     /**
      * Utils
      */
