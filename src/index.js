@@ -1555,6 +1555,22 @@ class SynapsD extends EventEmitter {
         }
     }
 
+    clearSync() {
+        if (!this.isActive) {
+            throw new Error('Workspace is not active');
+        }
+        this.db.clearSync();// returns void
+        return true;
+    }
+
+    async clearAsync() {
+        if (!this.isActive) {
+            throw new Error('Workspace is not active');
+        }
+        await this.db.clearAsync();
+        return true;
+    }
+
 }
 
 export default SynapsD;
