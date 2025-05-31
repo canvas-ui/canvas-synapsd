@@ -430,7 +430,7 @@ class SynapsD extends EventEmitter {
         return insertedIds; // Return array of IDs on full success
     }
 
-    async hasDocument(id, contextSpec, featureBitmapArrayInput) {
+    async hasDocument(id, contextSpec = "/", featureBitmapArrayInput) {
         if (!id) { throw new Error('Document id required'); }
 
         if (!await this.documents.has(id)) {
@@ -502,7 +502,7 @@ class SynapsD extends EventEmitter {
         return resultBitmap ? resultBitmap.has(id) : false;
     }
 
-    async hasDocumentByChecksum(checksum, contextSpec, featureBitmapArray) {
+    async hasDocumentByChecksum(checksum, contextSpec = '/', featureBitmapArray) {
         if (!checksum) { throw new Error('Checksum required'); }
 
         const id = await this.#checksumIndex.checksumStringToId(checksum);
@@ -816,10 +816,10 @@ class SynapsD extends EventEmitter {
     }
 
     // Deletes documents from all bitmaps and the main dataset
-    async deleteDocument(docId, contextSpec = null) {
+    async deleteDocument(docId, contextSpec = '/') {
         if (!docId) { throw new Error('Document id required'); }
 
-        if (contextSpec) {
+        /* if (contextSpec) {
             const isInContext = await this.hasDocument(docId, contextSpec);
             if (!isInContext) {
                 debug(`deleteDocument: Document ID ${docId} not found in contextSpec: ${contextSpec}. Deletion aborted.`);
@@ -832,7 +832,7 @@ class SynapsD extends EventEmitter {
                 debug(`deleteDocument: Document with ID "${docId}" not found in store. Deletion aborted.`);
                 return false;
             }
-        }
+        }*/
         debug(`deleteDocument: Document with ID "${docId}" found (or context check passed), proceeding to delete..`);
 
         try {
@@ -865,7 +865,7 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    async deleteDocumentArray(docIdArray, contextSpec = null) {
+    async deleteDocumentArray(docIdArray, contextSpec = '/') {
         if (!Array.isArray(docIdArray)) {
             throw new Error('Document ID array must be an array');
         }
@@ -889,7 +889,7 @@ class SynapsD extends EventEmitter {
                 continue; // Skip to the next ID
             }
 
-            if (contextSpec) {
+            /*if (contextSpec) {
                 const isInContext = await this.hasDocument(id, contextSpec);
                 if (!isInContext) {
                     debug(`deleteDocumentArray: Document ID ${id} (index ${i}) not found in contextSpec: ${contextSpec}. Skipping deletion.`);
@@ -901,7 +901,7 @@ class SynapsD extends EventEmitter {
                     continue; // Skip to the next ID
                 }
                 debug(`deleteDocumentArray: Document ID ${id} (index ${i}) confirmed in contextSpec: ${contextSpec}.`);
-            }
+            }*/
 
             try {
                 // deleteDocument returns true on success, false if not found (or not in context if spec was passed to it, but here we check context first)
@@ -918,7 +918,7 @@ class SynapsD extends EventEmitter {
                         id: id,
                         error: 'Document not found or already deleted'
                     });
-                     debug(`deleteDocumentArray: Document not found or already deleted (ID: ${id}, index ${i}).`);
+                    debug(`deleteDocumentArray: Document not found or already deleted (ID: ${id}, index ${i}).`);
                 }
             } catch (error) {
                 debug(`deleteDocumentArray: Error deleting document at index ${i} (ID: ${id}). Error: ${error.message}`);
@@ -940,7 +940,7 @@ class SynapsD extends EventEmitter {
      * Convenience methods
      */
 
-    async getDocument(docId, contextSpec = null, options = { parse: true }) {
+    async getDocument(docId, contextSpec = '/', options = { parse: true }) {
         if (!docId) { throw new Error('Document id required'); }
         if (options.parse) {
             return await this.getDocumentById(docId);
@@ -1051,7 +1051,7 @@ class SynapsD extends EventEmitter {
      * @param {string} checksumString - Checksum string
      * @returns {BaseDocument|null} Document instance or null if not found
      */
-    async getDocumentByChecksumString(checksumString, contextSpec = null, options = { parse: true }) {
+    async getDocumentByChecksumString(checksumString, contextSpec = '/', options = { parse: true }) {
         if (!checksumString) { throw new Error('Checksum string required'); }
         debug(`getDocumentByChecksumString: Searching for document with checksum ${checksumString}` + (contextSpec ? ` in context ${contextSpec}` : ''));
 
@@ -1068,7 +1068,7 @@ class SynapsD extends EventEmitter {
      * @param {Array<string>} checksumStringArray - Array of checksum strings
      * @returns {Array<BaseDocument>} Array of document instances
      */
-    async getDocumentsByChecksumStringArray(checksumStringArray, contextSpec = null, options = { parse: true }) {
+    async getDocumentsByChecksumStringArray(checksumStringArray, contextSpec = '/', options = { parse: true }) {
         if (!Array.isArray(checksumStringArray)) {
             throw new Error('Checksum string array must be an array');
         }
@@ -1242,7 +1242,7 @@ class SynapsD extends EventEmitter {
      * Utils
      */
 
-    async dumpDocuments(dstDir, contextSpec = null, featureBitmapArray = [], filterArray = []) {
+    async dumpDocuments(dstDir, contextSpec = '/', featureBitmapArray = [], filterArray = []) {
         if (!dstDir) { throw new Error('Destination directory required'); }
         if (typeof dstDir !== 'string') { throw new Error('Destination directory must be a string'); }
         debug('Dumping DB documents to directory: ', dstDir);
