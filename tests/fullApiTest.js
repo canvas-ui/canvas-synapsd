@@ -15,35 +15,30 @@ async function test() {
     const schemas = db.listSchemas('data');
     const TabSchema = db.getSchema('data/abstraction/tab');
 
-    const tab = TabSchema.fromData({
-        data: {
-            url: 'https://example.com',
-            title: 'Example Tab',
-        }
-    });
+    for (let i = 0; i < 100; i++) {
+        const tab = TabSchema.fromData({
+            data: {
+                url: `https://example.com/${i}`,
+                title: `Example Tab ${i}`,
+            }
+        });
+        await db.insertDocument(tab, '/test/path', ['client/os/linux', 'client/browser/chrome']);
+    }
 
-    const tab2 = TabSchema.fromData({
-        data: {
-            url: 'https://example2.com',
-            title: 'Example Tab2',
-        }
-    });
+    console.log(await db.findDocuments('/test/path'));
 
-    const tree = db.tree;
-    console.log(tree.paths);
+    console.log(await db.findDocuments('/test/path', ['custom/tag/foo']));
 
-    //const result = await db.insertDocument(tab, '/foo/bar/baz', ['client/os/linux', 'client/browser/chrome']);
-    //const result2 = await db.insertDocument(tab2, '/foo/baf', ['client/os/windows', 'client/browser/firefox']);
-    const treeResult = await tree.insertDocument(tab, '/newpath', ['client/os/macos']);
-    console.log(treeResult);
+    console.log(await db.hasDocument(100100));
 
-    /*
-    console.log(await db.findDocuments('/foo', ['client/browser/firefox']));
-    console.log(await db.findDocuments('/foo/bar/baz'));
-    console.log(await db.findDocuments('/foo/baf'));*/
+    console.log(await db.hasDocument(100100, '/z', ['client/os/linux', 'client/browser/chrome']));
 
-    console.log(await db.findDocuments('/newpath'));
 
+    console.log('--------------------------------');
+    console.log(await db.removeDocument(100100, '/test/path'));
+    console.log(await db.hasDocument(100100, '/test/path'));
+    console.log(await db.hasDocument(100100, '/test'));
+    await db.stop();
 
 }
 

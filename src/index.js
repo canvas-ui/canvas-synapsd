@@ -739,17 +739,45 @@ class SynapsD extends EventEmitter {
     }
 
     // Removes documents from context and/or feature bitmaps
-    async removeDocument(docId, contextSpec = '/', featureBitmapArray = []) {
+    async removeDocument(docId, contextSpec = '/', featureBitmapArray = [], options = { recursive: false }) {
         if (!docId) { throw new Error('Document id required'); }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
+        if (typeof options !== 'object') { options = { recursive: false }; }
 
         const contextBitmapArray = this.#parseContextSpec(contextSpec);
+
+        // Check if we're trying to remove from root context only
+        if (contextBitmapArray.length === 1 && contextBitmapArray[0] === '/') {
+            throw new Error('Cannot remove document from root context "/". Use deleteDocument to permanently delete documents.');
+        }
+
+        // Remove root "/" from the array if it exists alongside other contexts
+        // We should never untick documents from the root context via removeDocument
+        let filteredContextArray = contextBitmapArray.filter(context => context !== '/');
+
+        // After filtering, we need at least one context to operate on
+        if (filteredContextArray.length === 0) {
+            throw new Error('Cannot remove document from root context "/". Use deleteDocument to permanently delete documents.');
+        }
+
+        // Handle recursive vs non-recursive removal
+        if (!options.recursive) {
+            // Non-recursive: remove from leaf context only (last element in the path)
+            const leafContext = filteredContextArray[filteredContextArray.length - 1];
+            filteredContextArray = [leafContext];
+            debug(`removeDocument: Non-recursive removal from leaf context only: ${leafContext}`);
+        } else {
+            // Recursive: remove from all contexts in the hierarchy (current behavior)
+            debug(`removeDocument: Recursive removal from all contexts: ${filteredContextArray.join(', ')}`);
+        }
+
+        debug(`removeDocument: Removing document ${docId} from contexts: ${filteredContextArray.join(', ')}`);
 
         // Remove document will only remove the document from the supplied bitmaps
         // It will not delete the document from the database.
         try {
-            if (contextBitmapArray.length > 0) {
-                await this.contextBitmapCollection.untickMany(contextBitmapArray, docId);
+            if (filteredContextArray.length > 0) {
+                await this.contextBitmapCollection.untickMany(filteredContextArray, docId);
             }
             if (featureBitmapArray.length > 0) {
                 await this.bitmapIndex.untickMany(featureBitmapArray, docId);
@@ -757,7 +785,7 @@ class SynapsD extends EventEmitter {
 
             // If the operations completed without throwing, return the ID.
             // This signals the removal *attempt* was successful.
-            this.emit('document:removed', { id: docId, contextArray: contextSpec, featureArray: featureBitmapArray });
+            this.emit('document:removed', { id: docId, contextArray: filteredContextArray, featureArray: featureBitmapArray, recursive: options.recursive });
             return docId;
 
         } catch (error) {
@@ -768,14 +796,15 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    async removeDocumentArray(docIdArray, contextSpec = '/', featureBitmapArray = []) {
+    async removeDocumentArray(docIdArray, contextSpec = '/', featureBitmapArray = [], options = { recursive: false }) {
         if (!Array.isArray(docIdArray)) {
             throw new Error('Document ID array must be an array');
         }
         if (!Array.isArray(featureBitmapArray)) {
             throw new Error('Feature array must be an array');
         }
-        debug(`removeDocumentArray: Attempting to remove ${docIdArray.length} documents from context/features`);
+        if (typeof options !== 'object') { options = { recursive: false }; }
+        debug(`removeDocumentArray: Attempting to remove ${docIdArray.length} documents from context/features (recursive: ${options.recursive})`);
 
         const result = {
             successful: [], // Array of { index: number, id: number }
@@ -796,7 +825,7 @@ class SynapsD extends EventEmitter {
             }
             try {
                 // removeDocument returns the ID on success, throws on failure
-                const removedId = await this.removeDocument(id, contextSpec, featureBitmapArray);
+                const removedId = await this.removeDocument(id, contextSpec, featureBitmapArray, options);
                 result.successful.push({ index: i, id: removedId });
                 debug(`removeDocumentArray: Successfully removed document ID ${id} (index ${i}) from context/features.`);
             } catch (error) {
@@ -816,23 +845,8 @@ class SynapsD extends EventEmitter {
     }
 
     // Deletes documents from all bitmaps and the main dataset
-    async deleteDocument(docId, contextSpec = '/') {
+    async deleteDocument(docId) {
         if (!docId) { throw new Error('Document id required'); }
-
-        /* if (contextSpec) {
-            const isInContext = await this.hasDocument(docId, contextSpec);
-            if (!isInContext) {
-                debug(`deleteDocument: Document ID ${docId} not found in contextSpec: ${contextSpec}. Deletion aborted.`);
-                return false; // Document not in the specified context, or doesn't exist
-            }
-            debug(`deleteDocument: Document ID ${docId} confirmed in contextSpec: ${contextSpec}. Proceeding with deletion.`);
-        } else {
-            // If no contextSpec, ensure document exists before attempting to get its data for checksum removal etc.
-            if (!await this.documents.has(docId)) {
-                debug(`deleteDocument: Document with ID "${docId}" not found in store. Deletion aborted.`);
-                return false;
-            }
-        }*/
         debug(`deleteDocument: Document with ID "${docId}" found (or context check passed), proceeding to delete..`);
 
         try {
@@ -865,7 +879,7 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    async deleteDocumentArray(docIdArray, contextSpec = '/') {
+    async deleteDocumentArray(docIdArray) {
         if (!Array.isArray(docIdArray)) {
             throw new Error('Document ID array must be an array');
         }
@@ -889,24 +903,10 @@ class SynapsD extends EventEmitter {
                 continue; // Skip to the next ID
             }
 
-            /*if (contextSpec) {
-                const isInContext = await this.hasDocument(id, contextSpec);
-                if (!isInContext) {
-                    debug(`deleteDocumentArray: Document ID ${id} (index ${i}) not found in contextSpec: ${contextSpec}. Skipping deletion.`);
-                    result.failed.push({
-                        index: i,
-                        id: id,
-                        error: 'Document not found in specified context'
-                    });
-                    continue; // Skip to the next ID
-                }
-                debug(`deleteDocumentArray: Document ID ${id} (index ${i}) confirmed in contextSpec: ${contextSpec}.`);
-            }*/
-
             try {
                 // deleteDocument returns true on success, false if not found (or not in context if spec was passed to it, but here we check context first)
                 // Pass null for contextSpec to deleteDocument as we've already done the check for the array method.
-                const success = await this.deleteDocument(id, null); // Context check already done for the array method
+                const success = await this.deleteDocument(id); // Context check already done for the array method
                 if (success) {
                     result.successful.push({ index: i, id: id });
                     debug(`deleteDocumentArray: Successfully deleted document ID ${id} (index ${i}).`);
@@ -952,25 +952,14 @@ class SynapsD extends EventEmitter {
     /**
      * Get a document by ID and return a properly instantiated document object
      * @param {string|number} id - Document ID
-     * @param {string|null} contextSpec - Optional context specification
      * @param {Object} options - Options object
      * @param {boolean} options.parse - Whether to parse the documents
      * @returns {BaseDocument|null} Document instance or null if not found
      */
-    async getDocumentById(id, contextSpec = null, options = { parse: true }) {
+    async getDocumentById(id, options = { parse: true }) {
         if (!id) { throw new Error('Document id required'); }
         if (typeof id === 'string') { id = parseInt(id); }
         debug(`getById: Searching for document with ID ${id} of type ${typeof id}`);
-
-        // If contextSpec is provided, check if the document is in that context first
-        if (contextSpec) {
-            const isInContext = await this.hasDocument(id, contextSpec);
-            if (!isInContext) {
-                debug(`getDocumentById: Document ID ${id} not found in contextSpec: ${contextSpec}`);
-                return null; // Document not in the specified context
-            }
-            debug(`getDocumentById: Document ID ${id} confirmed in contextSpec: ${contextSpec}`);
-        }
 
         // Get raw document data from database
         const rawDocData = await this.documents.get(id);
@@ -986,32 +975,19 @@ class SynapsD extends EventEmitter {
     /**
      * Get multiple documents by ID and return properly instantiated document objects
      * @param {Array<string|number>} idArray - Array of document IDs
-     * @param {string|null} contextSpec - Optional context specification
      * @param {Object} options - Options object
      * @param {boolean} options.parse - Whether to parse the documents
      * @param {number} options.limit - Maximum number of documents to return
      * TODO: Support proper pagination!
      * @returns {Array<BaseDocument>} Array of document instances
      */
-    async getDocumentsByIdArray(idArray, contextSpec = null, options = { parse: true, limit: null }) {
+    async getDocumentsByIdArray(idArray, options = { parse: true, limit: null }) {
         if (!Array.isArray(idArray)) {
             throw new Error('Document ID array must be an array');
         }
 
         // Convert all ids to numbers if they are strings
         let processedIdArray = idArray.map(id => typeof id === 'string' ? parseInt(id) : id);
-
-        if (contextSpec) {
-            debug(`getDocumentsByIdArray: Filtering ${processedIdArray.length} IDs against contextSpec: ${contextSpec}`);
-            const idsInContext = [];
-            for (const id of processedIdArray) {
-                if (await this.hasDocument(id, contextSpec)) {
-                    idsInContext.push(id);
-                }
-            }
-            debug(`getDocumentsByIdArray: ${idsInContext.length} IDs remain after context filter.`);
-            processedIdArray = idsInContext;
-        }
 
         if (processedIdArray.length === 0) {
             debug('getDocumentsByIdArray: No IDs to fetch after context filter (if applied).ନ');
@@ -1051,9 +1027,9 @@ class SynapsD extends EventEmitter {
      * @param {string} checksumString - Checksum string
      * @returns {BaseDocument|null} Document instance or null if not found
      */
-    async getDocumentByChecksumString(checksumString, contextSpec = '/', options = { parse: true }) {
+    async getDocumentByChecksumString(checksumString, options = { parse: true }) {
         if (!checksumString) { throw new Error('Checksum string required'); }
-        debug(`getDocumentByChecksumString: Searching for document with checksum ${checksumString}` + (contextSpec ? ` in context ${contextSpec}` : ''));
+        debug(`getDocumentByChecksumString: Searching for document with checksum ${checksumString}`);
 
         // Get document ID from checksum index
         const id = await this.#checksumIndex.checksumStringToId(checksumString);
@@ -1072,7 +1048,7 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(checksumStringArray)) {
             throw new Error('Checksum string array must be an array');
         }
-        debug(`getDocumentsByChecksumStringArray: Getting ${checksumStringArray.length} documents` + (contextSpec ? ` within context ${contextSpec}` : ''));
+        debug(`getDocumentsByChecksumStringArray: Getting ${checksumStringArray.length} documents`);
 
         try {
             const ids = [];
@@ -1088,8 +1064,7 @@ class SynapsD extends EventEmitter {
             }
 
             // Use getDocumentsByIdArray which now properly returns a result object
-            // Pass the contextSpec through
-            return await this.getDocumentsByIdArray(ids, contextSpec, options);
+            return await this.getDocumentsByIdArray(ids, options);
         } catch (error) {
             debug(`Error in getDocumentsByChecksumStringArray: ${error.message}`);
             return {
