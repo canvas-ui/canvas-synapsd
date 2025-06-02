@@ -1,5 +1,6 @@
 # TODO
 
+- ! Implement pagination on top of range queries
 - ! Implement a off-thread worker to post-process ingested documents (to calculate embeddings, tag bitmaps etc)
 - ! Create a *proper* collection abstraction, esp. for Bitmaps
 - ! Refactor those ***UGLY*** insert/updateDocument methods!!!
@@ -22,15 +23,3 @@
     - Extract concepts, factoids, tags from the data and store them in the metadata part of the document(we will need to update our schemas a little), not used directly but will be useful when using different embedding models
     - Calculate embeddings for all data and store them in a vector DB(not sure it'd make sense to store them in the document object itself, we support embeddings directly for use-cases like file indexing where the client itself would calculate embeddings)
   
-
-
-
-## Standalone for each folder with scanning and auto-watch/index?
-
-```
-$ROOT_FOLDER
-    /.canvas
-        /db
-        /config
-        /data
-```
