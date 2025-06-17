@@ -217,7 +217,7 @@ class SynapsD extends EventEmitter {
         debug('Shutting down SynapsD');
         try {
             this.#status = 'shutting down';
-            this.emit('before-shutdown');
+            this.emit('beforeShutdown');
             // Close index backends
             // Close database backend
             await this.#db.close();
@@ -388,7 +388,7 @@ class SynapsD extends EventEmitter {
         // TODO: Implement sending document ID to the embedding vector worker queue
 
         // Avoid emitting if we update multiple documents in a batch operation(e.g., insertDocumentArray)
-        if (emitEvent) { this.emit('document:inserted', { id: parsedDocument.id, document: parsedDocument }); }
+        if (emitEvent) { this.emit('document.inserted', { id: parsedDocument.id, document: parsedDocument }); }
         debug(`insertDocument: Successfully inserted document ID: ${parsedDocument.id}`);
 
         return parsedDocument.id;
@@ -686,7 +686,7 @@ class SynapsD extends EventEmitter {
             await this.bitmapIndex.tickMany(featureBitmaps, updatedDocument.id);
 
             // Emit event
-            this.emit('document:updated', { id: updatedDocument.id, document: updatedDocument });
+            this.emit('document.updated', { id: updatedDocument.id, document: updatedDocument });
             debug(`updateDocument: Successfully updated document ID: ${updatedDocument.id}`);
 
             return updatedDocument.id;
@@ -785,7 +785,7 @@ class SynapsD extends EventEmitter {
 
             // If the operations completed without throwing, return the ID.
             // This signals the removal *attempt* was successful.
-            this.emit('document:removed', { id: docId, contextArray: filteredContextArray, featureArray: featureBitmapArray, recursive: options.recursive });
+            this.emit('document.removed', { id: docId, contextArray: filteredContextArray, featureArray: featureBitmapArray, recursive: options.recursive });
             return docId;
 
         } catch (error) {
@@ -871,7 +871,7 @@ class SynapsD extends EventEmitter {
             await this.#timestampIndex.insert('deleted', document.updatedAt, docId);
 
             debug(`Document with ID "${docId}" deleted`);
-            this.emit('document:deleted', { id: docId });
+            this.emit('document.deleted', { id: docId });
             return true;
         } catch (error) {
             debug(`Error deleting document ${docId}: `, error);

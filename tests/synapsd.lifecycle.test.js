@@ -51,13 +51,13 @@ const lifecycleTestSuite = {
 
             let beforeShutdownEmitted = false;
             let shutdownEmitted = false;
-            db.on('before-shutdown', () => { beforeShutdownEmitted = true; });
+            db.on('beforeShutdown', () => { beforeShutdownEmitted = true; });
             db.on('shutdown', () => { shutdownEmitted = true; });
 
             await db.shutdown();
 
             assertEqual(db.status, 'shutdown', 'Status should be shutdown');
-            assert(beforeShutdownEmitted, 'before-shutdown event should be emitted');
+            assert(beforeShutdownEmitted, 'beforeShutdown event should be emitted');
             assert(shutdownEmitted, 'shutdown event should be emitted');
 
         } finally {

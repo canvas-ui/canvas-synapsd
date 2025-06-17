@@ -173,7 +173,7 @@ class ContextTree extends EventEmitter {
             await this.#saveTreeToDataStore();
             debug(`Path "${normalizedPath}" inserted successfully.`);
 
-            this.emit('tree:path:inserted', {
+            this.emit('tree.path.inserted', {
                 path: normalizedPath,
                 layerIds,
                 createdLayers: createdLayers.map(layer => ({
@@ -253,7 +253,7 @@ class ContextTree extends EventEmitter {
             await this.#saveTreeToDataStore();
 
             // Emit event
-            this.emit('tree:path:moved', {
+            this.emit('tree.path.moved', {
                 pathFrom: normalizedPathFrom,
                 pathTo: normalizedPathTo,
                 recursive,
@@ -360,7 +360,7 @@ class ContextTree extends EventEmitter {
         await this.#saveTreeToDataStore();
 
         // Emit an event with the normalized source and destination paths
-        this.emit('tree:path:copied', {
+        this.emit('tree.path.copied', {
             pathFrom: normalizedPathFrom,
             pathTo: normalizedPathTo,
             recursive,
@@ -418,7 +418,7 @@ class ContextTree extends EventEmitter {
             await this.#saveTreeToDataStore();
 
             // Emit an event with path and removal details
-            this.emit('tree:path:removed', {
+            this.emit('tree.path.removed', {
                 path: normalizedPath,
                 recursive,
                 layerId: layer.id,
@@ -480,7 +480,7 @@ class ContextTree extends EventEmitter {
             }
 
             // Emit an event for the merge operation
-            this.emit('tree:layer:merged:up', {
+            this.emit('tree.layer.merged.up', {
                 path,
                 layerId: node.id,
                 layerName: node.payload.name
@@ -536,7 +536,7 @@ class ContextTree extends EventEmitter {
             }
 
             // Emit an event for the merge operation
-            this.emit('tree:layer:merged:down', {
+            this.emit('tree.layer.merged.down', {
                 path,
                 layerId: node.id,
                 layerName: node.payload.name
@@ -653,7 +653,7 @@ class ContextTree extends EventEmitter {
             }
 
             if (changed) { // <-- Event emitted only if changed === true
-                this.emit('tree:path:locked', { path: normalizedPath, lockBy, timestamp: new Date().toISOString() });
+                this.emit('tree.path.locked', { path: normalizedPath, lockBy, timestamp: new Date().toISOString() });
             }
 
             return {
@@ -709,7 +709,7 @@ class ContextTree extends EventEmitter {
             }
 
             if (changed) {
-                this.emit('tree:path:unlocked', { path: normalizedPath, lockBy, stillLockedIds, timestamp: new Date().toISOString() });
+                this.emit('tree.path.unlocked', { path: normalizedPath, lockBy, stillLockedIds, timestamp: new Date().toISOString() });
             }
 
             return {
@@ -767,7 +767,7 @@ class ContextTree extends EventEmitter {
         if (resultId) {
             // Use the returned ID for the event
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
-            this.emit('tree:document:inserted', {
+            this.emit('tree.document.inserted', {
                 documentId: resultId,
                 contextSpec: normalizedContextSpec,
                 layerNames,
@@ -788,7 +788,7 @@ class ContextTree extends EventEmitter {
             // Assuming results might be an array of IDs corresponding to docArray
             const documentIds = Array.isArray(results) ? results : docArray.map((doc, index) => results[index] || doc.id); // Placeholder logic
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
-            this.emit('tree:document:inserted:batch', {
+            this.emit('tree.document.inserted.batch', {
                 documentIds,
                 contextSpec: normalizedContextSpec,
                 layerNames,
@@ -823,7 +823,7 @@ class ContextTree extends EventEmitter {
         const result = await this.#db.updateDocument(document, normalizedContextSpec, featureBitmapArray);
         if (result && document.id) { // Check document.id as it MUST be provided for update
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
-            this.emit('tree:document:updated', {
+            this.emit('tree.document.updated', {
                 documentId: document.id, // Use the ID passed in
                 contextSpec: normalizedContextSpec,
                 layerNames,
@@ -841,7 +841,7 @@ class ContextTree extends EventEmitter {
         if (results) { // Adjust condition
             const documentIds = docArray.map(doc => doc.id); // IDs must be in input array
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
-            this.emit('tree:document:updated:batch', {
+            this.emit('tree.document.updated.batch', {
                 documentIds,
                 contextSpec: normalizedContextSpec,
                 layerNames,
@@ -859,7 +859,7 @@ class ContextTree extends EventEmitter {
 
         if (result) {
              const layerNames = this.#pathToLayerNames(normalizedContextSpec);
-             this.emit('tree:document:removed', {
+             this.emit('tree.document.removed', {
                  documentId, // Use the ID passed in
                  contextSpec: normalizedContextSpec,
                  layerNames,
@@ -878,7 +878,7 @@ class ContextTree extends EventEmitter {
         const results = await this.#db.removeDocumentArray(docIdArray, normalizedContextSpec, featureBitmapArray);
         if (results) { // Adjust condition
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
-            this.emit('tree:document:removed:batch', {
+            this.emit('tree.document.removed.batch', {
                 documentIds: docIdArray, // Use the IDs passed in
                 contextSpec: normalizedContextSpec,
                 layerNames,
@@ -893,7 +893,7 @@ class ContextTree extends EventEmitter {
         // Await the async DB call
         const result = await this.#db.deleteDocument(documentId);
         if (result) { // Adjust condition
-            this.emit('tree:document:deleted', {
+            this.emit('tree.document.deleted', {
                 documentId, // Use the ID passed in
                 timestamp: new Date().toISOString()
             });
@@ -906,7 +906,7 @@ class ContextTree extends EventEmitter {
         // Await the async DB call
         const results = await this.#db.deleteDocumentArray(docIdArray);
         if (results) { // Adjust condition
-            this.emit('tree:document:deleted:batch', {
+            this.emit('tree.document.deleted.batch', {
                 documentIds: docIdArray, // Use the IDs passed in
                 timestamp: new Date().toISOString()
             });
@@ -1033,7 +1033,7 @@ class ContextTree extends EventEmitter {
         this.save();
 
         // Emit a recalculation event
-        this.emit('tree:recalculated', {
+        this.emit('tree.recalculated', {
             timestamp: new Date().toISOString()
         });
     }
@@ -1116,7 +1116,7 @@ class ContextTree extends EventEmitter {
             debug('Tree saved successfully.');
 
             // Emit a save event
-            this.emit('tree:saved', {
+            this.emit('tree.saved', {
                 timestamp: new Date().toISOString()
             });
 
@@ -1125,7 +1125,7 @@ class ContextTree extends EventEmitter {
             debug(`Error saving tree to database: ${error.message}`);
 
             // Emit an error event
-            this.emit('tree:error', {
+            this.emit('tree.error', {
                 operation: 'save',
                 error: error.message
             });
@@ -1163,7 +1163,7 @@ class ContextTree extends EventEmitter {
         this.root = loadedRootNode; // Assign the successfully built tree
 
         // Emit a load event
-        this.emit('tree:loaded', {
+        this.emit('tree.loaded', {
             timestamp: new Date().toISOString()
         });
 

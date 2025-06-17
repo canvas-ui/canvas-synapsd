@@ -30,7 +30,7 @@ const crudTestSuite = {
             const docData = { schema: TAB_SCHEMA_NAME, data: { url: 'http://example.com/page1', title: 'First Tab' } };
             let eventFired = false;
             let eventPayload = null;
-            db.on('documentInserted', (payload) => {
+            db.on('document.inserted', (payload) => {
                 eventFired = true;
                 eventPayload = payload;
             });
@@ -59,7 +59,7 @@ const crudTestSuite = {
             const schemaFeatureBitmap = await db.bitmapIndex.getBitmap(TAB_SCHEMA_NAME);
             assert(schemaFeatureBitmap && schemaFeatureBitmap.has(docId), `Schema feature bitmap for ${TAB_SCHEMA_NAME} missing ID`);
 
-            assert(eventFired, 'documentInserted event should be fired');
+            assert(eventFired, 'document.inserted event should be fired');
             assertEqual(eventPayload.id, docId, 'Event payload ID mismatch');
             assert(eventPayload.document instanceof Tab, 'Event payload document type mismatch for Tab');
 
@@ -293,7 +293,7 @@ const crudTestSuite = {
             const updateData = { data: { title: 'Updated Title', version: 2, newField: 'added' } };
             let eventFired = false;
             let eventPayload = null;
-            db.on('documentUpdated', (payload) => {
+            db.on('document.updated', (payload) => {
                 eventFired = true;
                 eventPayload = payload;
             });
@@ -317,7 +317,7 @@ const crudTestSuite = {
             const updatedBitmap = await db._SynapsD__timestampIndex.getBitmap('updated', retrievedDoc.updatedAt.toISOString().slice(0, 10));
             assert(updatedBitmap && updatedBitmap.has(docId), 'Timestamp index for updated date incorrect');
 
-            assert(eventFired, 'documentUpdated event should be fired');
+            assert(eventFired, 'document.updated event should be fired');
             assertEqual(eventPayload.id, docId, 'Update event payload ID mismatch');
 
         } finally {
@@ -511,11 +511,11 @@ const crudTestSuite = {
 
             // Ensure no individual events are fired
             let individualEventFired = false;
-            db.on('documentInserted', () => { individualEventFired = true; });
+            db.on('document.inserted', () => { individualEventFired = true; });
 
             const errors = await db.insertDocumentArray(docArray, '/batchContext', ['batchFeature']);
             assertEqual(errors.length, 0, 'insertDocumentArray should have no errors for valid docs');
-            assert(!individualEventFired, 'No individual documentInserted event should fire for array insert');
+            assert(!individualEventFired, 'No individual document.inserted event should fire for array insert');
 
             const docs = await db.findDocuments('/batchContext', ['batchFeature']);
             assertEqual(docs.length, 2, 'Should find 2 documents after array insert');
