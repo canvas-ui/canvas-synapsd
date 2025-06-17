@@ -19,15 +19,15 @@ export default class Document extends BaseDocument {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
 
-        super(options);
-
-        // Customize indexOptions for JSON Document
-        this.indexOptions = {
-            ...this.indexOptions,
+        // Inject Document-specific index options BEFORE super() so checksum fields are correct
+        options.indexOptions = {
+            ...options.indexOptions,
             ftsSearchFields: ['data'],
             vectorEmbeddingFields: ['data'],
             checksumFields: ['data'],
         };
+
+        super(options);
     }
 
     static fromData(data) {

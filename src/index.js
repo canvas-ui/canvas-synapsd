@@ -1037,7 +1037,7 @@ class SynapsD extends EventEmitter {
         if (!id) { return null; }
 
         // Return the document instance, passing the contextSpec through
-        return await this.getDocumentById(id, contextSpec, options);
+        return await this.getDocumentById(id, options);
     }
 
     /**

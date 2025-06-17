@@ -24,15 +24,15 @@ export default class Todo extends Document {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
 
-        super(options);
-
-        // Customize indexOptions for Todo
-        this.indexOptions = {
-            ...this.indexOptions,
+        // Inject Todo-specific index options BEFORE super()
+        options.indexOptions = {
+            ...options.indexOptions,
             ftsSearchFields: ['data.title', 'data.description'],
             vectorEmbeddingFields: ['data.title', 'data.description'],
             checksumFields: ['data.title', 'data.description'],
         };
+
+        super(options);
     }
 
     /**
