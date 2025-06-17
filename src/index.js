@@ -415,11 +415,12 @@ class SynapsD extends EventEmitter {
             } catch (error) {
                 debug(`insertDocumentArray: Error inserting document at index ${i} (ID: ${doc.id ?? 'N/A'}). Aborting batch. Error: ${error.message}`);
                 // Re-throw the error to stop the batch operation immediately
-                // Add context about the failed item
-                error.message = `Failed to insert document at index ${i}: ${error.message}`;
-                error.failedItem = doc;
-                error.failedIndex = i;
-                throw error;
+                // Add context about the failed item - create a new error instead of modifying the existing one
+                const contextualError = new Error(`Failed to insert document at index ${i}: ${error.message}`);
+                contextualError.cause = error; // Preserve original error
+                contextualError.failedItem = doc;
+                contextualError.failedIndex = i;
+                throw contextualError;
             }
         }
 
