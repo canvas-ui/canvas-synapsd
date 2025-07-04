@@ -11,9 +11,7 @@ const debug = debugInstance('canvas:synapsd');
 import { ValidationError, NotFoundError, DuplicateError, DatabaseError } from './utils/errors.js';
 
 // DB Backends
-import Lmdb from './backends/lmdb/index.js';
-import RxDB from './backends/rxdb/index.js';
-import File from './backends/file/index.js';
+import BackendFactory from './backends/index.js';
 
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
@@ -41,7 +39,7 @@ const INTERNAL_BITMAP_ID_MAX = 100000;
 class SynapsD extends EventEmitter {
 
     // Database Backend
-    #dbBackend = 'lmdb';
+    #dbBackend = 'lmdb';  // Default backend type
     #rootPath;  // Root path of the database
     #db;        // Database backend instance
 
@@ -71,6 +69,7 @@ class SynapsD extends EventEmitter {
         backupOnClose: true,
         compression: true,
         eventEmitterOptions: {},
+        backend: 'lmdb',  // Default backend type
         // TODO: Add per dataset versioning support to the underlying db backend!
     }) {
         super(options.eventEmitterOptions);
@@ -84,8 +83,19 @@ class SynapsD extends EventEmitter {
         this.#rootPath = options.rootPath ?? options.path;
         if (!this.#rootPath) { throw new Error('Database path required'); }
 
+        // Set backend type
+        this.#dbBackend = options.backend || 'lmdb';
+        
+        // Validate backend type
+        if (!BackendFactory.isValidBackendType(this.#dbBackend)) {
+            throw new Error(`Invalid backend type: ${this.#dbBackend}. Available backends: ${BackendFactory.getAvailableBackends().join(', ')}`);
+        }
+
         debug('Database path:', this.#rootPath);
-        this.#db = new Lmdb({
+        debug('Backend type:', this.#dbBackend);
+        
+        // Create backend instance using factory
+        this.#db = BackendFactory.createBackend(this.#dbBackend, {
             ...options,
             path: this.#rootPath,
         });
@@ -157,13 +167,17 @@ class SynapsD extends EventEmitter {
             bitmapCacheSize: this.#bitmapCache.size,
             bitmapStoreSize: this.#bitmapStore.getCount(),
             checksumIndexSize: this.#checksumIndex.getCount(),
-            timestampIndexSize: this.#timestampIndex.getCount(),
+            timestampIndexSize: this.#timestampIndex ? this.#timestampIndex.getCount() : 0,
             // TODO: Refactor this away
-            deletedDocumentsCount: this.deletedDocumentsBitmap.size,
-            actionBitmaps: {
+            deletedDocumentsCount: this.deletedDocumentsBitmap ? this.deletedDocumentsBitmap.size : 0,
+            actionBitmaps: this.actionBitmaps ? {
                 created: this.actionBitmaps.created.size,
                 updated: this.actionBitmaps.updated.size,
                 deleted: this.actionBitmaps.deleted.size,
+            } : {
+                created: 0,
+                updated: 0,
+                deleted: 0,
             },
         };
     }
