@@ -37,14 +37,15 @@ export default class File extends Document {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
 
-        super(options);
-
-        // Customize indexOptions for File
-        this.indexOptions = {
-            ...this.indexOptions,
+        // Inject File-specific index options BEFORE super()
+        options.indexOptions = {
+            ...options.indexOptions,
             ftsSearchFields: ['data.name', 'data.path'],
             vectorEmbeddingFields: ['data.name', 'data.path'],
+            // File relies on external checksumArray, so we don't modify checksumFields here
         };
+
+        super(options);
     }
 
     /**

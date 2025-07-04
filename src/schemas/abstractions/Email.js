@@ -31,15 +31,15 @@ export default class Email extends Document {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
 
-        super(options);
-
-        // Customize indexOptions for Email
-        this.indexOptions = {
-            ...this.indexOptions,
+        // Inject Email-specific index options BEFORE super() so checksum uses correct fields
+        options.indexOptions = {
+            ...options.indexOptions,
             ftsSearchFields: ['data.subject', 'data.body', 'data.from', 'data.to'],
             vectorEmbeddingFields: ['data.subject', 'data.body'],
             checksumFields: ['data.subject', 'data.from', 'data.to', 'data.receivedAt'],
         };
+
+        super(options);
     }
 
     /**

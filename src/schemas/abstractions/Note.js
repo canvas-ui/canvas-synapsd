@@ -22,15 +22,15 @@ export default class Note extends Document {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
 
-        super(options);
-
-        // Customize indexOptions for Note
-        this.indexOptions = {
-            ...this.indexOptions,
+        // Inject Note-specific index options BEFORE super()
+        options.indexOptions = {
+            ...options.indexOptions,
             ftsSearchFields: ['data.title', 'data.content'],
             vectorEmbeddingFields: ['data.title', 'data.content'],
             checksumFields: ['data.title', 'data.content'],
         };
+
+        super(options);
 
         if (!this.data.title) {
             // If Note has no title, we'll use YYYYMMDD, subject to change

@@ -18,19 +18,20 @@ const documentDataSchema = z.object({
 
 export default class Tab extends Document {
     constructor(options = {}) {
-        // Set schema before calling super
+        // Set schema defaults before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
 
-        super(options);
-
-        // Customize indexOptions for Tab
-        this.indexOptions = {
-            ...this.indexOptions,
+        // Inject Tab-specific index options BEFORE super() so that BaseDocument
+        // computes checksums and other derived values using the correct fields.
+        options.indexOptions = {
+            ...options.indexOptions,
             ftsSearchFields: ['data.title', 'data.url'],
             vectorEmbeddingFields: ['data.title', 'data.url'],
             checksumFields: ['data.url'],
         };
+
+        super(options);
     }
 
     /**
