@@ -10,8 +10,10 @@ const debug = debugInstance('canvas:synapsd');
 // Errors
 import { ValidationError, NotFoundError, DuplicateError, DatabaseError } from './utils/errors.js';
 
-// DB Backend
-import Db from './backends/lmdb/index.js';
+// DB Backends
+import Lmdb from './backends/lmdb/index.js';
+import RxDB from './backends/rxdb/index.js';
+import File from './backends/file/index.js';
 
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
@@ -83,7 +85,7 @@ class SynapsD extends EventEmitter {
         if (!this.#rootPath) { throw new Error('Database path required'); }
 
         debug('Database path:', this.#rootPath);
-        this.#db = new Db({
+        this.#db = new Lmdb({
             ...options,
             path: this.#rootPath,
         });
