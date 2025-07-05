@@ -17,6 +17,7 @@ This document describes the implementation of a proper backend abstraction layer
 - **Complete File-Based Storage**: JSON file-based storage system that implements the same interface as LMDB
 - **Schema-Based Organization**: Documents are automatically organized into subdirectories based on their schema
 - **Binary Data Support**: Automatic detection and handling of binary data with `.bin` extension
+- **Dataset Slash Handling**: Dataset names with slashes automatically create proper directory structures
 - **Dataset Support**: Multi-dataset support with separate directories per dataset
 - **Atomic Operations**: Atomic writes using temporary files and atomic rename operations
 - **Caching System**: LRU-style caching to improve performance
@@ -45,6 +46,7 @@ This document describes the implementation of a proper backend abstraction layer
 | **Human Readable** | ❌ Binary | ✅ JSON files |
 | **Debugging** | ❌ Requires tools | ✅ Easy inspection |
 | **Schema Organization** | ❌ Flat structure | ✅ Auto-organized |
+| **Dataset Slash Handling** | ❌ N/A | ✅ Auto-subdirectories |
 | **Binary Data** | ✅ Native | ✅ Auto-detected |
 | **Mixed Data Types** | ✅ Native | ✅ Automatic |
 | **File Extensions** | ❌ N/A | ✅ .json/.bin |
@@ -98,6 +100,15 @@ db.db.createDataset('bitmaps').set('user-bitmap', bitmapData);
 const mixedDataset = db.db.createDataset('mixed');
 mixedDataset.set('config', { theme: 'dark' });        // → config.json
 mixedDataset.set('data', Buffer.from([1, 2, 3]));     // → data.bin
+
+// Dataset names with slashes create subdirectories
+const internalBitmaps = db.db.createDataset('internal/bitmaps');
+internalBitmaps.set('bitmap-1', Buffer.from([0x01, 0x02]));
+// → Stored in: /path/to/database/internal/bitmaps/bitmap-1.bin
+
+const userProfiles = db.db.createDataset('data/user/profiles');
+userProfiles.set('user-123', { name: 'Alice' });
+// → Stored in: /path/to/database/data/user/profiles/user-123.json
 ```
 
 ### Backend Factory Direct Usage

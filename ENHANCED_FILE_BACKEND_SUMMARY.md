@@ -39,7 +39,13 @@ documents/
 - `ArrayBuffer` → `.bin` file
 - Everything else → `.json` file
 
-### 3. **Complete LMDB Interface Compatibility**
+### 3. **Dataset Slash Handling**
+- **Automatic Subdirectories**: Dataset names with slashes create proper directory structures
+- **Deep Nesting**: Supports any level of nesting (e.g., `data/user/profiles/active`)
+- **Natural Organization**: Organize datasets logically with filesystem-like paths
+- **Lock Directory Mirroring**: Lock directories automatically mirror the same structure
+
+### 4. **Complete LMDB Interface Compatibility**
 - **All Methods Implemented**: Every LMDB method has been implemented in the file backend
 - **Same Signatures**: Identical method signatures and return types
 - **Drop-in Replacement**: Can switch backends without changing application code
@@ -82,6 +88,8 @@ From our comprehensive testing:
 ✅ **Mixed Datasets**: JSON and binary data in same dataset  
 ✅ **File Extensions**: Correct .json/.bin extension assignment  
 ✅ **Directory Creation**: Automatic subdirectory creation  
+✅ **Dataset Slash Handling**: Slash-separated dataset names create proper directory structures  
+✅ **Deep Nesting**: Multi-level directory structures (3+ levels) working  
 ✅ **Cache Performance**: LRU cache working efficiently  
 ✅ **Atomic Operations**: Temporary file operations safe  
 ✅ **Error Handling**: Proper error messages and recovery  
@@ -122,6 +130,26 @@ documents/abstraction/note/meeting-notes.json
 
 # Document without schema
 documents/simple-document.json
+```
+
+### Dataset Slash Handling
+```bash
+# Dataset: internal/bitmaps
+internal/bitmaps/bitmap-1.bin
+internal/bitmaps/bitmap-2.bin
+
+# Dataset: data/user/profiles  
+data/user/profiles/user-123.json
+data/user/profiles/user-456.json
+
+# Dataset: cache/sessions/active
+cache/sessions/active/session-abc123.json
+
+# Dataset: logs/application/errors
+logs/application/errors/error-001.json
+
+# Dataset: config/environment/prod
+config/environment/prod/database.json
 ```
 
 ### Binary Data Storage
@@ -186,6 +214,23 @@ db.bitmaps.set('user-bitmap', bitmapData);
 // → Stored in: bitmaps/user-bitmap.bin
 ```
 
+### Dataset Slash Handling
+```javascript
+// Dataset names with slashes create subdirectories
+const internalBitmaps = db.db.createDataset('internal/bitmaps');
+internalBitmaps.set('bitmap-1', Buffer.from([0x01, 0x02]));
+// → Stored in: internal/bitmaps/bitmap-1.bin
+
+const userProfiles = db.db.createDataset('data/user/profiles');
+userProfiles.set('user-123', { name: 'Alice', email: 'alice@example.com' });
+// → Stored in: data/user/profiles/user-123.json
+
+// Deep nesting works perfectly
+const deepDataset = db.db.createDataset('cache/sessions/active');
+deepDataset.set('session-abc', { userId: 123 });
+// → Stored in: cache/sessions/active/session-abc.json
+```
+
 ## 🔮 Future Enhancements
 
 The architecture supports easy extension:
@@ -207,4 +252,4 @@ The enhanced file backend implementation successfully delivers:
 
 The implementation provides Canvas SynapsD with a robust, feature-rich file storage backend that complements the existing LMDB backend, giving developers the flexibility to choose the right storage solution for their specific needs.
 
-**🎯 Mission Accomplished**: Schema-based organization and binary data detection working perfectly! 🚀
+**🎯 Mission Accomplished**: Schema-based organization, binary data detection, and dataset slash handling working perfectly! 🚀

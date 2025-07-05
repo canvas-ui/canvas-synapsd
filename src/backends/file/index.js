@@ -61,10 +61,12 @@ class FileBackend {
             this.options = options.options || {};
             this.#path = options.path;
             this.#dataset = dataset;
+            
+            // Handle dataset names with slashes by creating proper directory structure
             this.#dataPath = path.join(this.#path, dataset);
             this.#lockPath = path.join(this.#path, 'locks', dataset);
             
-            // Create dataset directory
+            // Create dataset directory (including any subdirectories from slashes)
             this.#ensureDirectories();
             
             debug(`File backend dataset "${dataset}" initialized`);
