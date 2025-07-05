@@ -44,6 +44,7 @@ class Db {
                 logLevel: options.logLevel || 'info',
                 compression: options.compression || true,
                 cache: options.cache || true,
+                strictAsyncOrder: options.strictAsyncOrder ?? true, // Ensure strict ordering for document ID generation
                 // keyEncoding: options.keyEncoding || 'uint32',// ?ordered-binary
                 // encoding: options.encoding || 'binary',
                 // useVersions: options.useVersions || false,
@@ -125,7 +126,14 @@ class Db {
     // Creates a new dataset using the same wrapper class
     createDataset(dataset, options = {}) {
         debug(`Creating new dataset "${dataset}" using options: ${JSON.stringify(options)}`);
-        const db = this.db.openDB(dataset, options);
+
+        // Ensure strictAsyncOrder is enabled for datasets as well
+        const datasetOptions = {
+            strictAsyncOrder: true, // Required for document ID generation consistency
+            ...options,
+        };
+
+        const db = this.db.openDB(dataset, datasetOptions);
         return new Db(db, dataset);
     }
 
