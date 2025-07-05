@@ -103,10 +103,22 @@ class FileBackend {
         }
     }
 
-    #getFilePath(key) {
+    #getFilePath(key, value = null) {
         // Sanitize key for filename
         const sanitized = this.#sanitizeKey(key);
-        return path.join(this.#dataPath, sanitized + this.options.fileExtension);
+        
+        // Determine file extension based on data type
+        const extension = this.#getFileExtension(value);
+        
+        // Check if we need schema-based directory organization
+        const schemaPath = this.#getSchemaPath(value);
+        
+        // Combine paths
+        const fullPath = schemaPath ? 
+            path.join(this.#dataPath, schemaPath, sanitized + extension) :
+            path.join(this.#dataPath, sanitized + extension);
+            
+        return fullPath;
     }
 
     #sanitizeKey(key) {
@@ -117,10 +129,116 @@ class FileBackend {
         return String(key).replace(/[^a-zA-Z0-9_-]/g, '_');
     }
 
+    #getFileExtension(value) {
+        // Determine file extension based on data type
+        if (this.#isBinaryData(value)) {
+            return '.bin';
+        }
+        return this.options.fileExtension || '.json';
+    }
+
+    #isBinaryData(value) {
+        // Check if value is binary data
+        if (value === null || value === undefined) {
+            return false;
+        }
+        
+        // Check for Buffer instances
+        if (Buffer.isBuffer(value)) {
+            return true;
+        }
+        
+        // Check for typed arrays (Uint8Array, Int8Array, etc.)
+        if (ArrayBuffer.isView(value)) {
+            return true;
+        }
+        
+        // Check for ArrayBuffer
+        if (value instanceof ArrayBuffer) {
+            return true;
+        }
+        
+        return false;
+    }
+
+    #getSchemaPath(value) {
+        // Only organize by schema if we're in the documents dataset
+        if (this.#dataset !== 'documents') {
+            return null;
+        }
+        
+        // Check if value has a schema property
+        if (!value || typeof value !== 'object' || !value.schema) {
+            return null;
+        }
+        
+        const schema = value.schema;
+        
+        // Extract schema path, removing 'data/' prefix if present
+        // e.g., 'data/abstraction/tab' -> 'abstraction/tab'
+        const schemaPath = typeof schema === 'string' ? 
+            schema.replace(/^data\//, '') : 
+            null;
+            
+        return schemaPath;
+    }
+
+    #findAndReadFile(key) {
+        const sanitized = this.#sanitizeKey(key);
+        
+        // Try different possible file paths
+        const possiblePaths = [
+            // Regular paths
+            path.join(this.#dataPath, sanitized + '.json'),
+            path.join(this.#dataPath, sanitized + '.bin'),
+        ];
+        
+        // If we're in documents dataset, also try to find in schema subdirectories
+        if (this.#dataset === 'documents') {
+            try {
+                const subdirs = this.#getSubdirectories(this.#dataPath);
+                for (const subdir of subdirs) {
+                    possiblePaths.push(
+                        path.join(this.#dataPath, subdir, sanitized + '.json'),
+                        path.join(this.#dataPath, subdir, sanitized + '.bin')
+                    );
+                }
+            } catch (error) {
+                // If we can't read subdirectories, just continue with base paths
+            }
+        }
+        
+        // Try each possible path
+        for (const filePath of possiblePaths) {
+            const value = this.#readFile(filePath);
+            if (value !== undefined) {
+                return value;
+            }
+        }
+        
+        return undefined;
+    }
+
+    #getSubdirectories(dirPath) {
+        try {
+            const items = readdirSync(dirPath, { withFileTypes: true });
+            return items
+                .filter(item => item.isDirectory())
+                .map(item => item.name);
+        } catch (error) {
+            return [];
+        }
+    }
+
     #readFile(filePath) {
         try {
-            const data = readFileSync(filePath, 'utf8');
-            return JSON.parse(data);
+            // Check if it's a binary file
+            if (filePath.endsWith('.bin')) {
+                return readFileSync(filePath);
+            } else {
+                const data = readFileSync(filePath, 'utf8');
+                return JSON.parse(data);
+            }
         } catch (error) {
             if (error.code === 'ENOENT') {
                 return undefined;
@@ -131,17 +249,35 @@ class FileBackend {
 
     #writeFile(filePath, data) {
         try {
-            const jsonData = JSON.stringify(data, null, this.options.pretty ? 2 : 0);
+            // Ensure directory exists
+            const dir = path.dirname(filePath);
+            if (!existsSync(dir)) {
+                mkdirSync(dir, { recursive: true });
+            }
+            
+            // Determine if we're writing binary or JSON data
+            const isBinary = this.#isBinaryData(data);
+            let writeData, writeOptions;
+            
+            if (isBinary) {
+                // Write binary data
+                writeData = data;
+                writeOptions = {};
+            } else {
+                // Write JSON data
+                writeData = JSON.stringify(data, null, this.options.pretty ? 2 : 0);
+                writeOptions = { encoding: 'utf8' };
+            }
             
             if (this.options.atomic) {
                 // Atomic write using temporary file
                 const tempFile = filePath + '.tmp.' + randomUUID();
-                writeFileSync(tempFile, jsonData, 'utf8');
+                writeFileSync(tempFile, writeData, writeOptions);
                 
                 // Atomic rename (sync version)
                 renameSync(tempFile, filePath);
             } else {
-                writeFileSync(filePath, jsonData, 'utf8');
+                writeFileSync(filePath, writeData, writeOptions);
             }
             
             return true;
@@ -164,15 +300,61 @@ class FileBackend {
 
     #listFiles() {
         try {
-            const files = readdirSync(this.#dataPath);
-            return files
-                .filter(file => file.endsWith(this.options.fileExtension))
-                .map(file => file.replace(this.options.fileExtension, ''));
+            const allFiles = [];
+            
+            // Get files from base directory
+            const baseFiles = readdirSync(this.#dataPath, { withFileTypes: true });
+            
+            // Add regular files from base directory
+            baseFiles
+                .filter(item => item.isFile() && (item.name.endsWith('.json') || item.name.endsWith('.bin')))
+                .forEach(file => {
+                    const key = file.name.replace(/\.(json|bin)$/, '');
+                    allFiles.push(key);
+                });
+            
+            // If we're in documents dataset, also check schema subdirectories
+            if (this.#dataset === 'documents') {
+                baseFiles
+                    .filter(item => item.isDirectory())
+                    .forEach(dir => {
+                        try {
+                            const subdirPath = path.join(this.#dataPath, dir.name);
+                            const subdirFiles = readdirSync(subdirPath, { withFileTypes: true });
+                            
+                            // Recursively get files from subdirectories
+                            this.#listFilesRecursively(subdirPath, allFiles);
+                        } catch (error) {
+                            // Skip directories we can't read
+                        }
+                    });
+            }
+            
+            // Remove duplicates and return
+            return [...new Set(allFiles)];
         } catch (error) {
             if (error.code === 'ENOENT') {
                 return [];
             }
             throw error;
+        }
+    }
+
+    #listFilesRecursively(dirPath, filesList) {
+        try {
+            const items = readdirSync(dirPath, { withFileTypes: true });
+            
+            items.forEach(item => {
+                if (item.isFile() && (item.name.endsWith('.json') || item.name.endsWith('.bin'))) {
+                    const key = item.name.replace(/\.(json|bin)$/, '');
+                    filesList.push(key);
+                } else if (item.isDirectory()) {
+                    // Recursively search subdirectories
+                    this.#listFilesRecursively(path.join(dirPath, item.name), filesList);
+                }
+            });
+        } catch (error) {
+            // Skip directories we can't read
         }
     }
 
@@ -282,14 +464,26 @@ class FileBackend {
     }
 
     delete(key) {
-        const filePath = this.#getFilePath(key);
-        const result = this.#deleteFile(filePath);
+        // Try to get the value first to determine the correct file path
+        let value = this.cache.get(key);
         
-        // Clear from cache
-        this.cache.delete(key);
-        this.cacheTimestamps.delete(key);
+        // If not in cache, try to find and read the file
+        if (!value) {
+            value = this.#findAndReadFile(key);
+        }
         
-        return result;
+        if (value !== undefined) {
+            const filePath = this.#getFilePath(key, value);
+            const result = this.#deleteFile(filePath);
+            
+            // Clear from cache
+            this.cache.delete(key);
+            this.cacheTimestamps.delete(key);
+            
+            return result;
+        }
+        
+        return false; // File not found
     }
 
     entries() {
@@ -308,13 +502,16 @@ class FileBackend {
         if (this.cache.has(key)) {
             const cachedValue = this.cache.get(key);
             if (options.asBuffer) {
+                if (this.#isBinaryData(cachedValue)) {
+                    return cachedValue;
+                }
                 return Buffer.from(JSON.stringify(cachedValue));
             }
             return cachedValue;
         }
 
-        const filePath = this.#getFilePath(key);
-        const value = this.#readFile(filePath);
+        // Try to find the file - we need to search since we don't know the schema yet
+        const value = this.#findAndReadFile(key);
         
         if (value !== undefined) {
             // Cache the value
@@ -328,6 +525,9 @@ class FileBackend {
         }
         
         if (options.asBuffer && value !== undefined) {
+            if (this.#isBinaryData(value)) {
+                return value;
+            }
             return Buffer.from(JSON.stringify(value));
         }
         
@@ -357,8 +557,9 @@ class FileBackend {
             return true;
         }
         
-        const filePath = this.#getFilePath(key);
-        return existsSync(filePath);
+        // Try to find the file in any possible location
+        const value = this.#findAndReadFile(key);
+        return value !== undefined;
     }
 
     keys() {
@@ -370,7 +571,7 @@ class FileBackend {
     }
 
     set(key, value) {
-        const filePath = this.#getFilePath(key);
+        const filePath = this.#getFilePath(key, value);
         const result = this.#writeFile(filePath, value);
         
         if (result) {
