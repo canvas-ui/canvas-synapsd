@@ -399,7 +399,7 @@ class BitmapIndex {
                 }
                 // If it was already empty (originalSize === 0), and still is, no change, not affected by this logic block.
             } else if (bitmap.size !== originalSize) { // Not empty, but size changed
-                await this.#saveBitmap(key, bitmap);
+                this.#saveBitmapSync(key, bitmap);
                 affectedKeys.push(key);
             }
             // If not empty and size didn't change, or was empty and stayed empty, it's not considered affected by unticking.
@@ -463,10 +463,10 @@ class BitmapIndex {
         }
 
         // Perform batch save (or individual saves if batching isn't implemented in store)
-        // Assuming #saveBitmap handles individual saves for now.
+        // Assuming #saveBitmapSync handles individual saves for now.
         for (const bitmap of bitmapsToSave) {
             // Need the key associated with the bitmap instance for saving
-            await this.#saveBitmap(bitmap.key, bitmap);
+            this.#saveBitmapSync(bitmap.key, bitmap);
         }
 
         if (affectedKeys.length) {
@@ -513,7 +513,7 @@ class BitmapIndex {
 
         // Perform batch save/delete
         for (const bitmap of bitmapsToSave) {
-             await this.#saveBitmap(bitmap.key, bitmap);
+             this.#saveBitmapSync(bitmap.key, bitmap);
         }
         for (const key of keysToDelete) {
             await this.deleteBitmap(key); // Ensure this line has await
@@ -765,11 +765,11 @@ class BitmapIndex {
         }
     }
 
-    async #batchSaveBitmaps(keyArray, bitmapArray) {
+    #batchSaveBitmapsSync(keyArray, bitmapArray) {
         const keys = Array.isArray(keyArray) ? keyArray : [keyArray];
         const bitmaps = Array.isArray(bitmapArray) ? bitmapArray : [bitmapArray];
         for (let i = 0; i < keys.length; i++) {
-            await this.#saveBitmap(keys[i], bitmaps[i]);
+            this.#saveBitmapSync(keys[i], bitmaps[i]);
         }
     }
 
