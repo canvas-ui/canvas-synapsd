@@ -95,7 +95,7 @@ class BitmapIndex {
             });
 
             // Save to store and cache
-            await this.#saveBitmap(key, bitmap);
+            this.#saveBitmapSync(key, bitmap);
             debug(`Bitmap with key ID "${key}" created successfully with ${bitmap.size} elements`);
             return bitmap;
         } catch (error) {
@@ -181,7 +181,7 @@ class BitmapIndex {
         if (!bitmap) { throw new Error(`Unable to rename bitmap "${oldKey}" to "${newKey}" because bitmap "${oldKey}" does not exist`); }
 
         try {
-            await this.#saveBitmap(newKey, bitmap);
+            this.#saveBitmapSync(newKey, bitmap);
             await this.deleteBitmap(oldKey);
         } catch (error) {
             debug(`Error renaming bitmap "${oldKey}" to "${newKey}"`, error);
@@ -255,7 +255,7 @@ class BitmapIndex {
         }
 
         bitmap.addMany(validIds);
-        await this.#saveBitmap(key, bitmap);
+        this.#saveBitmapSync(key, bitmap);
         return bitmap;
     }
 
@@ -310,7 +310,7 @@ class BitmapIndex {
             await this.deleteBitmap(key);
             return null;
         } else {
-            await this.#saveBitmap(key, bitmap);
+            this.#saveBitmapSync(key, bitmap);
             return bitmap;
         }
     }
@@ -346,7 +346,7 @@ class BitmapIndex {
             BitmapIndex.validateKey(key);
             const bitmap = await this.getBitmap(key, true);
             bitmap.addMany(validIds);
-            await this.#saveBitmap(key, bitmap);
+            this.#saveBitmapSync(key, bitmap);
             affectedKeys.push(key);
         }
 
@@ -745,7 +745,7 @@ class BitmapIndex {
      * Database operations
      */
 
-    async #saveBitmap(key, bitmap) {
+    #saveBitmapSync(key, bitmap) {
         debug('Storing bitmap to persistent store', key);
         if (!key) { throw new Error('Key is required'); }
         if (!bitmap) { throw new Error('Bitmap is required'); }
@@ -756,7 +756,7 @@ class BitmapIndex {
             }
 
             const serializedBitmap = bitmap.serialize(true);
-            await this.dataset.put(key, serializedBitmap);
+            this.dataset.putSync(key, serializedBitmap);
             this.cache.set(key, bitmap);
             debug(`Bitmap "${key}" saved successfully with ${bitmap.size} elements`);
         } catch (error) {

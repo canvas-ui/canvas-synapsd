@@ -85,7 +85,7 @@ class SynapsD extends EventEmitter {
 
         // Set backend type
         this.#dbBackend = options.backend || 'lmdb';
-        
+
         // Validate backend type
         if (!BackendFactory.isValidBackendType(this.#dbBackend)) {
             throw new Error(`Invalid backend type: ${this.#dbBackend}. Available backends: ${BackendFactory.getAvailableBackends().join(', ')}`);
@@ -93,7 +93,7 @@ class SynapsD extends EventEmitter {
 
         debug('Database path:', this.#rootPath);
         debug('Backend type:', this.#dbBackend);
-        
+
         // Create backend instance using factory
         this.#db = BackendFactory.createBackend(this.#dbBackend, {
             ...options,
@@ -345,7 +345,7 @@ class SynapsD extends EventEmitter {
             parsedDocument.createdAt = storedDocument.createdAt;
         } else {
             debug(`insertDocument: Document not found by checksum ${primaryChecksum}, generating new document ID.`);
-            parsedDocument.id = await this.#generateDocumentID();
+            parsedDocument.id = this.#generateDocumentID();
         }
 
         // Validate the final state before saving
@@ -530,12 +530,13 @@ class SynapsD extends EventEmitter {
 
     // Legacy API, now alias for findDocuments,
     // TODO: Implement for metedata retrieval only
-    async listDocuments(contextSpec = '/', featureBitmapArray = [], filterArray = [], options = { parse: true }) {
+    async listDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
         return await this.findDocuments(contextSpec, featureBitmapArray, filterArray, options);
     }
 
-    async findDocuments(contextSpec = '/', featureBitmapArray = [], filterArray = [], options = { parse: true }) {
-        const contextBitmapArray = this.#parseContextSpec(contextSpec);
+    async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
+        // Only parse contextSpec if it was explicitly provided (not null/undefined)
+        const contextBitmapArray = contextSpec !== null && contextSpec !== undefined ? this.#parseContextSpec(contextSpec) : [];
         if (!Array.isArray(featureBitmapArray) && typeof featureBitmapArray === 'string') { featureBitmapArray = [featureBitmapArray]; }
         if (!Array.isArray(filterArray) && typeof filterArray === 'string') { filterArray = [filterArray]; }
         debug(`Listing documents with contextArray: ${contextBitmapArray}, features: ${featureBitmapArray}, filters: ${filterArray}`);
@@ -546,8 +547,8 @@ class SynapsD extends EventEmitter {
             // Flag to track if any filters actually modified the initial empty bitmap
             let filtersApplied = false;
 
-            // Apply context filters if provided
-            if (contextBitmapArray.length > 0) {
+            // Apply context filters only if contextSpec was explicitly provided
+            if (contextSpec !== null && contextSpec !== undefined && contextBitmapArray.length > 0) {
                 resultBitmap = await this.contextBitmapCollection.AND(contextBitmapArray);
                 filtersApplied = true; // AND result assigned
             }
@@ -1292,12 +1293,15 @@ class SynapsD extends EventEmitter {
             return ['/'];
         }
 
-        // Process a single path string
+                // Process a single path string to create layer contexts
         const processString = (str) => {
             if (str === '/') return ['/'];
+
             // Split the string and filter empty elements
             const parts = str.split('/').map(part => part.trim()).filter(Boolean);
-            // Ensure '/' is at the beginning
+            if (parts.length === 0) return ['/'];
+
+            // Create layer contexts: ['/', 'foo', 'bar', 'baz']
             return ['/', ...parts];
         };
 
@@ -1309,19 +1313,14 @@ class SynapsD extends EventEmitter {
                 return ['/'];
             }
 
-            // Process each path and collect unique parts
-            const allParts = new Set();
+            // Process each path and collect unique layer contexts
+            const allContexts = new Set(['/']); // Always include root
             flattened.forEach(path => {
-                const parts = processString(path);
-                parts.forEach(part => allParts.add(part));
+                const contexts = processString(path);
+                contexts.forEach(context => allContexts.add(context));
             });
 
-            // Convert to array and ensure root is first
-            const result = Array.from(allParts);
-            if (result.includes('/')) {
-                result.splice(result.indexOf('/'), 1);
-            }
-            return result.length ? ['/', ...result] : ['/'];
+            return Array.from(allContexts);
         }
 
         // Handle string input
@@ -1456,59 +1455,30 @@ class SynapsD extends EventEmitter {
         return count;
     }
 
-    async #generateDocumentID() {
+    #generateDocumentID() {
         try {
-            // Try to get a recycled ID first
-            const recycledId = this.#popDeletedId();
-            if (recycledId !== null) {
-                debug(`Using recycled document ID: ${recycledId}`);
-                return recycledId;
-            }
-
-            // Use synchronous transaction for atomic ID generation
             const counterKey = 'internal/document-id-counter';
 
-            return await this.#internalStore.transaction(async () => {
+            // Use synchronous transaction for atomic ID generation
+            return this.#internalStore.transactionSync(() => {
                 // Get current counter within transaction
-                let currentCounter = await this.#internalStore.get(counterKey);
+                let currentCounter = this.#internalStore.get(counterKey);
 
                 // Initialize counter if it doesn't exist
                 if (currentCounter === undefined || currentCounter === null) {
-                    const docCount = this.documents.getCount();
-                    currentCounter = Math.max(0, docCount);
+                    // Start from INTERNAL_BITMAP_ID_MAX to avoid conflicts with internal bitmaps
+                    currentCounter = INTERNAL_BITMAP_ID_MAX;
                     debug(`Initializing document ID counter to: ${currentCounter}`);
                 }
 
-                // Find the next available ID
-                let attempts = 0;
-                const maxAttempts = 50;
+                // Increment counter
+                const newId = currentCounter + 1;
 
-                while (attempts < maxAttempts) {
-                    const nextCounter = currentCounter + 1;
-                    const newId = INTERNAL_BITMAP_ID_MAX + nextCounter;
+                // Update counter atomically within transaction
+                this.#internalStore.putSync(counterKey, newId);
 
-                    // Check if this ID is available
-                    if (!this.documents.has(newId)) {
-                        // ID is available, increment counter and reserve it
-                        await this.#internalStore.put(counterKey, nextCounter);
-
-                        // Reserve the ID immediately within the transaction
-                        this.documents.putSync(newId, { __reserved: true, __timestamp: Date.now() });
-
-                        debug(`Generated and reserved document ID: ${newId} (counter: ${nextCounter})`);
-                        return newId;
-                    }
-
-                    // ID exists, try next one
-                    currentCounter = nextCounter;
-                    attempts++;
-
-                    if (attempts % 10 === 0) {
-                        debug(`ID search attempt ${attempts}: trying ID ${newId + 1}`);
-                    }
-                }
-
-                throw new Error(`Failed to find available document ID after ${maxAttempts} attempts`);
+                debug(`Generated document ID: ${newId}`);
+                return newId;
             });
         } catch (error) {
             debug(`Error generating document ID: ${error.message}`);
@@ -1516,36 +1486,7 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    /**
-     * Safely get a recycled ID from the deletedDocuments bitmap
-     * @returns {number|null} A numeric ID or null if none available
-     * @private
-     */
-    #popDeletedId() {
-        try {
-            if (!this.deletedDocumentsBitmap || this.deletedDocumentsBitmap.isEmpty) {
-                return null;
-            }
 
-            // Get the minimum ID from the deleted documents bitmap
-            const minId = this.deletedDocumentsBitmap.minimum();
-
-            // Ensure it's a valid number
-            if (typeof minId !== 'number' || isNaN(minId) || !Number.isInteger(minId) || minId <= 0) {
-                debug(`Invalid minimum ID in deletedDocuments: ${minId}`);
-                return null;
-            }
-
-            // Remove this ID from the bitmap
-            // Lets do this after insertion only
-            //this.deletedDocumentsBitmap.remove(minId);
-
-            return minId;
-        } catch (error) {
-            debug(`Error popping deleted ID: ${error.message}`);
-            return null;
-        }
-    }
 
     clearSync() {
         if (!this.isRunning()) {
