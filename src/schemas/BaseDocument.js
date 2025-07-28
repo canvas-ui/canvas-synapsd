@@ -16,7 +16,7 @@ import { generateChecksum } from '../utils/crypto.js';
 
 // Document constants
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/document';
-const DOCUMENT_SCHEMA_VERSION = '2.0';
+const DOCUMENT_SCHEMA_VERSION = '2.1';
 const DOCUMENT_DATA_CHECKSUM_ALGORITHMS = ['sha1', 'sha256'];
 const DOCUMENT_DATA_CHECKSUM_ALGORITHM_DEFAULT = DOCUMENT_DATA_CHECKSUM_ALGORITHMS[0];
 const DOCUMENT_DATA_CHECKSUM_FIELDS = ['data'];
@@ -64,12 +64,26 @@ const documentSchema = z.object({
     // Document data/payload
     data: z.record(z.any()),
 
-    // Metadata section
+    // Metadata section – unified shape (v2.1)
     metadata: z.object({
-        contentType: z.string(),
-        contentEncoding: z.string(),
-        dataPaths: z.array(z.string()).optional(), // A document may have multiple data paths
-    }).and(z.record(z.any())).optional(), // Allow additional metadata fields
+        contentType: z.string().optional(),
+        contentEncoding: z.string().optional(),
+        dataPaths: z.array(
+            z.union([
+                z.string(),
+                z.object({
+                    uri: z.string(),
+                    protocol: z.string(),
+                    checksum: z.string().optional(),
+                    priority: z.number().int().optional(),
+                    metadata: z.record(z.any()).optional(),
+                }).strict(),
+            ]),
+        ).optional(),
+        contextUUIDs: z.array(z.string()).optional(),
+        contextPath: z.array(z.string()).optional(),
+        features: z.array(z.string()).optional(),
+    }).catchall(z.any()).optional(), // Allow additional metadata fields
 
     // Checksums
     checksumArray: z.array(z.string()).optional(),
@@ -129,12 +143,26 @@ class BaseDocument {
 
         // Document data/payload
         this.data = options.data ?? {};
+        // Build metadata with defaults & new redundancy fields
         this.metadata = {
             contentType: options.metadata?.contentType || DEFAULT_DOCUMENT_DATA_TYPE,
             contentEncoding: options.metadata?.contentEncoding || DEFAULT_DOCUMENT_DATA_ENCODING,
             dataPaths: options.metadata?.dataPaths || [],
+            contextUUIDs: options.metadata?.contextUUIDs || [],
+            contextPath: options.metadata?.contextPath || [],
+            features: options.metadata?.features || [],
             ...options.metadata,
         };
+
+        // Ensure the document's schema id is always present as a feature (deduplicated)
+        if (!Array.isArray(this.metadata.features)) {
+            this.metadata.features = [];
+        }
+        if (!this.metadata.features.includes(this.schema)) {
+            this.metadata.features.unshift(this.schema);
+        }
+        // Deduplicate features array
+        this.metadata.features = Array.from(new Set(this.metadata.features));
 
         // Checksums/embeddings
         this.checksumArray = options.checksumArray || this.generateChecksumStrings();
@@ -477,6 +505,76 @@ class BaseDocument {
      */
     toObject() {
         return JSON.parse(this.toJSON());
+    }
+
+    /**
+     * Sub-classes can call this helper to extend the base data-schema with their
+     * own fields while inheriting the common wrapper (schema, schemaVersion, …)
+     *
+     * @param {object|z.ZodRawShape} extraShape – additional fields describing `data`
+     * @returns {z.ZodObject}
+     */
+    static extendDataSchema(extraShape = {}) {
+        // Accept both plain object and Zod raw shape
+        const shape = (extraShape instanceof z.ZodType) ? extraShape : z.object(extraShape);
+
+        return z.object({
+            schema: z.string(),
+            schemaVersion: z.string().optional(),
+            data: shape.passthrough(),
+            metadata: z.any().optional(),
+        });
+    }
+
+    /**
+     * -------- Context management helpers --------
+     */
+
+    addContext(uuid, pathArray = undefined) {
+        if (!uuid) { return; }
+        if (!Array.isArray(this.metadata.contextUUIDs)) {
+            this.metadata.contextUUIDs = [];
+        }
+        if (!this.metadata.contextUUIDs.includes(uuid)) {
+            this.metadata.contextUUIDs.push(uuid);
+        }
+        if (pathArray && Array.isArray(pathArray)) {
+            this.metadata.contextPath = pathArray;
+        }
+    }
+
+    removeContext(uuid) {
+        if (!uuid || !Array.isArray(this.metadata.contextUUIDs)) { return; }
+        this.metadata.contextUUIDs = this.metadata.contextUUIDs.filter(id => id !== uuid);
+    }
+
+    /**
+     * -------- Feature helpers --------
+     */
+
+    addFeature(feature) {
+        if (!feature) { return; }
+        if (!Array.isArray(this.metadata.features)) {
+            this.metadata.features = [];
+        }
+        if (!this.metadata.features.includes(feature)) {
+            this.metadata.features.push(feature);
+        }
+    }
+
+    removeFeature(feature) {
+        if (!feature || !Array.isArray(this.metadata.features)) { return; }
+        this.metadata.features = this.metadata.features.filter(f => f !== feature);
+    }
+
+    hasFeature(feature) {
+        if (!feature || !Array.isArray(this.metadata.features)) { return false; }
+        return this.metadata.features.includes(feature);
+    }
+
+    getFeaturesByPrefix(prefix) {
+        if (!prefix || !Array.isArray(this.metadata.features)) { return []; }
+        return this.metadata.features.filter(f => f.startsWith(prefix));
     }
 
 }
