@@ -47,8 +47,6 @@ const documentDataSchema = z.object({
 
         priority: z.number().int().default(0),
 
-        // Context support – allows implicit activation when context changes
-        contextPath: z.string().optional(),
     }).passthrough(),
 
     metadata: z.object().optional(),
