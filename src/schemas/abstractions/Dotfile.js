@@ -5,7 +5,7 @@
  * -------------------
  * Describes a mapping between a *local* path (file or directory on any
  * machine) and a *remote* path inside the dot-files Git repository that lives
- * under ~/.canvas/dotfiles/…
+ * under ~/.canvas/data/{user@remote}/{workspace}/dotfiles/…
  *
  * Uniqueness is guaranteed through the combination of
  *     localPath + remotePath
