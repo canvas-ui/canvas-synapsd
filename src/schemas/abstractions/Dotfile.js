@@ -4,11 +4,11 @@
  * Dotfile abstraction
  * -------------------
  * Describes a mapping between a *local* path (file or directory on any
- * machine) and a *remote* path inside the dot-files Git repository that lives
+ * machine) and a path inside the dot-files Git repository that lives
  * under ~/.canvas/data/{user@remote}/{workspace}/dotfiles/…
  *
  * Uniqueness is guaranteed through the combination of
- *     localPath + remotePath
+ *     localPath + repoUrl + repoPath
  * which we feed into the checksum fields so that SynapsD stores at most one
  * instance of a given mapping.
  *
@@ -22,7 +22,7 @@ import Document, { documentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/dotfile';
-const DOCUMENT_SCHEMA_VERSION = '2.3';
+const DOCUMENT_SCHEMA_VERSION = '3.0';
 
 // Regex allows:  /abs/path, ~/path, $HOME/path, {{HOME}}/path etc.
 const pathPattern = /^(\{\{\s*[A-Za-z0-9_]+\s*\}\}|\$[A-Za-z0-9_]+|~)?[\/A-Za-z0-9_.-]+$/;
@@ -30,27 +30,34 @@ const pathPattern = /^(\{\{\s*[A-Za-z0-9_]+\s*\}\}|\$[A-Za-z0-9_]+|~)?[\/A-Za-z0
 /*******************
  * Data Schema     *
  *******************/
-const documentDataSchema = z.object({
-    schema: z.string(),
-    schemaVersion: z.string().optional(),
+const documentDataSchema = z
+    .object({
+        schema: z.string(),
+        schemaVersion: z.string().optional(),
 
-    data: z.object({
-        // Mandatory
-        localPath: z.string().regex(pathPattern, {
-            message: 'localPath must be an absolute path or contain a placeholder such as {{HOME}} or $HOME',
-        }),
-        remotePath: z.string().min(1), // "user@remote.id:workspace/path"
+        data: z
+            .object({
+                // Mandatory
+                localPath: z.string().regex(pathPattern, {
+                    message:
+                        'localPath must be an absolute path or contain a placeholder such as {{HOME}} or $HOME',
+                }),
 
-        // Optional
-        backupPath: z.string().optional(),
-        backupCreatedAt: z.string().datetime().optional(),
+                // Full URL of the dotfiles repository (e.g., http://user@host:port/rest/v2/workspaces/<ws>/dotfiles/git)
+                repoUrl: z.string().url(),
+                // Path inside the dotfiles repository (e.g., work/mbag/wallpaper.jpg)
+                repoPath: z.string().min(1),
 
-        priority: z.number().int().default(0),
+                // Optional
+                backupPath: z.string().optional(),
+                backupCreatedAt: z.string().datetime().optional(),
 
-    }).passthrough(),
+                priority: z.number().int().default(0),
+            })
+            .passthrough(),
 
-    metadata: z.object().optional(),
-});
+        metadata: z.object().optional(),
+    });
 
 /*******************
  * Dotfile class   *
@@ -64,9 +71,10 @@ export default class Dotfile extends Document {
         // Index configuration (before super)
         options.indexOptions = {
             ...options.indexOptions,
-            ftsSearchFields: ['data.localPath', 'data.remotePath'],
-            vectorEmbeddingFields: ['data.localPath', 'data.remotePath'],
-            checksumFields: ['data.localPath', 'data.remotePath'],
+            ftsSearchFields: ['data.localPath', 'data.repoUrl', 'data.repoPath'],
+            vectorEmbeddingFields: ['data.localPath', 'data.repoUrl', 'data.repoPath'],
+            // Uniqueness: localPath + repoUrl + repoPath
+            checksumFields: ['data.localPath', 'data.repoUrl', 'data.repoPath'],
         };
 
         super(options);
@@ -76,7 +84,8 @@ export default class Dotfile extends Document {
      * Convenience getters
      * ------------------*/
     get localPath() { return this.data.localPath; }
-    get remotePath() { return this.data.remotePath; }
+    get repoUrl() { return this.data.repoUrl; }
+    get repoPath() { return this.data.repoPath; }
     get backupPath() { return this.data.backupPath; }
 
     /* --------------------
@@ -95,11 +104,15 @@ export default class Dotfile extends Document {
      */
     conflictsWith(other) {
         if (!other) return false;
-        return this.localPath === other.localPath || this.remotePath === other.remotePath;
+        return (
+            this.localPath === other.localPath ||
+            (this.repoUrl === other.repoUrl && this.repoPath === other.repoPath)
+        );
     }
 
     getDisplayName() {
-        return `${this.localPath} ↔ ${this.remotePath}`;
+        const right = this.repoPath;
+        return `${this.localPath} ↔ ${right}`;
     }
 
     /* --------------------
@@ -118,7 +131,8 @@ export default class Dotfile extends Document {
             schema: DOCUMENT_SCHEMA_NAME,
             data: {
                 localPath: 'string',
-                remotePath: 'string',
+                repoUrl: 'string',
+                repoPath: 'string',
                 backupPath: 'string?',
             },
         };
