@@ -106,6 +106,104 @@ class ContextTree extends EventEmitter {
     }
 
     /**
+     * Layer operations (wrappers around LayerIndex)
+     */
+    getLayer(name) {
+        if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
+        if (!name) { return undefined; }
+        return this.#layerIndex.getLayerByName(name);
+    }
+
+    getLayerById(id) {
+        if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
+        if (!id) { return undefined; }
+        return this.#layerIndex.getLayerByID(id);
+    }
+
+    async listAllLayers() {
+        if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
+        const keys = await this.#layerIndex.listLayers(); // ['layer/<uuid>', ...]
+        const result = [];
+        for (const key of keys) {
+            try {
+                const layer = this.#layerIndex.getLayerByID(key);
+                if (layer) { result.push(layer); }
+            } catch (e) {
+                debug(`listAllLayers: failed to reconstruct layer ${key}: ${e.message}`);
+            }
+        }
+        return result;
+    }
+
+    async renameLayer(nameOrId, newName) {
+        if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
+        if (!newName) { throw new Error('New name required'); }
+        // Accept both ID and name. Prefer ID if it looks like one.
+        let currentName = nameOrId;
+        // If the identifier contains a dash or begins with 'layer/', treat as ID
+        if (typeof nameOrId === 'string' && (nameOrId.startsWith('layer/') || nameOrId.includes('-'))) {
+            const layer = this.getLayerById(nameOrId);
+            if (!layer) { throw new Error(`Layer not found with ID: ${nameOrId}`); }
+            currentName = layer.name;
+        }
+        const layer = await this.#layerIndex.renameLayer(String(currentName), String(newName));
+        // Persist updated tree JSON to reflect renamed layer names in stored tree
+        await this.recalculateTree();
+        return layer;
+    }
+
+    async updateLayer(nameOrId, updates = {}) {
+        if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
+        let targetName = nameOrId;
+        if (typeof nameOrId === 'string' && (nameOrId.startsWith('layer/') || nameOrId.includes('-'))) {
+            const layer = this.getLayerById(nameOrId);
+            if (!layer) { throw new Error(`Layer not found with ID: ${nameOrId}`); }
+            targetName = layer.name;
+        }
+        const layer = await this.#layerIndex.updateLayer(String(targetName), { ...updates });
+        return layer;
+    }
+
+    async deleteLayer(nameOrId) {
+        if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
+        let layer = null;
+        if (typeof nameOrId === 'string' && (nameOrId.startsWith('layer/') || nameOrId.includes('-'))) {
+            layer = this.getLayerById(nameOrId);
+        } else {
+            layer = this.getLayer(String(nameOrId));
+        }
+        if (!layer) { throw new Error(`Layer not found: ${nameOrId}`); }
+        await this.#layerIndex.removeLayer(layer);
+        // Rebuild tree to drop references to the deleted layer
+        await this.recalculateTree();
+        return true;
+    }
+
+    async lockLayer(nameOrId, lockBy) {
+        if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
+        if (!lockBy) { throw new Error('Locking layer requires a lockBy parameter'); }
+        const layer = (typeof nameOrId === 'string' && (nameOrId.startsWith('layer/') || nameOrId.includes('-')))
+            ? this.getLayerById(nameOrId)
+            : this.getLayer(String(nameOrId));
+        if (!layer) { throw new Error(`Layer not found: ${nameOrId}`); }
+        layer.lock(lockBy);
+        await this.#layerIndex.persistLayer(layer);
+        return true;
+    }
+
+    async unlockLayer(nameOrId, lockBy) {
+        if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
+        if (!lockBy) { throw new Error('Unlocking layer requires a lockBy parameter'); }
+        const layer = (typeof nameOrId === 'string' && (nameOrId.startsWith('layer/') || nameOrId.includes('-')))
+            ? this.getLayerById(nameOrId)
+            : this.getLayer(String(nameOrId));
+        if (!layer) { throw new Error(`Layer not found: ${nameOrId}`); }
+        layer.unlock(lockBy);
+        await this.#layerIndex.persistLayer(layer);
+        return true;
+    }
+
+    /**
      * Path Operations
      */
 
@@ -1009,7 +1107,7 @@ class ContextTree extends EventEmitter {
         return buildTree(node);
     }
 
-    recalculateTree() {
+    async recalculateTree() {
         debug('Recalculating tree after layer changes');
         // Create a copy of the current tree without deleted layers
         const newRoot = new TreeNode(this.rootLayer.id, this.rootLayer);
@@ -1030,7 +1128,7 @@ class ContextTree extends EventEmitter {
 
         rebuildTree(this.root, newRoot);
         this.root = newRoot;
-        this.save();
+        await this.#saveTreeToDataStore();
 
         // Emit a recalculation event
         this.emit('tree.recalculated', {

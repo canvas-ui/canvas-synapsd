@@ -23,7 +23,8 @@ class Layer {
         this.schemaVersion = options.schemaVersion || '2.0';
         this.type = options.type ?? 'context';
         this.name = this.#sanitizeName(name);
-        this.label = options.label ? this.#sanitizeLabel(options.label) : this.name;
+        // Always keep label equal to name
+        this.label = this.name;
         this.description = options.description ? this.#sanitizeDescription(options.description) : 'Canvas layer';
         this.color = options?.color;
         this.lockedBy = options?.lockedBy || [];
@@ -53,7 +54,10 @@ class Layer {
         if (this.isLocked) {
             throw new Error('Layer is locked');
         }
-        this.name = this.#sanitizeName(name);
+        const sanitized = this.#sanitizeName(name);
+        this.name = sanitized;
+        // Keep label equal to name at all times
+        this.label = sanitized;
         return this;
     }
 

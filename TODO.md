@@ -4,6 +4,7 @@
 - ! Implement a off-thread worker to post-process ingested documents (to calculate embeddings, tag bitmaps etc)
 - ! Create a *proper* collection abstraction, esp. for Bitmaps
 - ! Refactor those ***UGLY*** insert/updateDocument methods!!!
+- ! Add a new "root" layer type, prevent all ops on the root layer, root "/" layer should always be locked
 - format option
   - full
   - data+meta (data)

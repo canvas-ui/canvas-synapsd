@@ -88,7 +88,12 @@ class LayerIndex extends EventEmitter {
                  throw new Error(`Invalid schema class for layer type "${layerType}"`);
             }
 
-             return LayerClass.fromJSON(layerData); // Use static method from the correct class
+            const layer = LayerClass.fromJSON(layerData); // Use static method from the correct class
+            // Ensure label mirrors name to avoid inconsistencies after older data
+            if (layer && layer.name && layer.label !== layer.name) {
+                layer.label = layer.name;
+            }
+            return layer;
         } catch (error) {
             debug(`Error reconstructing layer instance for ID ${normalizedId}: ${error.message}`);
             console.error(`Failed to reconstruct layer from data:`, layerData);
@@ -219,6 +224,13 @@ class LayerIndex extends EventEmitter {
         const normalizedName = this.#normalizeLayerName(name);
         const normalizedNewName = this.#normalizeLayerName(newName);
 
+        if (normalizedName === '/') {
+            throw new Error('Root layer "/" cannot be renamed');
+        }
+        if (normalizedNewName === '/') {
+            throw new Error('Invalid target name "/" for rename');
+        }
+
         const currentLayer = this.getLayerByName(normalizedName); // Use normalized lookup
         if (!currentLayer) {
             throw new Error(`Layer not found: ${name} (normalized: ${normalizedName})`);
@@ -232,29 +244,25 @@ class LayerIndex extends EventEmitter {
             throw new Error(`Unable to rename layer, layer name already exists: ${newName} (normalized: ${normalizedNewName})`);
         }
 
-        // First lets insert the "new" layer to the db
-        const newLayer = currentLayer;
-        // Set the name using the normalized new name
-        newLayer.setName(normalizedNewName);
-        // Optionally set the label to the original newName if desired
-        newLayer.setLabel(newName);
-        try {
-            await this.#dbStoreLayer(newLayer);
-        } catch (error) {
-            throw new Error(`Failed to store renamed layer into the database: ${newName}`);
+        // Capture old normalized name for map cleanup
+        const oldNormalizedName = this.#normalizeLayerName(currentLayer.name);
+
+        // Update the name only (do not change label as per spec)
+        currentLayer.setName(normalizedNewName);
+
+        // Persist the updated layer by ID (upsert)
+        await this.#dbStoreLayer(currentLayer);
+
+        // Clean up the old name mapping if different
+        if (oldNormalizedName !== normalizedNewName) {
+            this.#nameToLayerMap.delete(oldNormalizedName);
         }
 
-        // Now lets remove the old layer from the db using the old layer object
-        try {
-            await this.#dbRemoveLayer(currentLayer); // #dbRemoveLayer normalizes the name from layer object
-        } catch (error) {
-            throw new Error(`Failed to remove existing layer: ${newName}`);
-        }
-
-        return newLayer;
+        return currentLayer;
     }
 
     async removeLayer(layer) {
+        if (!layer || layer.name === '/') { throw new Error('Root layer "/" cannot be removed'); }
         if (layer.locked) { throw new Error('Layer is locked'); }
         await this.#dbRemoveLayer(layer); // Normalizes internally
     }
@@ -263,6 +271,10 @@ class LayerIndex extends EventEmitter {
         const layer = this.getLayerByID(id);
         if (!layer) {
             throw new Error(`Layer not found with ID: ${id}`);
+        }
+
+        if (layer.name === '/') {
+            throw new Error('Root layer "/" cannot be removed');
         }
 
         if (layer.locked) {
@@ -278,6 +290,10 @@ class LayerIndex extends EventEmitter {
             // It's possible the layer doesn't exist, handle gracefully or re-throw
             debug(`Layer not found by name "${name}", cannot remove.`);
             return; // Or throw new Error(`Layer not found: ${name}`);
+        }
+
+        if (layer.name === '/') {
+            throw new Error('Root layer "/" cannot be removed');
         }
 
         if (layer.locked) {
