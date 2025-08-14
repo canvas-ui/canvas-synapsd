@@ -1,40 +1,40 @@
 {
   "name": "canvas-synapsd",
-  "version": "2.0.0-alpha.1",
+  "version": "2.0.0-alpha.2",
   "description": "Canvas SynapsD - Context-based document indexing engine",
   "type": "module",
   "main": "src/index.js",
   "dependencies": {
-    "@lancedb/lancedb": "^0.16.0",
+    "@lancedb/lancedb": "^0.21.2",
     "apache-arrow": "^18.1.0",
     "date-fns": "^4.1.0",
-    "debug": "^4.4.0",
+    "debug": "^4.4.1",
     "eventemitter2": "^6.4.9",
-    "flexsearch": "^0.7.43",
-    "llamaindex": "^0.9.2",
-    "lmdb": "^3.2.6",
+    "flexsearch": "^0.8.205",
+    "llamaindex": "^0.11.26",
+    "lmdb": "^3.4.2",
     "mkdirp": "^3.0.1",
     "roaring": "^2.4.0",
     "uuid": "^11.1.0",
-    "zod": "^3.24.2"
+    "zod": "^4.0.17"
   },
   "devDependencies": {
-    "@eslint/js": "^9.22.0",
-    "@types/node": "^22.13.10",
-    "eslint": "^8.57.1",
-    "eslint-config-prettier": "^10.1.1",
-    "jest": "^29.7.0",
-    "typescript": "^5.7.3",
-    "typescript-eslint": "^8.21.0"
+    "@eslint/js": "^9.33.0",
+    "@types/node": "^24.2.1",
+    "eslint": "^9.33.0",
+    "eslint-config-prettier": "^10.1.8",
+    "jest": "^30.0.5",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.39.1"
   },
   "scripts": {
     "lint": "eslint \"**/*.js\"",
     "lint:fix": "eslint \"**/*.js\" --fix",
-    "test": "jest"
+    "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
   "author": "me@idnc.sk",
   "license": "AGPL-3.0-or-later",
   "engines": {
-    "node": ">=20.0.0 <21.0.0"
+    "node": ">=20.0.0"
   }
 }
