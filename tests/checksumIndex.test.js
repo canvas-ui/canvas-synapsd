@@ -6,7 +6,7 @@ import {
     assert,
     assertEqual,
     assertAsyncThrows, // If get is async
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 
 const checksumIndexTestSuite = {
@@ -130,7 +130,7 @@ const checksumIndexTestSuite = {
         assertEqual(checksumIndex.getCount(), 2, 'getCount() mismatch');
         checksumIndex.delete('csCount1');
         assertEqual(checksumIndex.getCount(), 1, 'getCount() mismatch after delete');
-    }
+    },
 };
 
 runTestSuite('ChecksumIndex Class', checksumIndexTestSuite);

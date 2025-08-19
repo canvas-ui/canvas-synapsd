@@ -55,7 +55,7 @@ async function demonstrateBackends() {
         path: '/tmp/synapsd-lmdb-demo',
         backend: 'lmdb',
         backupOnOpen: false,
-        backupOnClose: false
+        backupOnClose: false,
     });
     
     const fileDb = new SynapsD({
@@ -64,7 +64,7 @@ async function demonstrateBackends() {
         backupOnOpen: false,
         backupOnClose: false,
         pretty: true,
-        maxCacheSize: 500
+        maxCacheSize: 500,
     });
     
     console.log('✅ Both databases created successfully\n');
@@ -81,9 +81,9 @@ async function demonstrateBackends() {
             tags: ['test', 'demo', 'backend'],
             metadata: {
                 created: new Date().toISOString(),
-                author: 'Backend Demo'
-            }
-        }
+                author: 'Backend Demo',
+            },
+        },
     };
     
     // Performance comparison
@@ -186,7 +186,7 @@ async function demonstrateBackends() {
     try {
         new SynapsD({
             path: '/tmp/test',
-            backend: 'nonexistent'
+            backend: 'nonexistent',
         });
     } catch (error) {
         console.log('✅ Properly caught invalid backend:', error.message);

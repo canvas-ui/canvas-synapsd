@@ -11,14 +11,14 @@ import {
     assertEqual,
     assertAsyncThrows,
     runTestSuite,
-    MockDataset
+    MockDataset,
 } from './helpers.js';
 
 // Helper to create mock actionBitmaps for tests not using full SynapsD init
 const createMockActionBitmaps = () => ({
     created: new Bitmap([], {key: 'mock/action/created'}),
     updated: new Bitmap([], {key: 'mock/action/updated'}),
-    deleted: new Bitmap([], {key: 'mock/action/deleted'})
+    deleted: new Bitmap([], {key: 'mock/action/deleted'}),
 });
 
 const timestampIndexTestSuite = {
@@ -81,7 +81,7 @@ const timestampIndexTestSuite = {
         const timestampIndex = new TimestampIndex(new MockDataset(), createMockActionBitmaps());
         await assertAsyncThrows(
             async () => timestampIndex.insert('viewed', '2023-10-26', 103),
-            'insert() should throw for invalid action'
+            'insert() should throw for invalid action',
         );
     },
 
@@ -89,7 +89,7 @@ const timestampIndexTestSuite = {
         const timestampIndex = new TimestampIndex(new MockDataset(), createMockActionBitmaps());
         await assertAsyncThrows(
             async () => timestampIndex.insert('created', 'invalid-date-string', 104),
-            'insert() should throw for invalid timestamp input'
+            'insert() should throw for invalid timestamp input',
         );
     },
 
@@ -133,7 +133,7 @@ const timestampIndexTestSuite = {
         const result = await timestampIndex.delete('2023-12-01');
         assert(result, 'delete should return true on success');
         assertEqual(await timestampIndex.get('2023-12-01'), undefined, 'Should not exist after delete');
-    }
+    },
 };
 
 runTestSuite('TimestampIndex Class (Corrected Design)', timestampIndexTestSuite);

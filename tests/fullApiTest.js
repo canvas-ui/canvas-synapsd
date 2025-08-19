@@ -6,7 +6,7 @@ import SynapsD from '../src/index.js';
 const DB_PATH = '/tmp/synapsd-testdb';
 
 const db = new SynapsD({
-    path: DB_PATH
+    path: DB_PATH,
 });
 
 async function test() {
@@ -20,7 +20,7 @@ async function test() {
             data: {
                 url: `https://example.com/${i}`,
                 title: `Example Tab ${i}`,
-            }
+            },
         });
         await db.insertDocument(tab, '/test/path', ['client/os/linux', 'client/browser/chrome']);
     }

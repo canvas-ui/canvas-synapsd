@@ -51,10 +51,21 @@ class DatabaseError extends SynapsDError {
     }
 }
 
+/**
+ * Argument validation error
+ */
+class ArgumentError extends SynapsDError {
+    constructor(message, argument = null) {
+        super(message);
+        this.argument = argument;
+    }
+}
+
 export {
     SynapsDError,
     ValidationError,
     NotFoundError,
     DuplicateError,
-    DatabaseError
+    DatabaseError,
+    ArgumentError,
 };

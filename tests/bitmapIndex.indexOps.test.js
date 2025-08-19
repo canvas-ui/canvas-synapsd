@@ -7,7 +7,7 @@ import {
     assert,
     assertEqual,
     assertAsyncThrows,
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 
 const VALID_KEY_PREFIX = 'data/';
@@ -229,7 +229,7 @@ const bitmapIndexOpsTestSuite = {
         } finally {
             await cleanupTestDB(db);
         }
-    }
+    },
 };
 
 runTestSuite('BitmapIndex Index Operations (Integrated)', bitmapIndexOpsTestSuite);

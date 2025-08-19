@@ -7,7 +7,7 @@ import {
     assert,
     assertEqual,
     assertThrows,
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 import BaseDocument from '../src/schemas/BaseDocument.js';
 
@@ -134,7 +134,7 @@ const validationTestSuite = {
         } finally {
             await cleanupTestDB(db);
         }
-    }
+    },
 };
 
 runTestSuite('SynapsD Validation Methods', validationTestSuite);

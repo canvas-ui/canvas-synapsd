@@ -216,7 +216,7 @@ class ContextTree extends EventEmitter {
                 return {
                     data: [this.rootLayer.id],
                     count: 1,
-                    error: null
+                    error: null,
                 };
             }
 
@@ -225,7 +225,7 @@ class ContextTree extends EventEmitter {
                 return {
                     data: this.pathToLayerIds(normalizedPath),
                     count: this.pathToLayerIds(normalizedPath).length,
-                    error: null
+                    error: null,
                 };
             }
 
@@ -247,7 +247,7 @@ class ContextTree extends EventEmitter {
                         return {
                             data: [],
                             count: 0,
-                            error: `Layer "${layerName}" not found at path "${normalizedPath}" and autoCreateLayers is disabled`
+                            error: `Layer "${layerName}" not found at path "${normalizedPath}" and autoCreateLayers is disabled`,
                         };
                     }
                 }
@@ -277,21 +277,21 @@ class ContextTree extends EventEmitter {
                 createdLayers: createdLayers.map(layer => ({
                     id: layer.id,
                     name: layer.name,
-                    type: layer.type
-                }))
+                    type: layer.type,
+                })),
             });
 
             return {
                 data: layerIds,
                 count: layerIds.length,
-                error: null
+                error: null,
             };
         } catch (error) {
             debug(`Error inserting path "${normalizedPath}": ${error.message}`);
             return {
                 data: [],
                 count: 0,
-                error: error.message
+                error: error.message,
             };
         }
     }
@@ -319,7 +319,7 @@ class ContextTree extends EventEmitter {
                 return {
                     data: null,
                     count: 0,
-                    error: `Move failed: ${error.message}`
+                    error: `Move failed: ${error.message}`,
                 };
             }
 
@@ -330,12 +330,12 @@ class ContextTree extends EventEmitter {
                 return {
                     data: null,
                     count: 0,
-                    error: `Cannot move path "${normalizedPathFrom}": Layer "${layer.name}" (ID: ${layer.id}) is locked.`
+                    error: `Cannot move path "${normalizedPathFrom}": Layer "${layer.name}" (ID: ${layer.id}) is locked.`,
                 };
             }
 
             // Check if destination already contains the node. If so, skip adding, but still remove from source.
-            let alreadyExistsAtDest = destNode.hasChild(nodeToMove.id);
+            const alreadyExistsAtDest = destNode.hasChild(nodeToMove.id);
             if (alreadyExistsAtDest) {
                 debug(`Node ${nodeToMove.id} (${layer.name}) already exists under destination ${destNode.id}. Skipping add step.`);
             } else {
@@ -358,7 +358,7 @@ class ContextTree extends EventEmitter {
                 layerId: layer.id,
                 layerName: layer.name,
                 layerType: layer.type,
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
             });
 
             debug(`Path "${normalizedPathFrom}" successfully moved under "${normalizedPathTo}".`);
@@ -367,17 +367,17 @@ class ContextTree extends EventEmitter {
                     pathFrom: normalizedPathFrom,
                     pathTo: normalizedPathTo,
                     layerId: layer.id,
-                    layerName: layer.name
+                    layerName: layer.name,
                 },
                 count: 1,
-                error: null
+                error: null,
             };
         } catch (error) {
             debug(`Error moving path "${normalizedPathFrom}" to "${normalizedPathTo}": ${error.message}`);
             return {
                 data: null,
                 count: 0,
-                error: error.message
+                error: error.message,
             };
         }
     }
@@ -391,12 +391,12 @@ class ContextTree extends EventEmitter {
 
         try {
             const sourceNodes = this.#getNodesForPath(normalizedPathFrom);
-            if (sourceNodes.length < 1) throw new Error('Source path does not resolve to any nodes.'); // Should not happen if root exists
+            if (sourceNodes.length < 1) {throw new Error('Source path does not resolve to any nodes.');} // Should not happen if root exists
             sourceNode = sourceNodes[sourceNodes.length - 1];
 
             // Get the destination parent node
             const destParentNodes = this.#getNodesForPath(normalizedPathTo);
-            if (destParentNodes.length < 1) throw new Error('Destination path does not resolve to any nodes.');
+            if (destParentNodes.length < 1) {throw new Error('Destination path does not resolve to any nodes.');}
             destParentNode = destParentNodes[destParentNodes.length - 1];
 
         } catch (error) {
@@ -407,8 +407,8 @@ class ContextTree extends EventEmitter {
         }
 
         if (!sourceNode || !destParentNode) {
-             debug(`Copy failed: Source or destination node not found after resolution.`);
-             return false; // Or throw
+            debug('Copy failed: Source or destination node not found after resolution.');
+            return false; // Or throw
         }
 
         const layer = sourceNode.payload;
@@ -446,9 +446,9 @@ class ContextTree extends EventEmitter {
                 try {
                     await this.copyPath(sourceChildPath, fullCopiedPath, true);
                 } catch(error) {
-                     debug(`Recursive copy failed for child ${sourceChildPath} to ${fullCopiedPath}: ${error.message}`);
-                     // Decide whether to continue copying siblings or stop
-                     // For now, let's log and continue
+                    debug(`Recursive copy failed for child ${sourceChildPath} to ${fullCopiedPath}: ${error.message}`);
+                    // Decide whether to continue copying siblings or stop
+                    // For now, let's log and continue
                 }
             }
         }
@@ -465,7 +465,7 @@ class ContextTree extends EventEmitter {
             layerId: layer.id,
             layerName: layer.name,
             layerType: layer.type,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
         });
 
         debug(`Path "${normalizedPathFrom}" successfully copied under "${normalizedPathTo}".`);
@@ -490,7 +490,7 @@ class ContextTree extends EventEmitter {
                 return {
                     data: null,
                     count: 0,
-                    error: `Unable to remove path, error resolving path or parent path: ${error.message}`
+                    error: `Unable to remove path, error resolving path or parent path: ${error.message}`,
                 };
             }
 
@@ -498,7 +498,7 @@ class ContextTree extends EventEmitter {
                 return {
                     data: null,
                     count: 0,
-                    error: `Unable to remove path, node or parent node not found after resolution: "${normalizedPath}"`
+                    error: `Unable to remove path, node or parent node not found after resolution: "${normalizedPath}"`,
                 };
             }
 
@@ -523,7 +523,7 @@ class ContextTree extends EventEmitter {
                 layerName: layer.name,
                 layerType: layer.type,
                 hadChildren: childrenCount > 0,
-                childrenCount
+                childrenCount,
             });
 
             return {
@@ -532,17 +532,17 @@ class ContextTree extends EventEmitter {
                     layerId: layer.id,
                     layerName: layer.name,
                     hadChildren: childrenCount > 0,
-                    childrenCount
+                    childrenCount,
                 },
                 count: 1,
-                error: null
+                error: null,
             };
         } catch (error) {
             debug(`Error removing path "${normalizedPath}": ${error.message}`);
             return {
                 data: null,
                 count: 0,
-                error: error.message
+                error: error.message,
             };
         }
     }
@@ -565,7 +565,7 @@ class ContextTree extends EventEmitter {
                 return {
                     data: null,
                     count: 0,
-                    error: `Unable to merge layer up, error resolving path "${path}": ${error.message}`
+                    error: `Unable to merge layer up, error resolving path "${path}": ${error.message}`,
                 };
             }
 
@@ -573,7 +573,7 @@ class ContextTree extends EventEmitter {
                 return {
                     data: null,
                     count: 0,
-                    error: `Unable to merge layer up, node not found at path "${path}" after resolution.`
+                    error: `Unable to merge layer up, node not found at path "${path}" after resolution.`,
                 };
             }
 
@@ -581,24 +581,24 @@ class ContextTree extends EventEmitter {
             this.emit('tree.layer.merged.up', {
                 path,
                 layerId: node.id,
-                layerName: node.payload.name
+                layerName: node.payload.name,
             });
 
             return {
                 data: {
                     path,
                     layerId: node.id,
-                    layerName: node.payload.name
+                    layerName: node.payload.name,
                 },
                 count: 1,
-                error: null
+                error: null,
             };
         } catch (error) {
             debug(`Error merging layer up at path "${path}": ${error.message}`);
             return {
                 data: null,
                 count: 0,
-                error: error.message
+                error: error.message,
             };
         }
     }
@@ -621,7 +621,7 @@ class ContextTree extends EventEmitter {
                 return {
                     data: null,
                     count: 0,
-                    error: `Unable to merge layer down, error resolving path "${path}": ${error.message}`
+                    error: `Unable to merge layer down, error resolving path "${path}": ${error.message}`,
                 };
             }
 
@@ -629,7 +629,7 @@ class ContextTree extends EventEmitter {
                 return {
                     data: null,
                     count: 0,
-                    error: `Unable to merge layer down, node not found at path "${path}" after resolution.`
+                    error: `Unable to merge layer down, node not found at path "${path}" after resolution.`,
                 };
             }
 
@@ -637,50 +637,26 @@ class ContextTree extends EventEmitter {
             this.emit('tree.layer.merged.down', {
                 path,
                 layerId: node.id,
-                layerName: node.payload.name
+                layerName: node.payload.name,
             });
 
             return {
                 data: {
                     path,
                     layerId: node.id,
-                    layerName: node.payload.name
+                    layerName: node.payload.name,
                 },
                 count: 1,
-                error: null
+                error: null,
             };
         } catch (error) {
             debug(`Error merging layer down at path "${path}": ${error.message}`);
             return {
                 data: null,
                 count: 0,
-                error: error.message
+                error: error.message,
             };
         }
-    }
-
-    async lockPath(path, lockBy) {
-        const normalizedPath = this.#normalizePath(path);
-        if (!lockBy) {
-            return {
-                data: null,
-                count: 0,
-                error: 'Locking path requires a lockBy context'
-            };
-        }
-        debug(`Locking normalized path "${normalizedPath}" by context "${lockBy}"`);
-    }
-
-    async unlockPath(path, lockBy) {
-        const normalizedPath = this.#normalizePath(path);
-        if (!lockBy) {
-            return {
-                data: null,
-                count: 0,
-                error: 'Unlocking path requires a lockBy context'
-            };
-        }
-        debug(`Unlocking normalized path "${normalizedPath}" by context "${lockBy}"`);
     }
 
     /**
@@ -722,7 +698,7 @@ class ContextTree extends EventEmitter {
             return {
                 data: null,
                 count: 0,
-                error: 'Locking path requires a lockBy context'
+                error: 'Locking path requires a lockBy context',
             };
         }
         debug(`Locking normalized path "${normalizedPath}" by context "${lockBy}"`);
@@ -758,17 +734,17 @@ class ContextTree extends EventEmitter {
                 data: {
                     path: normalizedPath,
                     lockBy,
-                    layerIds: lockedLayerIds
+                    layerIds: lockedLayerIds,
                 },
                 count: lockedLayerIds.length,
-                error: null
+                error: null,
             };
         } catch (error) {
             debug(`Error locking path "${normalizedPath}": ${error.message}`);
             return {
                 data: null,
                 count: 0,
-                error: error.message
+                error: error.message,
             };
         }
     }
@@ -779,7 +755,7 @@ class ContextTree extends EventEmitter {
             return {
                 data: null,
                 count: 0,
-                error: 'Unlocking path requires a lockBy context'
+                error: 'Unlocking path requires a lockBy context',
             };
         }
         debug(`Unlocking normalized path "${normalizedPath}" by context "${lockBy}"`);
@@ -815,17 +791,17 @@ class ContextTree extends EventEmitter {
                     path: normalizedPath,
                     lockBy,
                     unlockedLayerIds,
-                    stillLockedIds
+                    stillLockedIds,
                 },
                 count: unlockedLayerIds.length,
-                error: null
+                error: null,
             };
         } catch (error) {
             debug(`Error unlocking path "${normalizedPath}": ${error.message}`);
             return {
                 data: null,
                 count: 0,
-                error: error.message
+                error: error.message,
             };
         }
     }
@@ -837,7 +813,7 @@ class ContextTree extends EventEmitter {
      */
     getLayerForPath(path) {
         const normalizedPath = this.#normalizePath(path);
-        debug(`Getting layer for normalized path \"${normalizedPath}\"`);
+        debug(`Getting layer for normalized path "${normalizedPath}"`);
         try {
             const nodes = this.#getNodesForPath(normalizedPath);
             if (!nodes || nodes.length === 0) {
@@ -847,7 +823,7 @@ class ContextTree extends EventEmitter {
             const finalNode = nodes[nodes.length - 1];
             return finalNode.payload; // Return the Layer object
         } catch (error) {
-            debug(`Failed to get layer for path \"${normalizedPath}\": ${error.message}`);
+            debug(`Failed to get layer for path "${normalizedPath}": ${error.message}`);
             return null; // Return null if path resolution failed
         }
     }
@@ -869,7 +845,7 @@ class ContextTree extends EventEmitter {
                 documentId: resultId,
                 contextSpec: normalizedContextSpec,
                 layerNames,
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
             });
         }
         return resultId; // Return the generated ID
@@ -890,7 +866,7 @@ class ContextTree extends EventEmitter {
                 documentIds,
                 contextSpec: normalizedContextSpec,
                 layerNames,
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
             });
         }
         return results;
@@ -925,7 +901,7 @@ class ContextTree extends EventEmitter {
                 documentId: document.id, // Use the ID passed in
                 contextSpec: normalizedContextSpec,
                 layerNames,
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
             });
         }
         return result;
@@ -943,7 +919,7 @@ class ContextTree extends EventEmitter {
                 documentIds,
                 contextSpec: normalizedContextSpec,
                 layerNames,
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
             });
         }
         return results;
@@ -956,13 +932,13 @@ class ContextTree extends EventEmitter {
         const result = await this.#db.removeDocument(documentId, normalizedContextSpec, featureBitmapArray);
 
         if (result) {
-             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
-             this.emit('tree.document.removed', {
-                 documentId, // Use the ID passed in
-                 contextSpec: normalizedContextSpec,
-                 layerNames,
-                 timestamp: new Date().toISOString()
-             });
+            const layerNames = this.#pathToLayerNames(normalizedContextSpec);
+            this.emit('tree.document.removed', {
+                documentId, // Use the ID passed in
+                contextSpec: normalizedContextSpec,
+                layerNames,
+                timestamp: new Date().toISOString(),
+            });
         }
 
         // Return the result from the underlying DB method.
@@ -980,7 +956,7 @@ class ContextTree extends EventEmitter {
                 documentIds: docIdArray, // Use the IDs passed in
                 contextSpec: normalizedContextSpec,
                 layerNames,
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
             });
         }
         return results;
@@ -993,7 +969,7 @@ class ContextTree extends EventEmitter {
         if (result) { // Adjust condition
             this.emit('tree.document.deleted', {
                 documentId, // Use the ID passed in
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
             });
         }
         return result;
@@ -1006,7 +982,7 @@ class ContextTree extends EventEmitter {
         if (results) { // Adjust condition
             this.emit('tree.document.deleted.batch', {
                 documentIds: docIdArray, // Use the IDs passed in
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
             });
         }
         return results;
@@ -1083,7 +1059,7 @@ class ContextTree extends EventEmitter {
                 .filter((child) => child instanceof TreeNode)
                 .map((child) => (child.hasChildren ? buildTree(child) : createLayerInfo(child.payload)));
 
-            let layer = this.#layerIndex.getLayerByID(currentNode.id)
+            let layer = this.#layerIndex.getLayerByID(currentNode.id);
             if (!layer) { layer = this.rootLayer; }
             return createLayerInfo(layer, children);
         };
@@ -1100,7 +1076,7 @@ class ContextTree extends EventEmitter {
                 description: payload.description,
                 color: payload.color,
                 locked: payload.locked,
-                children
+                children,
             };
         };
 
@@ -1132,7 +1108,7 @@ class ContextTree extends EventEmitter {
 
         // Emit a recalculation event
         this.emit('tree.recalculated', {
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
         });
     }
 
@@ -1167,13 +1143,13 @@ class ContextTree extends EventEmitter {
                     // If still not found, something is wrong. Skip this node.
                     console.error(`Failed to find or reconstruct layer '${normalizedName}' (ID: ${nodeData.id}) during tree build. Skipping node.`);
                     return null;
-                     // Alternatively, throw new Error(`...`);
+                    // Alternatively, throw new Error(`...`);
                 }
-                 // If reconstructed, ensure its name matches what we expected
-                 if (this.#layerIndex._LayerIndex__normalizeLayerName(layer.name) !== normalizedName) { // Access private for check
-                     console.error(`Name mismatch after direct fetch for layer ID ${layer.id}: Expected '${normalizedName}', got '${layer.name}'. Skipping node.`);
-                     return null;
-                 }
+                // If reconstructed, ensure its name matches what we expected
+                if (this.#layerIndex._LayerIndex__normalizeLayerName(layer.name) !== normalizedName) { // Access private for check
+                    console.error(`Name mismatch after direct fetch for layer ID ${layer.id}: Expected '${normalizedName}', got '${layer.name}'. Skipping node.`);
+                    return null;
+                }
 
             } else {
                 // Verify the ID from the map instance matches the stored tree data
@@ -1215,7 +1191,7 @@ class ContextTree extends EventEmitter {
 
             // Emit a save event
             this.emit('tree.saved', {
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
             });
 
             return true;
@@ -1225,7 +1201,7 @@ class ContextTree extends EventEmitter {
             // Emit an error event
             this.emit('tree.error', {
                 operation: 'save',
-                error: error.message
+                error: error.message,
             });
 
             throw error;
@@ -1239,8 +1215,8 @@ class ContextTree extends EventEmitter {
             debug('No persistent Tree data found in the data store, using default initial tree.');
             // Ensure this.root is the default initialized root (should be set earlier in initialize())
             if (!this.root || this.root.id !== this.rootLayer.id) {
-                 this.root = new TreeNode(this.rootLayer.id, this.rootLayer);
-                 debug('Initialized with default root node as persistent data was missing.');
+                this.root = new TreeNode(this.rootLayer.id, this.rootLayer);
+                debug('Initialized with default root node as persistent data was missing.');
             }
             return false; // Indicate load was skipped
         }
@@ -1249,20 +1225,20 @@ class ContextTree extends EventEmitter {
         const loadedRootNode = this.#buildTreeFromJson(jsonTreeData);
 
         if (!loadedRootNode) {
-             debug('Failed to build tree from persistent data. Using default initial tree.');
-             // Ensure this.root is the default initialized root
-             if (!this.root || this.root.id !== this.rootLayer.id) {
-                  this.root = new TreeNode(this.rootLayer.id, this.rootLayer);
-                  debug('Initialized with default root node due to build failure.');
-             }
-             return false; // Indicate load failed
+            debug('Failed to build tree from persistent data. Using default initial tree.');
+            // Ensure this.root is the default initialized root
+            if (!this.root || this.root.id !== this.rootLayer.id) {
+                this.root = new TreeNode(this.rootLayer.id, this.rootLayer);
+                debug('Initialized with default root node due to build failure.');
+            }
+            return false; // Indicate load failed
         }
 
         this.root = loadedRootNode; // Assign the successfully built tree
 
         // Emit a load event
         this.emit('tree.loaded', {
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
         });
 
         return true;
@@ -1368,19 +1344,19 @@ class ContextTree extends EventEmitter {
         // Split, process segments, rejoin
         const segments = normalized.split('/');
         const normalizedSegments = segments.map(segment => {
-            if (segment === '') return ''; // Keep empty segments from split('/')
+            if (segment === '') {return '';} // Keep empty segments from split('/')
             // Lowercase and remove invalid characters
             return segment.toLowerCase().replace(/[^a-z0-9._-]/g, '');
         });
 
         // Rejoin, handling potential empty segments if original was just '/' or '//'
         normalized = normalizedSegments.join('/');
-        if (normalized === '') return '/'; // If all segments were removed or empty
+        if (normalized === '') {return '/';} // If all segments were removed or empty
 
         // Final check for root representation
-        if (normalized === '/') return '/';
+        if (normalized === '/') {return '/';}
         // Ensure starting slash if lost during join/map (e.g., path was '/foo')
-        if (!normalized.startsWith('/')) normalized = '/' + normalized;
+        if (!normalized.startsWith('/')) {normalized = '/' + normalized;}
 
         return normalized;
     }

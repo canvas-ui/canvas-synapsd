@@ -202,7 +202,7 @@ class FileBackend {
                 for (const subdir of subdirs) {
                     possiblePaths.push(
                         path.join(this.#dataPath, subdir, sanitized + '.json'),
-                        path.join(this.#dataPath, subdir, sanitized + '.bin')
+                        path.join(this.#dataPath, subdir, sanitized + '.bin'),
                     );
                 }
             } catch (error) {
@@ -429,7 +429,7 @@ class FileBackend {
         const keys = this.listKeys();
         return keys.map(key => ({
             key,
-            value: this.get(key)
+            value: this.get(key),
         })).filter(entry => entry.value !== undefined);
     }
 
@@ -440,7 +440,7 @@ class FileBackend {
         const datasetInstance = new FileBackend({
             path: this.#path,
             options: { ...this.options, ...options },
-            open: true
+            open: true,
         }, dataset);
         
         return datasetInstance;
@@ -597,7 +597,7 @@ class FileBackend {
         return {
             key,
             value,
-            version: 1 // Simple versioning
+            version: 1, // Simple versioning
         };
     }
 

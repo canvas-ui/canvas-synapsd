@@ -7,7 +7,7 @@ import {
     cleanupTestDB,
     assert,
     assertEqual,
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 import TimestampIndex from '../src/indexes/inverted/Timestamp.js';
 import fs from 'fs';
@@ -121,7 +121,7 @@ const lifecycleTestSuite = {
         } finally {
             await cleanupTestDB(db);
         }
-    }
+    },
 };
 
 runTestSuite('SynapsD Lifecycle', lifecycleTestSuite);

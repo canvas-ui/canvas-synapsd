@@ -7,7 +7,7 @@ import {
     assert,
     assertEqual,
     assertThrows,
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 
 const DEFAULT_KEY = 'test/bitmap';

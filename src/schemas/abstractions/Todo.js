@@ -59,7 +59,7 @@ export default class Todo extends Document {
             data: {
                 title: 'string',
             },
-        }
+        };
     }
 
     static validate(document) {

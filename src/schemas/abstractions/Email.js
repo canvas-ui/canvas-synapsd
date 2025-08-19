@@ -63,8 +63,8 @@ export default class Email extends Document {
     static get jsonSchema() {
         return {
             schema: DOCUMENT_SCHEMA_NAME,
-            data: {}
-        }
+            data: {},
+        };
     }
 
     static validate(document) {

@@ -113,7 +113,7 @@ class Layer {
         }
 
         // Remove all special characters except underscore, dash, dot and forward slash
-        name = name.replace(/[^a-zA-Z0-9_./\-]/g, '_');
+        name = name.replace(/[^a-zA-Z0-9_./-]/g, '_');
 
         // Convert to lowercase
         name = name.toLowerCase();

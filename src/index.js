@@ -8,7 +8,7 @@ import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd');
 
 // Errors
-import { ValidationError, NotFoundError, DuplicateError, DatabaseError } from './utils/errors.js';
+import { ValidationError, NotFoundError, DuplicateError, DatabaseError, ArgumentError } from './utils/errors.js';
 
 // DB Backends
 import BackendFactory from './backends/index.js';
@@ -447,7 +447,7 @@ class SynapsD extends EventEmitter {
         return insertedIds; // Return array of IDs on full success
     }
 
-    async hasDocument(id, contextSpec = "/", featureBitmapArrayInput) {
+    async hasDocument(id, contextSpec = '/', featureBitmapArrayInput) {
         if (!id) { throw new Error('Document id required'); }
 
         if (!await this.documents.has(id)) {
@@ -483,10 +483,10 @@ class SynapsD extends EventEmitter {
             contextFilterApplied = true;
             // If context filter results in null/empty, and it was a specific request, then fail early.
             if (!resultBitmap || resultBitmap.isEmpty) {
-                 if (!noContextFilterWanted) { // only fail early if context was explicitly requested and yielded no results
+                if (!noContextFilterWanted) { // only fail early if context was explicitly requested and yielded no results
                     debug(`hasDocument: Doc ${id} - explicit context filter ${JSON.stringify(parsedContextKeys)} yielded no results.`);
                     return false;
-                 }
+                }
             }
         }
 
@@ -512,8 +512,8 @@ class SynapsD extends EventEmitter {
         // (e.g. context was default '/' and no features). In this case, existence is enough (already checked).
         // However, if filters *were* run, resultBitmap must exist.
         if (noContextFilterWanted && noFeatureFilterWanted) {
-             // This should have been caught by the top check, but as a safeguard:
-             return true;
+            // This should have been caught by the top check, but as a safeguard:
+            return true;
         }
 
         return resultBitmap ? resultBitmap.has(id) : false;
@@ -589,7 +589,7 @@ class SynapsD extends EventEmitter {
                 return {
                     data: options.parse ? limitedDocs.map(doc => this.#parseInitializeDocument(doc)) : limitedDocs,
                     count: documents.length,
-                    error: null
+                    error: null,
                 };
             }
 
@@ -599,7 +599,7 @@ class SynapsD extends EventEmitter {
                 return {
                     data: [],
                     count: 0,
-                    error: null
+                    error: null,
                 };
             }
 
@@ -616,7 +616,7 @@ class SynapsD extends EventEmitter {
             return {
                 data: options.parse ? limitedDocs.map(doc => this.#parseInitializeDocument(doc)) : limitedDocs,
                 count: finalDocumentIds.length,
-                error: null
+                error: null,
             };
 
         } catch (error) {
@@ -624,7 +624,7 @@ class SynapsD extends EventEmitter {
             return {
                 data: [],
                 count: 0,
-                error: error.message
+                error: error.message,
             };
         }
     }
@@ -655,7 +655,7 @@ class SynapsD extends EventEmitter {
 
         // If no update data provided, we're only updating context/feature memberships
         if (updateData === null) {
-            debug(`updateDocument: No update data provided, only updating document memberships`);
+            debug('updateDocument: No update data provided, only updating document memberships');
             // Use the stored document as our updated document
             updateData = storedDocument;
         } else if (typeof updateData === 'object' && !isDocumentInstance(updateData)) {
@@ -669,8 +669,8 @@ class SynapsD extends EventEmitter {
         }
 
         // Perform the update using the document's update method
-        let updatedDocument = storedDocument.update(updateData);
-        debug(`updateDocument: Document updated in memory, validating...`);
+        const updatedDocument = storedDocument.update(updateData);
+        debug('updateDocument: Document updated in memory, validating...');
 
         // Validate updated document
         updatedDocument.validate();
@@ -728,7 +728,7 @@ class SynapsD extends EventEmitter {
         for (let i = 0; i < docArray.length; i++) {
             const docUpdate = docArray[i]; // Assuming docArray contains { id, updateData } or just the full document to update
             if (!docUpdate || typeof docUpdate.id !== 'number') {
-                 // Add context about the failed item
+                // Add context about the failed item
                 const error = new Error(`Invalid document data at index ${i}: Missing or invalid ID.`);
                 error.failedItem = docUpdate;
                 error.failedIndex = i;
@@ -827,7 +827,7 @@ class SynapsD extends EventEmitter {
         const result = {
             successful: [], // Array of { index: number, id: number }
             failed: [],    // Array of { index: number, id: number, error: string }
-            count: docIdArray.length
+            count: docIdArray.length,
         };
 
         // TODO: Implement actual batch/transactional operation
@@ -837,7 +837,7 @@ class SynapsD extends EventEmitter {
                 result.failed.push({
                     index: i,
                     id: id,
-                    error: 'Invalid document ID: Must be a number.'
+                    error: 'Invalid document ID: Must be a number.',
                 });
                 continue;
             }
@@ -852,7 +852,7 @@ class SynapsD extends EventEmitter {
                 result.failed.push({
                     index: i,
                     id: id,
-                    error: error.message || 'Unknown error'
+                    error: error.message || 'Unknown error',
                 });
             }
         }
@@ -906,7 +906,7 @@ class SynapsD extends EventEmitter {
         const result = {
             successful: [], // Array of { index: number, id: number }
             failed: [],    // Array of { index: number, id: number, error: string }
-            count: docIdArray.length
+            count: docIdArray.length,
         };
 
         // TODO: Implement actual batch/transactional operation
@@ -916,7 +916,7 @@ class SynapsD extends EventEmitter {
                 result.failed.push({
                     index: i,
                     id: id,
-                    error: 'Invalid document ID: Must be a number.'
+                    error: 'Invalid document ID: Must be a number.',
                 });
                 continue; // Skip to the next ID
             }
@@ -934,7 +934,7 @@ class SynapsD extends EventEmitter {
                     result.failed.push({
                         index: i,
                         id: id,
-                        error: 'Document not found or already deleted'
+                        error: 'Document not found or already deleted',
                     });
                     debug(`deleteDocumentArray: Document not found or already deleted (ID: ${id}, index ${i}).`);
                 }
@@ -943,7 +943,7 @@ class SynapsD extends EventEmitter {
                 result.failed.push({
                     index: i,
                     id: id,
-                    error: error.message || 'Unknown error'
+                    error: error.message || 'Unknown error',
                 });
             }
         }
@@ -1005,14 +1005,14 @@ class SynapsD extends EventEmitter {
         }
 
         // Convert all ids to numbers if they are strings
-        let processedIdArray = idArray.map(id => typeof id === 'string' ? parseInt(id) : id);
+        const processedIdArray = idArray.map(id => typeof id === 'string' ? parseInt(id) : id);
 
         if (processedIdArray.length === 0) {
             debug('getDocumentsByIdArray: No IDs to fetch after context filter (if applied).ନ');
             return {
                 data: [],
                 count: 0, // Count is 0 as no documents will be fetched that match criteria
-                error: null
+                error: null,
             };
         }
 
@@ -1028,14 +1028,14 @@ class SynapsD extends EventEmitter {
             return {
                 data: options.parse ? limitedDocs.map(doc => this.#parseInitializeDocument(doc)) : limitedDocs,
                 count: totalMatchingCount, // This is the count of documents found for the (possibly context-filtered) IDs
-                error: null
+                error: null,
             };
         } catch (error) {
             debug(`Error in getDocumentsByIdArray: ${error.message}`);
             return {
                 data: [],
                 count: 0,
-                error: error.message
+                error: error.message,
             };
         }
     }
@@ -1088,7 +1088,7 @@ class SynapsD extends EventEmitter {
             return {
                 data: [],
                 count: 0,
-                error: error.message
+                error: error.message,
             };
         }
     }
@@ -1109,7 +1109,7 @@ class SynapsD extends EventEmitter {
         const result = {
             successful: [], // Array of { index: number, id: number }
             failed: [],    // Array of { index: number, id: number, error: string }
-            count: docIdArray.length
+            count: docIdArray.length,
         };
 
         for (let i = 0; i < docIdArray.length; i++) {
@@ -1130,7 +1130,7 @@ class SynapsD extends EventEmitter {
                 result.failed.push({
                     index: i,
                     id: id,
-                    error: error.message || 'Unknown error'
+                    error: error.message || 'Unknown error',
                 });
             }
         }
@@ -1155,7 +1155,7 @@ class SynapsD extends EventEmitter {
         const result = {
             successful: [], // Array of { index: number, id: number }
             failed: [],    // Array of { index: number, id: number, error: string }
-            count: docIdArray.length
+            count: docIdArray.length,
         };
 
         for (let i = 0; i < docIdArray.length; i++) {
@@ -1174,7 +1174,7 @@ class SynapsD extends EventEmitter {
                 result.failed.push({
                     index: i,
                     id: id,
-                    error: error.message || 'Unknown error'
+                    error: error.message || 'Unknown error',
                 });
             }
         }
@@ -1205,7 +1205,7 @@ class SynapsD extends EventEmitter {
         return {
             data: [],
             count: 0,
-            error: 'Query method not implemented yet'
+            error: 'Query method not implemented yet',
         };
     }
 
@@ -1227,7 +1227,7 @@ class SynapsD extends EventEmitter {
         return {
             data: [],
             count: 0,
-            error: 'FTS Query method not implemented yet'
+            error: 'FTS Query method not implemented yet',
         };
     }
 
@@ -1293,13 +1293,13 @@ class SynapsD extends EventEmitter {
             return ['/'];
         }
 
-                // Process a single path string to create layer contexts
+        // Process a single path string to create layer contexts
         const processString = (str) => {
-            if (str === '/') return ['/'];
+            if (str === '/') {return ['/'];}
 
             // Split the string and filter empty elements
             const parts = str.split('/').map(part => part.trim()).filter(Boolean);
-            if (parts.length === 0) return ['/'];
+            if (parts.length === 0) {return ['/'];}
 
             // Create layer contexts: ['/', 'foo', 'bar', 'baz']
             return ['/', ...parts];
@@ -1365,7 +1365,7 @@ class SynapsD extends EventEmitter {
         }
 
         // Basic sanity check for schema and data properties after potential parsing
-         if (!parsedData.schema || parsedData.data === undefined) {
+        if (!parsedData.schema || parsedData.data === undefined) {
             throw new Error('Parsed document data must have a schema and data property.', parsedData);
         }
 
@@ -1423,8 +1423,8 @@ class SynapsD extends EventEmitter {
     #parseInitializeDocument(documentData) {
         debug('#parseInitializeDocument: Starting parse and initialization.');
         if (!documentData) {
-             debug('#parseInitializeDocument: Error - Input document data is required.');
-             throw new Error('Document data required');
+            debug('#parseInitializeDocument: Error - Input document data is required.');
+            throw new Error('Document data required');
         }
 
         let parsedData;

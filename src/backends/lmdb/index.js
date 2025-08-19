@@ -100,7 +100,7 @@ class Db {
     get stats() { return this.db.getStats(); }
 
     listKeys() {
-        let keys = [];
+        const keys = [];
         this.db.getKeys().forEach(element => {
             keys.push(element);
         });
@@ -108,7 +108,7 @@ class Db {
     }
 
     listValues() {
-        let values = [];
+        const values = [];
         this.db.getRange().forEach(element => {
             values.push(element.value);
         });
@@ -116,7 +116,7 @@ class Db {
     }
 
     listEntries() {
-        let entries = [];
+        const entries = [];
         this.db.getRange().forEach(element => {
             entries.push(element);
         });
@@ -396,11 +396,11 @@ class Db {
         debug(`Backing up database "${this.#path}" to "${backupPath}"`);
         // this.db.backup(backupPath, compact); // Old call
         return this.db.backup(backupPath, compact); // backup() is async, so return its Promise
-                                                    // or await if the calling context supports it and needs completion.
-                                                    // Since #backupDatabase is called from constructor context for backupOnOpen,
-                                                    // making it fully async would require constructor to be async or use .then()
-                                                    // For now, returning the promise is the minimal change.
-                                                    // If backupOnOpen needs to *complete* before proceeding, more changes are needed.
+        // or await if the calling context supports it and needs completion.
+        // Since #backupDatabase is called from constructor context for backupOnOpen,
+        // making it fully async would require constructor to be async or use .then()
+        // For now, returning the promise is the minimal change.
+        // If backupOnOpen needs to *complete* before proceeding, more changes are needed.
     }
 
     #generateBackupFolderPath() {

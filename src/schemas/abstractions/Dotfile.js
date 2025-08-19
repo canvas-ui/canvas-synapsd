@@ -25,7 +25,7 @@ const DOCUMENT_SCHEMA_NAME = 'data/abstraction/dotfile';
 const DOCUMENT_SCHEMA_VERSION = '4.0';
 
 // Regex allows:  /abs/path, ~/path, $HOME/path, {{HOME}}/path etc.
-const pathPattern = /^(\{\{\s*[A-Za-z0-9_]+\s*\}\}|\$[A-Za-z0-9_]+|~)?[\/A-Za-z0-9_.-]+$/;
+const pathPattern = /^(\{\{\s*[A-Za-z0-9_]+\s*\}\}|\$[A-Za-z0-9_]+|~)?[/A-Za-z0-9_.-]+$/;
 
 /*******************
  * Data Schema     *
@@ -94,7 +94,7 @@ export default class Dotfile extends Document {
      * ------------------*/
 
     setBackup(backupPath) {
-        if (!backupPath) throw new Error('backupPath required');
+        if (!backupPath) {throw new Error('backupPath required');}
         this.data.backupPath = backupPath;
         this.data.backupCreatedAt = new Date().toISOString();
         this.updatedAt = this.data.backupCreatedAt;
@@ -104,7 +104,7 @@ export default class Dotfile extends Document {
      * Two Dotfile docs conflict if they share either endpoint of the mapping.
      */
     conflictsWith(other) {
-        if (!other) return false;
+        if (!other) {return false;}
         return (
             this.localPath === other.localPath || this.repoPath === other.repoPath
         );

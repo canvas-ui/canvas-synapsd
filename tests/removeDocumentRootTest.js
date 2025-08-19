@@ -5,7 +5,7 @@ import SynapsD from '../src/index.js';
 const DB_PATH = '/tmp/synapsd-testdb-removetest';
 
 const db = new SynapsD({
-    path: DB_PATH
+    path: DB_PATH,
 });
 
 async function testRemoveFromRoot() {
@@ -18,7 +18,7 @@ async function testRemoveFromRoot() {
             data: {
                 url: 'https://example.com/test',
                 title: 'Test Tab',
-            }
+            },
         });
 
         // Insert with both root and specific context

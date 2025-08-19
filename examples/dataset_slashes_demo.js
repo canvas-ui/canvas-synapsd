@@ -28,7 +28,7 @@ async function demonstrateDatasetSlashes() {
     const db = new SynapsD({
         path: '/tmp/dataset-slashes-demo',
         backend: 'file',
-        pretty: true
+        pretty: true,
     });
     
     console.log('✅ File backend created\n');
@@ -43,7 +43,7 @@ async function demonstrateDatasetSlashes() {
         { name: 'data/user/profiles', description: 'User profile data' },
         { name: 'cache/sessions/active', description: 'Active session cache' },
         { name: 'logs/application/errors', description: 'Application error logs' },
-        { name: 'config/environment/prod', description: 'Production configuration' }
+        { name: 'config/environment/prod', description: 'Production configuration' },
     ];
     
     const createdDatasets = {};
@@ -68,34 +68,34 @@ async function demonstrateDatasetSlashes() {
         id: 123,
         name: 'Alice Johnson',
         email: 'alice@example.com',
-        role: 'admin'
+        role: 'admin',
     });
     
     createdDatasets['data/user/profiles'].set('user-456', {
         id: 456,
         name: 'Bob Smith',
         email: 'bob@example.com',
-        role: 'user'
+        role: 'user',
     });
     
     createdDatasets['cache/sessions/active'].set('session-abc123', {
         userId: 123,
         loginTime: new Date().toISOString(),
-        ipAddress: '192.168.1.1'
+        ipAddress: '192.168.1.1',
     });
     
     createdDatasets['logs/application/errors'].set('error-001', {
         timestamp: new Date().toISOString(),
         level: 'ERROR',
         message: 'Database connection failed',
-        stack: 'Error: Connection timeout...'
+        stack: 'Error: Connection timeout...',
     });
     
     createdDatasets['config/environment/prod'].set('database', {
         host: 'db.example.com',
         port: 5432,
         ssl: true,
-        poolSize: 20
+        poolSize: 20,
     });
     
     console.log('   🔢 Binary data → internal/bitmaps (4 files)');

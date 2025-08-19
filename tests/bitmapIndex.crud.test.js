@@ -11,7 +11,7 @@ import {
     assertEqual,
     assertAsyncThrows,
     assertThrows,
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 
 const VALID_KEY_PREFIX = 'data/'; // Using a valid prefix for keys
@@ -87,7 +87,7 @@ const bitmapCrudTestSuite = {
             const bitmapIndex = db.bitmapIndex;
             await assertAsyncThrows(
                 async () => bitmapIndex.createBitmap('invalidKeyNoPrefix', [1]),
-                'createBitmap should throw for key without valid prefix'
+                'createBitmap should throw for key without valid prefix',
             );
         } finally {
             await cleanupTestDB(db);
@@ -100,13 +100,13 @@ const bitmapCrudTestSuite = {
             db = await initializeTestDB();
             const bitmapIndex = db.bitmapIndex;
             await bitmapIndex.createBitmap(`${VALID_KEY_PREFIX}listKey1`, [1]); // data/listKey1
-            await bitmapIndex.createBitmap(`user/listKey2`, [2]);         // user/listKey2
+            await bitmapIndex.createBitmap('user/listKey2', [2]);         // user/listKey2
 
             const allKeys = await bitmapIndex.listBitmaps(); // No prefix
             assert(Array.isArray(allKeys), 'listBitmaps should return an array');
 
             assert(allKeys.includes(`${VALID_KEY_PREFIX}listKey1`), 'List should include data/listKey1');
-            assert(allKeys.includes(`user/listKey2`), 'List should include user/listKey2');
+            assert(allKeys.includes('user/listKey2'), 'List should include user/listKey2');
 
             // Assert that internal keys created by SynapsD are NOT present
             assert(!allKeys.includes('internal/gc/deleted'), 'List should NOT include internal/gc/deleted');
@@ -205,7 +205,7 @@ const bitmapCrudTestSuite = {
             const bitmapIndex = db.bitmapIndex;
             await assertAsyncThrows(
                 async () => bitmapIndex.getBitmap('badkey_autocreate', true),
-                'getBitmap with invalid key and autoCreate=true should throw'
+                'getBitmap with invalid key and autoCreate=true should throw',
             );
         } finally {
             await cleanupTestDB(db);
@@ -244,7 +244,7 @@ const bitmapCrudTestSuite = {
             const bitmapIndex = db.bitmapIndex;
             await assertAsyncThrows(
                 async () => bitmapIndex.renameBitmap(`${VALID_KEY_PREFIX}nonExistentOld`, `${VALID_KEY_PREFIX}anyNewKey`),
-                'renameBitmap should throw if oldKey does not exist'
+                'renameBitmap should throw if oldKey does not exist',
             );
         } finally {
             await cleanupTestDB(db);
@@ -281,7 +281,7 @@ const bitmapCrudTestSuite = {
         } finally {
             await cleanupTestDB(db);
         }
-    }
+    },
 };
 
 runTestSuite('BitmapIndex CRUD Operations (Integrated)', bitmapCrudTestSuite);

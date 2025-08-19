@@ -5,7 +5,7 @@ import SynapsD from '../src/index.js';
 const DB_PATH = '/tmp/synapsd-testdb-hierarchy';
 
 const db = new SynapsD({
-    path: DB_PATH
+    path: DB_PATH,
 });
 
 async function testCurrentHierarchyBehavior() {
@@ -18,7 +18,7 @@ async function testCurrentHierarchyBehavior() {
             data: {
                 url: 'https://example.com/hierarchy-test',
                 title: 'Hierarchy Test Tab',
-            }
+            },
         });
 
         // Insert document in a deep path

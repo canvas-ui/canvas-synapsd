@@ -34,7 +34,7 @@ async function demonstrateEnhancedFileBackend() {
         backend: 'file',
         pretty: true,        // Pretty-print JSON files
         atomic: true,        // Atomic writes
-        maxCacheSize: 1000   // Cache size
+        maxCacheSize: 1000,   // Cache size
     });
     
     console.log('✅ Enhanced file backend created\n');
@@ -51,9 +51,9 @@ async function demonstrateEnhancedFileBackend() {
                 data: {
                     title: 'My Important Tab',
                     url: 'https://example.com',
-                    content: 'This is tab content'
-                }
-            }
+                    content: 'This is tab content',
+                },
+            },
         },
         {
             key: 'my-note-1',
@@ -62,9 +62,9 @@ async function demonstrateEnhancedFileBackend() {
                 data: {
                     title: 'Meeting Notes',
                     content: 'Discussion about file backend improvements',
-                    tags: ['backend', 'file-system', 'schemas']
-                }
-            }
+                    tags: ['backend', 'file-system', 'schemas'],
+                },
+            },
         },
         {
             key: 'my-file-1',
@@ -73,9 +73,9 @@ async function demonstrateEnhancedFileBackend() {
                 data: {
                     name: 'document.pdf',
                     path: '/home/user/documents/document.pdf',
-                    size: 1024000
-                }
-            }
+                    size: 1024000,
+                },
+            },
         },
         {
             key: 'todo-1',
@@ -84,10 +84,10 @@ async function demonstrateEnhancedFileBackend() {
                 data: {
                     title: 'Implement file backend',
                     completed: true,
-                    priority: 'high'
-                }
-            }
-        }
+                    priority: 'high',
+                },
+            },
+        },
     ];
     
     // Store documents
@@ -108,16 +108,16 @@ async function demonstrateEnhancedFileBackend() {
     const binaryData = [
         {
             key: 'user-bitmap-1',
-            data: Buffer.from([0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0xFD])
+            data: Buffer.from([0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0xFD]),
         },
         {
             key: 'feature-bitmap-1',
-            data: new Uint8Array([0x10, 0x20, 0x30, 0x40, 0x50])
+            data: new Uint8Array([0x10, 0x20, 0x30, 0x40, 0x50]),
         },
         {
             key: 'context-bitmap-1',
-            data: Buffer.from('binary data content', 'utf8')
-        }
+            data: Buffer.from('binary data content', 'utf8'),
+        },
     ];
     
     binaryData.forEach(({ key, data }) => {
@@ -137,7 +137,7 @@ async function demonstrateEnhancedFileBackend() {
     mixedDataset.set('config', {
         theme: 'dark',
         language: 'en',
-        features: ['file-backend', 'schema-organization']
+        features: ['file-backend', 'schema-organization'],
     });
     
     // Store binary data in the same dataset
@@ -206,8 +206,8 @@ async function demonstrateEnhancedFileBackend() {
             data: {
                 title: `Performance Test ${i}`,
                 content: `This is test document ${i}`,
-                index: i
-            }
+                index: i,
+            },
         });
     }
     
@@ -249,7 +249,7 @@ async function demonstrateEnhancedFileBackend() {
         // Show binary content info
         const binaryContent = readFileSync('/tmp/enhanced-file-demo/bitmaps/user-bitmap-1.bin');
         console.log('\nBinary file info:');
-        console.log(`   📁 File: bitmaps/user-bitmap-1.bin`);
+        console.log('   📁 File: bitmaps/user-bitmap-1.bin');
         console.log(`   📏 Size: ${binaryContent.length} bytes`);
         console.log(`   🔢 Content: ${Array.from(binaryContent).map(b => `0x${b.toString(16).padStart(2, '0')}`).join(' ')}`);
         

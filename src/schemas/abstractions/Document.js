@@ -47,7 +47,7 @@ export default class Document extends BaseDocument {
         return {
             schema: DOCUMENT_SCHEMA_NAME,
             data: {},
-        }
+        };
     }
 
     validate() {

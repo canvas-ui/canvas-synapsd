@@ -11,7 +11,7 @@ import {
     assertEqual,
     assertThrows,
     assertAsyncThrows,
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 
 const COLLECTION_NAME = 'testUserCollection';
@@ -149,7 +149,7 @@ const bitmapCollectionTestSuite = {
         } finally {
             await cleanupTestDB(db);
         }
-    }
+    },
     // Other delegated methods (list, rename, delete, untick, OR, XOR, etc.)
     // would follow a similar testing pattern: spy on the bitmapIndex method
     // and verify it's called with correctly prefixed keys.

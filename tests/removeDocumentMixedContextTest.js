@@ -5,7 +5,7 @@ import SynapsD from '../src/index.js';
 const DB_PATH = '/tmp/synapsd-testdb-mixedtest';
 
 const db = new SynapsD({
-    path: DB_PATH
+    path: DB_PATH,
 });
 
 async function testMixedContextRemoval() {
@@ -18,7 +18,7 @@ async function testMixedContextRemoval() {
             data: {
                 url: 'https://example.com/mixed-test',
                 title: 'Mixed Context Test Tab',
-            }
+            },
         });
 
         // Insert document in multiple contexts

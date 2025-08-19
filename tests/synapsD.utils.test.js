@@ -7,7 +7,7 @@ import {
     assert,
     assertEqual,
     runTestSuite,
-    TEST_DB_PATH
+    TEST_DB_PATH,
 } from './helpers.js';
 import fs from 'fs';
 import path from 'path';
@@ -110,7 +110,7 @@ const utilsTestSuite = {
             await this.afterEach();
             await cleanupTestDB(db);
         }
-    }
+    },
 };
 
 // Modify runTestSuite to handle beforeEach/afterEach if defined on the suite object
@@ -123,9 +123,9 @@ async function runCustomTestSuite(suiteName, suite) {
     for (const testName of testNames) {
         console.log(`\\n[TEST] ${suiteName} - ${testName}`);
         try {
-            if (suite.beforeEach) await suite.beforeEach();
+            if (suite.beforeEach) {await suite.beforeEach();}
             await suite[testName]();
-            if (suite.afterEach) await suite.afterEach();
+            if (suite.afterEach) {await suite.afterEach();}
             console.log(`[PASS] ${testName}`);
             passed++;
         } catch (error) {
@@ -143,7 +143,7 @@ async function runCustomTestSuite(suiteName, suite) {
     console.log(`Total tests: ${testNames.length}`);
     console.log(`Passed: ${passed}`);
     console.log(`Failed: ${failed}`);
-    console.log(`-----------------------------------\\n`);
+    console.log('-----------------------------------\\n');
     return failed === 0;
 }
 

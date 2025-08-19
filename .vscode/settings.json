@@ -1,0 +1,28 @@
+{
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "editor.tabSize": 4,
+    "[markdown]": {
+        "files.trimTrailingWhitespace": false
+    },
+    "workbench.colorCustomizations": {
+        "activityBar.activeBackground": "#a972cc",
+        "activityBar.background": "#a972cc",
+        "activityBar.foreground": "#15202b",
+        "activityBar.inactiveForeground": "#15202b99",
+        "activityBarBadge.background": "#ddc6a1",
+        "activityBarBadge.foreground": "#15202b",
+        "commandCenter.border": "#e7e7e799",
+        "sash.hoverBorder": "#a972cc",
+        "statusBar.background": "#924dbf",
+        "statusBar.foreground": "#e7e7e7",
+        "statusBarItem.hoverBackground": "#a972cc",
+        "statusBarItem.remoteBackground": "#924dbf",
+        "statusBarItem.remoteForeground": "#e7e7e7",
+        "titleBar.activeBackground": "#924dbf",
+        "titleBar.activeForeground": "#e7e7e7",
+        "titleBar.inactiveBackground": "#924dbf99",
+        "titleBar.inactiveForeground": "#e7e7e799"
+    },
+    "peacock.color": "#924DBF"
+}

@@ -5,7 +5,7 @@ import SynapsD from '../src/index.js';
 const DB_PATH = '/tmp/synapsd-testdb-recursive';
 
 const db = new SynapsD({
-    path: DB_PATH
+    path: DB_PATH,
 });
 
 async function testRecursiveVsNonRecursive() {
@@ -19,7 +19,7 @@ async function testRecursiveVsNonRecursive() {
         console.log('--- Test 1: Non-Recursive Removal (Default) ---');
 
         const tab1 = TabSchema.fromData({
-            data: { url: 'https://example.com/test1', title: 'Test Tab 1' }
+            data: { url: 'https://example.com/test1', title: 'Test Tab 1' },
         });
 
         const docId1 = await db.insertDocument(tab1, '/projects/web/frontend', ['custom/test1']);
@@ -43,7 +43,7 @@ async function testRecursiveVsNonRecursive() {
         console.log('\n--- Test 2: Recursive Removal (Explicit Flag) ---');
 
         const tab2 = TabSchema.fromData({
-            data: { url: 'https://example.com/test2', title: 'Test Tab 2' }
+            data: { url: 'https://example.com/test2', title: 'Test Tab 2' },
         });
 
         const docId2 = await db.insertDocument(tab2, '/projects/web/backend', ['custom/test2']);
@@ -67,10 +67,10 @@ async function testRecursiveVsNonRecursive() {
         console.log('\n--- Test 3: Array Operations ---');
 
         const tab3 = TabSchema.fromData({
-            data: { url: 'https://example.com/test3', title: 'Test Tab 3' }
+            data: { url: 'https://example.com/test3', title: 'Test Tab 3' },
         });
         const tab4 = TabSchema.fromData({
-            data: { url: 'https://example.com/test4', title: 'Test Tab 4' }
+            data: { url: 'https://example.com/test4', title: 'Test Tab 4' },
         });
 
         const docId3 = await db.insertDocument(tab3, '/docs/public/guides', ['custom/test3']);

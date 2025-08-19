@@ -67,7 +67,7 @@ export default class Note extends Document {
                 title: 'string',
                 content: 'string',
             },
-        }
+        };
     }
 
     static validate(document) {

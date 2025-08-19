@@ -58,8 +58,8 @@ export default class Tab extends Document {
             data: {
                 url: 'string',
                 title: 'string',
-            }
-        }
+            },
+        };
     }
 
     validate() {

@@ -10,7 +10,7 @@ import {
     assertThrows,
     assertAsyncThrows,
     runTestSuite,
-    TEST_DB_PATH
+    TEST_DB_PATH,
 } from './helpers.js';
 import BaseDocument from '../src/schemas/BaseDocument.js';
 import fs from 'fs';
@@ -139,7 +139,7 @@ const crudTestSuite = {
             const invalidData = { schema: 'BaseDocument', data: null }; // Invalid data for BaseDocument
             await assertAsyncThrows(
                 async () => db.insertDocument(invalidData),
-                'insertDocument should throw for data that fails schema validation'
+                'insertDocument should throw for data that fails schema validation',
             );
         } finally {
             await cleanupTestDB(db);
@@ -222,17 +222,17 @@ const crudTestSuite = {
             const docId1 = await db.insertDocument(
                 { schema: 'BaseDocument', data: { name: 'Doc1' } },
                 '/c1',
-                ['f1']
+                ['f1'],
             );
             const docId2 = await db.insertDocument(
                 { schema: 'BaseDocument', data: { name: 'Doc2' } },
                 '/c2',
-                ['f2']
+                ['f2'],
             );
-             const docId3 = await db.insertDocument(
+            const docId3 = await db.insertDocument(
                 { schema: 'BaseDocument', data: { name: 'Doc3' } },
                 '/c1',
-                ['f2'] // In c1, but with f2
+                ['f2'], // In c1, but with f2
             );
 
             assert(await db.hasDocument(docId1, '/c1', ['f1']), 'Doc1 in /c1 with f1 - positive case');
@@ -358,7 +358,7 @@ const crudTestSuite = {
             db = await initializeTestDB();
             await assertAsyncThrows(
                 async () => db.updateDocument(999123, { data: { title: 'ghost' } }),
-                'updateDocument should throw for non-existent document ID'
+                'updateDocument should throw for non-existent document ID',
             );
         } finally {
             await cleanupTestDB(db);
@@ -373,7 +373,7 @@ const crudTestSuite = {
             const invalidUpdateData = { schema: 'BaseDocument', data: null }; // Invalid for BaseDocument
             await assertAsyncThrows(
                 async () => db.updateDocument(docId, invalidUpdateData),
-                'updateDocument should throw for invalid update data'
+                'updateDocument should throw for invalid update data',
             );
         } finally {
             await cleanupTestDB(db);
@@ -454,7 +454,7 @@ const crudTestSuite = {
 
             assert(await db.hasDocument(docId, context, [feature]), 'Document should exist with context/feature before delete');
 
-            let deleteResult = await db.deleteDocument(docId);
+            const deleteResult = await db.deleteDocument(docId);
             assert(deleteResult, 'deleteDocument should return true on success');
 
             assertEqual(await db.getDocumentById(docId), null, 'Document should be null after delete from store');
@@ -534,7 +534,7 @@ const crudTestSuite = {
             const docArray = [
                 { schema: 'BaseDocument', data: { title: 'Valid ArrayDoc' } },
                 { schema: 'BaseDocument', data: null }, // Invalid
-                { schema: 'UnknownSchema', data: { title: 'Invalid Schema' } } // Invalid schema
+                { schema: 'UnknownSchema', data: { title: 'Invalid Schema' } }, // Invalid schema
             ];
             const errors = await db.insertDocumentArray(docArray);
             assertEqual(errors.length, 2, 'Should return 2 errors for the invalid documents');
@@ -665,8 +665,8 @@ const crudTestSuite = {
         let db;
         try {
             db = await initializeTestDB();
-            const docData1 = { schema: 'BaseDocument', data: { title: 'CS Array 1', content: "A" } };
-            const docData2 = { schema: 'BaseDocument', data: { title: 'CS Array 2', content: "B" } };
+            const docData1 = { schema: 'BaseDocument', data: { title: 'CS Array 1', content: 'A' } };
+            const docData2 = { schema: 'BaseDocument', data: { title: 'CS Array 2', content: 'B' } };
             const doc1 = await db.getDocumentById(await db.insertDocument(docData1));
             const doc2 = await db.getDocumentById(await db.insertDocument(docData2));
 
@@ -832,7 +832,7 @@ const crudTestSuite = {
         } finally {
             await cleanupTestDB(db);
         }
-    }
+    },
 
 };
 

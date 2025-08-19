@@ -81,7 +81,7 @@ export default class TimestampIndex {
      */
     async get(timestamp) {
         const normalizedTimestamp = this.#normalizeTimestamp(timestamp);
-        if (!normalizedTimestamp) return undefined;
+        if (!normalizedTimestamp) {return undefined;}
         return await this.dataset.get(normalizedTimestamp); // .get on Db wrapper is async
     }
 
@@ -124,7 +124,7 @@ export default class TimestampIndex {
         }
         const rangeIds = await this.findByRange(startDate, endDate);
         const actionBitmap = this.actionBitmaps[action];
-        if (!actionBitmap) return []; // Should not happen due to constructor check
+        if (!actionBitmap) {return [];} // Should not happen due to constructor check
 
         return rangeIds.filter(id => actionBitmap.has(id));
     }
@@ -136,10 +136,10 @@ export default class TimestampIndex {
      */
     async delete(timestamp) {
         const normalizedTimestamp = this.#normalizeTimestamp(timestamp);
-        if (!normalizedTimestamp) return false;
+        if (!normalizedTimestamp) {return false;}
 
         if (this.dataset && typeof this.dataset.remove === 'function') {
-             return await this.dataset.remove(normalizedTimestamp);
+            return await this.dataset.remove(normalizedTimestamp);
         } else {
             console.error('[TimestampIndex.delete ERROR] this.dataset.remove is not a function or dataset is undefined.');
             return false;
@@ -153,7 +153,7 @@ export default class TimestampIndex {
      */
     async has(timestamp) {
         const normalizedTimestamp = this.#normalizeTimestamp(timestamp);
-        if (!normalizedTimestamp) return false;
+        if (!normalizedTimestamp) {return false;}
         return this.dataset.doesExist(normalizedTimestamp); // doesExist is sync on Db wrapper
     }
 
@@ -174,7 +174,7 @@ export default class TimestampIndex {
                 keys.push(key);
             }
         } else {
-             console.error('[TimestampIndex.list ERROR] this.dataset.getKeys is not a function or dataset is undefined.');
+            console.error('[TimestampIndex.list ERROR] this.dataset.getKeys is not a function or dataset is undefined.');
         }
         return keys;
     }
@@ -190,7 +190,7 @@ export default class TimestampIndex {
                 keys.push(key);
             }
         } else {
-             console.error('[TimestampIndex.listAll ERROR] this.dataset.getKeys is not a function or dataset is undefined.');
+            console.error('[TimestampIndex.listAll ERROR] this.dataset.getKeys is not a function or dataset is undefined.');
         }
         return keys;
     }

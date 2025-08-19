@@ -1,7 +1,7 @@
-import SynapsD from '../src/index.js'
+import SynapsD from '../src/index.js';
 const db = new SynapsD({
-    path: '/tmp/synapsd-testdb'
-})
+    path: '/tmp/synapsd-testdb',
+});
 
 const Tab = db.getSchema('data/abstraction/tab');
 const Note = db.getSchema('data/abstraction/note');
@@ -10,7 +10,7 @@ const Note = db.getSchema('data/abstraction/note');
  * Sample documents
  */
 
-let count = 5000;
+const count = 5000;
 let tabData;
 
 async function insert() {
@@ -22,9 +22,9 @@ async function insert() {
             schema: 'data/abstraction/tab',
             data: {
                 title: `Tab ${i}`,
-                url: `https://example.com/tab${i}`
-            }
-        }
+                url: `https://example.com/tab${i}`,
+            },
+        };
 
         await db.insertDocument(tabData);
     }
@@ -35,16 +35,16 @@ async function insert() {
 async function insertArray() {
     await db.start(); // Ensure DB is started, SynapsD.start() should be idempotent
 
-    let docArray = [];
+    const docArray = [];
     console.log(`Preparing ${count} note documents for batch insert...`);
     for (let i = 0; i < count; i++) {
         tabData = {
             schema: 'data/abstraction/note',
             data: {
                 title: `Note ${i}`,
-                content: `Note content ${i}`
-            }
-        }
+                content: `Note content ${i}`,
+            },
+        };
 
         docArray.push(tabData);
     }

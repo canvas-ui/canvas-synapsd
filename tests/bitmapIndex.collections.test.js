@@ -8,7 +8,7 @@ import {
     assert,
     assertEqual,
     assertThrows,
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 
 const collectionManagementTestSuite = {
@@ -107,7 +107,7 @@ const collectionManagementTestSuite = {
         } finally {
             await cleanupTestDB(db);
         }
-    }
+    },
 };
 
 runTestSuite('BitmapIndex Collection Management (Integrated)', collectionManagementTestSuite);

@@ -44,7 +44,7 @@ export default class BitmapCollection {
         // Sanitize the segment:
         // Remove disallowed characters. Allowed: a-z, A-Z, 0-9, underscore, dash, dot, forward slash.
         // Preserves forward slashes
-        normalizedSegment = normalizedSegment.replace(/[^a-zA-Z0-9_\-\.\/]/g, '');
+        normalizedSegment = normalizedSegment.replace(/[^a-zA-Z0-9_\-./]/g, '');
 
         if (normalizedSegment === '') {
             return this.keyPrefix;

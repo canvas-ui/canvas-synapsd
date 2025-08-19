@@ -204,8 +204,8 @@ class BaseDocument {
     static get jsonSchema() {
         return {
             schema: DOCUMENT_SCHEMA_NAME,
-            data: {}
-        }
+            data: {},
+        };
     }
 
     /**
@@ -298,7 +298,7 @@ class BaseDocument {
         return this.constructor.dataSchema.parse({
             schema: this.schema,
             schemaVersion: this.schemaVersion,
-            data: this.data
+            data: this.data,
         });
     }
 

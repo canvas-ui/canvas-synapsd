@@ -241,8 +241,8 @@ class BitmapIndex {
                 // Find original value for logging, robustly handling non-numeric originals
                 const originalValue = idsArray.find(originalId => {
                     const numOriginalId = Number(originalId);
-                    if (!isNaN(numOriginalId) && numOriginalId === numId) return true; // Matched via number conversion
-                    if (isNaN(numOriginalId) && isNaN(numId)) return true; // Both NaN, could be same non-numeric string
+                    if (!isNaN(numOriginalId) && numOriginalId === numId) {return true;} // Matched via number conversion
+                    if (isNaN(numOriginalId) && isNaN(numId)) {return true;} // Both NaN, could be same non-numeric string
                     return String(originalId) === String(numId); // Fallback to string comparison for edge cases
                 }) ?? numId; // Fallback to numId if original not found (should not happen)
                 debug(`Invalid ID for tick: ${numId} (original: ${originalValue}), skipping`);
@@ -282,8 +282,8 @@ class BitmapIndex {
                 }
                 const originalValue = idsArray.find(originalId => {
                     const numOriginalId = Number(originalId);
-                    if (!isNaN(numOriginalId) && numOriginalId === numId) return true;
-                    if (isNaN(numOriginalId) && isNaN(numId)) return true;
+                    if (!isNaN(numOriginalId) && numOriginalId === numId) {return true;}
+                    if (isNaN(numOriginalId) && isNaN(numId)) {return true;}
                     return String(originalId) === String(numId);
                 }) ?? numId;
                 debug(`Invalid ID for untick: ${numId} (original: ${originalValue}), skipping filtering for untick`);
@@ -300,7 +300,7 @@ class BitmapIndex {
             return bitmap.isEmpty ? null : bitmap; // Check if it was already empty
         }
         if (validIds.length === 0 && idsArray.length === 0) { // No IDs at all
-             return bitmap.isEmpty ? null : bitmap;
+            return bitmap.isEmpty ? null : bitmap;
         }
 
         bitmap.removeMany(validIds);
@@ -501,7 +501,7 @@ class BitmapIndex {
             targetBitmap.andNotInPlace(sourceBitmap); // Subtract source from target
 
             if (targetBitmap.size !== originalSize) {
-                 if (targetBitmap.isEmpty) {
+                if (targetBitmap.isEmpty) {
                     debug(`Target bitmap "${targetKey}" is now empty after subtraction, scheduling for deletion.`);
                     keysToDelete.push(targetKey);
                 } else {
@@ -513,7 +513,7 @@ class BitmapIndex {
 
         // Perform batch save/delete
         for (const bitmap of bitmapsToSave) {
-             this.#saveBitmapSync(bitmap.key, bitmap);
+            this.#saveBitmapSync(bitmap.key, bitmap);
         }
         for (const key of keysToDelete) {
             await this.deleteBitmap(key); // Ensure this line has await
@@ -568,7 +568,7 @@ class BitmapIndex {
             }
         } else {
             // If no positive keys, start with a full bitmap
-            debug(`AND(): No positive keys, starting with a full bitmap`);
+            debug('AND(): No positive keys, starting with a full bitmap');
             partial = new RoaringBitmap32();
             partial.addRange(this.rangeMin, this.rangeMax);
         }
@@ -584,7 +584,7 @@ class BitmapIndex {
                     negativeUnion.orInPlace(nbitmap);
                 }
             }
-            debug(`AND(): Subtracting negative union from partial bitmap`);
+            debug('AND(): Subtracting negative union from partial bitmap');
             partial = RoaringBitmap32.andNot(partial, negativeUnion); // New: static ANDNOT
         }
 
@@ -706,7 +706,7 @@ class BitmapIndex {
         }
 
         // Remove disallowed characters. Allowed: a-z, A-Z, 0-9, underscore, dash, dot, forward slash.
-        key = key.replace(/[^a-zA-Z0-9_\-\.\/]/g, '');
+        key = key.replace(/[^a-zA-Z0-9_\-./]/g, '');
 
         // Collapse multiple slashes to single slashes
         key = key.replace(/\/+/g, '/');

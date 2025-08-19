@@ -8,7 +8,7 @@ import {
     assert,
     assertEqual,
     assertThrows,
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 import BitmapIndex from '../src/indexes/bitmaps/index.js';
 import ChecksumIndex from '../src/indexes/inverted/Checksum.js';
@@ -76,7 +76,7 @@ const constructorTestSuite = {
         } finally {
             await cleanupTestDB(db);
         }
-    }
+    },
 };
 
 runTestSuite('SynapsD Constructor & Basic Getters', constructorTestSuite);

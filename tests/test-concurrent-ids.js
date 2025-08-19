@@ -41,8 +41,8 @@ async function testConcurrentDocumentInsertion() {
                     url: `http://tab${i}.tld`,
                     title: `Tab ${i}`,
                     timestamp: new Date().toISOString(),
-                    index: i // Add index for verification
-                }
+                    index: i, // Add index for verification
+                },
             });
         }
 
@@ -60,7 +60,7 @@ async function testConcurrentDocumentInsertion() {
             console.log(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(documentsToInsert.length / batchSize)}...`);
 
             const batchPromises = batch.map((doc, index) =>
-                db.insertDocument(doc).then(id => ({ batchIndex: Math.floor(i / batchSize), index: i + index, id, doc }))
+                db.insertDocument(doc).then(id => ({ batchIndex: Math.floor(i / batchSize), index: i + index, id, doc })),
             );
 
             const batchResults = await Promise.all(batchPromises);

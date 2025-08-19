@@ -38,7 +38,7 @@ class LayerIndex extends EventEmitter {
 
     async initializeIndex() {
         if (this.#initialized) { return; }
-        debug(`Initializing layer index..`);
+        debug('Initializing layer index..');
 
         // Initialize name to layer map (using LMBDs get() sync method)
         await this.#initNameToLayerMap();
@@ -78,14 +78,14 @@ class LayerIndex extends EventEmitter {
             const layerType = layerData.type || 'context'; // Default to 'context' if type is missing?
             const schemaName = `internal/layers/${layerType}`;
             if (!SchemaRegistry.hasSchema(schemaName)) {
-                 console.error(`Cannot reconstruct layer ID ${normalizedId}: No schema registered for type "${layerType}" (schema: ${schemaName}).`);
-                 throw new Error(`Schema not found for layer type "${layerType}"`);
+                console.error(`Cannot reconstruct layer ID ${normalizedId}: No schema registered for type "${layerType}" (schema: ${schemaName}).`);
+                throw new Error(`Schema not found for layer type "${layerType}"`);
             }
 
             const LayerClass = SchemaRegistry.getSchema(schemaName);
             if (!LayerClass || typeof LayerClass.fromJSON !== 'function') {
-                 console.error(`Cannot reconstruct layer ID ${normalizedId}: Schema ${schemaName} exists but is invalid or lacks a static fromJSON method.`);
-                 throw new Error(`Invalid schema class for layer type "${layerType}"`);
+                console.error(`Cannot reconstruct layer ID ${normalizedId}: Schema ${schemaName} exists but is invalid or lacks a static fromJSON method.`);
+                throw new Error(`Invalid schema class for layer type "${layerType}"`);
             }
 
             const layer = LayerClass.fromJSON(layerData); // Use static method from the correct class
@@ -96,7 +96,7 @@ class LayerIndex extends EventEmitter {
             return layer;
         } catch (error) {
             debug(`Error reconstructing layer instance for ID ${normalizedId}: ${error.message}`);
-            console.error(`Failed to reconstruct layer from data:`, layerData);
+            console.error('Failed to reconstruct layer from data:', layerData);
             // Throwing might be safer.
             throw new Error(`Failed to reconstruct layer instance for ID ${normalizedId}`);
             // return layerData; // Less safe
@@ -150,12 +150,12 @@ class LayerIndex extends EventEmitter {
         // Consider normalizing name here if needed for comparison
         // const normalizedName = this.#normalizeLayerName(name);
         // const layer = this.getLayerByName(normalizedName); // Use normalized lookup
-        return false //layer && builtInLayers.find((layer) => layer.name === normalizedName);
+        return false; //layer && builtInLayers.find((layer) => layer.name === normalizedName);
     }
 
     isInternalLayerID(id) {
         //const layer = this.getLayerByID(id);
-        return false //layer && builtInLayers.find((layer) => layer.id === id);
+        return false; //layer && builtInLayers.find((layer) => layer.id === id);
     }
 
     /**
@@ -165,7 +165,7 @@ class LayerIndex extends EventEmitter {
     async listLayers() {
         // If prefix provided, use range query
         const results = [];
-        const prefix = 'layer/'
+        const prefix = 'layer/';
         for await (const key of this.#store.getKeys({
             start: prefix,
             end: prefix + '\uffff',
@@ -175,7 +175,7 @@ class LayerIndex extends EventEmitter {
     }
 
     async createLayer(name, options = {
-        type: 'context'
+        type: 'context',
     }) {
         if (!this.#initialized) { throw new Error('Layer index not initialized'); }
         const normalizedName = this.#normalizeLayerName(name);
@@ -192,7 +192,7 @@ class LayerIndex extends EventEmitter {
             // If update is needed, use normalized name to fetch
             // return this.updateLayer(normalizedName, options);
             // For now, just return the existing layer if found
-             return this.getLayerByName(name); // getLayerByName normalizes internally
+            return this.getLayerByName(name); // getLayerByName normalizes internally
         }
 
         const LayerSchema = SchemaRegistry.getSchema(`internal/layers/${options.type}`);
@@ -355,10 +355,10 @@ class LayerIndex extends EventEmitter {
 
     async #initBuiltInLayers() {
         // Check if a root layer already exists in the index
-        debug(`Initializing built-in layers..`);
-        debug(`Checking for root layer..`);
+        debug('Initializing built-in layers..');
+        debug('Checking for root layer..');
         if (!this.hasLayerName('/')) {
-            debug(`Root layer not found, creating..`);
+            debug('Root layer not found, creating..');
             const rootLayer = new RootLayer();
             await this.#dbStoreLayer(rootLayer);
         }
@@ -381,14 +381,14 @@ class LayerIndex extends EventEmitter {
             try {
                 debug(`Initializing layer ${layerId}`);
                 const layer = await this.getLayerByID(layerId); // Make sure this returns a promise if async
-                 if (layer && layer.name) {
+                if (layer && layer.name) {
                     const normalizedName = this.#normalizeLayerName(layer.name);
                     this.#nameToLayerMap.set(normalizedName, layer);
                     debug(`Added layer ${layerId} to map with normalized name: ${normalizedName}`);
                 } else {
-                     debug(`Skipping layer ${layerId} during map init: Invalid layer object retrieved.`);
-                     console.warn(`Layer data for ID ${layerId} seems invalid or lacks a name.`);
-                 }
+                    debug(`Skipping layer ${layerId} during map init: Invalid layer object retrieved.`);
+                    console.warn(`Layer data for ID ${layerId} seems invalid or lacks a name.`);
+                }
             } catch (error) {
                 console.error(`Error initializing layer ${layerId}:`, error);
                 // Decide if we should continue or stop initialization

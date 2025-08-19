@@ -106,7 +106,7 @@ export class MockDataset {
             keys = keys.filter(k => k >= options.start && k < options.endNotExact);
         }
         if (options.start && options.end) {
-             keys = keys.filter(k => k >= options.start && k <= options.end);
+            keys = keys.filter(k => k >= options.start && k <= options.end);
         }
         if (options.prefix) {
             keys = keys.filter(k => k.startsWith(options.prefix));
@@ -114,7 +114,7 @@ export class MockDataset {
         return keys.sort();
     }
     async *getRange(options = {}) { // Changed to async generator
-        let entries = Array.from(this.store.entries()).map(([key, value]) => ({ key, value }));
+        const entries = Array.from(this.store.entries()).map(([key, value]) => ({ key, value }));
         // Simple sort for mock
         entries.sort((a, b) => String(a.key).localeCompare(String(b.key)));
 
@@ -155,8 +155,8 @@ export class MockDataset {
             const result = fn();
             // Apply operations if transaction doesn't abort
             operations.forEach(op => {
-                if (op.type === 'put') this.store.set(op.key, op.value);
-                if (op.type === 'remove') this.store.delete(op.key);
+                if (op.type === 'put') {this.store.set(op.key, op.value);}
+                if (op.type === 'remove') {this.store.delete(op.key);}
             });
             this.txns.pop();
             return result;
@@ -169,8 +169,8 @@ export class MockDataset {
     getStats() {
         return {
             entryCount: this.store.size,
-            mapSize: this.store.size * 1024 // Arbitrary size
-        }
+            mapSize: this.store.size * 1024, // Arbitrary size
+        };
     }
 
     // Mock for db.getMany()
@@ -203,6 +203,6 @@ export async function runTestSuite(suiteName, tests) {
     console.log(`Total tests: ${testNames.length}`);
     console.log(`Passed: ${passed}`);
     console.log(`Failed: ${failed}`);
-    console.log(`-----------------------------------n`);
+    console.log('-----------------------------------n');
     return failed === 0;
 }

@@ -5,7 +5,7 @@ import {
     assert,
     assertEqual,
     assertThrows,
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 
 const utilsTestSuite = {
@@ -93,7 +93,7 @@ const utilsTestSuite = {
         assertThrows(() => {
             BitmapIndex.normalizeKey({ path: 'data/some' });
         }, 'Should throw for object input to normalizeKey');
-    }
+    },
 };
 
 runTestSuite('BitmapIndex Utils (validateKey, normalizeKey)', utilsTestSuite);

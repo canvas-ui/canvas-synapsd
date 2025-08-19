@@ -7,7 +7,7 @@ import {
     assert,
     assertEqual,
     assertAsyncThrows,
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 
 const featuresQueryTestSuite = {
@@ -62,7 +62,7 @@ const featuresQueryTestSuite = {
             db = await initializeTestDB();
             await assertAsyncThrows(
                 async () => db.query('some query string'),
-                'query() method should throw not implemented error'
+                'query() method should throw not implemented error',
             );
         } finally {
             await cleanupTestDB(db);
@@ -75,12 +75,12 @@ const featuresQueryTestSuite = {
             db = await initializeTestDB();
             await assertAsyncThrows(
                 async () => db.ftsQuery('some fts query'),
-                'ftsQuery() method should throw not implemented error'
+                'ftsQuery() method should throw not implemented error',
             );
         } finally {
             await cleanupTestDB(db);
         }
-    }
+    },
 };
 
 runTestSuite('SynapsD Feature Management & Query Placeholders', featuresQueryTestSuite);

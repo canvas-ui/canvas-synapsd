@@ -7,7 +7,7 @@ import util from 'util'; // For deep logging
 const DB_PATH = '/tmp/synapsd-testdb';
 
 const db = new SynapsD({
-    path: DB_PATH
+    path: DB_PATH,
 });
 
 /**
@@ -15,19 +15,19 @@ const db = new SynapsD({
  */
 const noteA = {
     schema: 'data/abstraction/note',
-    data: { title: 'Note A', content: 'Content for A' }
+    data: { title: 'Note A', content: 'Content for A' },
 };
 const noteB = {
     schema: 'data/abstraction/note',
-    data: { title: 'Note B', content: 'Content for B' }
+    data: { title: 'Note B', content: 'Content for B' },
 };
 const tabC = {
     schema: 'data/abstraction/tab',
-    data: { title: 'Tab C', url: 'https://example.com/c' }
+    data: { title: 'Tab C', url: 'https://example.com/c' },
 };
 const noteD = {
     schema: 'data/abstraction/note',
-    data: { title: 'Note D', content: 'Content for D' }
+    data: { title: 'Note D', content: 'Content for D' },
 };
 
 async function testTreeOperations() {
@@ -81,7 +81,7 @@ async function testTreeOperations() {
         console.log(JSON.stringify(db.tree.buildJsonTree(), null, 2 ));
 
     } catch (error) {
-        console.error("\n*** TEST FAILED ***");
+        console.error('\n*** TEST FAILED ***');
         console.error(error);
     } finally {
         // Optional: Shut down DB

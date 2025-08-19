@@ -6,7 +6,7 @@ import {
     cleanupTestDB,
     assert,
     assertEqual,
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 import BaseDocument from '../src/schemas/BaseDocument.js';
 import schemaRegistry from '../src/schemas/SchemaRegistry.js';
@@ -82,8 +82,8 @@ const schemaTestSuite = {
             // Check for other known schemas if any are guaranteed to be registered
             const expectedSchemas = ['Directory', 'Email', 'File', 'Note', 'Tab', 'Todo', 'BaseDocument'];
             expectedSchemas.forEach(s => {
-                assert(schemas.includes(s), `Schema list should include ${s}`)
-            })
+                assert(schemas.includes(s), `Schema list should include ${s}`);
+            });
         } finally {
             await cleanupTestDB(db);
         }
@@ -103,7 +103,7 @@ const schemaTestSuite = {
         } finally {
             await cleanupTestDB(db);
         }
-    }
+    },
 };
 
 runTestSuite('SynapsD Schema Methods', schemaTestSuite);

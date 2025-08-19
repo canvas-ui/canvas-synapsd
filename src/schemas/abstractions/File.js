@@ -23,7 +23,7 @@ const documentDataSchema = z.object({
 
 // Schema for the full File document, making checksumArray mandatory
 const fileDocumentSchema = baseDocumentSchema.extend({
-    checksumArray: z.array(z.string()).nonempty({ message: "checksumArray cannot be empty and must be provided for File documents" }),
+    checksumArray: z.array(z.string()).nonempty({ message: 'checksumArray cannot be empty and must be provided for File documents' }),
 });
 
 export default class File extends Document {
@@ -75,7 +75,7 @@ export default class File extends Document {
             },
             metadata: {},
             checksumArray: [],
-        }
+        };
     }
 
     static validate(document) {

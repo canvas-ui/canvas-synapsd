@@ -8,7 +8,7 @@ import {
     assert,
     assertEqual,
     assertAsyncThrows,
-    runTestSuite
+    runTestSuite,
 } from './helpers.js';
 
 const KEY_P = 'data/'; // Valid Prefix
@@ -207,7 +207,7 @@ const bitmapLogicalOpsTestSuite = {
         } finally {
             await cleanupTestDB(db);
         }
-    }
+    },
 };
 
 runTestSuite('BitmapIndex Logical/Collection Ops (Integrated)', bitmapLogicalOpsTestSuite);
