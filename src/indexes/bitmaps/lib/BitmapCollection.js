@@ -4,6 +4,9 @@
 import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd:bitmap-collection');
 
+// Import BitmapIndex for static method access
+import BitmapIndex from '../index.js';
+
 export default class BitmapCollection {
 
     constructor(name, bitmapIndex, options = {}) {
@@ -54,7 +57,7 @@ export default class BitmapCollection {
         if (isNegated) { normalizedSegment = '!' + normalizedSegment; }
 
         const constructedKey = `${this.keyPrefix}${normalizedSegment}`;
-        return this.bitmapIndex.constructor.normalizeKey(constructedKey);
+        return BitmapIndex.normalizeKey(constructedKey);
     }
 
     /**
