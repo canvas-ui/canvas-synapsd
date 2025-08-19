@@ -3,9 +3,9 @@
 /*
  * Dotfile abstraction
  * -------------------
- * Describes a mapping between a *local* path (file or directory on any
- * machine) and a path inside the dot-files Git repository that lives
- * under ~/.canvas/data/{user@remote}/{workspace}/dotfiles/…
+ * Describes a mapping between a local path (file or folder) and a path inside
+ * the workspace dotfiles repository (relative to the repo root):
+ *   ~/.canvas/data/{user@remote}/workspaces/{workspace}/dotfiles/…
  *
  * Uniqueness is guaranteed through the combination of
  *     localPath + repoUrl + repoPath
@@ -22,7 +22,7 @@ import Document, { documentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/dotfile';
-const DOCUMENT_SCHEMA_VERSION = '3.0';
+const DOCUMENT_SCHEMA_VERSION = '4.0';
 
 // Regex allows:  /abs/path, ~/path, $HOME/path, {{HOME}}/path etc.
 const pathPattern = /^(\{\{\s*[A-Za-z0-9_]+\s*\}\}|\$[A-Za-z0-9_]+|~)?[\/A-Za-z0-9_.-]+$/;
@@ -43,10 +43,11 @@ const documentDataSchema = z
                         'localPath must be an absolute path or contain a placeholder such as {{HOME}} or $HOME',
                 }),
 
-                // Full URL of the dotfiles repository (e.g., http://user@host:port/rest/v2/workspaces/<ws>/dotfiles/git)
-                repoUrl: z.string().url(),
-                // Path inside the dotfiles repository (e.g., work/mbag/wallpaper.jpg)
+                // Relative path inside the dotfiles repository (e.g., shell/bashrc)
                 repoPath: z.string().min(1),
+
+                // Type of mapping target in the repository
+                type: z.enum(['file', 'folder']),
 
                 // Optional
                 backupPath: z.string().optional(),
@@ -71,10 +72,10 @@ export default class Dotfile extends Document {
         // Index configuration (before super)
         options.indexOptions = {
             ...options.indexOptions,
-            ftsSearchFields: ['data.localPath', 'data.repoUrl', 'data.repoPath'],
-            vectorEmbeddingFields: ['data.localPath', 'data.repoUrl', 'data.repoPath'],
-            // Uniqueness: localPath + repoUrl + repoPath
-            checksumFields: ['data.localPath', 'data.repoUrl', 'data.repoPath'],
+            ftsSearchFields: ['data.localPath', 'data.repoPath'],
+            vectorEmbeddingFields: ['data.localPath', 'data.repoPath'],
+            // Uniqueness: localPath + repoPath (documents are per workspace)
+            checksumFields: ['data.localPath', 'data.repoPath'],
         };
 
         super(options);
@@ -84,8 +85,8 @@ export default class Dotfile extends Document {
      * Convenience getters
      * ------------------*/
     get localPath() { return this.data.localPath; }
-    get repoUrl() { return this.data.repoUrl; }
     get repoPath() { return this.data.repoPath; }
+    get type() { return this.data.type; }
     get backupPath() { return this.data.backupPath; }
 
     /* --------------------
@@ -105,8 +106,7 @@ export default class Dotfile extends Document {
     conflictsWith(other) {
         if (!other) return false;
         return (
-            this.localPath === other.localPath ||
-            (this.repoUrl === other.repoUrl && this.repoPath === other.repoPath)
+            this.localPath === other.localPath || this.repoPath === other.repoPath
         );
     }
 
@@ -131,8 +131,8 @@ export default class Dotfile extends Document {
             schema: DOCUMENT_SCHEMA_NAME,
             data: {
                 localPath: 'string',
-                repoUrl: 'string',
                 repoPath: 'string',
+                type: '"file"|"folder"',
                 backupPath: 'string?',
             },
         };
