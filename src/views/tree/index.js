@@ -146,6 +146,19 @@ class ContextTree extends EventEmitter {
             if (!layer) { throw new Error(`Layer not found with ID: ${nameOrId}`); }
             currentName = layer.name;
         }
+
+        // Rename the associated bitmap in contextBitmapCollection
+        if (this.#db && this.#db.contextBitmapCollection && currentName !== newName) {
+            try {
+                debug(`Renaming bitmap for layer from "${currentName}" to "${newName}"`);
+                await this.#db.contextBitmapCollection.renameBitmap(currentName, newName);
+                debug(`Successfully renamed bitmap for layer from "${currentName}" to "${newName}"`);
+            } catch (error) {
+                debug(`Warning: Failed to rename bitmap from "${currentName}" to "${newName}": ${error.message}`);
+                // Don't fail the entire operation if bitmap rename fails
+            }
+        }
+
         const layer = await this.#layerIndex.renameLayer(String(currentName), String(newName));
         // Persist updated tree JSON to reflect renamed layer names in stored tree
         await this.recalculateTree();
@@ -173,6 +186,19 @@ class ContextTree extends EventEmitter {
             layer = this.getLayer(String(nameOrId));
         }
         if (!layer) { throw new Error(`Layer not found: ${nameOrId}`); }
+
+        // Clean up the associated bitmap from contextBitmapCollection
+        if (this.#db && this.#db.contextBitmapCollection) {
+            try {
+                debug(`Cleaning up bitmap for layer ${layer.name} (ID: ${layer.id})`);
+                await this.#db.contextBitmapCollection.deleteBitmap(layer.name);
+                debug(`Successfully deleted bitmap for layer ${layer.name}`);
+            } catch (error) {
+                debug(`Warning: Failed to delete bitmap for layer ${layer.name}: ${error.message}`);
+                // Don't fail the entire operation if bitmap cleanup fails
+            }
+        }
+
         await this.#layerIndex.removeLayer(layer);
         // Rebuild tree to drop references to the deleted layer
         await this.recalculateTree();
