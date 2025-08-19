@@ -318,6 +318,13 @@ class SynapsD extends EventEmitter {
     async insertDocument(document, contextSpec = '/', featureBitmapArray = [], emitEvent = true) {
         if (!document) { throw new Error('Document is required'); }
 
+        // Support inserting by existing document ID to add context/feature memberships without resending the document
+        if (typeof document === 'number' || (typeof document === 'string' && /^\d+$/.test(document))) {
+            const docId = typeof document === 'number' ? document : parseInt(document, 10);
+            // Delegate to updateDocument with null updateData to only adjust memberships
+            return await this.updateDocument(docId, null, contextSpec, featureBitmapArray);
+        }
+
         // Parse bitmaps into arrays(context can be a path or a array of context layers)
         const contextBitmaps = this.#parseContextSpec(contextSpec);
         const featureBitmaps = this.#parseBitmapArray(featureBitmapArray);
@@ -369,7 +376,8 @@ class SynapsD extends EventEmitter {
                 debug(`insertDocument: Timestamps for document ${parsedDocument.id} added.`);
 
                 // Ensure context tree paths exist for the *target* context
-                if (!this.tree.insertPath(contextBitmaps.join('/'))) { // Use the parsed context array
+                const insertPathResult = await this.tree.insertPath(contextBitmaps.join('/'));
+                if (!insertPathResult || insertPathResult.error) {
                     throw new Error(`insertDocument: Failed to ensure context path '${contextBitmaps.join('/')}' in tree.`);
                 }
                 debug(`insertDocument: Context path '${contextBitmaps.join('/')}' ensured in tree.`);
