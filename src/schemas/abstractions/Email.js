@@ -1,11 +1,10 @@
 'use strict';
 
-import Document from './Document.js';
-import { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
+import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/email';
-const DOCUMENT_SCHEMA_VERSION = '2.1';
+const DOCUMENT_SCHEMA_VERSION = '2.0';
 
 const documentDataSchema = z.object({
     schema: z.string(),
