@@ -16,7 +16,7 @@
     "mkdirp": "^3.0.1",
     "roaring": "^2.4.0",
     "uuid": "^11.1.0",
-    "zod": "^4.0.17"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@eslint/js": "^9.33.0",
