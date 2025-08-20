@@ -348,8 +348,12 @@ class SynapsD extends EventEmitter {
 
         if (storedDocument) {
             debug(`insertDocument: Document found by checksum ${primaryChecksum}, setting existing document ID: ${storedDocument.id}`);
+            // Preserve the existing document ID
             parsedDocument.id = storedDocument.id;
-            parsedDocument.createdAt = storedDocument.createdAt;
+            // Only carry over timestamps if they exist on the stored document to avoid
+            // introducing undefined values that would fail schema validation in some environments
+            if (storedDocument.createdAt) { parsedDocument.createdAt = storedDocument.createdAt; }
+            if (storedDocument.updatedAt) { parsedDocument.updatedAt = storedDocument.updatedAt; }
         } else {
             debug(`insertDocument: Document not found by checksum ${primaryChecksum}, generating new document ID.`);
             parsedDocument.id = this.#generateDocumentID();
