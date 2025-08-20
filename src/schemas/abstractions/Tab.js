@@ -1,6 +1,7 @@
 'use strict';
 
-import Document, { documentSchema } from '../BaseDocument.js';
+import Document from './Document.js';
+import { documentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/tab';
