@@ -27,6 +27,15 @@ const DOCUMENT_SCHEMA_VERSION = '2.0';
 // Regex allows:  /abs/path, ~/path, $HOME/path, {{HOME}}/path etc.
 const pathPattern = /^(\{\{\s*[A-Za-z0-9_]+\s*\}\}|\$[A-Za-z0-9_]+|~)?[/A-Za-z0-9_.-]+$/;
 
+// Normalize {{ home }} / {{ HOME }} / ~ to $HOME (nix-focused)
+function normalizeHomePlaceholder(input) {
+    if (typeof input !== 'string') { return input; }
+    let out = input;
+    out = out.replace(/^(\{\{\s*home\s*\}\})(?=\/|$)/i, '$HOME');
+    out = out.replace(/^~(?=\/|$)/, '$HOME');
+    return out;
+}
+
 /*******************
  * Data Schema     *
  *******************/
@@ -41,7 +50,7 @@ const documentDataSchema = z
                 localPath: z.string().regex(pathPattern, {
                     message:
                         'localPath must be an absolute path or contain a placeholder such as {{HOME}} or $HOME',
-                }),
+                }).transform(normalizeHomePlaceholder),
 
                 // Relative path inside the dotfiles repository (e.g., shell/bashrc)
                 repoPath: z.string().min(1),
@@ -79,6 +88,10 @@ export default class Dotfile extends Document {
         };
 
         super(options);
+        // Defensive normalization in case upstream skipped schema transforms
+        if (this.data && typeof this.data.localPath === 'string') {
+            this.data.localPath = normalizeHomePlaceholder(this.data.localPath);
+        }
     }
 
     /* --------------------
