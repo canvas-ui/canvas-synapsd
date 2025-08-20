@@ -882,6 +882,10 @@ class SynapsD extends EventEmitter {
         try {
             // Get document before deletion
             const documentData = await this.documents.get(docId);
+            if (!documentData) {
+                debug(`deleteDocument: Document with ID "${docId}" not found`);
+                return false;
+            }
             const document = this.#parseDocumentData(documentData);
             debug('deleteDocument > Document: ', document);
 
