@@ -33,7 +33,7 @@ export default class Email extends Document {
 
         // Inject Email-specific index options BEFORE super() so checksum uses correct fields
         options.indexOptions = {
-            ...options.indexOptions,
+            ...(options.indexOptions || {}),
             ftsSearchFields: ['data.subject', 'data.body', 'data.from', 'data.to'],
             vectorEmbeddingFields: ['data.subject', 'data.body'],
             checksumFields: ['data.subject', 'data.from', 'data.to', 'data.receivedAt'],

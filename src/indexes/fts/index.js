@@ -44,15 +44,20 @@ class Fts {
         await this.saveIndex();
     }
 
-    async search(query, limit = 100) {
-        const results = await this.index.searchAsync(query, limit);
-        return results;
+    async search(query, options = { limit: 100, offset: 0 }) {
+        const limit = Number.isFinite(options?.limit) ? options.limit : 100;
+        const offset = Number.isFinite(options?.offset) ? options.offset : 0;
+        const results = await this.index.searchAsync(query, limit + offset);
+        return results.slice(offset, offset + limit);
     }
 
-    searchSync(query, limit = 100) {
+    searchSync(query, options = { limit: 100, offset: 0 }) {
         // TODO: Current backend does not support searching on a subset of documents
         // We can get those cheaply, so a nice task for whoever picks this up
-        return this.index.search(query, limit);
+        const limit = Number.isFinite(options?.limit) ? options.limit : 100;
+        const offset = Number.isFinite(options?.offset) ? options.offset : 0;
+        const results = this.index.search(query, limit + offset);
+        return results.slice(offset, offset + limit);
     }
 
     /**

@@ -26,7 +26,7 @@ export default class Todo extends Document {
 
         // Inject Todo-specific index options BEFORE super()
         options.indexOptions = {
-            ...options.indexOptions,
+            ...(options.indexOptions || {}),
             ftsSearchFields: ['data.title', 'data.description'],
             vectorEmbeddingFields: ['data.title', 'data.description'],
             checksumFields: ['data.title', 'data.description'],

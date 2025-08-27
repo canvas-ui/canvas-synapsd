@@ -126,9 +126,9 @@ class BaseDocument {
             checksumFields: options.indexOptions?.checksumFields || DOCUMENT_DATA_CHECKSUM_FIELDS,
             ftsSearchFields: options.indexOptions?.ftsSearchFields || DOCUMENT_DATA_FTS_SEARCH_FIELDS,
             vectorEmbeddingFields: options.indexOptions?.vectorEmbeddingFields || DOCUMENT_DATA_VECTOR_EMBEDDING_FIELDS,
-            ...options.indexOptions,
+            ...(options.indexOptions || {}),
             embeddingOptions: {
-                ...options.indexOptions?.embeddingOptions,
+                ...(options.indexOptions?.embeddingOptions || {}),
                 embeddingModel: options.indexOptions?.embeddingOptions?.embeddingModel || 'text-embedding-3-small',
                 embeddingDimensions: options.indexOptions?.embeddingOptions?.embeddingDimensions || 1536,
                 embeddingProvider: options.indexOptions?.embeddingOptions?.embeddingProvider || 'openai',
@@ -151,7 +151,7 @@ class BaseDocument {
             contextUUIDs: options.metadata?.contextUUIDs || [],
             contextPath: options.metadata?.contextPath || [],
             features: options.metadata?.features || [],
-            ...options.metadata,
+            ...(options.metadata || {}),
         };
 
         // Ensure the document's schema id is always present as a feature (deduplicated)

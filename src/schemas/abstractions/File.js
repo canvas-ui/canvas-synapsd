@@ -39,7 +39,7 @@ export default class File extends Document {
 
         // Inject File-specific index options BEFORE super()
         options.indexOptions = {
-            ...options.indexOptions,
+            ...(options.indexOptions || {}),
             ftsSearchFields: ['data.name', 'data.path'],
             vectorEmbeddingFields: ['data.name', 'data.path'],
             // File relies on external checksumArray, so we don't modify checksumFields here

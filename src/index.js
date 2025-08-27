@@ -547,11 +547,21 @@ class SynapsD extends EventEmitter {
     }
 
     async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
+        // Normalize options and pagination defaults
+        const effectiveOptions = typeof options === 'object' && options !== null ? { ...options } : { parse: true };
+        const parseDocuments = effectiveOptions.parse !== false;
+        const defaultLimit = 100;
+        const providedLimit = Number.isFinite(effectiveOptions.limit) ? Number(effectiveOptions.limit) : undefined;
+        const providedOffset = Number.isFinite(effectiveOptions.offset) ? Number(effectiveOptions.offset) : undefined;
+        const providedPage = Number.isFinite(effectiveOptions.page) ? Number(effectiveOptions.page) : undefined;
+        const limit = Math.max(0, providedLimit !== undefined ? providedLimit : defaultLimit);
+        const offset = Math.max(0, providedOffset !== undefined ? providedOffset : (providedPage && providedPage > 0 ? (providedPage - 1) * limit : 0));
+
         // Only parse contextSpec if it was explicitly provided (not null/undefined)
         const contextBitmapArray = contextSpec !== null && contextSpec !== undefined ? this.#parseContextSpec(contextSpec) : [];
         if (!Array.isArray(featureBitmapArray) && typeof featureBitmapArray === 'string') { featureBitmapArray = [featureBitmapArray]; }
         if (!Array.isArray(filterArray) && typeof filterArray === 'string') { filterArray = [filterArray]; }
-        debug(`Listing documents with contextArray: ${contextBitmapArray}, features: ${featureBitmapArray}, filters: ${filterArray}`);
+        debug(`Listing documents with contextArray: ${contextBitmapArray}, features: ${featureBitmapArray}, filters: ${filterArray}, limit: ${limit}, offset: ${offset}`);
 
         try {
             // Start with null, will hold RoaringBitmap32 instance if filters are applied
@@ -592,52 +602,51 @@ class SynapsD extends EventEmitter {
 
             // Case 1: No filters were effectively applied
             if (!filtersApplied) {
-                const documents = [];
-                for await (const { key, value } of this.documents.getRange()) {
-                    documents.push(value);
-                }
-                const limitedDocs = options.limit ? documents.slice(0, options.limit) : documents;
+                const totalCount = await this.documents.getCount();
 
-                return {
-                    data: options.parse ? limitedDocs.map(doc => this.#parseInitializeDocument(doc)) : limitedDocs,
-                    count: documents.length,
-                    error: null,
-                };
+                // Iterate and collect only the requested page window
+                const pagedDocs = [];
+                let seen = 0;
+                for await (const { value } of this.documents.getRange()) {
+                    if (seen++ < offset) { continue; }
+                    pagedDocs.push(value);
+                    if (pagedDocs.length >= limit) { break; }
+                }
+
+                const resultArray = parseDocuments ? pagedDocs.map(doc => this.#parseInitializeDocument(doc)) : pagedDocs;
+                // Attach metadata for compatibility
+                resultArray.count = totalCount;
+                resultArray.error = null;
+                return resultArray;
             }
 
             // Case 2: Filters were applied, but the resulting bitmap is null or empty
             if (finalDocumentIds.length === 0) {
                 debug('findDocuments: Resulting bitmap is null or empty after applying filters.');
-                return {
-                    data: [],
-                    count: 0,
-                    error: null,
-                };
+                const emptyArray = [];
+                emptyArray.count = 0;
+                emptyArray.error = null;
+                return emptyArray;
             }
 
-            // Convert bitmap to array of document IDs
-            let documentIds = finalDocumentIds;
-            if (options.limit) {
-                documentIds = documentIds.slice(0, options.limit);
-            }
+            // Convert bitmap to array of document IDs and apply pagination window
+            const totalCount = finalDocumentIds.length;
+            const slicedIds = limit === 0 ? [] : finalDocumentIds.slice(offset, offset + limit);
 
-            // Get documents from database
-            const documents = await this.documents.getMany(documentIds);
-            const limitedDocs = options.limit ? documents.slice(0, options.limit) : documents;
-
-            return {
-                data: options.parse ? limitedDocs.map(doc => this.#parseInitializeDocument(doc)) : limitedDocs,
-                count: finalDocumentIds.length,
-                error: null,
-            };
+            // Get documents from database for the page
+            const documents = await this.documents.getMany(slicedIds);
+            const resultArray = parseDocuments ? documents.map(doc => this.#parseInitializeDocument(doc)) : documents;
+            // Attach metadata for compatibility
+            resultArray.count = totalCount;
+            resultArray.error = null;
+            return resultArray;
 
         } catch (error) {
             debug(`Error in findDocuments: ${error.message}`);
-            return {
-                data: [],
-                count: 0,
-                error: error.message,
-            };
+            const errorArray = [];
+            errorArray.count = 0;
+            errorArray.error = error.message;
+            return errorArray;
         }
     }
 

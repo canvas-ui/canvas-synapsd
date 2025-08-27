@@ -24,7 +24,7 @@ export default class Note extends Document {
 
         // Inject Note-specific index options BEFORE super()
         options.indexOptions = {
-            ...options.indexOptions,
+            ...(options.indexOptions || {}),
             ftsSearchFields: ['data.title', 'data.content'],
             vectorEmbeddingFields: ['data.title', 'data.content'],
             checksumFields: ['data.title', 'data.content'],

@@ -140,29 +140,36 @@ Available batch operations:
 
 #### Query Operations
 
-Query operations return a result object:
+Pagination is supported for all queries. Default page size is 100 documents.
+
+Options:
+- `limit` (number): page size (default 100)
+- `offset` (number): starting index (default 0)
+- `page` (number): 1-based page number (ignored if `offset` provided)
+- `parse` (boolean): parse into schema instances (default true)
+
+Usage:
 
 ```javascript
-const result = await db.findDocuments(contextSpec, featureBitmapArray);
-if (result.error) {
-    // Handle error
-}
-// Access data
-const documents = result.data;
+// First page (implicit): limit=100, offset=0
+const docs = await db.findDocuments(contextSpec, featureBitmapArray, [], { limit: 100 });
+console.log(docs.length, docs.count); // docs has .count metadata
+
+// Second page via page
+const page2 = await db.findDocuments(contextSpec, featureBitmapArray, [], { page: 2, limit: 100 });
+
+// Or using offset directly
+const next100 = await db.findDocuments(contextSpec, featureBitmapArray, [], { offset: 100, limit: 100 });
 ```
 
-Result object structure:
+Return shape:
 ```typescript
-interface QueryResult {
-    data: Array<any>;    // Array of documents
-    count: number;       // Total count
-    error: string|null;  // Error if any
-}
+type QueryResultArray = Array<any> & { count: number; error: string | null };
 ```
 
 Available query operations:
 
-- `findDocuments(contextSpec, featureBitmapArray, filterArray)`
+- `findDocuments(contextSpec, featureBitmapArray, filterArray, options)`
 - `query(query, contextBitmapArray, featureBitmapArray, filterArray)`
 - `ftsQuery(query, contextBitmapArray, featureBitmapArray, filterArray)`
 

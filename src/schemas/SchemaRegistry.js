@@ -24,6 +24,8 @@ import Workspace from './internal/layers/Workspace.js';
 const SCHEMA_REGISTRY = {
     // Data Abstractions
     'data/abstraction/document': Document,
+    // Back-compat aliases used in tests and older code
+    'BaseDocument': Document,
     'data/abstraction/email': Email,
     'data/abstraction/file': File,
     'data/abstraction/note': Note,

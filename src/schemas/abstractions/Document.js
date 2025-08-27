@@ -21,7 +21,7 @@ export default class Document extends BaseDocument {
 
         // Inject Document-specific index options BEFORE super() so checksum fields are correct
         options.indexOptions = {
-            ...options.indexOptions,
+            ...(options.indexOptions || {}),
             ftsSearchFields: ['data'],
             vectorEmbeddingFields: ['data'],
             checksumFields: ['data'],

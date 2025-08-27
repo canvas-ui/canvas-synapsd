@@ -80,7 +80,7 @@ export default class Dotfile extends Document {
 
         // Index configuration (before super)
         options.indexOptions = {
-            ...options.indexOptions,
+            ...(options.indexOptions || {}),
             ftsSearchFields: ['data.localPath', 'data.repoPath'],
             vectorEmbeddingFields: ['data.localPath', 'data.repoPath'],
             // Uniqueness: localPath + repoPath (documents are per workspace)

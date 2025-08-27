@@ -25,7 +25,7 @@ export default class Tab extends Document {
         // Inject Tab-specific index options BEFORE super() so that BaseDocument
         // computes checksums and other derived values using the correct fields.
         options.indexOptions = {
-            ...options.indexOptions,
+            ...(options.indexOptions || {}),
             ftsSearchFields: ['data.title', 'data.url'],
             vectorEmbeddingFields: ['data.title', 'data.url'],
             checksumFields: ['data.url'],

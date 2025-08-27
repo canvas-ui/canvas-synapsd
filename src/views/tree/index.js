@@ -579,53 +579,26 @@ class ContextTree extends EventEmitter {
      * @returns {boolean} - True if successful
      */
     async mergeUp(path) {
-        debug(`[PLACEHOLDER] Merging layer at "${path}" with layers above it`);
-        // TODO: Implement bitmap merging logic
-
+        const normalizedPath = this.#normalizePath(path);
+        debug(`mergeUp: ${normalizedPath}`);
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         try {
-            let node;
-            try {
-                const nodes = this.#getNodesForPath(path);
-                node = nodes[nodes.length - 1];
-            } catch (error) {
-                return {
-                    data: null,
-                    count: 0,
-                    error: `Unable to merge layer up, error resolving path "${path}": ${error.message}`,
-                };
+            const nodes = this.#getNodesForPath(normalizedPath);
+            if (!nodes || nodes.length < 2) {
+                return { data: null, count: 0, error: `Unable to merge layer up, node not found at path "${normalizedPath}".` };
             }
 
-            if (!node) {
-                return {
-                    data: null,
-                    count: 0,
-                    error: `Unable to merge layer up, node not found at path "${path}" after resolution.`,
-                };
-            }
+            const layerNames = nodes.slice(1).map(n => n.payload.name);
+            if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
+            const source = layerNames[layerNames.length - 1];
+            const targets = layerNames.slice(0, layerNames.length - 1);
 
-            // Emit an event for the merge operation
-            this.emit('tree.layer.merged.up', {
-                path,
-                layerId: node.id,
-                layerName: node.payload.name,
-            });
-
-            return {
-                data: {
-                    path,
-                    layerId: node.id,
-                    layerName: node.payload.name,
-                },
-                count: 1,
-                error: null,
-            };
+            const affected = await this.#db.contextBitmapCollection.applyToMany(source, targets);
+            this.emit('tree.layer.merged.up', { path: normalizedPath, source, targets, affected });
+            return { data: affected, count: affected.length, error: null };
         } catch (error) {
-            debug(`Error merging layer up at path "${path}": ${error.message}`);
-            return {
-                data: null,
-                count: 0,
-                error: error.message,
-            };
+            debug(`Error merging layer up at path "${normalizedPath}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
         }
     }
 
@@ -635,53 +608,80 @@ class ContextTree extends EventEmitter {
      * @returns {boolean} - True if successful
      */
     async mergeDown(path) {
-        debug(`[PLACEHOLDER] Merging layer at "${path}" with layers below it`);
-        // TODO: Implement bitmap merging logic
-
+        const normalizedPath = this.#normalizePath(path);
+        debug(`mergeDown: ${normalizedPath}`);
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         try {
-            let node;
-            try {
-                const nodes = this.#getNodesForPath(path);
-                node = nodes[nodes.length - 1];
-            } catch (error) {
-                return {
-                    data: null,
-                    count: 0,
-                    error: `Unable to merge layer down, error resolving path "${path}": ${error.message}`,
-                };
+            const nodes = this.#getNodesForPath(normalizedPath);
+            if (!nodes || nodes.length < 2) {
+                return { data: null, count: 0, error: `Unable to merge layer down, node not found at path "${normalizedPath}".` };
             }
 
-            if (!node) {
-                return {
-                    data: null,
-                    count: 0,
-                    error: `Unable to merge layer down, node not found at path "${path}" after resolution.`,
-                };
-            }
+            const layerNames = nodes.slice(1).map(n => n.payload.name);
+            if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
+            const source = layerNames[layerNames.length - 1];
+            const targets = layerNames.slice(0, layerNames.length - 1);
 
-            // Emit an event for the merge operation
-            this.emit('tree.layer.merged.down', {
-                path,
-                layerId: node.id,
-                layerName: node.payload.name,
-            });
-
-            return {
-                data: {
-                    path,
-                    layerId: node.id,
-                    layerName: node.payload.name,
-                },
-                count: 1,
-                error: null,
-            };
+            const affected = await this.#db.contextBitmapCollection.applyToMany(source, targets);
+            this.emit('tree.layer.merged.down', { path: normalizedPath, source, targets, affected });
+            return { data: affected, count: affected.length, error: null };
         } catch (error) {
-            debug(`Error merging layer down at path "${path}": ${error.message}`);
-            return {
-                data: null,
-                count: 0,
-                error: error.message,
-            };
+            debug(`Error merging layer down at path "${normalizedPath}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
+    }
+
+    /**
+     * Subtract current layer bitmap from its ancestors (bar, baz in /work/foo/bar/baz)
+     */
+    async subtractUp(path) {
+        const normalizedPath = this.#normalizePath(path);
+        debug(`subtractUp: ${normalizedPath}`);
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        try {
+            const nodes = this.#getNodesForPath(normalizedPath);
+            if (!nodes || nodes.length < 2) {
+                return { data: null, count: 0, error: `Unable to subtract layer up, node not found at path "${normalizedPath}".` };
+            }
+
+            const layerNames = nodes.slice(1).map(n => n.payload.name);
+            if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
+            const source = layerNames[layerNames.length - 1];
+            const targets = layerNames.slice(0, layerNames.length - 1);
+
+            const affected = await this.#db.contextBitmapCollection.subtractFromMany(source, targets);
+            this.emit('tree.layer.subtracted.up', { path: normalizedPath, source, targets, affected });
+            return { data: affected, count: affected.length, error: null };
+        } catch (error) {
+            debug(`Error subtracting layer up at path "${normalizedPath}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
+    }
+
+    /**
+     * Subtract current layer bitmap from its ancestors for /work/mb/foo (from work and mb)
+     */
+    async subtractDown(path) {
+        const normalizedPath = this.#normalizePath(path);
+        debug(`subtractDown: ${normalizedPath}`);
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        try {
+            const nodes = this.#getNodesForPath(normalizedPath);
+            if (!nodes || nodes.length < 2) {
+                return { data: null, count: 0, error: `Unable to subtract layer down, node not found at path "${normalizedPath}".` };
+            }
+
+            const layerNames = nodes.slice(1).map(n => n.payload.name);
+            if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
+            const source = layerNames[layerNames.length - 1];
+            const targets = layerNames.slice(0, layerNames.length - 1);
+
+            const affected = await this.#db.contextBitmapCollection.subtractFromMany(source, targets);
+            this.emit('tree.layer.subtracted.down', { path: normalizedPath, source, targets, affected });
+            return { data: affected, count: affected.length, error: null };
+        } catch (error) {
+            debug(`Error subtracting layer down at path "${normalizedPath}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
         }
     }
 
@@ -910,7 +910,7 @@ class ContextTree extends EventEmitter {
         return this.#db.hasDocumentByChecksum(checksum, normalizedContextSpec, featureBitmapArray);
     }
 
-    async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { limit: null }) {
+    async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { limit: 100, offset: 0 }) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         // findDocuments doesn't modify, typically no event needed unless logging access
