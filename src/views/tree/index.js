@@ -910,7 +910,7 @@ class ContextTree extends EventEmitter {
         return this.#db.hasDocumentByChecksum(checksum, normalizedContextSpec, featureBitmapArray);
     }
 
-    async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { limit: 100, offset: 0 }) {
+    async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         // findDocuments doesn't modify, typically no event needed unless logging access
@@ -1014,14 +1014,14 @@ class ContextTree extends EventEmitter {
         return results;
     }
 
-    async query(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {
+    async query(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], options = { parse: true }) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return await this.#db.query(query, contextBitmapArray, featureBitmapArray, filterArray, metadataOnly);
+        return await this.#db.query(query, contextBitmapArray, featureBitmapArray, filterArray, options);
     }
 
-    async ftsQuery(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {
+    async ftsQuery(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], options = { parse: true }) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return await this.#db.ftsQuery(query, contextBitmapArray, featureBitmapArray, filterArray, metadataOnly);
+        return await this.#db.ftsQuery(query, contextBitmapArray, featureBitmapArray, filterArray, options);
     }
 
     /**

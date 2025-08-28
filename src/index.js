@@ -412,8 +412,8 @@ class SynapsD extends EventEmitter {
             throw new Error('Error inserting document atomically: ' + error.message);
         }
 
-        // Send document ID to the embedding vector worker queue
-        // TODO: Implement sending document ID to the embedding vector worker queue
+        // TODO: Send document ID to the embedding vector worker queue
+        // TODO: Implement actual batch/transactional operation in the backend if possible
 
         // Avoid emitting if we update multiple documents in a batch operation(e.g., insertDocumentArray)
         if (emitEvent) { this.emit('document.inserted', { id: parsedDocument.id, document: parsedDocument }); }
@@ -1222,7 +1222,7 @@ class SynapsD extends EventEmitter {
      * Query methods
      */
 
-    async query(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {
+    async query(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], options = { parse: true }) {
         if (typeof query !== 'string') {
             throw new ArgumentError('Query must be a string', 'query');
         }
@@ -1244,7 +1244,7 @@ class SynapsD extends EventEmitter {
         };
     }
 
-    async ftsQuery(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], metadataOnly = false) {
+    async ftsQuery(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], options = { parse: true }) {
         if (typeof query !== 'string') {
             throw new ArgumentError('Query must be a string', 'query');
         }
@@ -1484,12 +1484,6 @@ class SynapsD extends EventEmitter {
         return initializedDoc; // Return the fully validated and initialized BaseDocument instance
     }
 
-    async #documentCount() {
-        const count = this.documents.getCount(); // Direct LMDB count method
-        debug(`#documentCount: ${count}`);
-        return count;
-    }
-
     #generateDocumentID() {
         try {
             const counterKey = 'internal/document-id-counter';
@@ -1520,8 +1514,6 @@ class SynapsD extends EventEmitter {
             throw error;
         }
     }
-
-
 
     clearSync() {
         if (!this.isRunning()) {
