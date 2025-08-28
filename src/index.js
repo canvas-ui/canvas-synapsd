@@ -550,12 +550,13 @@ class SynapsD extends EventEmitter {
         // Normalize options and pagination defaults
         const effectiveOptions = typeof options === 'object' && options !== null ? { ...options } : { parse: true };
         const parseDocuments = effectiveOptions.parse !== false;
-        const defaultLimit = 100;
         const providedLimit = Number.isFinite(effectiveOptions.limit) ? Number(effectiveOptions.limit) : undefined;
         const providedOffset = Number.isFinite(effectiveOptions.offset) ? Number(effectiveOptions.offset) : undefined;
         const providedPage = Number.isFinite(effectiveOptions.page) ? Number(effectiveOptions.page) : undefined;
-        const limit = Math.max(0, providedLimit !== undefined ? providedLimit : defaultLimit);
-        const offset = Math.max(0, providedOffset !== undefined ? providedOffset : (providedPage && providedPage > 0 ? (providedPage - 1) * limit : 0));
+        // If no explicit limit provided, don't apply any limit (return all documents)
+        // If limit=0 explicitly provided, also don't apply any limit
+        const limit = providedLimit !== undefined ? Math.max(0, providedLimit) : 0;
+        const offset = Math.max(0, providedOffset !== undefined ? providedOffset : (providedPage && providedPage > 0 ? (providedPage - 1) * (limit || 100) : 0));
 
         // Only parse contextSpec if it was explicitly provided (not null/undefined)
         const contextBitmapArray = contextSpec !== null && contextSpec !== undefined ? this.#parseContextSpec(contextSpec) : [];
@@ -604,18 +605,24 @@ class SynapsD extends EventEmitter {
             if (!filtersApplied) {
                 const totalCount = await this.documents.getCount();
 
-                // Iterate and collect only the requested page window
+                // Iterate and collect the requested page window (or all documents if no limit)
                 const pagedDocs = [];
                 let seen = 0;
                 for await (const { value } of this.documents.getRange()) {
                     if (seen++ < offset) { continue; }
                     pagedDocs.push(value);
-                    if (pagedDocs.length >= limit) { break; }
+                    if (limit > 0 && pagedDocs.length >= limit) { break; }
+                }
+
+                // Debug: Log the discrepancy if it exists
+                if (limit > 0 && pagedDocs.length < limit && totalCount > pagedDocs.length) {
+                    debug(`findDocuments: Count discrepancy detected. Database count: ${totalCount}, Actual retrievable documents: ${seen}, Returned: ${pagedDocs.length}`);
                 }
 
                 const resultArray = parseDocuments ? pagedDocs.map(doc => this.#parseInitializeDocument(doc)) : pagedDocs;
                 // Attach metadata for compatibility
-                resultArray.count = totalCount;
+                resultArray.count = pagedDocs.length; // Number of documents actually returned
+                resultArray.totalCount = totalCount;   // Total number of documents available
                 resultArray.error = null;
                 return resultArray;
             }
@@ -624,27 +631,30 @@ class SynapsD extends EventEmitter {
             if (finalDocumentIds.length === 0) {
                 debug('findDocuments: Resulting bitmap is null or empty after applying filters.');
                 const emptyArray = [];
-                emptyArray.count = 0;
+                emptyArray.count = 0;      // Number of documents returned (0)
+                emptyArray.totalCount = 0; // Total available (0)
                 emptyArray.error = null;
                 return emptyArray;
             }
 
             // Convert bitmap to array of document IDs and apply pagination window
             const totalCount = finalDocumentIds.length;
-            const slicedIds = limit === 0 ? [] : finalDocumentIds.slice(offset, offset + limit);
+            const slicedIds = limit === 0 ? finalDocumentIds : finalDocumentIds.slice(offset, offset + limit);
 
             // Get documents from database for the page
             const documents = await this.documents.getMany(slicedIds);
             const resultArray = parseDocuments ? documents.map(doc => this.#parseInitializeDocument(doc)) : documents;
             // Attach metadata for compatibility
-            resultArray.count = totalCount;
+            resultArray.count = documents.length; // Number of documents actually returned
+            resultArray.totalCount = totalCount;  // Total number of documents available
             resultArray.error = null;
             return resultArray;
 
         } catch (error) {
             debug(`Error in findDocuments: ${error.message}`);
             const errorArray = [];
-            errorArray.count = 0;
+            errorArray.count = 0;      // Number of documents returned (0)
+            errorArray.totalCount = 0; // Total available (unknown due to error)
             errorArray.error = error.message;
             return errorArray;
         }
