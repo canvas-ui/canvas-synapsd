@@ -195,23 +195,6 @@ try {
 }
 ```
 
-## TODO
-
-- add support for chunking
-- add support for versioning
-- add support for embeddings (we should calculate embeddings on the db side if none are provided)
-- add support for vector search
-- move the contextTree functionality from Canvas to this module (db will present a tree view on top of the dataset)
-- switch to (andBitmapArray, orBitmapArray, filterArray) instead of contextBitmapArray and featureBitmapArray
-- For 2.0 we should move entirely to Collections (prefix based, not dataset based)
-- We should move all internal bitmaps out of view, list methods should not return them nor should it be possible to edit them directly(maybe a dedicated dataset for internal bitmaps?)
-- We need to **implement a ignoreMissingBitmaps** option for list methods; this module is consumed by tool calls from ai agents and minions, compiling a list of bitmaps may not be very accurate
-- Add proper stats() support
-  - We should keep track of bitmap usage
-  - The above implies having "static" and "dynamic" bitmaps, static would be kept regardless of their usage but dynamic would be removed when not in use
-- Implement nested bitmaps (simplest would be to just detect if a bitmap key ends with a ID or something like _nested:id or_ref:id)
-- All of the above is a breeze with todays tools, goes to show that the only limiting factor in most scenarios will prominently become time!
-
 ## References
 
 - [LMDB Documentation](http://www.lmdb.tech/doc/)

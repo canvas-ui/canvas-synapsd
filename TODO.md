@@ -1,6 +1,5 @@
 # TODO
 
-- ! Implement pagination on top of range queries
 - ! Implement a off-thread worker to post-process ingested documents (to calculate embeddings, tag bitmaps etc)
 - ! Create a *proper* collection abstraction, esp. for Bitmaps
 - ! Refactor those ***UGLY*** insert/updateDocument methods!!!
