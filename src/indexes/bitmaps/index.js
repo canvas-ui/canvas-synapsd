@@ -142,7 +142,7 @@ class BitmapIndex {
         // First check the cache
         if (this.cache.has(key)) {
             debug(`Returning Bitmap key "${key}" from cache`);
-            return this.cache.get(key);;
+            return this.cache.get(key);
         }
 
         // Then try to load from store

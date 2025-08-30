@@ -603,9 +603,9 @@ class ContextTree extends EventEmitter {
     }
 
     /**
-     * Merge a layer with layers below it (placeholder)
+     * Merge ancestors down to current layer (work, foo, bar -> baz in /work/foo/bar/baz)
      * @param {string} path - Path to merge
-     * @returns {boolean} - True if successful
+     * @returns {Object} - {data, count, error}
      */
     async mergeDown(path) {
         const normalizedPath = this.#normalizePath(path);
@@ -619,11 +619,19 @@ class ContextTree extends EventEmitter {
 
             const layerNames = nodes.slice(1).map(n => n.payload.name);
             if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
-            const source = layerNames[layerNames.length - 1];
-            const targets = layerNames.slice(0, layerNames.length - 1);
 
-            const affected = await this.#db.contextBitmapCollection.applyToMany(source, targets);
-            this.emit('tree.layer.merged.down', { path: normalizedPath, source, targets, affected });
+            // For mergeDown: merge ancestors TO current layer
+            const target = layerNames[layerNames.length - 1];
+            const sources = layerNames.slice(0, layerNames.length - 1);
+
+            const affected = [];
+            // Apply each ancestor to the target layer
+            for (const source of sources) {
+                const result = await this.#db.contextBitmapCollection.applyToMany(source, [target]);
+                affected.push(...result);
+            }
+
+            this.emit('tree.layer.merged.down', { path: normalizedPath, target, sources, affected });
             return { data: affected, count: affected.length, error: null };
         } catch (error) {
             debug(`Error merging layer down at path "${normalizedPath}": ${error.message}`);
@@ -659,7 +667,9 @@ class ContextTree extends EventEmitter {
     }
 
     /**
-     * Subtract current layer bitmap from its ancestors for /work/mb/foo (from work and mb)
+     * Subtract ancestors from current layer (work, foo, bar from baz in /work/foo/bar/baz)
+     * @param {string} path - Path to subtract from
+     * @returns {Object} - {data, count, error}
      */
     async subtractDown(path) {
         const normalizedPath = this.#normalizePath(path);
@@ -673,11 +683,19 @@ class ContextTree extends EventEmitter {
 
             const layerNames = nodes.slice(1).map(n => n.payload.name);
             if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
-            const source = layerNames[layerNames.length - 1];
-            const targets = layerNames.slice(0, layerNames.length - 1);
 
-            const affected = await this.#db.contextBitmapCollection.subtractFromMany(source, targets);
-            this.emit('tree.layer.subtracted.down', { path: normalizedPath, source, targets, affected });
+            // For subtractDown: subtract ancestors FROM current layer
+            const target = layerNames[layerNames.length - 1];
+            const sources = layerNames.slice(0, layerNames.length - 1);
+
+            const affected = [];
+            // Subtract each ancestor from the target layer
+            for (const source of sources) {
+                const result = await this.#db.contextBitmapCollection.subtractFromMany(source, [target]);
+                affected.push(...result);
+            }
+
+            this.emit('tree.layer.subtracted.down', { path: normalizedPath, target, sources, affected });
             return { data: affected, count: affected.length, error: null };
         } catch (error) {
             debug(`Error subtracting layer down at path "${normalizedPath}": ${error.message}`);

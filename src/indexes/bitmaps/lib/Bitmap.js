@@ -30,18 +30,13 @@ class Bitmap extends RoaringBitmap32 {
         debug(`Bitmap "${this.key}" has ${this.size} objects`);
     }
 
-    // Explicit implementation of addMany in case inheritance issues
+    // Optimized implementation using native roaring addMany
     addMany(values) {
         debug(`Adding ${Array.isArray(values) ? values.length : 'unknown number of'} values to bitmap "${this.key}"`);
 
-        if (Array.isArray(values)) {
-            // Add values one by one if array
-            for (const value of values) {
-                this.add(value);
-            }
-        } else if (values instanceof RoaringBitmap32) {
-            // Use or if it's another bitmap
-            this.orInPlace(values);
+        if (Array.isArray(values) || values instanceof RoaringBitmap32) {
+            // Native addMany supports both arrays and bitmaps efficiently
+            super.addMany(values);
         } else {
             throw new Error(`Cannot add values of type ${typeof values} to bitmap`);
         }
@@ -49,18 +44,13 @@ class Bitmap extends RoaringBitmap32 {
         return this;
     }
 
-    // Explicit implementation of removeMany
+    // Optimized implementation using native roaring removeMany
     removeMany(values) {
         debug(`Removing ${Array.isArray(values) ? values.length : 'unknown number of'} values from bitmap "${this.key}"`);
 
-        if (Array.isArray(values)) {
-            // Remove values one by one if array
-            for (const value of values) {
-                this.remove(value);
-            }
-        } else if (values instanceof RoaringBitmap32) {
-            // Use andNot if it's another bitmap
-            this.andNotInPlace(values);
+        if (Array.isArray(values) || values instanceof RoaringBitmap32) {
+            // Native removeMany supports both arrays and bitmaps efficiently
+            super.removeMany(values);
         } else {
             throw new Error(`Cannot remove values of type ${typeof values} from bitmap`);
         }
