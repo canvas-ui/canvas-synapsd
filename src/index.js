@@ -412,6 +412,27 @@ class SynapsD extends EventEmitter {
             throw new Error('Error inserting document atomically: ' + error.message);
         }
 
+        // Emit tree event with contextSpec for workspace mode auto-opening support
+        // This ensures that tree.document.inserted events are emitted with the original contextSpec
+        if (emitEvent && this.tree) {
+            try {
+                // Emit the tree event directly since we've already inserted the document
+                debug(`insertDocument: Emitting tree event for document ID: ${parsedDocument.id} at contextSpec: ${contextSpec}`);
+
+                this.tree.emit('tree.document.inserted', {
+                    documentId: parsedDocument.id,
+                    contextSpec: contextSpec,
+                    layerNames: [], // Simple implementation for now - layerNames is not critical for tab auto-opening
+                    timestamp: new Date().toISOString(),
+                });
+
+                debug(`insertDocument: Tree event emitted for document ID: ${parsedDocument.id}`);
+            } catch (treeError) {
+                debug(`insertDocument: Failed to emit tree event for document ID: ${parsedDocument.id}, error: ${treeError.message}`);
+                // Don't fail the insert if tree event emission fails
+            }
+        }
+
         // TODO: Send document ID to the embedding vector worker queue
         // TODO: Implement actual batch/transactional operation in the backend if possible
 
@@ -454,6 +475,26 @@ class SynapsD extends EventEmitter {
 
         // If loop completes, all documents were inserted successfully
         debug(`insertDocumentArray: Successfully inserted all ${insertedIds.length} documents.`);
+
+        // Emit tree event for batch insertion with contextSpec for workspace mode auto-opening support
+        if (insertedIds.length > 0 && this.tree) {
+            try {
+                debug(`insertDocumentArray: Emitting tree batch event for ${insertedIds.length} documents at contextSpec: ${contextSpec}`);
+
+                this.tree.emit('tree.document.inserted.batch', {
+                    documentIds: insertedIds,
+                    contextSpec: contextSpec,
+                    layerNames: [], // Simple implementation for now - layerNames is not critical for tab auto-opening
+                    timestamp: new Date().toISOString(),
+                });
+
+                debug(`insertDocumentArray: Tree batch event emitted for ${insertedIds.length} documents`);
+            } catch (treeError) {
+                debug(`insertDocumentArray: Failed to emit tree batch event, error: ${treeError.message}`);
+                // Don't fail the insert if tree event emission fails
+            }
+        }
+
         // Emit a single event for the batch success if needed (optional)
         // this.emit('document:inserted:batch', { ids: insertedIds, count: insertedIds.length });
         return insertedIds; // Return array of IDs on full success
