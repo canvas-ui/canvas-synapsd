@@ -35,7 +35,7 @@ class Db {
                 backupPath: options.backupPath || path.join(options.path, 'backup'),
 
                 // Backup options
-                backupOnOpen: options.backupOnOpen || false,
+                backupOnOpen: options.backupOnOpen || true,
                 backupOnClose: options.backupOnClose || false,
 
                 // Internals

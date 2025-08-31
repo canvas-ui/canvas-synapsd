@@ -1,5 +1,6 @@
 'use strict';
 
+import { type } from 'os';
 /*
  * Dotfile abstraction
  * -------------------
@@ -57,6 +58,10 @@ const documentDataSchema = z
 
                 // Type of mapping target in the repository
                 type: z.enum(['file', 'folder']),
+
+                encryption: z.object({
+                    enabled: z.boolean(),
+                }).optional(),
 
                 // Optional
                 backupPath: z.string().optional(),
