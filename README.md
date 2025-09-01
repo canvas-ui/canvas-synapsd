@@ -14,21 +14,8 @@ A very simple, naive implementation of a JSON document store with some bitmap in
 ### JSON Document Store
 
 - Simple LMDB KV store with enforced document schemas (See `./src/schemas` for more details)
-- Every data abstraction schema (File, Note, Browser tab, Email etc) defines its own indexing options; currently supported **indexOptions**:
-  - **checksumAlgorithms**: Checksums to calculate
-  - **checksumFields**: JSON document fields to calculate checksums
-  - **searchFields**: Full text search fields
-  - **embeddingFields**: Concatenated fields to calculate embedding vectors
-  - **embeddingModel**: Model to use for embedding
-  - **embeddingDimensions**: Dimensions of the embedding vectors
-  - **embeddingProvider**: Provider to use for embedding
-  - **embeddingProviderOptions**: Options for the embedding provider
-  - **chunking**: Chunking options
-- **storageOptions**:
-  - **supportedBackends**: Array of backend names to use
-  - **defaultBackend**: Default backend to use
-  - **defaultBackendOptions**: Default backend options
-
+- Every data abstraction schema (File, Note, Browser tab, Email etc) defines its own set of indexing options
+  
 ### Index implementation
 
 #### Hashmaps / Inverted indexes
@@ -204,3 +191,7 @@ try {
 - [FlexSearch](https://github.com/nextapps-de/flexsearch)
 - [LanceDB](https://lancedb.com/)
 - [Why-not-indices](https://stackoverflow.com/questions/1378781/proper-terminology-should-i-say-indexes-or-indices)
+
+## License
+
+Licensed under AGPL-3.0-or-later. See main project LICENSE file. 
