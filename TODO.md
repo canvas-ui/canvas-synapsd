@@ -1,43 +1,47 @@
-# Generic TODO
+# TODO
+
+## Generic
 
 - Add backup policy, backup DB every day at 2AM server time, keep 7 days of backups(default, configurable for each workspace, config in workspace.json at each workspace path, should work on an active workspace only)
+- Add backup/restore functionality internally
+- Add DB snapshot/restore option(on top of versioning?) to enable undo/redo ops || db op logs + traversal
+- Add proper support for Layer of type "label", this type of layer is not bound to a bitmap, hence not processed when supplied via contextSpec/contextArray
+  Feature can enable a more directory-tree like UX
+- Ensure locked layers can not be moved/removed/deleted/renamed
+- ? Add support for CRUD operations on top of single layers (currently can be done using existing methods)
+- ? Implement a off-thread worker to post-process ingested documents (to calculate embeddings, tag bitmaps etc)
+- ! Refactor those ***UGLY*** insert/updateDocument methods!!!
+- Add a new "root" (universe) layer type, prevent all ops on the root layer, root "/" layer should always be locked
+- Support the following format option
+  - full document
+  - data portion only
+  - meta data portion only
+- Besides standard document abstractions, we need to support Canvases and Workspaces(so that a user could link a foreign workspace subtree within his tree, might be a can of worms)
 
-- Add backup/restore functionality internally (full db backup/restore, we'll implement snapshoting for undo/redo ops later)
+## Update mergeUp/Down + subtractUp/Down methods to use (layerName, contextPath)  instead of (contextPath) only
 
-- Update mergeUp/Down + subtractUp/Down methods to use layerName, contextPath  instead of contextPath only
-
-## current API
+### current API
 
 - mergeUp(contextPath): merge the bitmap of layer "foo" in context path "/work/foo/bar/baz" to bitmaps "bar" and "baz"
 - mergeDown(contextPath): merge the bitmap of layer "foo" in context path "/work/foo/bar/baz" to bitmap "work"
 - subtractUp(contextPath): subtract the bitmap of layer "foo" in context path "/work/foo/bar/baz" from bitmaps "bar" and "baz"
 - subtractDown(contextPath): subtract the bitmap of layer "foo" in context path "/work/foo/bar/baz" from bitmap "work"
 
-## alternative (TBD?) API
+### alternative (TBD?) API
 
 - mergeUp(layerName, contextPath): merge the bitmap of layer "foo" in context path "/work/foo/bar/baz" to bitmaps "bar" and "baz"
 - mergeDown(layerName, contextPath): merge the bitmap of layer "foo" in context path "/work/foo/bar/baz" to bitmap "work"
 - subtractUp(layerName, contextPath): subtract the bitmap of layer "foo" in context path "/work/foo/bar/baz" from bitmaps "bar" and "baz"
 - subtractDown(layerName, contextPath): subtract the bitmap of layer "foo" in context path "/work/foo/bar/baz" from bitmap "work"
 
-- Add support for layer type Label -> label type does not have a bitmap and should be removed form contextSpec as its not counted
-- Ensure locked layers can not be moved/removed/deleted/renamed
+## findDocuments API Refactor (Bitmap Filter DSL)
 
-- ! Implement a off-thread worker to post-process ingested documents (to calculate embeddings, tag bitmaps etc)
-- ! Create a *proper* collection abstraction, esp. for Bitmaps
-- ! Refactor those ***UGLY*** insert/updateDocument methods!!!
-- ! Add a new "root" layer type, prevent all ops on the root layer, root "/" layer should always be locked
-- format option
-  - full
-  - data+meta (data)
-  - meta
-- Add zod validators to internal schemas
-- Add zod-to-json (zod v4) schema support
-- Besides standard document abstractions, we need to support Canvases and Workspaces, most probably we should remove them from internal or create a proper document abstraction for this type, anyway, todo, lets finally focus on a *usable* mvp damn it!!
+### Update (probably more human-understandable then the chatgpt conversation summary below)
+- (andArray, orArray, filterArray, options)
+- Support for !foo (NOT bitmap), this was always planned in as a handy feature
+- Some bitmaps could be referenced indirectly using faiss or simillar, multi-head hierarchical approach to RAG will be moved fron canvas-agentd to synapsd when properly tested
 
-# findDocuments API Refactor (Bitmap Filter DSL)
-
-## Motivation
+### Motivation
 Current signature:
 ```js
 findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true })
@@ -226,17 +230,7 @@ bm.timelineBetween(start: string, end: string): FilterClause
 * Encourages maintainable, intent-driven queries for both agents and users.
 * Aimed at CLI, internal agents, and future UI/graph tooling.
 
-## To eval
-
-- Integrate storeD, we want to be able to store documents in different locations while keeping a simple SPOT index what is stored where and from what location it is reachable. This would allow us to store data in different formats - lets say using a simple file backend for on-disk storage as markdown text files
-- Use https://unstorage.unjs.io/ instead of a custom lmdb wrapper?, in worst cases we can write a small lmdb driver for unstorage if we'll feel its justified
-
-### Transaction support
+## Transaction support
 
 - We want to support dynamic (stateful) vector-store-powered retrieval
-- We should start a query transaction and dynamically update the tree/bitmap arrays based on retrieved document metadata we received which should stay cached in-memory for the duration of that transaction. But more importantly, we should be able to refine which snippets/keywords/factoids we want to focus on dynamically - this means that instead of chunking up the whole document to calculate embedding vectors, we'd first process it to generate specific topics/tags/factoids/concepts, calculate and store embeddings of those, parse our query into the same and do a vector-db similarity search. Once a batch of documents is retrieved - as metadata - we can further refine the query (dive "deeper" into the memory) by silencing/removing/reorganizing items in the factoid/concept array (while optionally - simultaneously updating our context tree/bitmap refs) and update the resulting document metadata array. We can then retrieve the top N documents in full with the rest of as metadata only. Should be fairly simple to test:
-  - Ingestion pipeline that would off-thread process documents, we need to do this anyway for things like browser tabs (I'd like to download a ofline copy and process it for RAG whenever a tab gets inserted), same for notes, emails etc
-    - Pipeline would first fetch the linked content if applicable
-    - Extract concepts, factoids, tags from the data and store them in the metadata part of the document(we will need to update our schemas a little), not used directly but will be useful when using different embedding models
-    - Calculate embeddings for all data and store them in a vector DB(not sure it'd make sense to store them in the document object itself, we support embeddings directly for use-cases like file indexing where the client itself would calculate embeddings)
-  
+- Feature to be moved from canvas-agentd
