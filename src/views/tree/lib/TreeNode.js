@@ -53,4 +53,10 @@ export default class TreeNode {
     removeChild(id) {
         return this.children.delete(id);
     }
+
+    getSortedChildren() {
+        return Array.from(this.children.values()).sort((a, b) =>
+            a.payload.name.localeCompare(b.payload.name)
+        );
+    }
 }

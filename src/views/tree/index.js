@@ -1070,9 +1070,9 @@ class ContextTree extends EventEmitter {
 
             if (node.children.size > 0) {
                 paths.push(displayPath); // Add intermediate paths too
-                for (const child of node.children.values()) {
-                    traverseTree(child, displayPath); // Pass the constructed path
-                }
+            for (const child of node.getSortedChildren()) {
+                traverseTree(child, displayPath); // Pass the constructed path
+            }
             } else {
                 paths.push(displayPath); // Add leaf paths
             }
@@ -1084,7 +1084,7 @@ class ContextTree extends EventEmitter {
         // Add root path explicitly
         uniquePaths.unshift('/');
 
-        return sort ? uniquePaths.sort() : uniquePaths;
+        return uniquePaths; // Already sorted during tree traversal
     }
 
     /**
@@ -1094,7 +1094,7 @@ class ContextTree extends EventEmitter {
      */
     buildJsonTree(node = this.root) {
         const buildTree = (currentNode) => {
-            const children = Array.from(currentNode.children.values())
+            const children = currentNode.getSortedChildren()
                 .filter((child) => child instanceof TreeNode)
                 .map((child) => (child.hasChildren ? buildTree(child) : createLayerInfo(child.payload)));
 
@@ -1128,7 +1128,7 @@ class ContextTree extends EventEmitter {
         const newRoot = new TreeNode(this.rootLayer.id, this.rootLayer);
 
         const rebuildTree = (oldNode, newParent) => {
-            for (const child of oldNode.children.values()) {
+            for (const child of oldNode.getSortedChildren()) {
                 const layer = this.#layerIndex.getLayerByID(child.id);
                 if (layer) {
                     const newChild = new TreeNode(layer.id, layer);
@@ -1185,7 +1185,7 @@ class ContextTree extends EventEmitter {
                     // Alternatively, throw new Error(`...`);
                 }
                 // If reconstructed, ensure its name matches what we expected
-                if (this.#layerIndex._LayerIndex__normalizeLayerName(layer.name) !== normalizedName) { // Access private for check
+                if (this.#layerIndex.normalizeLayerName(layer.name) !== normalizedName) {
                     console.error(`Name mismatch after direct fetch for layer ID ${layer.id}: Expected '${normalizedName}', got '${layer.name}'. Skipping node.`);
                     return null;
                 }

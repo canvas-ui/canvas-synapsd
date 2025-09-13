@@ -26,12 +26,12 @@ class LayerIndex extends EventEmitter {
     }
 
     /**
-     * Private utility to normalize layer names for consistent lookups and storage.
+     * Utility to normalize layer names for consistent lookups and storage.
      * Currently uses lowercase.
      * @param {string} name - The layer name.
      * @returns {string} - The normalized layer name.
      */
-    #normalizeLayerName(name) {
+    normalizeLayerName(name) {
         // Return '/' as is, lowercase others
         return name === '/' ? name : String(name).toLowerCase();
     }
@@ -108,7 +108,7 @@ class LayerIndex extends EventEmitter {
         if (!this.#initialized) {
             throw new Error('Layer index not initialized');
         }
-        const normalizedName = this.#normalizeLayerName(name);
+        const normalizedName = this.normalizeLayerName(name);
         return this.#nameToLayerMap.get(normalizedName);
     }
 
@@ -124,7 +124,7 @@ class LayerIndex extends EventEmitter {
         if (!this.#initialized) {
             throw new Error('Layer index not initialized');
         }
-        const normalizedName = this.#normalizeLayerName(name);
+        const normalizedName = this.normalizeLayerName(name);
         return this.#nameToLayerMap.has(normalizedName);
     }
 
@@ -148,7 +148,7 @@ class LayerIndex extends EventEmitter {
 
     isInternalLayerName(name) {
         // Consider normalizing name here if needed for comparison
-        // const normalizedName = this.#normalizeLayerName(name);
+        // const normalizedName = this.normalizeLayerName(name);
         // const layer = this.getLayerByName(normalizedName); // Use normalized lookup
         return false; //layer && builtInLayers.find((layer) => layer.name === normalizedName);
     }
@@ -178,7 +178,7 @@ class LayerIndex extends EventEmitter {
         type: 'context',
     }) {
         if (!this.#initialized) { throw new Error('Layer index not initialized'); }
-        const normalizedName = this.#normalizeLayerName(name);
+        const normalizedName = this.normalizeLayerName(name);
         debug(`Creating layer "${normalizedName}" (original: "${name}") with options ${JSON.stringify(options)}`);
 
         // Check if layer type is valid
@@ -221,8 +221,8 @@ class LayerIndex extends EventEmitter {
     }
 
     async renameLayer(name, newName) {
-        const normalizedName = this.#normalizeLayerName(name);
-        const normalizedNewName = this.#normalizeLayerName(newName);
+        const normalizedName = this.normalizeLayerName(name);
+        const normalizedNewName = this.normalizeLayerName(newName);
 
         if (normalizedName === '/') {
             throw new Error('Root layer "/" cannot be renamed');
@@ -245,7 +245,7 @@ class LayerIndex extends EventEmitter {
         }
 
         // Capture old normalized name for map cleanup
-        const oldNormalizedName = this.#normalizeLayerName(currentLayer.name);
+        const oldNormalizedName = this.normalizeLayerName(currentLayer.name);
 
         // Update the name only (do not change label as per spec)
         currentLayer.setName(normalizedNewName);
@@ -335,7 +335,7 @@ class LayerIndex extends EventEmitter {
         if (persistent) {
             await this.#store.put(this.#constructLayerKey(layer.id), layer);
         }
-        const normalizedName = this.#normalizeLayerName(layer.name);
+        const normalizedName = this.normalizeLayerName(layer.name);
         this.#nameToLayerMap.set(normalizedName, layer);
         debug(`Stored layer ${layer.id} in DB and map with normalized name: ${normalizedName}`);
         return true;
@@ -347,7 +347,7 @@ class LayerIndex extends EventEmitter {
             throw new Error('Cannot remove invalid layer object.');
         }
         await this.#store.remove(this.#constructLayerKey(layer.id));
-        const normalizedName = this.#normalizeLayerName(layer.name);
+        const normalizedName = this.normalizeLayerName(layer.name);
         this.#nameToLayerMap.delete(normalizedName);
         debug(`Removed layer ${layer.id} from DB and map using normalized name: ${normalizedName}`);
         return true;
@@ -382,7 +382,7 @@ class LayerIndex extends EventEmitter {
                 debug(`Initializing layer ${layerId}`);
                 const layer = await this.getLayerByID(layerId); // Make sure this returns a promise if async
                 if (layer && layer.name) {
-                    const normalizedName = this.#normalizeLayerName(layer.name);
+                    const normalizedName = this.normalizeLayerName(layer.name);
                     this.#nameToLayerMap.set(normalizedName, layer);
                     debug(`Added layer ${layerId} to map with normalized name: ${normalizedName}`);
                 } else {
