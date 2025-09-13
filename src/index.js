@@ -1543,7 +1543,8 @@ class SynapsD extends EventEmitter {
             const text = parts.join('\n').toLowerCase();
             let score = 0;
             for (const token of tokens) { if (text.includes(token)) { score++; } }
-            if (score > 0) { scored.push({ id: doc.id, score, doc }); }
+            // AND logic: only include documents where ALL tokens match
+            if (score === tokens.length) { scored.push({ id: doc.id, score, doc }); }
         }
 
         scored.sort((a, b) => b.score - a.score || a.id - b.id);
