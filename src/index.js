@@ -1558,20 +1558,47 @@ class SynapsD extends EventEmitter {
     async #backfillLance(limit = 2000) {
         try {
             if (!this.#lanceTable) { return; }
-            const total = await this.documents.getCount();
-            if (!total || total <= 0) { return; }
-            if (total > limit) { return; }
+
+            // Get bitmaps for all documents and processed documents
+            const allDocsBitmap = await this.bitmapIndex.getBitmap('context/', false);
+            const processedBitmap = await this.bitmapIndex.getBitmap(this.#lanceFtsBitmapKey, false);
+
+            if (!allDocsBitmap || allDocsBitmap.isEmpty) {
+                debug('#backfillLance: no documents found in context bitmap');
+                return;
+            }
+
+            // Calculate unprocessed documents using bitmap difference
+            let unprocessedBitmap = allDocsBitmap.clone();
+            if (processedBitmap && !processedBitmap.isEmpty) {
+                unprocessedBitmap.andNotInPlace(processedBitmap); // Remove processed docs
+            }
+
+            if (unprocessedBitmap.isEmpty) {
+                debug('#backfillLance: all documents already processed');
+                return;
+            }
+
+            // Convert to array and limit the processing
+            const unprocessedIds = unprocessedBitmap.toArray();
+            const idsToProcess = limit > 0 ? unprocessedIds.slice(0, limit) : unprocessedIds;
+
+            debug(`#backfillLance: found ${unprocessedIds.length} unprocessed documents, processing ${idsToProcess.length}`);
+
             let processed = 0;
-            for await (const { value } of this.documents.getRange()) {
+            for (const docId of idsToProcess) {
                 try {
-                    const doc = this.#parseInitializeDocument(value);
-                    await this.#upsertLanceDocument(doc);
-                    processed++;
-                    if (processed >= limit) { break; }
+                    const docData = await this.documents.get(docId);
+                    if (docData) {
+                        const doc = this.#parseInitializeDocument(docData);
+                        await this.#upsertLanceDocument(doc);
+                        processed++;
+                    }
                 } catch (e) {
-                    debug(`#backfillLance: failed to upsert one doc: ${e.message}`);
+                    debug(`#backfillLance: failed to upsert doc ${docId}: ${e.message}`);
                 }
             }
+
             debug(`#backfillLance: backfilled ${processed} documents into Lance FTS`);
         } catch (e) {
             debug(`#backfillLance: error ${e.message}`);
