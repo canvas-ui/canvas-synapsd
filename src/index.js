@@ -24,6 +24,7 @@ import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
 //import FtsIndex from './indexes/fts/index.js';
 //import VectorIndex from './indexes/vector/index.js';
+import * as lancedb from '@lancedb/lancedb';
 
 // Views / Abstractions
 import ContextTree from './views/tree/index.js';
@@ -63,6 +64,12 @@ class SynapsD extends EventEmitter {
 
     // Collections
     #collections;
+
+    // LanceDB
+    #lanceDb;
+    #lanceTable;
+    #lanceRootPath;
+    #lanceFtsBitmapKey = 'internal/lance/fts';
 
     constructor(options = {
         backupOnOpen: false,
@@ -127,9 +134,6 @@ class SynapsD extends EventEmitter {
 
         this.#checksumIndex = new ChecksumIndex(this.#db.createDataset('checksums'));
         this.#timestampIndex = null;
-
-        // TODO: FTS index
-        // TODO: Vector index
 
         /**
          * Collections Map (TODO: Implement an easy-to-use collection abstraction)
@@ -212,6 +216,13 @@ class SynapsD extends EventEmitter {
                 this.actionBitmaps,
             );
 
+            // Initialize LanceDB under workspace root (rootPath/lance)
+            await this.#initLance();
+            await this.#backfillLance(1000);
+
+            // Ensure FTS membership bitmap exists
+            await this.bitmapIndex.createBitmap(this.#lanceFtsBitmapKey);
+
             // Initialize context tree
             await this.#tree.initialize();
             this.#treeLayers = this.#tree.layers;
@@ -235,6 +246,7 @@ class SynapsD extends EventEmitter {
             this.#status = 'shutting down';
             this.emit('beforeShutdown');
             // Close index backends
+            // LanceDB uses filesystem-based storage; no explicit close needed.
             // Close database backend
             await this.#db.close();
 
@@ -410,6 +422,15 @@ class SynapsD extends EventEmitter {
         } catch (error) {
             debug(`insertDocument: Transaction failed for document ID: ${parsedDocument.id}, error: ${error.message}`);
             throw new Error('Error inserting document atomically: ' + error.message);
+        }
+
+        // Upsert into LanceDB (best-effort, non-fatal)
+        try {
+            // Ensure document is fully initialized with methods before Lance indexing
+            const docForLance = this.#parseInitializeDocument(parsedDocument);
+            await this.#upsertLanceDocument(docForLance);
+        } catch (e) {
+            debug(`insertDocument: Lance upsert failed for ${parsedDocument.id}: ${e.message}`);
         }
 
         // Emit tree event with contextSpec for workspace mode auto-opening support
@@ -779,6 +800,15 @@ class SynapsD extends EventEmitter {
             this.emit('document.updated', { id: updatedDocument.id, document: updatedDocument });
             debug(`updateDocument: Successfully updated document ID: ${updatedDocument.id}`);
 
+            // Best-effort Lance upsert
+            try {
+                // Ensure document is fully initialized with methods before Lance indexing
+                const docForLance = this.#parseInitializeDocument(updatedDocument);
+                await this.#upsertLanceDocument(docForLance);
+            } catch (e) {
+                debug(`updateDocument: Lance upsert failed for ${updatedDocument.id}: ${e.message}`);
+            }
+
             return updatedDocument.id;
         } catch (error) {
             debug(`updateDocument: Error during update: ${error.message}`);
@@ -965,6 +995,12 @@ class SynapsD extends EventEmitter {
             await this.#timestampIndex.insert('deleted', document.updatedAt, docId);
 
             debug(`Document with ID "${docId}" deleted`);
+            // Best-effort Lance delete
+            try {
+                await this.#deleteLanceDocument(docId);
+            } catch (e) {
+                debug(`deleteDocument: Lance delete failed for ${docId}: ${e.message}`);
+            }
             this.emit('document.deleted', { id: docId });
             return true;
         } catch (error) {
@@ -1263,48 +1299,66 @@ class SynapsD extends EventEmitter {
      * Query methods
      */
 
-    async query(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], options = { parse: true }) {
-        if (typeof query !== 'string') {
+    async query(queryString, contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
+        if (typeof queryString !== 'string') {
             throw new ArgumentError('Query must be a string', 'query');
         }
-        if (!Array.isArray(contextBitmapArray)) {
-            throw new ArgumentError('Context array must be an array', 'contextBitmapArray');
-        }
-        if (!Array.isArray(featureBitmapArray)) {
-            throw new ArgumentError('Feature array must be an array', 'featureBitmapArray');
-        }
-        if (!Array.isArray(filterArray)) {
-            throw new ArgumentError('Filter array must be an array', 'filterArray');
-        }
 
-        debug('Query not implemented yet');
-        return {
-            data: [],
-            count: 0,
-            error: 'Query method not implemented yet',
-        };
+        return await this.ftsQuery(queryString, contextSpec, featureBitmapArray, filterArray, options);
     }
 
-    async ftsQuery(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], options = { parse: true }) {
-        if (typeof query !== 'string') {
-            throw new ArgumentError('Query must be a string', 'query');
-        }
-        if (!Array.isArray(contextBitmapArray)) {
-            throw new ArgumentError('Context array must be an array', 'contextBitmapArray');
-        }
-        if (!Array.isArray(featureBitmapArray)) {
-            throw new ArgumentError('Feature array must be an array', 'featureBitmapArray');
-        }
-        if (!Array.isArray(filterArray)) {
-            throw new ArgumentError('Filter array must be an array', 'filterArray');
+    async ftsQuery(queryString, contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true, limit: 50, offset: 0 }) {
+        if (!this.#lanceTable) {
+            const empty = [];
+            empty.count = 0;
+            empty.totalCount = 0;
+            empty.error = 'FTS not initialized';
+            return empty;
         }
 
-        debug('FTS Query not implemented yet');
-        return {
-            data: [],
-            count: 0,
-            error: 'FTS Query method not implemented yet',
-        };
+        // Normalize options
+        const effectiveOptions = typeof options === 'object' && options !== null ? { ...options } : { parse: true };
+        const parseDocuments = effectiveOptions.parse !== false;
+        const limit = Number.isFinite(effectiveOptions.limit) ? Math.max(0, Number(effectiveOptions.limit)) : 50;
+        const offset = Math.max(0, Number.isFinite(effectiveOptions.offset) ? Number(effectiveOptions.offset) : 0);
+
+        // Build candidate set via bitmaps (context AND, features OR, filters AND)
+        let candidateBitmap = null;
+        let filtersApplied = false;
+        const contextBitmapArray = contextSpec !== null && contextSpec !== undefined ? this.#parseContextSpec(contextSpec) : [];
+
+        if (contextSpec !== null && contextSpec !== undefined && contextBitmapArray.length > 0) {
+            candidateBitmap = await this.contextBitmapCollection.AND(contextBitmapArray);
+            filtersApplied = true;
+        }
+        if (Array.isArray(featureBitmapArray) && featureBitmapArray.length > 0) {
+            const featureBitmap = await this.bitmapIndex.OR(featureBitmapArray);
+            if (filtersApplied && candidateBitmap) { candidateBitmap.andInPlace(featureBitmap); } else { candidateBitmap = featureBitmap; filtersApplied = true; }
+        }
+        if (Array.isArray(filterArray) && filterArray.length > 0) {
+            const extraFilter = await this.bitmapIndex.AND(filterArray);
+            if (filtersApplied && candidateBitmap) { candidateBitmap.andInPlace(extraFilter); } else { candidateBitmap = extraFilter; filtersApplied = true; }
+        }
+
+        const candidateIds = candidateBitmap ? candidateBitmap.toArray() : [];
+        if (filtersApplied && candidateIds.length === 0) {
+            const empty = [];
+            empty.count = 0;
+            empty.totalCount = 0;
+            empty.error = null;
+            return empty;
+        }
+        // MVP: use local FTS scoring over candidate IDs for deterministic results
+        if (filtersApplied && candidateIds.length > 0) {
+            return await this.#localFtsFallback(queryString, candidateIds, { limit, offset, parse: parseDocuments });
+        }
+
+        // No filters: avoid scanning entire DB locally. Return empty for now.
+        const emptyNoFilter = [];
+        emptyNoFilter.count = 0;
+        emptyNoFilter.totalCount = 0;
+        emptyNoFilter.error = null;
+        return emptyNoFilter;
     }
 
     /**
@@ -1410,6 +1464,118 @@ class SynapsD extends EventEmitter {
     #parseBitmapArray(bitmapArray) {
         if (!Array.isArray(bitmapArray)) { bitmapArray = [bitmapArray]; }
         return bitmapArray;
+    }
+
+    async #initLance() {
+        try {
+            this.#lanceRootPath = path.join(this.#rootPath, 'lance');
+            if (!fs.existsSync(this.#lanceRootPath)) {
+                fs.mkdirSync(this.#lanceRootPath, { recursive: true });
+            }
+            this.#lanceDb = await lancedb.connect(this.#lanceRootPath);
+            try {
+                this.#lanceTable = await this.#lanceDb.openTable('documents');
+            } catch (e) {
+                // Create table with schema
+                const sampleRow = {
+                    id: 0,
+                    schema: 'sample',
+                    updatedAt: new Date().toISOString(),
+                    fts_text: 'sample text',
+                };
+                await this.#lanceDb.createTable('documents', [sampleRow]);
+                this.#lanceTable = await this.#lanceDb.openTable('documents');
+                // Remove the sample row
+                await this.#lanceTable.delete('id = 0');
+            }
+            // Ensure BM25 index on fts_text exists
+            await this.#ensureLanceFtsIndex();
+        } catch (error) {
+            debug(`LanceDB initialization failed: ${error.message}`);
+            // Non-fatal: allow DB to run without FTS
+            this.#lanceDb = null;
+            this.#lanceTable = null;
+        }
+    }
+
+    async #upsertLanceDocument(doc) {
+        if (!this.#lanceTable || !doc || !doc.id) { return; }
+        const ftsArray = typeof doc.generateFtsData === 'function' ? doc.generateFtsData() : null;
+        const ftsText = Array.isArray(ftsArray) ? ftsArray.join('\n') : '';
+        const row = {
+            id: doc.id,
+            schema: doc.schema,
+            updatedAt: doc.updatedAt,
+            fts_text: ftsText,
+        };
+        // Emulate upsert by deleting existing id then adding
+        try { await this.#lanceTable.delete?.(`id = ${doc.id}`); } catch (_) {}
+        await this.#lanceTable.add([row]);
+        // Mark as FTS-indexed in bitmap
+        try { await this.bitmapIndex.tick(this.#lanceFtsBitmapKey, doc.id); } catch (_) {}
+    }
+
+    async #deleteLanceDocument(docId) {
+        if (!this.#lanceTable || !docId) { return; }
+        await this.#lanceTable.delete?.(`id = ${docId}`);
+        try { await this.bitmapIndex.untick(this.#lanceFtsBitmapKey, docId); } catch (_) { /* ignore */ }
+    }
+
+    async #ensureLanceFtsIndex() {
+        if (!this.#lanceTable) { return; }
+        try {
+            await this.#lanceTable.createIndex?.({ type: 'BM25', columns: ['fts_text'] });
+        } catch (_) { /* ignore if already exists */ }
+    }
+
+    async #localFtsFallback(queryString, candidateIds, opts = { limit: 50, offset: 0, parse: true }) {
+        const limit = Math.max(0, Number(opts.limit ?? 50));
+        const offset = Math.max(0, Number(opts.offset ?? 0));
+        const parseDocs = opts.parse !== false;
+
+        const docs = await this.documents.getMany(candidateIds);
+        const tokens = String(queryString).toLowerCase().split(/\s+/).filter(Boolean);
+        const scored = [];
+
+        for (const raw of docs) {
+            const doc = parseDocs ? this.#parseInitializeDocument(raw) : raw;
+            const parts = (typeof doc.generateFtsData === 'function' ? doc.generateFtsData() : []) || [];
+            const text = parts.join('\n').toLowerCase();
+            let score = 0;
+            for (const token of tokens) { if (text.includes(token)) { score++; } }
+            if (score > 0) { scored.push({ id: doc.id, score, doc }); }
+        }
+
+        scored.sort((a, b) => b.score - a.score || a.id - b.id);
+        const sliced = limit === 0 ? scored : scored.slice(offset, offset + limit);
+        const result = sliced.map(s => s.doc);
+        result.count = result.length;
+        result.totalCount = scored.length;
+        result.error = null;
+        return result;
+    }
+
+    async #backfillLance(limit = 2000) {
+        try {
+            if (!this.#lanceTable) { return; }
+            const total = await this.documents.getCount();
+            if (!total || total <= 0) { return; }
+            if (total > limit) { return; }
+            let processed = 0;
+            for await (const { value } of this.documents.getRange()) {
+                try {
+                    const doc = this.#parseInitializeDocument(value);
+                    await this.#upsertLanceDocument(doc);
+                    processed++;
+                    if (processed >= limit) { break; }
+                } catch (e) {
+                    debug(`#backfillLance: failed to upsert one doc: ${e.message}`);
+                }
+            }
+            debug(`#backfillLance: backfilled ${processed} documents into Lance FTS`);
+        } catch (e) {
+            debug(`#backfillLance: error ${e.message}`);
+        }
     }
 
     /**

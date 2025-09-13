@@ -1032,14 +1032,9 @@ class ContextTree extends EventEmitter {
         return results;
     }
 
-    async query(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], options = { parse: true }) {
+    async query(queryString, contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return await this.#db.query(query, contextBitmapArray, featureBitmapArray, filterArray, options);
-    }
-
-    async ftsQuery(query, contextBitmapArray = [], featureBitmapArray = [], filterArray = [], options = { parse: true }) {
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return await this.#db.ftsQuery(query, contextBitmapArray, featureBitmapArray, filterArray, options);
+        return await this.#db.query(queryString , contextSpec, featureBitmapArray, filterArray, options);
     }
 
     /**
