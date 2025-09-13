@@ -37,6 +37,7 @@ class Db {
                 // Backup options
                 backupOnOpen: options.backupOnOpen || true,
                 backupOnClose: options.backupOnClose || false,
+                maxBackupRetention: options.maxBackupRetention || 14,
 
                 // Internals
                 maxDbs: options.maxDbs || 64,
@@ -69,6 +70,7 @@ class Db {
             backupOnOpen: options.backupOnOpen,
             backupOnClose: options.backupOnClose,
             compact: options.backupCompact,
+            maxBackupRetention: options.maxBackupRetention,
         };
 
         if (this.db && dataset) { // Check if it's a dataset instance
@@ -394,13 +396,17 @@ class Db {
         }
 
         debug(`Backing up database "${this.#path}" to "${backupPath}"`);
-        // this.db.backup(backupPath, compact); // Old call
-        return this.db.backup(backupPath, compact); // backup() is async, so return its Promise
-        // or await if the calling context supports it and needs completion.
-        // Since #backupDatabase is called from constructor context for backupOnOpen,
-        // making it fully async would require constructor to be async or use .then()
-        // For now, returning the promise is the minimal change.
-        // If backupOnOpen needs to *complete* before proceeding, more changes are needed.
+
+        const backupPromise = this.db.backup(backupPath, compact);
+
+        // Clean up old backups after successful backup
+        backupPromise.then(() => {
+            this.#cleanupOldBackups();
+        }).catch(error => {
+            debug(`Backup failed: ${error.message}`);
+        });
+
+        return backupPromise;
     }
 
     #generateBackupFolderPath() {
@@ -416,6 +422,40 @@ class Db {
         }
 
         return backupFolderPath;
+    }
+
+    #cleanupOldBackups() {
+        try {
+            if (!fs.existsSync(this.backupOptions.backupPath)) {
+                return; // No backup directory exists yet
+            }
+
+            const backupFolders = fs.readdirSync(this.backupOptions.backupPath)
+                .filter(folder => {
+                    const folderPath = path.join(this.backupOptions.backupPath, folder);
+                    return fs.statSync(folderPath).isDirectory() && /^\d{8}(\.\d+)?$/.test(folder);
+                })
+                .map(folder => ({
+                    name: folder,
+                    path: path.join(this.backupOptions.backupPath, folder),
+                    date: folder.split('.')[0] // Extract YYYYMMDD part
+                }))
+                .sort((a, b) => a.name.localeCompare(b.name)); // Sort chronologically
+
+            const foldersToDelete = backupFolders.slice(0, Math.max(0, backupFolders.length - this.backupOptions.maxBackupRetention));
+
+            foldersToDelete.forEach(folder => {
+                fs.rmSync(folder.path, { recursive: true, force: true });
+                debug(`Removed old backup folder: ${folder.name}`);
+            });
+
+            if (foldersToDelete.length > 0) {
+                debug(`Cleaned up ${foldersToDelete.length} old backup folders, keeping ${backupFolders.length - foldersToDelete.length} most recent`);
+            }
+
+        } catch (error) {
+            debug(`Error during backup cleanup: ${error.message}`);
+        }
     }
 
 }
