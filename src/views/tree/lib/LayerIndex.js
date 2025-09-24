@@ -27,13 +27,25 @@ class LayerIndex extends EventEmitter {
 
     /**
      * Utility to normalize layer names for consistent lookups and storage.
-     * Currently uses lowercase.
+     * Rules:
+     *  - Keep '/' as-is
+     *  - Trim
+     *  - Collapse whitespace to single underscores
+     *  - Lowercase
+     *  - Remove characters other than [a-z0-9._-]
+     *  - Collapse multiple underscores
      * @param {string} name - The layer name.
      * @returns {string} - The normalized layer name.
      */
     normalizeLayerName(name) {
-        // Return '/' as is, lowercase others
-        return name === '/' ? name : String(name).toLowerCase();
+        if (name === '/') { return '/'; }
+        let normalized = String(name ?? '')
+            .trim()
+            .replace(/\s+/g, '_')
+            .toLowerCase()
+            .replace(/[^a-z0-9._-]/g, '_')
+            .replace(/_+/g, '_');
+        return normalized || '_';
     }
 
     async initializeIndex() {
@@ -89,10 +101,6 @@ class LayerIndex extends EventEmitter {
             }
 
             const layer = LayerClass.fromJSON(layerData); // Use static method from the correct class
-            // Ensure label mirrors name to avoid inconsistencies after older data
-            if (layer && layer.name && layer.label !== layer.name) {
-                layer.label = layer.name;
-            }
             return layer;
         } catch (error) {
             debug(`Error reconstructing layer instance for ID ${normalizedId}: ${error.message}`);
@@ -196,8 +204,8 @@ class LayerIndex extends EventEmitter {
         }
 
         const LayerSchema = SchemaRegistry.getSchema(`internal/layers/${options.type}`);
-        // Pass the *normalized* name to the schema constructor
-        const layer = new LayerSchema(normalizedName, options);
+        // Pass the *normalized* name to the schema constructor and preserve original as label if not provided
+        const layer = new LayerSchema(normalizedName, { ...options, label: options.label ?? String(name) });
         if (!layer) { throw new Error(`Failed to create layer with options ${options}`); }
 
         await this.#dbStoreLayer(layer);

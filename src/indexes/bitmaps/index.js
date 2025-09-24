@@ -705,8 +705,12 @@ class BitmapIndex {
             key = key.slice(1);
         }
 
-        // Remove disallowed characters. Allowed: a-z, A-Z, 0-9, underscore, dash, dot, forward slash.
-        key = key.replace(/[^a-zA-Z0-9_\-./]/g, '');
+        // Normalize whitespace and case, then sanitize: allow [a-z0-9._-/]
+        key = String(key)
+            .replace(/\s+/g, '_')
+            .toLowerCase()
+            .replace(/[^a-z0-9_\-./]/g, '_')
+            .replace(/_+/g, '_');
 
         // Collapse multiple slashes to single slashes
         key = key.replace(/\/+/g, '/');

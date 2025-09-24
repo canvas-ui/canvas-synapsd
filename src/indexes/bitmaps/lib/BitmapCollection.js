@@ -32,7 +32,7 @@ export default class BitmapCollection {
      * Key management
      */
 
-    makeKey(key) {
+	makeKey(key) {
         // If the input key segment is already '/', it refers to the root of this collection.
         // this.keyPrefix (e.g., 'context/') already correctly represents this root path.
         if (key === '/') {
@@ -40,14 +40,17 @@ export default class BitmapCollection {
             return this.keyPrefix;
         }
 
-        // Handle negation prefix before other normalizations
-        const isNegated = key.startsWith('!');
-        let normalizedSegment = isNegated ? key.slice(1) : key;
+		// Handle negation prefix before other normalizations
+		const isNegated = key.startsWith('!');
+		let normalizedSegment = isNegated ? key.slice(1) : key;
 
-        // Sanitize the segment:
-        // Remove disallowed characters. Allowed: a-z, A-Z, 0-9, underscore, dash, dot, forward slash.
-        // Preserves forward slashes
-        normalizedSegment = normalizedSegment.replace(/[^a-zA-Z0-9_\-./]/g, '');
+		// Normalize whitespace and case to ensure consistent keys
+		normalizedSegment = String(normalizedSegment)
+			.replace(/\s+/g, '_')
+			.toLowerCase()
+			// Remove/sanitize disallowed characters. Preserve '/', '.', '-', '_'
+			.replace(/[^a-z0-9_\-./]/g, '_')
+			.replace(/_+/g, '_');
 
         if (normalizedSegment === '') {
             return this.keyPrefix;

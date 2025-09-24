@@ -1384,8 +1384,9 @@ class ContextTree extends EventEmitter {
         const segments = normalized.split('/');
         const normalizedSegments = segments.map(segment => {
             if (segment === '') {return '';} // Keep empty segments from split('/')
-            // Lowercase and remove invalid characters
-            return segment.toLowerCase().replace(/[^a-z0-9._-]/g, '');
+            // Replace whitespace with underscore, lowercase and remove invalid characters, collapse underscores
+            let s = segment.replace(/\s+/g, '_').toLowerCase().replace(/[^a-z0-9._-]/g, '_').replace(/_+/g, '_');
+            return s;
         });
 
         // Rejoin, handling potential empty segments if original was just '/' or '//'

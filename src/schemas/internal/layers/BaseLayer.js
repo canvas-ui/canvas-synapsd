@@ -12,19 +12,27 @@ class Layer {
 
         // Default options
         options = {
-            id: uuidv4(),
+            id: undefined,
             type: 'context',
             color: null,
             ...options,
         };
 
-        // TODO: This constructor needs a proper cleanup!
-        this.id = options.id;
+        // Compute normalized name first
+        const normalizedName = this.#sanitizeName(name);
+
+        // Initialize core fields
         this.schemaVersion = options.schemaVersion || '2.0';
         this.type = options.type ?? 'context';
-        this.name = this.#sanitizeName(name);
-        // Always keep label equal to name
-        this.label = this.name;
+        this.name = normalizedName;
+
+        // ID: prefer provided id; otherwise generate a UUID (do not derive from name)
+        this.id = options.id ?? uuidv4();
+
+        // Label: preserve provided label (original user-facing string), else fallback to original name string
+        const providedLabel = options.label ?? String(name ?? normalizedName);
+        this.label = this.#sanitizeLabel(providedLabel);
+
         this.description = options.description ? this.#sanitizeDescription(options.description) : 'Canvas layer';
         this.color = options?.color;
         this.lockedBy = options?.lockedBy || [];
@@ -56,8 +64,6 @@ class Layer {
         }
         const sanitized = this.#sanitizeName(name);
         this.name = sanitized;
-        // Keep label equal to name at all times
-        this.label = sanitized;
         return this;
     }
 
@@ -108,17 +114,17 @@ class Layer {
             throw new Error('Name must be a string');
         }
 
-        if (name.length > 32) {
-            throw new Error('Name must be less than 32 characters');
+        if (name.length > 64) {
+            throw new Error('Name must be less than 64 characters');
         }
 
-        // Remove all special characters except underscore, dash, dot and forward slash
-        name = name.replace(/[^a-zA-Z0-9_./-]/g, '_');
-
-        // Convert to lowercase
-        name = name.toLowerCase();
-
-        return name;
+        // Normalize: trim, spaces->underscore, lowercase, allow [a-z0-9._-/], collapse multiple underscores
+        let n = String(name).trim();
+        n = n.replace(/\s+/g, '_');
+        n = n.toLowerCase();
+        n = n.replace(/[^a-z0-9._\/-]/g, '_');
+        n = n.replace(/_+/g, '_');
+        return n;
     }
 
     #sanitizeLabel(label) {
@@ -126,8 +132,8 @@ class Layer {
             throw new Error('Label must be a string');
         }
 
-        if (label.length > 32) {
-            throw new Error('Label must be less than 32 characters');
+        if (label.length > 64) {
+            throw new Error('Label must be less than 64 characters');
         }
 
         return label; //label.replace(/[^a-zA-Z0-9_-]/g, '_');
