@@ -574,14 +574,13 @@ class ContextTree extends EventEmitter {
     }
 
     /**
-     * Merge a layer with layers above it (placeholder)
+     * Merge a layer with layers above it (uses mergeLayer internally)
      * @param {string} path - Path to merge
-     * @returns {boolean} - True if successful
+     * @returns {Object} - {data, count, error}
      */
     async mergeUp(path) {
         const normalizedPath = this.#normalizePath(path);
         debug(`mergeUp: ${normalizedPath}`);
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         try {
             const nodes = this.#getNodesForPath(normalizedPath);
             if (!nodes || nodes.length < 2) {
@@ -590,12 +589,15 @@ class ContextTree extends EventEmitter {
 
             const layerNames = nodes.slice(1).map(n => n.payload.name);
             if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
+
             const source = layerNames[layerNames.length - 1];
             const targets = layerNames.slice(0, layerNames.length - 1);
 
-            const affected = await this.#db.contextBitmapCollection.applyToMany(source, targets);
-            this.emit('tree.layer.merged.up', { path: normalizedPath, source, targets, affected });
-            return { data: affected, count: affected.length, error: null };
+            const result = await this.mergeLayer(source, targets);
+            if (result.error) { return result; }
+
+            this.emit('tree.layer.merged.up', { path: normalizedPath, source, targets, affected: result.data });
+            return result;
         } catch (error) {
             debug(`Error merging layer up at path "${normalizedPath}": ${error.message}`);
             return { data: null, count: 0, error: error.message };
@@ -603,14 +605,13 @@ class ContextTree extends EventEmitter {
     }
 
     /**
-     * Merge ancestors down to current layer (work, foo, bar -> baz in /work/foo/bar/baz)
+     * Merge ancestors down to current layer (uses mergeLayer internally)
      * @param {string} path - Path to merge
      * @returns {Object} - {data, count, error}
      */
     async mergeDown(path) {
         const normalizedPath = this.#normalizePath(path);
         debug(`mergeDown: ${normalizedPath}`);
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         try {
             const nodes = this.#getNodesForPath(normalizedPath);
             if (!nodes || nodes.length < 2) {
@@ -620,15 +621,15 @@ class ContextTree extends EventEmitter {
             const layerNames = nodes.slice(1).map(n => n.payload.name);
             if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
 
-            // For mergeDown: merge ancestors TO current layer
             const target = layerNames[layerNames.length - 1];
             const sources = layerNames.slice(0, layerNames.length - 1);
 
             const affected = [];
-            // Apply each ancestor to the target layer
             for (const source of sources) {
-                const result = await this.#db.contextBitmapCollection.applyToMany(source, [target]);
-                affected.push(...result);
+                const result = await this.mergeLayer(source, [target]);
+                if (!result.error && result.data) {
+                    affected.push(...result.data);
+                }
             }
 
             this.emit('tree.layer.merged.down', { path: normalizedPath, target, sources, affected });
@@ -640,12 +641,13 @@ class ContextTree extends EventEmitter {
     }
 
     /**
-     * Subtract current layer bitmap from its ancestors (bar, baz in /work/foo/bar/baz)
+     * Subtract current layer bitmap from its ancestors (uses subtractLayer internally)
+     * @param {string} path - Path to subtract from
+     * @returns {Object} - {data, count, error}
      */
     async subtractUp(path) {
         const normalizedPath = this.#normalizePath(path);
         debug(`subtractUp: ${normalizedPath}`);
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         try {
             const nodes = this.#getNodesForPath(normalizedPath);
             if (!nodes || nodes.length < 2) {
@@ -654,12 +656,15 @@ class ContextTree extends EventEmitter {
 
             const layerNames = nodes.slice(1).map(n => n.payload.name);
             if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
+
             const source = layerNames[layerNames.length - 1];
             const targets = layerNames.slice(0, layerNames.length - 1);
 
-            const affected = await this.#db.contextBitmapCollection.subtractFromMany(source, targets);
-            this.emit('tree.layer.subtracted.up', { path: normalizedPath, source, targets, affected });
-            return { data: affected, count: affected.length, error: null };
+            const result = await this.subtractLayer(source, targets);
+            if (result.error) { return result; }
+
+            this.emit('tree.layer.subtracted.up', { path: normalizedPath, source, targets, affected: result.data });
+            return result;
         } catch (error) {
             debug(`Error subtracting layer up at path "${normalizedPath}": ${error.message}`);
             return { data: null, count: 0, error: error.message };
@@ -667,14 +672,13 @@ class ContextTree extends EventEmitter {
     }
 
     /**
-     * Subtract ancestors from current layer (work, foo, bar from baz in /work/foo/bar/baz)
+     * Subtract ancestors from current layer (uses subtractLayer internally)
      * @param {string} path - Path to subtract from
      * @returns {Object} - {data, count, error}
      */
     async subtractDown(path) {
         const normalizedPath = this.#normalizePath(path);
         debug(`subtractDown: ${normalizedPath}`);
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         try {
             const nodes = this.#getNodesForPath(normalizedPath);
             if (!nodes || nodes.length < 2) {
@@ -684,21 +688,107 @@ class ContextTree extends EventEmitter {
             const layerNames = nodes.slice(1).map(n => n.payload.name);
             if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
 
-            // For subtractDown: subtract ancestors FROM current layer
             const target = layerNames[layerNames.length - 1];
             const sources = layerNames.slice(0, layerNames.length - 1);
 
             const affected = [];
-            // Subtract each ancestor from the target layer
             for (const source of sources) {
-                const result = await this.#db.contextBitmapCollection.subtractFromMany(source, [target]);
-                affected.push(...result);
+                const result = await this.subtractLayer(source, [target]);
+                if (!result.error && result.data) {
+                    affected.push(...result.data);
+                }
             }
 
             this.emit('tree.layer.subtracted.down', { path: normalizedPath, target, sources, affected });
             return { data: affected, count: affected.length, error: null };
         } catch (error) {
             debug(`Error subtracting layer down at path "${normalizedPath}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
+    }
+
+    /**
+     * Merge a layer into one or more layers
+     * @param {string} layerId - Layer ID or name to merge from
+     * @param {Array<string>} layerArray - Array of layer IDs or names to merge into
+     * @returns {Object} - {data, count, error}
+     */
+    async mergeLayer(layerId, layerArray) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        try {
+            const sourceLayer = this.getLayer(layerId) || this.getLayerById(layerId);
+            if (!sourceLayer) {
+                return { data: null, count: 0, error: `Source layer "${layerId}" not found.` };
+            }
+
+            const targetLayers = Array.isArray(layerArray) ? layerArray : [layerArray];
+            const targetNames = [];
+
+            for (const targetId of targetLayers) {
+                const targetLayer = this.getLayer(targetId) || this.getLayerById(targetId);
+                if (!targetLayer) {
+                    debug(`Target layer "${targetId}" not found, skipping.`);
+                    continue;
+                }
+                targetNames.push(targetLayer.name);
+            }
+
+            if (targetNames.length === 0) {
+                return { data: [], count: 0, error: 'No valid target layers found.' };
+            }
+
+            const affected = await this.#db.contextBitmapCollection.mergeBitmap(sourceLayer.name, targetNames);
+            this.emit('tree.layer.merged', {
+                source: sourceLayer.name,
+                targets: targetNames,
+                affected
+            });
+            return { data: affected, count: affected.length, error: null };
+        } catch (error) {
+            debug(`Error merging layer "${layerId}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
+    }
+
+    /**
+     * Subtract a layer from one or more layers
+     * @param {string} layerId - Layer ID or name to subtract
+     * @param {Array<string>} layerArray - Array of layer IDs or names to subtract from
+     * @returns {Object} - {data, count, error}
+     */
+    async subtractLayer(layerId, layerArray) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        try {
+            const sourceLayer = this.getLayer(layerId) || this.getLayerById(layerId);
+            if (!sourceLayer) {
+                return { data: null, count: 0, error: `Source layer "${layerId}" not found.` };
+            }
+
+            const targetLayers = Array.isArray(layerArray) ? layerArray : [layerArray];
+            const targetNames = [];
+
+            for (const targetId of targetLayers) {
+                const targetLayer = this.getLayer(targetId) || this.getLayerById(targetId);
+                if (!targetLayer) {
+                    debug(`Target layer "${targetId}" not found, skipping.`);
+                    continue;
+                }
+                targetNames.push(targetLayer.name);
+            }
+
+            if (targetNames.length === 0) {
+                return { data: [], count: 0, error: 'No valid target layers found.' };
+            }
+
+            const affected = await this.#db.contextBitmapCollection.subtractBitmap(sourceLayer.name, targetNames);
+            this.emit('tree.layer.subtracted', {
+                source: sourceLayer.name,
+                targets: targetNames,
+                affected
+            });
+            return { data: affected, count: affected.length, error: null };
+        } catch (error) {
+            debug(`Error subtracting layer "${layerId}": ${error.message}`);
             return { data: null, count: 0, error: error.message };
         }
     }

@@ -523,6 +523,20 @@ class BitmapIndex {
         return affectedKeys;
     }
 
+    async mergeBitmap(bitmapId, bitmapArray) {
+        BitmapIndex.validateKey(bitmapId);
+        const targetKeys = Array.isArray(bitmapArray) ? bitmapArray : [bitmapArray];
+        debug(`mergeBitmap(): Merging bitmap "${bitmapId}" into targets: "${targetKeys}"`);
+        return await this.applyToMany(bitmapId, targetKeys);
+    }
+
+    async subtractBitmap(bitmapId, bitmapArray) {
+        BitmapIndex.validateKey(bitmapId);
+        const targetKeys = Array.isArray(bitmapArray) ? bitmapArray : [bitmapArray];
+        debug(`subtractBitmap(): Subtracting bitmap "${bitmapId}" from targets: "${targetKeys}"`);
+        return await this.subtractFromMany(bitmapId, targetKeys);
+    }
+
     /**
      * Logical operations
      */

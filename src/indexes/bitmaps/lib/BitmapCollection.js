@@ -135,6 +135,20 @@ export default class BitmapCollection {
         );
     }
 
+    mergeBitmap(sourceKey, targetKeys) {
+        return this.bitmapIndex.mergeBitmap(
+            this.makeKey(sourceKey),
+            Array.isArray(targetKeys) ? targetKeys.map(key => this.makeKey(key)) : [this.makeKey(targetKeys)],
+        );
+    }
+
+    subtractBitmap(sourceKey, targetKeys) {
+        return this.bitmapIndex.subtractBitmap(
+            this.makeKey(sourceKey),
+            Array.isArray(targetKeys) ? targetKeys.map(key => this.makeKey(key)) : [this.makeKey(targetKeys)],
+        );
+    }
+
     AND(keyArray) {
         return this.bitmapIndex.AND(keyArray.map(key => this.makeKey(key)));
     }
