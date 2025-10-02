@@ -969,44 +969,69 @@ class SynapsD extends EventEmitter {
         if (!docId) { throw new Error('Document id required'); }
         debug(`deleteDocument: Document with ID "${docId}" found (or context check passed), proceeding to delete..`);
 
+        let document = null;
+        let transactionSuccess = false;
+
         try {
-            // Get document before deletion
+            // Get document before deletion (outside transaction to check existence)
             const documentData = await this.documents.get(docId);
             if (!documentData) {
                 debug(`deleteDocument: Document with ID "${docId}" not found`);
                 return false;
             }
-            const document = this.#parseDocumentData(documentData);
+            document = this.#parseDocumentData(documentData);
             debug('deleteDocument > Document: ', document);
 
-            // Delete document from database
-            await this.documents.delete(docId);
+            // Wrap all critical database operations in a single transaction for atomicity
+            await this.#db.transaction(async () => {
+                // Delete document from main database
+                await this.documents.delete(docId);
+                debug(`deleteDocument: Document ${docId} deleted from main store`);
 
-            // Delete document from all bitmaps
-            await this.bitmapIndex.untickAll(docId);
+                // Delete document from all bitmaps
+                await this.bitmapIndex.untickAll(docId);
+                debug(`deleteDocument: Document ${docId} removed from all bitmaps`);
 
-            // Delete document checksums from inverted index
-            await this.#checksumIndex.deleteArray(document.checksumArray);
+                // Delete document checksums from inverted index
+                await this.#checksumIndex.deleteArray(document.checksumArray);
+                debug(`deleteDocument: Checksums for document ${docId} deleted from index`);
 
-            // Add document ID to deleted documents bitmap
-            await this.deletedDocumentsBitmap.tick(docId);
+                // Add document ID to deleted documents bitmap
+                await this.deletedDocumentsBitmap.tick(docId);
+                debug(`deleteDocument: Document ${docId} added to deleted documents bitmap`);
 
-            // Timestamp index
-            await this.#timestampIndex.insert('deleted', document.updatedAt, docId);
+                // Update timestamp index
+                await this.#timestampIndex.insert('deleted', document.updatedAt || new Date().toISOString(), docId);
+                debug(`deleteDocument: Timestamp for document ${docId} updated in index`);
+            });
 
-            debug(`Document with ID "${docId}" deleted`);
-            // Best-effort Lance delete
+            transactionSuccess = true;
+            debug(`deleteDocument: All database operations completed atomically for document ID: ${docId}`);
+
+        } catch (error) {
+            debug(`deleteDocument: Transaction failed for document ID: ${docId}, error: ${error.message}`);
+            // If transaction failed, ensure we don't attempt Lance cleanup
+            transactionSuccess = false;
+            throw new Error(`Failed to delete document atomically: ${error.message}`);
+        }
+
+        // Best-effort Lance delete (outside transaction since it's a separate system)
+        if (transactionSuccess) {
             try {
                 await this.#deleteLanceDocument(docId);
+                debug(`deleteDocument: LanceDB cleanup completed for document ${docId}`);
             } catch (e) {
                 debug(`deleteDocument: Lance delete failed for ${docId}: ${e.message}`);
+                // Don't fail the entire operation if Lance cleanup fails
             }
+
+            // Emit success event
             this.emit('document.deleted', { id: docId });
+            debug(`deleteDocument: Successfully deleted document ID: ${docId}`);
             return true;
-        } catch (error) {
-            debug(`Error deleting document ${docId}: `, error);
-            return false;
         }
+
+        return false;
     }
 
     async deleteDocumentArray(docIdArray) {
