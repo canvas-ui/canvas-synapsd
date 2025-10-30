@@ -93,7 +93,9 @@ class ContextTree extends EventEmitter {
     }
 
     /**
-     * Getters
+     * ============================================================================
+     * Getters / Setters
+     * ============================================================================
      */
 
     get layers() {
@@ -105,9 +107,6 @@ class ContextTree extends EventEmitter {
         return this.#buildPathArray();
     }
 
-    /**
-     * Layer operations (wrappers around LayerIndex)
-     */
     getLayer(name) {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
         if (!name) { return undefined; }
@@ -120,7 +119,30 @@ class ContextTree extends EventEmitter {
         return this.#layerIndex.getLayerByID(id);
     }
 
-    async listAllLayers() {
+    getLayerForPath(path) {
+        const normalizedPath = this.#normalizePath(path);
+        debug(`Getting layer for normalized path "${normalizedPath}"`);
+        try {
+            const nodes = this.#getNodesForPath(normalizedPath);
+            if (!nodes || nodes.length === 0) {
+                return null; // Should not happen if root always exists
+            }
+            // The last node in the array corresponds to the final segment of the path
+            const finalNode = nodes[nodes.length - 1];
+            return finalNode.payload; // Return the Layer object
+        } catch (error) {
+            debug(`Failed to get layer for path "${normalizedPath}": ${error.message}`);
+            return null; // Return null if path resolution failed
+        }
+    }
+
+    /**
+     * ============================================================================
+     * Layer methods
+     * ============================================================================
+     */
+
+    async listLayers() {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
         const keys = await this.#layerIndex.listLayers(); // ['layer/<uuid>', ...]
         const result = [];
@@ -129,7 +151,7 @@ class ContextTree extends EventEmitter {
                 const layer = this.#layerIndex.getLayerByID(key);
                 if (layer) { result.push(layer); }
             } catch (e) {
-                debug(`listAllLayers: failed to reconstruct layer ${key}: ${e.message}`);
+                debug(`listLayers: failed to reconstruct layer ${key}: ${e.message}`);
             }
         }
         return result;
@@ -229,8 +251,84 @@ class ContextTree extends EventEmitter {
         return true;
     }
 
+    async mergeLayer(layerId, layerArray) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        try {
+            const sourceLayer = this.getLayer(layerId) || this.getLayerById(layerId);
+            if (!sourceLayer) {
+                return { data: null, count: 0, error: `Source layer "${layerId}" not found.` };
+            }
+
+            const targetLayers = Array.isArray(layerArray) ? layerArray : [layerArray];
+            const targetNames = [];
+
+            for (const targetId of targetLayers) {
+                const targetLayer = this.getLayer(targetId) || this.getLayerById(targetId);
+                if (!targetLayer) {
+                    debug(`Target layer "${targetId}" not found, skipping.`);
+                    continue;
+                }
+                targetNames.push(targetLayer.name);
+            }
+
+            if (targetNames.length === 0) {
+                return { data: [], count: 0, error: 'No valid target layers found.' };
+            }
+
+            const affected = await this.#db.contextBitmapCollection.mergeBitmap(sourceLayer.name, targetNames);
+            this.emit('tree.layer.merged', {
+                source: sourceLayer.name,
+                targets: targetNames,
+                affected
+            });
+            return { data: affected, count: affected.length, error: null };
+        } catch (error) {
+            debug(`Error merging layer "${layerId}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
+    }
+
+    async subtractLayer(layerId, layerArray) {
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        try {
+            const sourceLayer = this.getLayer(layerId) || this.getLayerById(layerId);
+            if (!sourceLayer) {
+                return { data: null, count: 0, error: `Source layer "${layerId}" not found.` };
+            }
+
+            const targetLayers = Array.isArray(layerArray) ? layerArray : [layerArray];
+            const targetNames = [];
+
+            for (const targetId of targetLayers) {
+                const targetLayer = this.getLayer(targetId) || this.getLayerById(targetId);
+                if (!targetLayer) {
+                    debug(`Target layer "${targetId}" not found, skipping.`);
+                    continue;
+                }
+                targetNames.push(targetLayer.name);
+            }
+
+            if (targetNames.length === 0) {
+                return { data: [], count: 0, error: 'No valid target layers found.' };
+            }
+
+            const affected = await this.#db.contextBitmapCollection.subtractBitmap(sourceLayer.name, targetNames);
+            this.emit('tree.layer.subtracted', {
+                source: sourceLayer.name,
+                targets: targetNames,
+                affected
+            });
+            return { data: affected, count: affected.length, error: null };
+        } catch (error) {
+            debug(`Error subtracting layer "${layerId}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
+    }
+
     /**
-     * Path Operations
+     * ============================================================================
+     * Path methods
+     * ============================================================================
      */
 
     async insertPath(path = '/', node, autoCreateLayers = true) {
@@ -573,259 +671,6 @@ class ContextTree extends EventEmitter {
         }
     }
 
-    /**
-     * Merge a layer with layers above it (uses mergeLayer internally)
-     * @param {string} path - Path to merge
-     * @returns {Object} - {data, count, error}
-     */
-    async mergeUp(path) {
-        const normalizedPath = this.#normalizePath(path);
-        debug(`mergeUp: ${normalizedPath}`);
-        try {
-            const nodes = this.#getNodesForPath(normalizedPath);
-            if (!nodes || nodes.length < 2) {
-                return { data: null, count: 0, error: `Unable to merge layer up, node not found at path "${normalizedPath}".` };
-            }
-
-            const layerNames = nodes.slice(1).map(n => n.payload.name);
-            if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
-
-            const source = layerNames[layerNames.length - 1];
-            const targets = layerNames.slice(0, layerNames.length - 1);
-
-            const result = await this.mergeLayer(source, targets);
-            if (result.error) { return result; }
-
-            this.emit('tree.layer.merged.up', { path: normalizedPath, source, targets, affected: result.data });
-            return result;
-        } catch (error) {
-            debug(`Error merging layer up at path "${normalizedPath}": ${error.message}`);
-            return { data: null, count: 0, error: error.message };
-        }
-    }
-
-    /**
-     * Merge ancestors down to current layer (uses mergeLayer internally)
-     * @param {string} path - Path to merge
-     * @returns {Object} - {data, count, error}
-     */
-    async mergeDown(path) {
-        const normalizedPath = this.#normalizePath(path);
-        debug(`mergeDown: ${normalizedPath}`);
-        try {
-            const nodes = this.#getNodesForPath(normalizedPath);
-            if (!nodes || nodes.length < 2) {
-                return { data: null, count: 0, error: `Unable to merge layer down, node not found at path "${normalizedPath}".` };
-            }
-
-            const layerNames = nodes.slice(1).map(n => n.payload.name);
-            if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
-
-            const target = layerNames[layerNames.length - 1];
-            const sources = layerNames.slice(0, layerNames.length - 1);
-
-            const affected = [];
-            for (const source of sources) {
-                const result = await this.mergeLayer(source, [target]);
-                if (!result.error && result.data) {
-                    affected.push(...result.data);
-                }
-            }
-
-            this.emit('tree.layer.merged.down', { path: normalizedPath, target, sources, affected });
-            return { data: affected, count: affected.length, error: null };
-        } catch (error) {
-            debug(`Error merging layer down at path "${normalizedPath}": ${error.message}`);
-            return { data: null, count: 0, error: error.message };
-        }
-    }
-
-    /**
-     * Subtract current layer bitmap from its ancestors (uses subtractLayer internally)
-     * @param {string} path - Path to subtract from
-     * @returns {Object} - {data, count, error}
-     */
-    async subtractUp(path) {
-        const normalizedPath = this.#normalizePath(path);
-        debug(`subtractUp: ${normalizedPath}`);
-        try {
-            const nodes = this.#getNodesForPath(normalizedPath);
-            if (!nodes || nodes.length < 2) {
-                return { data: null, count: 0, error: `Unable to subtract layer up, node not found at path "${normalizedPath}".` };
-            }
-
-            const layerNames = nodes.slice(1).map(n => n.payload.name);
-            if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
-
-            const source = layerNames[layerNames.length - 1];
-            const targets = layerNames.slice(0, layerNames.length - 1);
-
-            const result = await this.subtractLayer(source, targets);
-            if (result.error) { return result; }
-
-            this.emit('tree.layer.subtracted.up', { path: normalizedPath, source, targets, affected: result.data });
-            return result;
-        } catch (error) {
-            debug(`Error subtracting layer up at path "${normalizedPath}": ${error.message}`);
-            return { data: null, count: 0, error: error.message };
-        }
-    }
-
-    /**
-     * Subtract ancestors from current layer (uses subtractLayer internally)
-     * @param {string} path - Path to subtract from
-     * @returns {Object} - {data, count, error}
-     */
-    async subtractDown(path) {
-        const normalizedPath = this.#normalizePath(path);
-        debug(`subtractDown: ${normalizedPath}`);
-        try {
-            const nodes = this.#getNodesForPath(normalizedPath);
-            if (!nodes || nodes.length < 2) {
-                return { data: null, count: 0, error: `Unable to subtract layer down, node not found at path "${normalizedPath}".` };
-            }
-
-            const layerNames = nodes.slice(1).map(n => n.payload.name);
-            if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
-
-            const target = layerNames[layerNames.length - 1];
-            const sources = layerNames.slice(0, layerNames.length - 1);
-
-            const affected = [];
-            for (const source of sources) {
-                const result = await this.subtractLayer(source, [target]);
-                if (!result.error && result.data) {
-                    affected.push(...result.data);
-                }
-            }
-
-            this.emit('tree.layer.subtracted.down', { path: normalizedPath, target, sources, affected });
-            return { data: affected, count: affected.length, error: null };
-        } catch (error) {
-            debug(`Error subtracting layer down at path "${normalizedPath}": ${error.message}`);
-            return { data: null, count: 0, error: error.message };
-        }
-    }
-
-    /**
-     * Merge a layer into one or more layers
-     * @param {string} layerId - Layer ID or name to merge from
-     * @param {Array<string>} layerArray - Array of layer IDs or names to merge into
-     * @returns {Object} - {data, count, error}
-     */
-    async mergeLayer(layerId, layerArray) {
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        try {
-            const sourceLayer = this.getLayer(layerId) || this.getLayerById(layerId);
-            if (!sourceLayer) {
-                return { data: null, count: 0, error: `Source layer "${layerId}" not found.` };
-            }
-
-            const targetLayers = Array.isArray(layerArray) ? layerArray : [layerArray];
-            const targetNames = [];
-
-            for (const targetId of targetLayers) {
-                const targetLayer = this.getLayer(targetId) || this.getLayerById(targetId);
-                if (!targetLayer) {
-                    debug(`Target layer "${targetId}" not found, skipping.`);
-                    continue;
-                }
-                targetNames.push(targetLayer.name);
-            }
-
-            if (targetNames.length === 0) {
-                return { data: [], count: 0, error: 'No valid target layers found.' };
-            }
-
-            const affected = await this.#db.contextBitmapCollection.mergeBitmap(sourceLayer.name, targetNames);
-            this.emit('tree.layer.merged', {
-                source: sourceLayer.name,
-                targets: targetNames,
-                affected
-            });
-            return { data: affected, count: affected.length, error: null };
-        } catch (error) {
-            debug(`Error merging layer "${layerId}": ${error.message}`);
-            return { data: null, count: 0, error: error.message };
-        }
-    }
-
-    /**
-     * Subtract a layer from one or more layers
-     * @param {string} layerId - Layer ID or name to subtract
-     * @param {Array<string>} layerArray - Array of layer IDs or names to subtract from
-     * @returns {Object} - {data, count, error}
-     */
-    async subtractLayer(layerId, layerArray) {
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        try {
-            const sourceLayer = this.getLayer(layerId) || this.getLayerById(layerId);
-            if (!sourceLayer) {
-                return { data: null, count: 0, error: `Source layer "${layerId}" not found.` };
-            }
-
-            const targetLayers = Array.isArray(layerArray) ? layerArray : [layerArray];
-            const targetNames = [];
-
-            for (const targetId of targetLayers) {
-                const targetLayer = this.getLayer(targetId) || this.getLayerById(targetId);
-                if (!targetLayer) {
-                    debug(`Target layer "${targetId}" not found, skipping.`);
-                    continue;
-                }
-                targetNames.push(targetLayer.name);
-            }
-
-            if (targetNames.length === 0) {
-                return { data: [], count: 0, error: 'No valid target layers found.' };
-            }
-
-            const affected = await this.#db.contextBitmapCollection.subtractBitmap(sourceLayer.name, targetNames);
-            this.emit('tree.layer.subtracted', {
-                source: sourceLayer.name,
-                targets: targetNames,
-                affected
-            });
-            return { data: affected, count: affected.length, error: null };
-        } catch (error) {
-            debug(`Error subtracting layer "${layerId}": ${error.message}`);
-            return { data: null, count: 0, error: error.message };
-        }
-    }
-
-    /**
-     * Utils
-     */
-
-    /**
-     * Check if a path exists in the tree
-     * @param {string} path - Path to check
-     * @returns {boolean} - True if path exists
-     */
-    pathExists(path) {
-        const normalizedPath = this.#normalizePath(path);
-        try {
-            this.#getNodesForPath(normalizedPath);
-            return true;
-        } catch (error) {
-            // #getNodesForPath throws if path is invalid or doesn't exist
-            debug(`Path existence check failed for normalized path "${normalizedPath}": ${error.message}`);
-            return false;
-        }
-    }
-
-    pathToLayerIds(path) {
-        const normalizedPath = this.#normalizePath(path);
-        try {
-            const nodes = this.#getNodesForPath(normalizedPath);
-            // Exclude the root node's ID unless the path is exactly "/"
-            return nodes.slice(1).map(node => node.id); // node.id is the layer ID
-        } catch (error) {
-            debug(`Failed to convert normalized path "${normalizedPath}" to layer IDs: ${error.message}`);
-            return []; // Return empty array if path is invalid
-        }
-    }
-
     async lockPath(path, lockBy) {
         const normalizedPath = this.#normalizePath(path);
         if (!lockBy) {
@@ -941,29 +786,9 @@ class ContextTree extends EventEmitter {
     }
 
     /**
-     * Retrieve the Layer object associated with the final segment of a path.
-     * @param {string} path - The path to query.
-     * @returns {Layer | null} - The Layer object instance or null if the path is invalid or does not exist.
-     */
-    getLayerForPath(path) {
-        const normalizedPath = this.#normalizePath(path);
-        debug(`Getting layer for normalized path "${normalizedPath}"`);
-        try {
-            const nodes = this.#getNodesForPath(normalizedPath);
-            if (!nodes || nodes.length === 0) {
-                return null; // Should not happen if root always exists
-            }
-            // The last node in the array corresponds to the final segment of the path
-            const finalNode = nodes[nodes.length - 1];
-            return finalNode.payload; // Return the Layer object
-        } catch (error) {
-            debug(`Failed to get layer for path "${normalizedPath}": ${error.message}`);
-            return null; // Return null if path resolution failed
-        }
-    }
-
-    /**
-     * Document CRUD (convenience) wrapper methods for the db backend
+     * ============================================================================
+     * Document methods
+     * ============================================================================
      */
 
     async insertDocument(document, contextSpec = '/', featureBitmapArray = []) {
@@ -1004,25 +829,6 @@ class ContextTree extends EventEmitter {
             });
         }
         return results;
-    }
-
-    hasDocument(id, contextSpec = '/', featureBitmapArray = []) {
-        const normalizedContextSpec = this.#normalizePath(contextSpec);
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.hasDocument(id, normalizedContextSpec, featureBitmapArray);
-    }
-
-    hasDocumentByChecksum(checksum, contextSpec = null, featureBitmapArray = []) {
-        const normalizedContextSpec = this.#normalizePath(contextSpec);
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.hasDocumentByChecksum(checksum, normalizedContextSpec, featureBitmapArray);
-    }
-
-    async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
-        const normalizedContextSpec = this.#normalizePath(contextSpec);
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        // findDocuments doesn't modify, typically no event needed unless logging access
-        return await this.#db.findDocuments(normalizedContextSpec, featureBitmapArray, filterArray, options);
     }
 
     async updateDocument(document, contextSpec = null, featureBitmapArray = []) {
@@ -1122,66 +928,192 @@ class ContextTree extends EventEmitter {
         return results;
     }
 
+    /**
+     * ============================================================================
+     * Find / Query methods
+     * ============================================================================
+     */
+
     async query(queryString, contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         return await this.#db.query(queryString , contextSpec, featureBitmapArray, filterArray, options);
     }
 
-    /**
-     * Node Methods
-     */
+    async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        // findDocuments doesn't modify, typically no event needed unless logging access
+        return await this.#db.findDocuments(normalizedContextSpec, featureBitmapArray, filterArray, options);
+    }
 
-    /**
-     * Get parent path
-     * @param {string} path - Child path
-     * @returns {string} - Parent path
-     */
-    #getParentPath(path) {
-        // This should operate on an already normalized path
-        const normalizedPath = this.#normalizePath(path); // Ensure it's normalized
-        return normalizedPath.split('/').slice(0, -1).join('/') || '/';
+    hasDocument(id, contextSpec = '/', featureBitmapArray = []) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.hasDocument(id, normalizedContextSpec, featureBitmapArray);
+    }
+
+    hasDocumentByChecksum(checksum, contextSpec = null, featureBitmapArray = []) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        return this.#db.hasDocumentByChecksum(checksum, normalizedContextSpec, featureBitmapArray);
     }
 
     /**
-     * Build an array of all paths in the tree
-     * @param {boolean} sort - Whether to sort the paths
-     * @returns {Array} - Array of paths
+     * ============================================================================
+     * Utils and Private Methods
+     * ============================================================================
      */
-    #buildPathArray(sort = true) {
-        const paths = [];
-        // Traversal uses node.payload.name which is assumed to be normalized (by LayerIndex/BaseLayer)
-        const traverseTree = (node, parentPath) => {
-            // Construct path segments using the (already normalized) layer name
-            const currentSegment = node.payload.name;
-            const path = !parentPath || parentPath === '/' ? `/${currentSegment}` : `${parentPath}/${currentSegment}`;
 
-            // Handle root case where name is '/'
-            const displayPath = (path === '//' || path === '/') ? '/' : path;
-
-            if (node.children.size > 0) {
-                paths.push(displayPath); // Add intermediate paths too
-            for (const child of node.getSortedChildren()) {
-                traverseTree(child, displayPath); // Pass the constructed path
+    /**
+     * Merge a layer with layers above it (uses mergeLayer internally)
+     */
+    async mergeUp(path) {
+        const normalizedPath = this.#normalizePath(path);
+        debug(`mergeUp: ${normalizedPath}`);
+        try {
+            const nodes = this.#getNodesForPath(normalizedPath);
+            if (!nodes || nodes.length < 2) {
+                return { data: null, count: 0, error: `Unable to merge layer up, node not found at path "${normalizedPath}".` };
             }
-            } else {
-                paths.push(displayPath); // Add leaf paths
-            }
-        };
-        // Start traversal from root node, parent path is initially empty
-        traverseTree(this.root, '');
-        // Remove potential duplicates and the root path if added separately by logic
-        const uniquePaths = [...new Set(paths)].filter(p => p !== '/');
-        // Add root path explicitly
-        uniquePaths.unshift('/');
 
-        return uniquePaths; // Already sorted during tree traversal
+            const layerNames = nodes.slice(1).map(n => n.payload.name);
+            if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
+
+            const source = layerNames[layerNames.length - 1];
+            const targets = layerNames.slice(0, layerNames.length - 1);
+
+            const result = await this.mergeLayer(source, targets);
+            if (result.error) { return result; }
+
+            this.emit('tree.layer.merged.up', { path: normalizedPath, source, targets, affected: result.data });
+            return result;
+        } catch (error) {
+            debug(`Error merging layer up at path "${normalizedPath}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
     }
 
     /**
-     * Build JSON representation of the tree
-     * @param {Object} node - Root node
-     * @returns {Object} - JSON tree
+     * Merge ancestors down to current layer (uses mergeLayer internally)
      */
+    async mergeDown(path) {
+        const normalizedPath = this.#normalizePath(path);
+        debug(`mergeDown: ${normalizedPath}`);
+        try {
+            const nodes = this.#getNodesForPath(normalizedPath);
+            if (!nodes || nodes.length < 2) {
+                return { data: null, count: 0, error: `Unable to merge layer down, node not found at path "${normalizedPath}".` };
+            }
+
+            const layerNames = nodes.slice(1).map(n => n.payload.name);
+            if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
+
+            const target = layerNames[layerNames.length - 1];
+            const sources = layerNames.slice(0, layerNames.length - 1);
+
+            const affected = [];
+            for (const source of sources) {
+                const result = await this.mergeLayer(source, [target]);
+                if (!result.error && result.data) {
+                    affected.push(...result.data);
+                }
+            }
+
+            this.emit('tree.layer.merged.down', { path: normalizedPath, target, sources, affected });
+            return { data: affected, count: affected.length, error: null };
+        } catch (error) {
+            debug(`Error merging layer down at path "${normalizedPath}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
+    }
+
+    /**
+     * Subtract current layer bitmap from its ancestors (uses subtractLayer internally)
+     */
+    async subtractUp(path) {
+        const normalizedPath = this.#normalizePath(path);
+        debug(`subtractUp: ${normalizedPath}`);
+        try {
+            const nodes = this.#getNodesForPath(normalizedPath);
+            if (!nodes || nodes.length < 2) {
+                return { data: null, count: 0, error: `Unable to subtract layer up, node not found at path "${normalizedPath}".` };
+            }
+
+            const layerNames = nodes.slice(1).map(n => n.payload.name);
+            if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
+
+            const source = layerNames[layerNames.length - 1];
+            const targets = layerNames.slice(0, layerNames.length - 1);
+
+            const result = await this.subtractLayer(source, targets);
+            if (result.error) { return result; }
+
+            this.emit('tree.layer.subtracted.up', { path: normalizedPath, source, targets, affected: result.data });
+            return result;
+        } catch (error) {
+            debug(`Error subtracting layer up at path "${normalizedPath}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
+    }
+
+    /**
+     * Subtract ancestors from current layer (uses subtractLayer internally)
+     */
+    async subtractDown(path) {
+        const normalizedPath = this.#normalizePath(path);
+        debug(`subtractDown: ${normalizedPath}`);
+        try {
+            const nodes = this.#getNodesForPath(normalizedPath);
+            if (!nodes || nodes.length < 2) {
+                return { data: null, count: 0, error: `Unable to subtract layer down, node not found at path "${normalizedPath}".` };
+            }
+
+            const layerNames = nodes.slice(1).map(n => n.payload.name);
+            if (layerNames.length < 2) { return { data: [], count: 0, error: null }; }
+
+            const target = layerNames[layerNames.length - 1];
+            const sources = layerNames.slice(0, layerNames.length - 1);
+
+            const affected = [];
+            for (const source of sources) {
+                const result = await this.subtractLayer(source, [target]);
+                if (!result.error && result.data) {
+                    affected.push(...result.data);
+                }
+            }
+
+            this.emit('tree.layer.subtracted.down', { path: normalizedPath, target, sources, affected });
+            return { data: affected, count: affected.length, error: null };
+        } catch (error) {
+            debug(`Error subtracting layer down at path "${normalizedPath}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
+    }
+
+    pathExists(path) {
+        const normalizedPath = this.#normalizePath(path);
+        try {
+            this.#getNodesForPath(normalizedPath);
+            return true;
+        } catch (error) {
+            // #getNodesForPath throws if path is invalid or doesn't exist
+            debug(`Path existence check failed for normalized path "${normalizedPath}": ${error.message}`);
+            return false;
+        }
+    }
+
+    pathToLayerIds(path) {
+        const normalizedPath = this.#normalizePath(path);
+        try {
+            const nodes = this.#getNodesForPath(normalizedPath);
+            // Exclude the root node's ID unless the path is exactly "/"
+            return nodes.slice(1).map(node => node.id); // node.id is the layer ID
+        } catch (error) {
+            debug(`Failed to convert normalized path "${normalizedPath}" to layer IDs: ${error.message}`);
+            return []; // Return empty array if path is invalid
+        }
+    }
+
     buildJsonTree(node = this.root) {
         const buildTree = (currentNode) => {
             const children = currentNode.getSortedChildren()
@@ -1241,13 +1173,42 @@ class ContextTree extends EventEmitter {
         });
     }
 
-    /**
-     * Build a tree from JSON data retrieved from the store.
-     * Prioritizes using Layer instances already managed by LayerIndex.
-     * @param {Object} rootNodeData - The raw root node data from the data store.
-     * @returns {TreeNode | null} - The root TreeNode of the built tree, or null if data is invalid.
-     * @private
-     */
+    #getParentPath(path) {
+        // This should operate on an already normalized path
+        const normalizedPath = this.#normalizePath(path); // Ensure it's normalized
+        return normalizedPath.split('/').slice(0, -1).join('/') || '/';
+    }
+
+    #buildPathArray(sort = true) {
+        const paths = [];
+        // Traversal uses node.payload.name which is assumed to be normalized (by LayerIndex/BaseLayer)
+        const traverseTree = (node, parentPath) => {
+            // Construct path segments using the (already normalized) layer name
+            const currentSegment = node.payload.name;
+            const path = !parentPath || parentPath === '/' ? `/${currentSegment}` : `${parentPath}/${currentSegment}`;
+
+            // Handle root case where name is '/'
+            const displayPath = (path === '//' || path === '/') ? '/' : path;
+
+            if (node.children.size > 0) {
+                paths.push(displayPath); // Add intermediate paths too
+            for (const child of node.getSortedChildren()) {
+                traverseTree(child, displayPath); // Pass the constructed path
+            }
+            } else {
+                paths.push(displayPath); // Add leaf paths
+            }
+        };
+        // Start traversal from root node, parent path is initially empty
+        traverseTree(this.root, '');
+        // Remove potential duplicates and the root path if added separately by logic
+        const uniquePaths = [...new Set(paths)].filter(p => p !== '/');
+        // Add root path explicitly
+        uniquePaths.unshift('/');
+
+        return uniquePaths; // Already sorted during tree traversal
+    }
+
     #buildTreeFromJson(rootNodeData) {
         if (!rootNodeData || !rootNodeData.id || rootNodeData.name === undefined) {
             debug('Invalid or missing root node data for buildTreeFromJson.');
@@ -1306,10 +1267,6 @@ class ContextTree extends EventEmitter {
         // Start building from the root data
         return buildNodeRecursive(rootNodeData);
     }
-
-    /**
-     * Data Store Methods
-     */
 
     async #saveTreeToDataStore() {
         debug('Saving in-memory context tree to database');
@@ -1373,17 +1330,6 @@ class ContextTree extends EventEmitter {
         return true;
     }
 
-    /**
-     * Node Methods
-     */
-
-    /**
-     * Get an array of nodes corresponding to a path.
-     * Throws error if path or any layer component is invalid.
-     * @param {string} path - Path string (e.g., "/work/projectA")
-     * @returns {Array<TreeNode>} - Array of TreeNode objects for the path
-     * @private
-     */
     #getNodesForPath(path) {
         if (path === '/' || !path) {
             return [this.root]; // Root path only has the root node
@@ -1417,13 +1363,6 @@ class ContextTree extends EventEmitter {
         return nodes;
     }
 
-    /**
-     * Convert a path string to an array of layer names.
-     * Returns empty array if path is invalid or '/'.
-     * @param {string} path - Path string (e.g., "/work/projectA")
-     * @returns {Array<string>} - Array of layer names
-     * @private
-     */
     #pathToLayerNames(path) {
         if (!path || path === '/') {
             return [];
@@ -1441,13 +1380,6 @@ class ContextTree extends EventEmitter {
         }
     }
 
-    /**
-     * Normalizes a path string: trims, removes extra slashes, converts to lowercase,
-     * and removes characters other than letters, numbers, /, ., -, _.
-     * @param {string | null} path - The input path string.
-     * @returns {string} - The normalized path string.
-     * @private
-     */
     #normalizePath(path) {
         if (path === null || path === undefined) {
             // Decide handling: return null, '/', or throw error? Returning '/' seems safest for contextSpec defaults.
