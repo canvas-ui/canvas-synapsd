@@ -649,14 +649,32 @@ class SynapsD extends EventEmitter {
                 }
             }
 
-            // Apply additional filters if provided
+            // Apply additional filters (bitmaps and datetime filters)
             if (filterArray.length > 0) {
-                const filterBitmap = await this.bitmapIndex.AND(filterArray);
-                if (filtersApplied) {
-                    resultBitmap.andInPlace(filterBitmap);
-                } else {
-                    resultBitmap = filterBitmap;
-                    filtersApplied = true; // Modified by AND
+                const { bitmapFilters, datetimeFilters } = this.#parseFilters(filterArray);
+
+                // Apply bitmap filters
+                if (bitmapFilters.length > 0) {
+                    const filterBitmap = await this.bitmapIndex.AND(bitmapFilters);
+                    if (filtersApplied) {
+                        resultBitmap.andInPlace(filterBitmap);
+                    } else {
+                        resultBitmap = filterBitmap;
+                        filtersApplied = true;
+                    }
+                }
+
+                // Apply datetime filters
+                for (const datetimeFilter of datetimeFilters) {
+                    const datetimeBitmap = await this.#applyDatetimeFilter(datetimeFilter);
+                    if (datetimeBitmap) {
+                        if (filtersApplied) {
+                            resultBitmap.andInPlace(datetimeBitmap);
+                        } else {
+                            resultBitmap = datetimeBitmap;
+                            filtersApplied = true;
+                        }
+                    }
                 }
             }
 
@@ -1360,9 +1378,29 @@ class SynapsD extends EventEmitter {
             const featureBitmap = await this.bitmapIndex.OR(featureBitmapArray);
             if (filtersApplied && candidateBitmap) { candidateBitmap.andInPlace(featureBitmap); } else { candidateBitmap = featureBitmap; filtersApplied = true; }
         }
+
+        // Parse and apply filters (including datetime)
         if (Array.isArray(filterArray) && filterArray.length > 0) {
-            const extraFilter = await this.bitmapIndex.AND(filterArray);
-            if (filtersApplied && candidateBitmap) { candidateBitmap.andInPlace(extraFilter); } else { candidateBitmap = extraFilter; filtersApplied = true; }
+            const { bitmapFilters, datetimeFilters } = this.#parseFilters(filterArray);
+
+            // Apply bitmap filters
+            if (bitmapFilters.length > 0) {
+                const extraFilter = await this.bitmapIndex.AND(bitmapFilters);
+                if (filtersApplied && candidateBitmap) { candidateBitmap.andInPlace(extraFilter); } else { candidateBitmap = extraFilter; filtersApplied = true; }
+            }
+
+            // Apply datetime filters
+            for (const datetimeFilter of datetimeFilters) {
+                const datetimeBitmap = await this.#applyDatetimeFilter(datetimeFilter);
+                if (datetimeBitmap) {
+                    if (filtersApplied && candidateBitmap) {
+                        candidateBitmap.andInPlace(datetimeBitmap);
+                    } else {
+                        candidateBitmap = datetimeBitmap;
+                        filtersApplied = true;
+                    }
+                }
+            }
         }
 
         const candidateIds = candidateBitmap ? candidateBitmap.toArray() : [];
@@ -1489,6 +1527,121 @@ class SynapsD extends EventEmitter {
     #parseBitmapArray(bitmapArray) {
         if (!Array.isArray(bitmapArray)) { bitmapArray = [bitmapArray]; }
         return bitmapArray;
+    }
+
+    /**
+     * Parse filterArray into bitmap filters and datetime filters
+     * Supports both string-based and object-based filter formats
+     * @private
+     */
+    #parseFilters(filterArray) {
+        const bitmapFilters = [];
+        const datetimeFilters = [];
+
+        for (const filter of filterArray) {
+            // Object-based filter
+            if (typeof filter === 'object' && filter !== null && filter.type === 'datetime') {
+                datetimeFilters.push(filter);
+            }
+            // String-based datetime filter
+            else if (typeof filter === 'string' && filter.startsWith('datetime:')) {
+                const parsed = this.#parseDatetimeFilterString(filter);
+                if (parsed) {
+                    datetimeFilters.push(parsed);
+                }
+            }
+            // Regular bitmap filter
+            else {
+                bitmapFilters.push(filter);
+            }
+        }
+
+        return { bitmapFilters, datetimeFilters };
+    }
+
+    /**
+     * Parse string-based datetime filter into object format
+     * Formats:
+     *   datetime:ACTION:TIMEFRAME (e.g., datetime:updated:today)
+     *   datetime:ACTION:range:START:END (e.g., datetime:created:range:2023-10-01:2023-10-31)
+     * @private
+     */
+    #parseDatetimeFilterString(filterString) {
+        const parts = filterString.split(':');
+
+        if (parts.length < 3) {
+            debug(`Invalid datetime filter format: ${filterString}`);
+            return null;
+        }
+
+        const [, action, specType, ...rest] = parts;
+
+        // Validate action
+        if (!['created', 'updated', 'deleted'].includes(action)) {
+            debug(`Invalid datetime action: ${action}`);
+            return null;
+        }
+
+        // Range filter: datetime:updated:range:2023-10-01:2023-10-31
+        if (specType === 'range' && rest.length === 2) {
+            return {
+                type: 'datetime',
+                action,
+                range: { start: rest[0], end: rest[1] }
+            };
+        }
+
+        // Timeframe filter: datetime:updated:today
+        const validTimeframes = ['today', 'yesterday', 'thisWeek', 'thisMonth', 'thisYear'];
+        if (validTimeframes.includes(specType)) {
+            return {
+                type: 'datetime',
+                action,
+                timeframe: specType
+            };
+        }
+
+        debug(`Invalid datetime filter spec: ${filterString}`);
+        return null;
+    }
+
+    /**
+     * Apply datetime filter and return bitmap of matching document IDs
+     * @private
+     */
+    async #applyDatetimeFilter(filter) {
+        if (!this.#timestampIndex) {
+            debug('Timestamp index not initialized, skipping datetime filter');
+            return null;
+        }
+
+        try {
+            const action = filter.action;
+            let ids = [];
+
+            // Timeframe-based filter
+            if (filter.timeframe) {
+                ids = await this.#timestampIndex.findByTimeframe(filter.timeframe, action);
+                debug(`Datetime filter (${action}:${filter.timeframe}) matched ${ids.length} documents`);
+            }
+            // Range-based filter
+            else if (filter.range) {
+                ids = await this.#timestampIndex.findByRangeAndAction(action, filter.range.start, filter.range.end);
+                debug(`Datetime filter (${action}:${filter.range.start} to ${filter.range.end}) matched ${ids.length} documents`);
+            }
+
+            // Convert to RoaringBitmap32
+            if (ids.length > 0) {
+                const roaring = await import('roaring');
+                const { RoaringBitmap32 } = roaring.default || roaring;
+                return new RoaringBitmap32(ids);
+            }
+
+            return null;
+        } catch (error) {
+            debug(`Error applying datetime filter: ${error.message}`);
+            return null;
+        }
     }
 
     async #initLance() {
