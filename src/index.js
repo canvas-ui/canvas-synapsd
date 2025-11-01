@@ -337,10 +337,10 @@ class SynapsD extends EventEmitter {
             return await this.updateDocument(docId, null, contextSpec, featureBitmapArray);
         }
 
-        // Parse bitmaps into arrays(context can be a path or a array of context layers)
-        const contextBitmaps = this.#parseContextSpec(contextSpec);
+        // Parse context into array of independent path-layer-arrays
+        const pathLayersArray = this.#parseContextSpecForInsert(contextSpec);
         const featureBitmaps = this.#parseBitmapArray(featureBitmapArray);
-        debug(`insertDocument: Attempting to insert document with contextArray: ${contextBitmaps}, featureArray: ${featureBitmaps}`);
+        debug(`insertDocument: Attempting to insert document with ${pathLayersArray.length} context path(s), featureArray: ${featureBitmaps}`);
 
         // Parse the document
         let parsedDocument;
@@ -391,19 +391,23 @@ class SynapsD extends EventEmitter {
                 await this.#timestampIndex.insert('updated', parsedDocument.updatedAt, parsedDocument.id);
                 debug(`insertDocument: Timestamps for document ${parsedDocument.id} added.`);
 
-                // Ensure context tree paths exist for the *target* context
-                const insertPathResult = await this.tree.insertPath(contextBitmaps.join('/'));
-                if (!insertPathResult || insertPathResult.error) {
-                    throw new Error(`insertDocument: Failed to ensure context path '${contextBitmaps.join('/')}' in tree.`);
-                }
-                debug(`insertDocument: Context path '${contextBitmaps.join('/')}' ensured in tree.`);
+                // Process each independent context path
+                for (const pathLayers of pathLayersArray) {
+                    // Ensure context tree path exists
+                    const pathString = pathLayers.join('/');
+                    const insertPathResult = await this.tree.insertPath(pathString);
+                    if (!insertPathResult || insertPathResult.error) {
+                        throw new Error(`insertDocument: Failed to ensure context path '${pathString}' in tree.`);
+                    }
+                    debug(`insertDocument: Context path '${pathString}' ensured in tree.`);
 
-                // Update context bitmaps
-                const contextResult = await this.contextBitmapCollection.tickMany(contextBitmaps, parsedDocument.id);
-                if (!contextResult) {
-                    throw new Error(`insertDocument: Failed to update context bitmaps for document ${parsedDocument.id}`);
+                    // Update context bitmaps for this path
+                    const contextResult = await this.contextBitmapCollection.tickMany(pathLayers, parsedDocument.id);
+                    if (!contextResult) {
+                        throw new Error(`insertDocument: Failed to update context bitmaps for path '${pathString}' for document ${parsedDocument.id}`);
+                    }
+                    debug(`insertDocument: Context bitmaps updated for path '${pathString}' for document ${parsedDocument.id}.`);
                 }
-                debug(`insertDocument: Context bitmaps updated for document ${parsedDocument.id}.`);
 
                 // Update feature bitmaps
                 if (!featureBitmaps.includes(parsedDocument.schema)) {
@@ -543,7 +547,7 @@ class SynapsD extends EventEmitter {
         const effectiveContextSpec = noContextFilterWanted ? '/' : contextSpec;
         const effectiveFeatureArray = noFeatureFilterWanted ? [] : featureBitmapArrayInput;
 
-        const parsedContextKeys = this.#parseContextSpec(effectiveContextSpec);
+        const parsedContextKeys = this.#parseContextSpecForQuery(effectiveContextSpec);
         const parsedFeatureKeys = this.#parseBitmapArray(effectiveFeatureArray);
 
         let resultBitmap = null;
@@ -620,8 +624,8 @@ class SynapsD extends EventEmitter {
         const limit = providedLimit !== undefined ? Math.max(0, providedLimit) : 0;
         const offset = Math.max(0, providedOffset !== undefined ? providedOffset : (providedPage && providedPage > 0 ? (providedPage - 1) * (limit || 100) : 0));
 
-        // Only parse contextSpec if it was explicitly provided (not null/undefined)
-        const contextBitmapArray = contextSpec !== null && contextSpec !== undefined ? this.#parseContextSpec(contextSpec) : [];
+        // Parse contextSpec for query (single path only, or null/undefined)
+        const contextBitmapArray = this.#parseContextSpecForQuery(contextSpec);
         if (!Array.isArray(featureBitmapArray) && typeof featureBitmapArray === 'string') { featureBitmapArray = [featureBitmapArray]; }
         if (!Array.isArray(filterArray) && typeof filterArray === 'string') { filterArray = [filterArray]; }
         debug(`Listing documents with contextArray: ${contextBitmapArray}, features: ${featureBitmapArray}, filters: ${filterArray}, limit: ${limit}, offset: ${offset}`);
@@ -752,10 +756,10 @@ class SynapsD extends EventEmitter {
         const docId = docIdentifier;
         debug(`updateDocument: Attempting to update document with ID: ${docId}`);
 
-        // Parse context into array
-        const contextBitmaps = this.#parseContextSpec(contextSpec);
+        // Parse context into array of independent path-layer-arrays
+        const pathLayersArray = this.#parseContextSpecForInsert(contextSpec);
         const featureBitmaps = this.#parseBitmapArray(featureBitmapArray);
-        debug(`updateDocument: Context bitmaps: ${contextBitmaps}, Feature bitmaps: ${featureBitmaps}`);
+        debug(`updateDocument: ${pathLayersArray.length} context path(s), Feature bitmaps: ${featureBitmaps}`);
 
         // Get the stored document
         const storedDocument = await this.getDocumentById(docId);
@@ -786,12 +790,6 @@ class SynapsD extends EventEmitter {
         // Validate updated document
         updatedDocument.validate();
 
-        // Ensure context tree paths exist
-        if (contextBitmaps.length > 0) {
-            this.tree.insertPath(contextBitmaps.join('/'));
-            debug(`updateDocument: Ensured context path '${contextBitmaps.join('/')}' exists in tree`);
-        }
-
         try {
             // Update main document store
             await this.documents.put(updatedDocument.id, updatedDocument);
@@ -803,8 +801,17 @@ class SynapsD extends EventEmitter {
             // Update timestamps
             await this.#timestampIndex.insert('updated', updatedDocument.updatedAt, updatedDocument.id);
 
-            // Update context bitmaps
-            await this.contextBitmapCollection.tickMany(contextBitmaps, updatedDocument.id);
+            // Process each independent context path
+            for (const pathLayers of pathLayersArray) {
+                // Ensure context tree path exists
+                const pathString = pathLayers.join('/');
+                await this.tree.insertPath(pathString);
+                debug(`updateDocument: Ensured context path '${pathString}' exists in tree`);
+
+                // Update context bitmaps for this path
+                await this.contextBitmapCollection.tickMany(pathLayers, updatedDocument.id);
+                debug(`updateDocument: Context bitmaps updated for path '${pathString}'`);
+            }
 
             // Ensure schema is included in features
             if (!featureBitmaps.includes(updatedDocument.schema)) {
@@ -882,40 +889,47 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
         if (typeof options !== 'object') { options = { recursive: false }; }
 
-        const contextBitmapArray = this.#parseContextSpec(contextSpec);
+        // Parse context into array of independent path-layer-arrays
+        const pathLayersArray = this.#parseContextSpecForInsert(contextSpec);
 
-        // Check if we're trying to remove from root context only
-        if (contextBitmapArray.length === 1 && contextBitmapArray[0] === '/') {
-            throw new Error('Cannot remove document from root context "/". Use deleteDocument to permanently delete documents.');
+        // Collect all layers to remove from across all paths
+        const allLayersToRemove = [];
+
+        for (const pathLayers of pathLayersArray) {
+            // Check if we're trying to remove from root context only
+            if (pathLayers.length === 1 && pathLayers[0] === '/') {
+                throw new Error('Cannot remove document from root context "/". Use deleteDocument to permanently delete documents.');
+            }
+
+            // Remove root "/" from the array if it exists alongside other contexts
+            // We should never untick documents from the root context via removeDocument
+            let filteredLayers = pathLayers.filter(context => context !== '/');
+
+            // After filtering, we need at least one context to operate on
+            if (filteredLayers.length === 0) {
+                throw new Error('Cannot remove document from root context "/". Use deleteDocument to permanently delete documents.');
+            }
+
+            // Handle recursive vs non-recursive removal
+            if (!options.recursive) {
+                // Non-recursive: remove from leaf context only (last element in the path)
+                const leafContext = filteredLayers[filteredLayers.length - 1];
+                allLayersToRemove.push(leafContext);
+                debug(`removeDocument: Non-recursive removal from leaf context only: ${leafContext}`);
+            } else {
+                // Recursive: remove from all contexts in the hierarchy (current behavior)
+                allLayersToRemove.push(...filteredLayers);
+                debug(`removeDocument: Recursive removal from all contexts: ${filteredLayers.join(', ')}`);
+            }
         }
 
-        // Remove root "/" from the array if it exists alongside other contexts
-        // We should never untick documents from the root context via removeDocument
-        let filteredContextArray = contextBitmapArray.filter(context => context !== '/');
-
-        // After filtering, we need at least one context to operate on
-        if (filteredContextArray.length === 0) {
-            throw new Error('Cannot remove document from root context "/". Use deleteDocument to permanently delete documents.');
-        }
-
-        // Handle recursive vs non-recursive removal
-        if (!options.recursive) {
-            // Non-recursive: remove from leaf context only (last element in the path)
-            const leafContext = filteredContextArray[filteredContextArray.length - 1];
-            filteredContextArray = [leafContext];
-            debug(`removeDocument: Non-recursive removal from leaf context only: ${leafContext}`);
-        } else {
-            // Recursive: remove from all contexts in the hierarchy (current behavior)
-            debug(`removeDocument: Recursive removal from all contexts: ${filteredContextArray.join(', ')}`);
-        }
-
-        debug(`removeDocument: Removing document ${docId} from contexts: ${filteredContextArray.join(', ')}`);
+        debug(`removeDocument: Removing document ${docId} from contexts: ${allLayersToRemove.join(', ')}`);
 
         // Remove document will only remove the document from the supplied bitmaps
         // It will not delete the document from the database.
         try {
-            if (filteredContextArray.length > 0) {
-                await this.contextBitmapCollection.untickMany(filteredContextArray, docId);
+            if (allLayersToRemove.length > 0) {
+                await this.contextBitmapCollection.untickMany(allLayersToRemove, docId);
             }
             if (featureBitmapArray.length > 0) {
                 await this.bitmapIndex.untickMany(featureBitmapArray, docId);
@@ -923,7 +937,7 @@ class SynapsD extends EventEmitter {
 
             // If the operations completed without throwing, return the ID.
             // This signals the removal *attempt* was successful.
-            this.emit('document.removed', { id: docId, contextArray: filteredContextArray, featureArray: featureBitmapArray, recursive: options.recursive });
+            this.emit('document.removed', { id: docId, contextArray: allLayersToRemove, featureArray: featureBitmapArray, recursive: options.recursive });
             return docId;
 
         } catch (error) {
@@ -1368,9 +1382,9 @@ class SynapsD extends EventEmitter {
         // Build candidate set via bitmaps (context AND, features OR, filters AND)
         let candidateBitmap = null;
         let filtersApplied = false;
-        const contextBitmapArray = contextSpec !== null && contextSpec !== undefined ? this.#parseContextSpec(contextSpec) : [];
+        const contextBitmapArray = this.#parseContextSpecForQuery(contextSpec);
 
-        if (contextSpec !== null && contextSpec !== undefined && contextBitmapArray.length > 0) {
+        if (contextBitmapArray.length > 0) {
             candidateBitmap = await this.contextBitmapCollection.AND(contextBitmapArray);
             filtersApplied = true;
         }
@@ -1478,50 +1492,109 @@ class SynapsD extends EventEmitter {
      * Internal methods
      */
 
-    #parseContextSpec(contextSpec) {
-        debug('#parseContextSpec: Received contextSpec:', contextSpec);
+    /**
+     * Parse a single path string into layer array
+     * @param {string} pathString - Path string like '/foo/bar'
+     * @returns {Array<string>} Array of layers ['/', 'foo', 'bar']
+     * @private
+     */
+    #parsePathToLayers(pathString) {
+        debug('#parsePathToLayers: Received pathString:', pathString);
 
         // Handle null/undefined/empty cases
-        if (!contextSpec || contextSpec === '') {
+        if (!pathString || pathString === '') {
             return ['/'];
         }
 
-        // Process a single path string to create layer contexts
-        const processString = (str) => {
-            if (str === '/') {return ['/'];}
+        // Must be a string
+        if (typeof pathString !== 'string') {
+            throw new Error('Path must be a string');
+        }
 
-            // Split the string and filter empty elements
-            const parts = str.split('/').map(part => part.trim()).filter(Boolean);
-            if (parts.length === 0) {return ['/'];}
+        // Handle root path
+        if (pathString === '/') {
+            return ['/'];
+        }
 
-            // Create layer contexts: ['/', 'foo', 'bar', 'baz']
-            return ['/', ...parts];
-        };
+        // Split the string and filter empty elements
+        const parts = pathString.split('/').map(part => part.trim()).filter(Boolean);
+        if (parts.length === 0) {
+            return ['/'];
+        }
 
-        // Handle array input
+        // Create layer contexts: ['/', 'foo', 'bar', 'baz']
+        const layers = ['/', ...parts];
+        debug('#parsePathToLayers: Parsed layers:', layers);
+        return layers;
+    }
+
+    /**
+     * Parse contextSpec for INSERT operations (supports arrays of independent paths)
+     * @param {string|Array<string>} contextSpec - Single path or array of paths
+     * @returns {Array<Array<string>>} Array of path-layer-arrays
+     * @private
+     */
+    #parseContextSpecForInsert(contextSpec) {
+        debug('#parseContextSpecForInsert: Received contextSpec:', contextSpec);
+
+        // Handle null/undefined/empty cases - default to root
+        if (!contextSpec || contextSpec === '') {
+            return [['/']];
+        }
+
+        // Handle array input - each path is independent
         if (Array.isArray(contextSpec)) {
             // Flatten the array and filter out empty/null values
             const flattened = contextSpec.flat().filter(Boolean);
             if (flattened.length === 0) {
-                return ['/'];
+                return [['/']];
             }
 
-            // Process each path and collect unique layer contexts
-            const allContexts = new Set(['/']); // Always include root
-            flattened.forEach(path => {
-                const contexts = processString(path);
-                contexts.forEach(context => allContexts.add(context));
-            });
-
-            return Array.from(allContexts);
+            // Parse each path independently
+            const pathLayersArray = flattened.map(path => this.#parsePathToLayers(path));
+            debug('#parseContextSpecForInsert: Parsed path arrays:', pathLayersArray);
+            return pathLayersArray;
         }
 
         // Handle string input
         if (typeof contextSpec === 'string') {
-            return processString(contextSpec);
+            const layers = this.#parsePathToLayers(contextSpec);
+            return [layers]; // Return array containing single path-layer-array
         }
 
-        throw new Error('Invalid contextSpec: Must be a path string or an array of strings.');
+        throw new Error('Invalid contextSpec: Must be a path string or an array of path strings.');
+    }
+
+    /**
+     * Parse contextSpec for QUERY operations (single path only)
+     * @param {string|null} contextSpec - Single path string or null
+     * @returns {Array<string>} Single layer array
+     * @private
+     */
+    #parseContextSpecForQuery(contextSpec) {
+        debug('#parseContextSpecForQuery: Received contextSpec:', contextSpec);
+
+        // Handle null/undefined - means no context filter
+        if (contextSpec === null || contextSpec === undefined) {
+            return [];
+        }
+
+        // Handle empty string - default to root
+        if (contextSpec === '') {
+            return ['/'];
+        }
+
+        // Reject arrays in queries
+        if (Array.isArray(contextSpec)) {
+            throw new Error('Arrays are not supported in query contextSpec. Use a single path string or null.');
+        }
+
+        // Handle string input
+        if (typeof contextSpec === 'string') {
+            return this.#parsePathToLayers(contextSpec);
+        }
+
+        throw new Error('Invalid contextSpec for query: Must be a path string or null.');
     }
 
     #parseBitmapArray(bitmapArray) {

@@ -1367,6 +1367,17 @@ class ContextTree extends EventEmitter {
         if (!path || path === '/') {
             return [];
         }
+
+        // Handle array input - process each path independently and flatten results
+        if (Array.isArray(path)) {
+            const allLayerNames = new Set();
+            for (const p of path) {
+                const layerNames = this.#pathToLayerNames(p);
+                layerNames.forEach(name => allLayerNames.add(name));
+            }
+            return Array.from(allLayerNames);
+        }
+
         try {
             const nodes = this.#getNodesForPath(path);
             // Skip the root node (index 0) and map others to payload.name
@@ -1385,6 +1396,12 @@ class ContextTree extends EventEmitter {
             // Decide handling: return null, '/', or throw error? Returning '/' seems safest for contextSpec defaults.
             return '/';
         }
+
+        // Handle array input - normalize each path independently
+        if (Array.isArray(path)) {
+            return path.map(p => this.#normalizePath(p));
+        }
+
         let normalized = String(path).trim();
         if (!normalized) {
             return '/'; // Treat empty string as root
