@@ -5,6 +5,7 @@ import BaseDocument from './BaseDocument.js';
 
 // Document Schemas
 import Document from './abstractions/Document.js';
+import Contact from './abstractions/Contact.js';
 import Email from './abstractions/Email.js';
 import File from './abstractions/File.js';
 import Note from './abstractions/Note.js';
@@ -26,6 +27,7 @@ const SCHEMA_REGISTRY = {
     'data/abstraction/document': Document,
     // Back-compat aliases used in tests and older code
     'BaseDocument': Document,
+    'data/abstraction/contact': Contact,
     'data/abstraction/email': Email,
     'data/abstraction/file': File,
     'data/abstraction/note': Note,
