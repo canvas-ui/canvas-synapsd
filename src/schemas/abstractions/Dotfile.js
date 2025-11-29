@@ -1,29 +1,26 @@
 'use strict';
 
-import { type } from 'os';
 /*
  * Dotfile abstraction
  * -------------------
- * Describes a mapping between a local path (file or folder) and a path inside
- * the workspace dotfiles repository (relative to the repo root):
- *   ~/.canvas/data/{user@remote}/workspaces/{workspace}/dotfiles/…
+ * Describes a mapping between local paths (file or folder) on multiple devices
+ * and a path inside the workspace dotfiles repository.
  *
- * Uniqueness is guaranteed through the combination of
- *     localPath + repoUrl + repoPath
- * which we feed into the checksum fields so that SynapsD stores at most one
- * instance of a given mapping.
+ * Repository Path (source of truth):
+ *   ~/.canvas/data/{user@remote}/workspaces/{workspace}/dotfiles/{repoPath}
  *
- * Per-device activation is not stored inside the document itself – a client
- * simply OR-filters the bitmap feature  "client/device/id/<deviceId>" together
- * with the document bitmap when it wants to operate on the subset that is
- * currently active on the local machine.
+ * Links:
+ *   Map of deviceId -> localPath
+ *
+ * Uniqueness is guaranteed by `repoPath` per workspace.
+ * A single file in the repo can be mapped to different locations on different devices.
  */
 
 import Document, { documentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/dotfile';
-const DOCUMENT_SCHEMA_VERSION = '2.0';
+const DOCUMENT_SCHEMA_VERSION = '3.0';
 
 // Regex allows:  /abs/path, ~/path, $HOME/path, {{HOME}}/path etc.
 const pathPattern = /^(\{\{\s*[A-Za-z0-9_]+\s*\}\}|\$[A-Za-z0-9_]+|~)?[/A-Za-z0-9_.-]+$/;
@@ -47,25 +44,20 @@ const documentDataSchema = z
 
         data: z
             .object({
-                // Mandatory
-                localPath: z.string().regex(pathPattern, {
-                    message:
-                        'localPath must be an absolute path or contain a placeholder such as {{HOME}} or $HOME',
-                }).transform(normalizeHomePlaceholder),
-
                 // Relative path inside the dotfiles repository (e.g., shell/bashrc)
+                // This is the primary identifier for the dotfile content.
                 repoPath: z.string().min(1),
 
                 // Type of mapping target in the repository
                 type: z.enum(['file', 'folder']),
 
-                encryption: z.object({
-                    enabled: z.boolean(),
-                }).optional(),
-
-                // Optional
-                backupPath: z.string().optional(),
-                backupCreatedAt: z.string().datetime().optional(),
+                // Mappings per device: deviceId -> localPath
+                links: z.record(
+                    z.string(), // Device ID / Name
+                    z.string().regex(pathPattern, {
+                        message: 'localPath must be an absolute path or contain a placeholder'
+                    }).transform(normalizeHomePlaceholder)
+                ).default({}),
 
                 priority: z.number().int().default(0),
             })
@@ -86,51 +78,82 @@ export default class Dotfile extends Document {
         // Index configuration (before super)
         options.indexOptions = {
             ...(options.indexOptions || {}),
-            ftsSearchFields: ['data.localPath', 'data.repoPath'],
-            vectorEmbeddingFields: ['data.localPath', 'data.repoPath'],
-            // Uniqueness: localPath + repoPath (documents are per workspace)
-            checksumFields: ['data.localPath', 'data.repoPath'],
+            // Search in repoPath and all mapped local paths
+            ftsSearchFields: ['allLocalPaths', 'data.repoPath'],
+            vectorEmbeddingFields: ['allLocalPaths', 'data.repoPath'],
+            // Uniqueness: repoPath (one config per file in repo)
+            checksumFields: ['data.repoPath'],
         };
 
         super(options);
-        // Defensive normalization in case upstream skipped schema transforms
-        if (this.data && typeof this.data.localPath === 'string') {
-            this.data.localPath = normalizeHomePlaceholder(this.data.localPath);
+
+        // Ensure links object exists
+        if (!this.data.links) {
+            this.data.links = {};
         }
     }
 
     /* --------------------
-     * Convenience getters
+     * Getters / Setters
      * ------------------*/
-    get localPath() { return this.data.localPath; }
+
     get repoPath() { return this.data.repoPath; }
     get type() { return this.data.type; }
-    get backupPath() { return this.data.backupPath; }
+    get links() { return this.data.links; }
+
+    // Computed property for search indexing
+    get allLocalPaths() {
+        return Object.values(this.data.links).join(' ');
+    }
+
+    /* --------------------
+     * Link Management
+     * ------------------*/
+
+    addLink(deviceId, localPath) {
+        if (!deviceId || !localPath) { return; }
+        this.data.links[deviceId] = normalizeHomePlaceholder(localPath);
+        this.updatedAt = new Date().toISOString();
+    }
+
+    removeLink(deviceId) {
+        if (!deviceId) { return; }
+        delete this.data.links[deviceId];
+        this.updatedAt = new Date().toISOString();
+    }
+
+    getLink(deviceId) {
+        return this.data.links[deviceId];
+    }
 
     /* --------------------
      * Utility helpers
      * ------------------*/
 
-    setBackup(backupPath) {
-        if (!backupPath) {throw new Error('backupPath required');}
-        this.data.backupPath = backupPath;
-        this.data.backupCreatedAt = new Date().toISOString();
-        this.updatedAt = this.data.backupCreatedAt;
-    }
-
     /*
-     * Two Dotfile docs conflict if they share either endpoint of the mapping.
+     * Check if this dotfile conflicts with another.
+     * Conflict means:
+     * 1. Same repoPath (already handled by checksum, but good to check)
+     * 2. OR Same localPath on the SAME device.
      */
     conflictsWith(other) {
-        if (!other) {return false;}
-        return (
-            this.localPath === other.localPath || this.repoPath === other.repoPath
-        );
+        if (!other) { return false; }
+        if (this.repoPath === other.repoPath) { return true; }
+
+        // Check for overlapping local paths on same devices
+        const myDevices = Object.keys(this.links);
+        for (const deviceId of myDevices) {
+            const otherPath = other.getLink(deviceId);
+            if (otherPath && otherPath === this.links[deviceId]) {
+                return true;
+            }
+        }
+        return false;
     }
 
     getDisplayName() {
-        const right = this.repoPath;
-        return `${this.localPath} ↔ ${right}`;
+        const count = Object.keys(this.links).length;
+        return `${this.repoPath} (${count} links)`;
     }
 
     /* --------------------
@@ -138,7 +161,8 @@ export default class Dotfile extends Document {
      * ------------------*/
     static fromData(data) {
         data.schema = DOCUMENT_SCHEMA_NAME;
-        return new Dotfile(data);
+        const transformed = this.validateData(data);
+        return new Dotfile(transformed);
     }
 
     static get dataSchema() { return documentDataSchema; }
@@ -148,10 +172,9 @@ export default class Dotfile extends Document {
         return {
             schema: DOCUMENT_SCHEMA_NAME,
             data: {
-                localPath: 'string',
                 repoPath: 'string',
                 type: '"file"|"folder"',
-                backupPath: 'string?',
+                links: 'Record<string, string>',
             },
         };
     }
