@@ -26,26 +26,38 @@ class LayerIndex extends EventEmitter {
     }
 
     /**
-     * Utility to normalize layer names for consistent lookups and storage.
-     * Rules:
+     * Utility to normalize layer names for duplicate checking (case-insensitive).
+     * For storage and display, we keep the original case.
+     * Rules for comparison:
      *  - Keep '/' as-is
      *  - Trim
-     *  - Collapse whitespace to single underscores
-     *  - Lowercase
-     *  - Remove characters other than [a-z0-9._-]
-     *  - Collapse multiple underscores
+     *  - Collapse whitespace to single spaces
+     *  - Lowercase for comparison only
+     *  - Keep valid chars: [a-zA-Z0-9._- ]
      * @param {string} name - The layer name.
-     * @returns {string} - The normalized layer name.
+     * @returns {string} - The normalized layer name for comparison.
      */
     normalizeLayerName(name) {
         if (name === '/') { return '/'; }
         let normalized = String(name ?? '')
             .trim()
-            .replace(/\s+/g, '_')
-            .toLowerCase()
-            .replace(/[^a-z0-9._-]/g, '_')
-            .replace(/_+/g, '_');
+            .replace(/\s+/g, ' ')
+            .toLowerCase();
         return normalized || '_';
+    }
+
+    /**
+     * Validate layer name format (allow more flexible names but sanitize invalid chars)
+     * @param {string} name - The layer name to validate
+     * @returns {string} - Sanitized layer name
+     */
+    sanitizeLayerName(name) {
+        if (name === '/') { return '/'; }
+        return String(name ?? '')
+            .trim()
+            .replace(/\s+/g, '_')
+            .replace(/[^a-zA-Z0-9._-]/g, '_')
+            .replace(/_+/g, '_');
     }
 
     async initializeIndex() {
@@ -186,26 +198,26 @@ class LayerIndex extends EventEmitter {
         type: 'context',
     }) {
         if (!this.#initialized) { throw new Error('Layer index not initialized'); }
-        const normalizedName = this.normalizeLayerName(name);
-        debug(`Creating layer "${normalizedName}" (original: "${name}") with options ${JSON.stringify(options)}`);
+
+        // Sanitize the name but keep original case
+        const sanitizedName = this.sanitizeLayerName(name);
+        const normalizedForComparison = this.normalizeLayerName(sanitizedName);
+        debug(`Creating layer "${sanitizedName}" (normalized for comparison: "${normalizedForComparison}") with options ${JSON.stringify(options)}`);
 
         // Check if layer type is valid
         if (options.type && !SchemaRegistry.hasSchema(`internal/layers/${options.type}`)) {
             throw new Error(`Invalid layer type: ${options.type}`);
         }
 
-        // Check if layer already exists using the original name (hasLayerName normalizes internally)
-        if (this.hasLayerName(name)) {
-            debug(`Layer "${normalizedName}" already exists, returning existing or updating..`);
-            // If update is needed, use normalized name to fetch
-            // return this.updateLayer(normalizedName, options);
-            // For now, just return the existing layer if found
-            return this.getLayerByName(name); // getLayerByName normalizes internally
+        // Check if layer already exists (case-insensitive check)
+        if (this.hasLayerName(sanitizedName)) {
+            debug(`Layer "${sanitizedName}" already exists (case-insensitive), returning existing layer`);
+            return this.getLayerByName(sanitizedName);
         }
 
         const LayerSchema = SchemaRegistry.getSchema(`internal/layers/${options.type}`);
-        // Pass the *normalized* name to the schema constructor and preserve original as label if not provided
-        const layer = new LayerSchema(normalizedName, { ...options, label: options.label ?? String(name) });
+        // Use sanitized name as both name and label for consistency
+        const layer = new LayerSchema(sanitizedName, { ...options, label: sanitizedName });
         if (!layer) { throw new Error(`Failed to create layer with options ${options}`); }
 
         await this.#dbStoreLayer(layer);
@@ -229,40 +241,44 @@ class LayerIndex extends EventEmitter {
     }
 
     async renameLayer(name, newName) {
-        const normalizedName = this.normalizeLayerName(name);
-        const normalizedNewName = this.normalizeLayerName(newName);
+        const sanitizedNewName = this.sanitizeLayerName(newName);
+        const normalizedForComparison = this.normalizeLayerName(sanitizedNewName);
 
-        if (normalizedName === '/') {
+        if (name === '/') {
             throw new Error('Root layer "/" cannot be renamed');
         }
-        if (normalizedNewName === '/') {
+        if (sanitizedNewName === '/') {
             throw new Error('Invalid target name "/" for rename');
         }
 
-        const currentLayer = this.getLayerByName(normalizedName); // Use normalized lookup
+        const currentLayer = this.getLayerByName(name);
         if (!currentLayer) {
-            throw new Error(`Layer not found: ${name} (normalized: ${normalizedName})`);
+            throw new Error(`Layer not found: ${name}`);
         }
 
         if (currentLayer.locked) {
             throw new Error('Layer is locked');
         }
 
-        if (this.getLayerByName(normalizedNewName)) { // Use normalized lookup
-            throw new Error(`Unable to rename layer, layer name already exists: ${newName} (normalized: ${normalizedNewName})`);
+        // Check if new name already exists (case-insensitive)
+        const existingLayer = this.getLayerByName(sanitizedNewName);
+        if (existingLayer && existingLayer.id !== currentLayer.id) {
+            throw new Error(`Unable to rename layer, name already exists: ${sanitizedNewName}`);
         }
 
         // Capture old normalized name for map cleanup
         const oldNormalizedName = this.normalizeLayerName(currentLayer.name);
 
-        // Update the name only (do not change label as per spec)
-        currentLayer.setName(normalizedNewName);
+        // Update both name and label to keep them in sync
+        currentLayer.setName(sanitizedNewName);
+        currentLayer.label = sanitizedNewName;
 
         // Persist the updated layer by ID (upsert)
         await this.#dbStoreLayer(currentLayer);
 
-        // Clean up the old name mapping if different
-        if (oldNormalizedName !== normalizedNewName) {
+        // Clean up the old name mapping if different (case-insensitive comparison)
+        const newNormalizedName = this.normalizeLayerName(sanitizedNewName);
+        if (oldNormalizedName !== newNormalizedName) {
             this.#nameToLayerMap.delete(oldNormalizedName);
         }
 
