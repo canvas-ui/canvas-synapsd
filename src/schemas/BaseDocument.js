@@ -68,18 +68,7 @@ const documentSchema = z.object({
     metadata: z.object({
         contentType: z.string().optional(),
         contentEncoding: z.string().optional(),
-        dataPaths: z.array(
-            z.union([
-                z.string(),
-                z.object({
-                    uri: z.string(),
-                    protocol: z.string(),
-                    checksum: z.string().optional(),
-                    priority: z.number().int().optional(),
-                    metadata: z.record(z.any()).optional(),
-                }).strict(),
-            ]),
-        ).optional(),
+        dataPaths: z.array(z.string()).optional(),
         contextUUIDs: z.array(z.string()).optional(),
         contextPath: z.array(z.string()).optional(),
         features: z.array(z.string()).optional(),
