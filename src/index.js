@@ -774,12 +774,18 @@ class SynapsD extends EventEmitter {
             // Use the stored document as our updated document
             updateData = storedDocument;
         } else if (typeof updateData === 'object' && !isDocumentInstance(updateData)) {
-            // Parse and initialize update data if it's not already a document instance
-            try {
-                updateData = this.#parseInitializeDocument(updateData);
-                debug(`updateDocument: Parsed update data, schema: ${updateData.schema}`);
-            } catch (error) {
-                throw new Error(`Invalid update data: ${error.message}`);
+            // Check if this looks like a full document (has schema) or a partial update
+            if (updateData.schema) {
+                // Full document replacement - parse and initialize
+                try {
+                    updateData = this.#parseInitializeDocument(updateData);
+                    debug(`updateDocument: Parsed update data, schema: ${updateData.schema}`);
+                } catch (error) {
+                    throw new Error(`Invalid update data: ${error.message}`);
+                }
+            } else {
+                // Partial update (e.g., { metadata: {...}, data: {...} }) - pass through directly
+                debug('updateDocument: Partial update data provided, passing through to document.update()');
             }
         }
 

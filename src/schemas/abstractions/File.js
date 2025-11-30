@@ -84,7 +84,14 @@ export default class File extends BaseDocument {
     }
 
     /**
-     * Validate just the data portion
+     * Validate the data portion (instance method)
+     */
+    validateData() {
+        return fileDataSchema.parse(this.data);
+    }
+
+    /**
+     * Validate just the data portion (static)
      */
     static validateData(documentData) {
         return fileDataSchema.parse(documentData);
