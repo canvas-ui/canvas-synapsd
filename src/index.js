@@ -215,7 +215,7 @@ class SynapsD extends EventEmitter {
             this.deletedDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/gc/deleted');
 
             this.#timestampIndex = new TimestampIndex(
-                this.#db.createDataset('timestamps'),
+                this.bitmapIndex,
                 this.actionBitmaps,
             );
 
@@ -1088,6 +1088,10 @@ class SynapsD extends EventEmitter {
                 // await this.bitmapIndex.untickAll(docId);
                 await this.#synapses.clearSynapses(docId);
                 debug(`deleteDocument: Document ${docId} removed from all bitmaps and Synapses index`);
+
+                // Remove document from timestamp indices (created, updated)
+                await this.#timestampIndex.remove(null, docId);
+                debug(`deleteDocument: Document ${docId} removed from timestamp indices`);
 
                 // Delete document checksums from inverted index
                 await this.#checksumIndex.deleteArray(document.checksumArray);

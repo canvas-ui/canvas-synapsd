@@ -2,51 +2,74 @@
 
 import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd:timestamp-index');
-import roaring from 'roaring';
-const { RoaringBitmap32 } = roaring;
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const Roaring = require('roaring');
+const { RoaringBitmap32 } = Roaring;
 import {
     parseISO,
+    getUnixTime,
     isToday,
     isYesterday,
     isThisWeek,
-    isThisISOWeek,
     isThisMonth,
-    isThisQuarter,
     isThisYear,
+    startOfDay,
+    endOfDay,
+    startOfYesterday,
+    endOfYesterday,
+    startOfWeek,
+    endOfWeek,
+    startOfMonth,
+    endOfMonth,
+    startOfYear,
+    endOfYear
 } from 'date-fns';
+
+import BitSlicedIndex from '../bitmaps/lib/BitSlicedIndex.js';
 
 const VALID_ACTIONS = ['created', 'updated', 'deleted'];
 
 /**
- * TimestampIndex - Maps normalized timestamps to bitmaps of document IDs
+ * TimestampIndex - Maps normalized timestamps (seconds) to bitmaps of document IDs using BSI.
  *
- * Design: timestamp (YYYY-MM-DD) -> RoaringBitmap of document IDs
- * This allows efficient filtering like "all files updated today"
+ * Replaces the legacy YYYY-MM-DD Key-Value approach with Bit-Sliced Indexing
+ * for efficient range queries.
  */
 export default class TimestampIndex {
 
-    constructor(dataset, actionBitmaps) {
-        if (!dataset) { throw new Error('TimestampIndex dataset required for timestamp:bitmap mappings'); }
+    constructor(bitmapIndex, actionBitmaps) {
+        if (!bitmapIndex) { throw new Error('BitmapIndex required for TimestampIndex'); }
         if (!actionBitmaps || !VALID_ACTIONS.every(act => actionBitmaps[act] && typeof actionBitmaps[act].has === 'function')) {
             throw new Error('Valid actionBitmaps (created, updated, deleted), which are Bitmap instances, are required');
         }
-        
-        this.dataset = dataset; // LMDB store for timestamp -> serialized RoaringBitmap
+
+        this.bitmapIndex = bitmapIndex;
         this.actionBitmaps = actionBitmaps; // { created: Bitmap, updated: Bitmap, deleted: Bitmap }
-        debug('TimestampIndex initialized');
+
+        // Initialize BSI instances for each action
+        this.bsi = {
+            created: new BitSlicedIndex('internal/ts/c', bitmapIndex),
+            updated: new BitSlicedIndex('internal/ts/u', bitmapIndex),
+            deleted: new BitSlicedIndex('internal/ts/d', bitmapIndex),
+        };
+
+        debug('TimestampIndex initialized with BSI');
     }
 
     /**
-     * Get the number of timestamp keys in the index.
-     * @returns {Promise<number>} The number of timestamp entries.
+     * Get the count of items in the index.
+     * For BSI, this is ambiguous (count of bits? count of unique IDs?).
+     * We'll return the size of the 'created' action bitmap as a proxy for "indexed documents",
+     * or we can return 0 as "keys" concept is deprecated.
      */
     async getCount() {
-        return this.dataset.getCount();
+        // Proxy to global created bitmap size
+        return this.actionBitmaps.created.size;
     }
 
     /**
      * Insert a document ID with its timestamp and action.
-     * Adds the ID to the bitmap for the normalized timestamp.
      * @param {string} action - The action type (created, updated, deleted).
      * @param {string|Date|number} timestamp - The timestamp of the action.
      * @param {number} id - Document ID.
@@ -56,81 +79,87 @@ export default class TimestampIndex {
         if (!this.#isValidAction(action)) {
             throw new Error(`Invalid action: ${action}. Must be one of ${VALID_ACTIONS.join(', ')}`);
         }
-        const normalizedTimestamp = this.#normalizeTimestamp(timestamp);
-        if (!normalizedTimestamp) { throw new Error('Invalid timestamp provided for insert'); }
+        const ts = this.#normalizeTimestamp(timestamp);
+        if (ts === null) { throw new Error('Invalid timestamp provided for insert'); }
         if (id === undefined || id === null) { throw new Error('ID required for insert'); }
 
-        // Get or create bitmap for this timestamp
-        let bitmap = await this.#getBitmap(normalizedTimestamp);
-        if (!bitmap) {
-            bitmap = new RoaringBitmap32();
-        }
-
-        // Add ID to bitmap
-        bitmap.add(id);
-
-        // Store serialized bitmap (portable format)
-        await this.dataset.put(normalizedTimestamp, Buffer.from(bitmap.serialize('portable')));
-        debug(`Added ID ${id} to timestamp bitmap: ${normalizedTimestamp}`);
+        // Update BSI
+        await this.bsi[action].setValue(id, ts);
+        debug(`Set ID ${id} timestamp to ${ts} in BSI '${action}'`);
 
         // Update action bitmap
         const actionBitmap = this.actionBitmaps[action];
         if (actionBitmap) {
             actionBitmap.add(id);
-            debug(`Ticked ID ${id} in action bitmap '${action}'`);
+            // Note: We don't strictly need to save actionBitmap here if BSI is the source of truth,
+            // but actionBitmaps are likely used elsewhere for quick "isCreated" checks.
+            // Also, BitmapIndex usually requires explicit save, but here we are operating on the instance passed in.
+            // We assume the caller or a periodic process handles persistence of actionBitmaps if they are not auto-saved.
+            // However, looking at src/index.js, they are created via bitmapIndex.createBitmap,
+            // so they are managed by BitmapIndex. We should probably save them.
+            await this.bitmapIndex.tick(actionBitmap.key, id);
         }
 
         return true;
     }
 
     /**
-     * Get document IDs for a specific timestamp.
+     * Get document IDs for a specific timestamp (Exact Match).
      * @param {string|Date|number} timestamp - The timestamp to query.
-     * @returns {Promise<Array<number>>} Array of document IDs, empty if timestamp not found.
+     * @returns {Promise<Array<number>>} Array of document IDs.
      */
     async get(timestamp) {
-        const normalizedTimestamp = this.#normalizeTimestamp(timestamp);
-        if (!normalizedTimestamp) { return []; }
+        const ts = this.#normalizeTimestamp(timestamp);
+        if (ts === null) { return []; }
 
-        const bitmap = await this.#getBitmap(normalizedTimestamp);
-        return bitmap ? bitmap.toArray() : [];
+        // "Get" implies "any action happened at this timestamp"?
+        // Or specific action? Legacy implies union.
+        const results = await Promise.all([
+            this.bsi.created.query('=', ts),
+            this.bsi.updated.query('=', ts),
+            this.bsi.deleted.query('=', ts)
+        ]);
+
+        const union = new RoaringBitmap32();
+        for (const res of results) {
+            union.orInPlace(res);
+        }
+        return union.toArray();
     }
 
     /**
      * Find document IDs by timestamp range.
-     * Returns union of all bitmaps in the range.
+     * Returns union of all actions in the range.
      * @param {string|Date|number} startDate - Starting timestamp (inclusive).
      * @param {string|Date|number} endDate - Ending timestamp (inclusive).
      * @returns {Promise<Array<number>>} Array of unique document IDs.
      */
     async findByRange(startDate, endDate) {
-        const normalizedStart = this.#normalizeTimestamp(startDate);
-        const normalizedEnd = this.#normalizeTimestamp(endDate);
+        const start = this.#normalizeTimestamp(startDate);
+        const end = this.#normalizeTimestamp(endDate);
 
-        if (!normalizedStart || !normalizedEnd) {
+        if (start === null || end === null) {
             throw new Error('Valid start and end dates required for findByRange');
         }
-        if (new Date(normalizedStart) > new Date(normalizedEnd)) {
+        if (start > end) {
             throw new Error('Start date must be before or equal to end date');
         }
 
-        const unionBitmap = new RoaringBitmap32();
+        const results = await Promise.all([
+            this.bsi.created.query('BETWEEN', [start, end]),
+            this.bsi.updated.query('BETWEEN', [start, end]),
+            this.bsi.deleted.query('BETWEEN', [start, end])
+        ]);
 
-        if (this.dataset && typeof this.dataset.getRange === 'function') {
-            for await (const { value } of this.dataset.getRange({ start: normalizedStart, end: normalizedEnd })) {
-                if (value && Buffer.isBuffer(value)) {
-                    const bitmap = RoaringBitmap32.deserialize(value, 'portable');
-                    unionBitmap.orInPlace(bitmap);
-                }
-            }
+        const union = new RoaringBitmap32();
+        for (const res of results) {
+            union.orInPlace(res);
         }
-
-        return unionBitmap.toArray();
+        return union.toArray();
     }
 
     /**
      * Find document IDs by timestamp range and action.
-     * Returns intersection of range results with action bitmap.
      * @param {string} action - The action type (created, updated, deleted).
      * @param {string|Date|number} startDate - Starting timestamp.
      * @param {string|Date|number} endDate - Ending timestamp.
@@ -141,124 +170,75 @@ export default class TimestampIndex {
             throw new Error(`Invalid action: ${action}. Must be one of: ${VALID_ACTIONS.join(', ')}`);
         }
 
-        const normalizedStart = this.#normalizeTimestamp(startDate);
-        const normalizedEnd = this.#normalizeTimestamp(endDate);
+        const start = this.#normalizeTimestamp(startDate);
+        const end = this.#normalizeTimestamp(endDate);
 
-        if (!normalizedStart || !normalizedEnd) {
+        if (start === null || end === null) {
             throw new Error('Valid start and end dates required');
         }
 
-        const unionBitmap = new RoaringBitmap32();
-
-        if (this.dataset && typeof this.dataset.getRange === 'function') {
-            for await (const { value } of this.dataset.getRange({ start: normalizedStart, end: normalizedEnd })) {
-                if (value && Buffer.isBuffer(value)) {
-                    const bitmap = RoaringBitmap32.deserialize(value, 'portable');
-                    unionBitmap.orInPlace(bitmap);
-                }
-            }
-        }
-
-        // Intersect with action bitmap
-        const actionBitmap = this.actionBitmaps[action];
-        if (!actionBitmap) { return []; }
-
-        const resultBitmap = RoaringBitmap32.and(unionBitmap, actionBitmap);
-        return resultBitmap.toArray();
+        const result = await this.bsi[action].query('BETWEEN', [start, end]);
+        return result.toArray();
     }
 
     /**
-     * Remove a document ID from a timestamp's bitmap.
-     * If bitmap becomes empty, removes the timestamp entry.
-     * @param {string|Date|number} timestamp - The timestamp.
+     * Remove a document ID from a timestamp entry.
+     * NOTE: In BSI, we typically just "unset" the value for the ID.
+     * But we need to know the action.
+     * If action is not provided (legacy signature), we attempt to remove from ALL.
+     * @param {string|Date|number} timestamp - Ignored in BSI (value matches ID).
      * @param {number} id - Document ID to remove.
-     * @returns {Promise<boolean>} True if removed, false if not found.
+     * @returns {Promise<boolean>} True.
      */
     async remove(timestamp, id) {
-        const normalizedTimestamp = this.#normalizeTimestamp(timestamp);
-        if (!normalizedTimestamp || id === undefined || id === null) { return false; }
+        if (id === undefined || id === null) { return false; }
 
-        const bitmap = await this.#getBitmap(normalizedTimestamp);
-        if (!bitmap || !bitmap.has(id)) { return false; }
+        // We remove from all actions as we don't know which one is intended
+        await Promise.all([
+            this.bsi.created.removeValue(id),
+            this.bsi.updated.removeValue(id),
+            this.bsi.deleted.removeValue(id)
+        ]);
 
-        bitmap.remove(id);
-
-        // If bitmap is empty, delete the entry
-        if (bitmap.size === 0) {
-            await this.dataset.remove(normalizedTimestamp);
-            debug(`Removed empty timestamp entry: ${normalizedTimestamp}`);
-        } else {
-            await this.dataset.put(normalizedTimestamp, Buffer.from(bitmap.serialize('portable')));
-            debug(`Removed ID ${id} from timestamp: ${normalizedTimestamp}`);
-        }
-
+        debug(`Removed ID ${id} from all BSI indices`);
         return true;
     }
 
     /**
      * Delete an entire timestamp entry (removes all IDs).
-     * @param {string|Date|number} timestamp - The timestamp to delete.
-     * @returns {Promise<boolean>} True if deleted, false if not found.
+     * Not supported/applicable in BSI (would require finding all IDs with value X and clearing them).
+     * @deprecated
      */
     async delete(timestamp) {
-        const normalizedTimestamp = this.#normalizeTimestamp(timestamp);
-        if (!normalizedTimestamp) { return false; }
-
-        if (this.dataset && typeof this.dataset.remove === 'function') {
-            const result = await this.dataset.remove(normalizedTimestamp);
-            debug(`Deleted timestamp entry: ${normalizedTimestamp}`);
-            return result;
-        }
+        debug('delete() is deprecated/not supported in BSI TimestampIndex');
         return false;
     }
 
     /**
      * Check if a timestamp key exists.
-     * @param {string|Date|number} timestamp - The timestamp to check.
-     * @returns {Promise<boolean>} Whether the timestamp has any document IDs.
+     * @deprecated
      */
     async has(timestamp) {
-        const normalizedTimestamp = this.#normalizeTimestamp(timestamp);
-        if (!normalizedTimestamp) { return false; }
-        return this.dataset.doesExist(normalizedTimestamp);
+        const ids = await this.get(timestamp);
+        return ids.length > 0;
     }
 
     /**
-     * List timestamp keys (YYYY-MM-DD) by a prefix.
-     * Example: prefix '2023-10' lists all timestamp keys in October 2023.
-     * @param {string} prefix - Timestamp prefix.
-     * @returns {Promise<Array<string>>} Array of timestamp keys.
+     * List timestamp keys.
+     * @deprecated
      */
     async list(prefix) {
-        if (!prefix || typeof prefix !== 'string') {
-            throw new Error('A valid string timestamp prefix is required for list.');
-        }
-        const keys = [];
-        if (this.dataset && typeof this.dataset.getKeys === 'function') {
-            // LMDB getKeys with start/end to simulate prefix scan
-            for await (const key of this.dataset.getKeys({ start: prefix, end: prefix + '\\uffff' })) {
-                keys.push(key);
-            }
-        } else {
-            console.error('[TimestampIndex.list ERROR] this.dataset.getKeys is not a function or dataset is undefined.');
-        }
-        return keys;
+        debug('list() is deprecated in BSI TimestampIndex');
+        return [];
     }
 
     /**
-     * List all stored timestamp keys (YYYY-MM-DD).
-     * @returns {Promise<Array<string>>} Array of all timestamp keys.
+     * List all stored timestamp keys.
+     * @deprecated
      */
     async listAll() {
-        const keys = [];
-        if (this.dataset && typeof this.dataset.getKeys === 'function') {
-            for await (const key of this.dataset.getKeys()) {
-                keys.push(key);
-            }
-        } else {
-            console.error('[TimestampIndex.listAll ERROR] this.dataset.getKeys is not a function or dataset is undefined.');
-        }
-        return keys;
+        debug('listAll() is deprecated in BSI TimestampIndex');
+        return [];
     }
 
     /**
@@ -269,40 +249,37 @@ export default class TimestampIndex {
      */
     async findByTimeframe(timeframe, action = null) {
         const now = new Date();
-        let startDate, endDate;
+        let start, end;
 
         switch (timeframe) {
             case 'today':
-                startDate = endDate = now;
+                start = startOfDay(now);
+                end = endOfDay(now);
                 break;
             case 'yesterday':
-                startDate = endDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+                start = startOfYesterday();
+                end = endOfYesterday();
                 break;
-            case 'thisWeek': {
-                const dayOfWeek = now.getDay();
-                const startOfWeek = new Date(now.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
-                startDate = startOfWeek;
-                endDate = now;
+            case 'thisWeek':
+                start = startOfWeek(now);
+                end = endOfWeek(now); // or end = now
                 break;
-            }
-            case 'thisMonth': {
-                startDate = new Date(now.getFullYear(), now.getMonth(), 1);
-                endDate = now;
+            case 'thisMonth':
+                start = startOfMonth(now);
+                end = endOfMonth(now); // or end = now
                 break;
-            }
-            case 'thisYear': {
-                startDate = new Date(now.getFullYear(), 0, 1);
-                endDate = now;
+            case 'thisYear':
+                start = startOfYear(now);
+                end = endOfYear(now); // or end = now
                 break;
-            }
             default:
                 throw new Error(`Invalid timeframe: ${timeframe}. Must be one of: today, yesterday, thisWeek, thisMonth, thisYear`);
         }
 
         if (action) {
-            return await this.findByRangeAndAction(action, startDate, endDate);
+            return await this.findByRangeAndAction(action, start, end);
         }
-        return await this.findByRange(startDate, endDate);
+        return await this.findByRange(start, end);
     }
 
     // ========================================
@@ -310,26 +287,9 @@ export default class TimestampIndex {
     // ========================================
 
     /**
-     * Retrieve bitmap for a timestamp key.
-     * @param {string} normalizedTimestamp - Normalized timestamp (YYYY-MM-DD).
-     * @returns {Promise<RoaringBitmap32|null>} Bitmap or null if not found.
-     */
-    async #getBitmap(normalizedTimestamp) {
-        const buffer = await this.dataset.get(normalizedTimestamp);
-        if (!buffer || !Buffer.isBuffer(buffer)) { return null; }
-
-        try {
-            return RoaringBitmap32.deserialize(buffer, 'portable');
-        } catch (e) {
-            debug(`Error deserializing bitmap for ${normalizedTimestamp}: ${e.message}`);
-            return null;
-        }
-    }
-
-    /**
-     * Normalize timestamp to YYYY-MM-DD format.
+     * Normalize timestamp to Unix Timestamp (Seconds).
      * @param {string|Date|number} timestamp - Input timestamp.
-     * @returns {string|null} Normalized timestamp or null if invalid.
+     * @returns {number|null} Unix timestamp (integer seconds) or null if invalid.
      */
     #normalizeTimestamp(timestamp) {
         if (timestamp === null || timestamp === undefined) { return null; }
@@ -339,12 +299,16 @@ export default class TimestampIndex {
             if (timestamp instanceof Date) {
                 date = timestamp;
             } else if (typeof timestamp === 'number') {
+                // Assuming milliseconds if > 2^32? Or seconds?
+                // JS Date uses ms.
+                // If it's a small number, it might be seconds.
+                // But let's assume input is either Date object or Date-compatible (ms).
+                // But getUnixTime expects Date or number (ms).
                 date = new Date(timestamp);
             } else if (typeof timestamp === 'string') {
-                // Try parseISO for better ISO string handling
                 date = parseISO(timestamp);
                 if (isNaN(date.getTime())) {
-                    date = new Date(timestamp);
+                    date = new Date(timestamp); // Fallback
                 }
             } else {
                 return null;
@@ -354,10 +318,7 @@ export default class TimestampIndex {
                 throw new Error('Invalid date value');
             }
 
-            const year = date.getFullYear();
-            const month = (date.getMonth() + 1).toString().padStart(2, '0');
-            const day = date.getDate().toString().padStart(2, '0');
-            return `${year}-${month}-${day}`;
+            return getUnixTime(date);
         } catch (e) {
             debug(`Error normalizing timestamp '${String(timestamp)}': ${e.message}`);
             return null;

@@ -22,9 +22,8 @@ A very simple, naive implementation of a JSON document store with some bitmap in
 
 - **algorithm/checksum | docID**  
   Example: sha1/4e1243.. => document ID)
-- **timestamp | docID**  
-  Example: 20250212082411.1234 => document ID  
-We could use composite keys and LMDB range queries instead (timestamp/docID => document) but for now this way is more practical.
+- **timestamp | docID** (Bit-Sliced Index)
+  We use Bit-Sliced Indexing (BSI) to map timestamps (seconds precision) to document IDs. This allows for highly efficient range queries (>, <, BETWEEN) using bitwise operations on 32 bit-slices per action (created, updated, deleted).
 
 #### Bitmap indexes
 
