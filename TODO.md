@@ -1,5 +1,26 @@
 # TODO
 
+## Implementation of synapses
+
+We are approaching the point to implement the main functionality of our synpasd db module - synapses!
+SynanpsD indexes a variety of data - files, notes, emails from various sources, browser tabs/URLs, chat messages, contacts, todo items etc. On top of this data "lake" index, we construct a tree abstraction with tree leafs mapped to bitmap indexes unique-by-name by default. This means that /reports/customer-a/2025 will display objects based on bitmaps "reports" AND "customer-a" AND "2025", /customer-b/reports will use the same "reports" bitmap but due to customer-b AND reports, we'll get only relevant data for customer-b.
+
+Synapsd has to deal with multiple streams of incomming data, a good example are teams/chat messages and emails. 
+
+The use-case we need to support is as follows:
+In the Canvas application, user creates a Canvas/Context with the path universe://work/devops/jira-1001 which represents a task related to an nvidia driver kernel issue, universe in that url stands for the workspace(each workspace runs its own syanpsd db instance and defines data sources available for the whole workspace - lets say IMAP mailboxes and teams channels). He then links relevant contacts (stored in synapds) to the context path, and relevant email threads - lets say based on subject title. He can add notes, todo items, browser tabs etc - to the context path but the important part are updates. All incomming documents(lets say email messages) related to the context should be automatically linked/indexed to the context. If user receives an email from contact user@domain.com, we'd first store that email to get/generate a document ID, then we would need to check if the contact is in synapsd and get that contacts document ID, with that information we would loop through all context layers(bitmaps) where the contact document ID is set and tick/set the document ID of that new email as well. 
+
+Now I guess the high level logic to decide what to link to what is something we should leave for the application(canvas), but correct me if I'm wrong here. What synapsd should definitely support are low-level methods to create,remote,listSynapses for a given documentId 
+Maybe createSynapses(documentId-lets say our mail messages, [relatedDocumentIds - we'd then check where these IDs are ticked and also tick the doc ID?])
+or createSynapses(docuemntId, [arrayOfContextPaths]) - in this scenario we'd also need to implement something like listSynapses(ourContactDocumentID) which would return a list of layers where this doc ID is set, we'd then use this list to run createSynapses(documentId, [array of layers where related contact is already ticked])
+
+- What do you think about the separation of concerns above
+- How should a synaps interface look like on the DB level? We provide a Tree and Tree.layers abstraction
+
+Please do not implement any code yet, lets discuss the design first
+
+
+
 ## Generic
 
 - Add backup policy, backup DB every day at 2AM server time, keep 7 days of backups(default, configurable for each workspace, config in workspace.json at each workspace path, should work on an active workspace only)

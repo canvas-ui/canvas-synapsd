@@ -22,6 +22,7 @@ import BaseDocument from './schemas/BaseDocument.js';
 import BitmapIndex from './indexes/bitmaps/index.js';
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
+import Synapses from './indexes/inverted/Synapses.js';
 //import FtsIndex from './indexes/fts/index.js';
 //import VectorIndex from './indexes/vector/index.js';
 import * as lancedb from '@lancedb/lancedb';
@@ -61,6 +62,7 @@ class SynapsD extends EventEmitter {
     // Inverted Indexes
     #checksumIndex;
     #timestampIndex;
+    #synapses;
 
     // Collections
     #collections;
@@ -194,6 +196,7 @@ class SynapsD extends EventEmitter {
     // Inverted indexes
     get checksumIndex() { return this.#checksumIndex; }
     get timestampIndex() { return this.#timestampIndex; }
+    get synapses() { return this.#synapses; }
 
     /**
      * Service methods
@@ -214,6 +217,12 @@ class SynapsD extends EventEmitter {
             this.#timestampIndex = new TimestampIndex(
                 this.#db.createDataset('timestamps'),
                 this.actionBitmaps,
+            );
+
+            // Initialize Synapses inverted index
+            this.#synapses = new Synapses(
+                this.#db.createDataset('synapses'),
+                this.bitmapIndex
             );
 
             // Initialize LanceDB under workspace root (rootPath/lance)
@@ -407,6 +416,12 @@ class SynapsD extends EventEmitter {
                         throw new Error(`insertDocument: Failed to update context bitmaps for path '${pathString}' for document ${parsedDocument.id}`);
                     }
                     debug(`insertDocument: Context bitmaps updated for path '${pathString}' for document ${parsedDocument.id}.`);
+
+                    // Update Synapses index (Reverse Index) for context layers
+                    // We need to convert path layers to normalized keys if not already handled
+                    // contextBitmapCollection.tickMany does this internally, but Synapses expects normalized keys
+                    const normalizedLayers = pathLayers.map(l => this.contextBitmapCollection.makeKey(l));
+                    await this.#synapses.createSynapses(parsedDocument.id, normalizedLayers);
                 }
 
                 // Update feature bitmaps
@@ -420,6 +435,11 @@ class SynapsD extends EventEmitter {
                     throw new Error(`insertDocument: Failed to update feature bitmaps for document ${parsedDocument.id}`);
                 }
                 debug(`insertDocument: Feature bitmaps updated for document ${parsedDocument.id}.`);
+
+                // Update Synapses index for features
+                // Features are direct bitmap keys usually, but let's normalize them
+                const normalizedFeatures = featureBitmaps.map(f => this.bitmapIndex.constructor.normalizeKey(f));
+                await this.#synapses.createSynapses(parsedDocument.id, normalizedFeatures);
             });
 
             debug(`insertDocument: All operations completed atomically for document ID: ${parsedDocument.id}`);
@@ -835,6 +855,10 @@ class SynapsD extends EventEmitter {
                 // Update context bitmaps for this path
                 await this.contextBitmapCollection.tickMany(pathLayers, updatedDocument.id);
                 debug(`updateDocument: Context bitmaps updated for path '${pathString}'`);
+
+                // Update Synapses index (Reverse Index) for context layers
+                const normalizedLayers = pathLayers.map(l => this.contextBitmapCollection.makeKey(l));
+                await this.#synapses.createSynapses(updatedDocument.id, normalizedLayers);
             }
 
             // Ensure schema is included in features
@@ -844,6 +868,10 @@ class SynapsD extends EventEmitter {
 
             // Update feature bitmaps
             await this.bitmapIndex.tickMany(featureBitmaps, updatedDocument.id);
+
+            // Update Synapses index for features
+            const normalizedFeatures = featureBitmaps.map(f => this.bitmapIndex.constructor.normalizeKey(f));
+            await this.#synapses.createSynapses(updatedDocument.id, normalizedFeatures);
 
             // Emit event
             this.emit('document.updated', { id: updatedDocument.id, document: updatedDocument });
@@ -952,11 +980,23 @@ class SynapsD extends EventEmitter {
         // Remove document will only remove the document from the supplied bitmaps
         // It will not delete the document from the database.
         try {
+            const layersToRemove = [];
+
             if (allLayersToRemove.length > 0) {
-                await this.contextBitmapCollection.untickMany(allLayersToRemove, docId);
+                // await this.contextBitmapCollection.untickMany(allLayersToRemove, docId);
+                // Use Synapses instead to sync both indexes
+                const normalizedContexts = allLayersToRemove.map(l => this.contextBitmapCollection.makeKey(l));
+                layersToRemove.push(...normalizedContexts);
             }
             if (featureBitmapArray.length > 0) {
-                await this.bitmapIndex.untickMany(featureBitmapArray, docId);
+                // await this.bitmapIndex.untickMany(featureBitmapArray, docId);
+                 const normalizedFeatures = featureBitmapArray.map(f => this.bitmapIndex.constructor.normalizeKey(f));
+                 layersToRemove.push(...normalizedFeatures);
+            }
+
+            if (layersToRemove.length > 0) {
+                await this.#synapses.removeSynapses(docId, layersToRemove);
+                debug(`removeDocument: Removed doc ${docId} from ${layersToRemove.length} layers via Synapses`);
             }
 
             // If the operations completed without throwing, return the ID.
@@ -1044,9 +1084,10 @@ class SynapsD extends EventEmitter {
                 await this.documents.delete(docId);
                 debug(`deleteDocument: Document ${docId} deleted from main store`);
 
-                // Delete document from all bitmaps
-                await this.bitmapIndex.untickAll(docId);
-                debug(`deleteDocument: Document ${docId} removed from all bitmaps`);
+                // Delete document from all bitmaps AND Reverse Index via Synapses
+                // await this.bitmapIndex.untickAll(docId);
+                await this.#synapses.clearSynapses(docId);
+                debug(`deleteDocument: Document ${docId} removed from all bitmaps and Synapses index`);
 
                 // Delete document checksums from inverted index
                 await this.#checksumIndex.deleteArray(document.checksumArray);
