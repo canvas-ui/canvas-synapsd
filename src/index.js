@@ -554,7 +554,7 @@ class SynapsD extends EventEmitter {
         let contextFilterApplied = false;
 
         // Apply context filter if caller actually wanted one OR if it defaulted to '/' but features are also specified.
-        if (!noContextFilterWanted || (noContextFilterWanted && !noFeatureFilterWanted) ) {
+        if (!noContextFilterWanted || (noContextFilterWanted && !noFeatureFilterWanted)) {
             // This condition means: apply context filter if context was specified,
             // OR if context was not specified (defaulting to '/') BUT features were specified.
             resultBitmap = await this.contextBitmapCollection.AND(parsedContextKeys);
@@ -580,7 +580,7 @@ class SynapsD extends EventEmitter {
             } else {
                 resultBitmap = featureOpBitmap; // RoaringBitmap32.or(new RoaringBitmap32(), featureOpBitmap) for a new instance if needed
             }
-        } else if (contextFilterApplied && (!resultBitmap || resultBitmap.isEmpty   ) && !noContextFilterWanted) {
+        } else if (contextFilterApplied && (!resultBitmap || resultBitmap.isEmpty) && !noContextFilterWanted) {
             // If context filter was applied (explicitly), was the only filter, and yielded no results.
             debug(`hasDocument: Doc ${id} - explicit context filter (as only filter) ${JSON.stringify(parsedContextKeys)} yielded no results.`);
             return false;
@@ -595,6 +595,24 @@ class SynapsD extends EventEmitter {
         }
 
         return resultBitmap ? resultBitmap.has(id) : false;
+    }
+
+    async getBitmapsForDocument(id, prefix = '') {
+        if (!id) throw new Error('Document ID required');
+
+        const keys = await this.bitmapIndex.listBitmaps(prefix);
+        const matchingKeys = [];
+
+        for (const key of keys) {
+            // We need to check if the ID exists in this bitmap
+            // Optimization: check cache first? listBitmaps returns keys.
+            // We have to load the bitmap to check.
+            const bitmap = await this.bitmapIndex.getBitmap(key, false);
+            if (bitmap && bitmap.has(id)) {
+                matchingKeys.push(key);
+            }
+        }
+        return matchingKeys;
     }
 
     async hasDocumentByChecksum(checksum, contextSpec = '/', featureBitmapArray) {
@@ -1766,10 +1784,10 @@ class SynapsD extends EventEmitter {
             fts_text: ftsText,
         };
         // Emulate upsert by deleting existing id then adding
-        try { await this.#lanceTable.delete?.(`id = ${doc.id}`); } catch (_) {}
+        try { await this.#lanceTable.delete?.(`id = ${doc.id}`); } catch (_) { }
         await this.#lanceTable.add([row]);
         // Mark as FTS-indexed in bitmap
-        try { await this.bitmapIndex.tick(this.#lanceFtsBitmapKey, doc.id); } catch (_) {}
+        try { await this.bitmapIndex.tick(this.#lanceFtsBitmapKey, doc.id); } catch (_) { }
     }
 
     async #deleteLanceDocument(docId) {
@@ -1919,7 +1937,7 @@ class SynapsD extends EventEmitter {
             debug('#initializeDocument: Input is already a Document instance, returning it.');
             doc = documentData;
 
-        // Case 2: A plain data object that conforms to the basic document structure
+            // Case 2: A plain data object that conforms to the basic document structure
         } else if (isDocumentData(documentData)) {
             debug(`#initializeDocument: Input is a plain data object. Schema: ${documentData.schema}`);
             // Get the schema class for the document
