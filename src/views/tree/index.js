@@ -331,7 +331,20 @@ class ContextTree extends EventEmitter {
      * ============================================================================
      */
 
-    async insertPath(path = '/', node, autoCreateLayers = true) {
+    async insertPath(path = '/', nodeOrOptions, autoCreateLayers = true, insertOptions = {}) {
+        // Back-compat overload:
+        // - insertPath(path)
+        // - insertPath(path, node)
+        // - insertPath(path, node, autoCreateLayers)
+        // - insertPath(path, { leafType: 'canvas' })
+        // - insertPath(path, node, autoCreateLayers, { leafType: 'canvas' })
+        let node = nodeOrOptions;
+        if (nodeOrOptions && typeof nodeOrOptions === 'object' && !(nodeOrOptions instanceof TreeNode)) {
+            insertOptions = nodeOrOptions;
+            node = null;
+        }
+
+        const leafType = insertOptions?.leafType || 'context';
         const normalizedPath = this.#normalizePath(path);
         debug(`Inserting normalized path "${normalizedPath}" (original: "${path}") into the context tree`);
 
@@ -364,14 +377,32 @@ class ContextTree extends EventEmitter {
                 if (!layer) {
                     debug(`Layer "${layerName}" not found in layerIndex`);
                     if (autoCreateLayers) {
+                        const isLeaf = layerName === layerNames[layerNames.length - 1];
+                        const desiredType = isLeaf ? leafType : 'context';
                         debug(`Creating layer "${layerName}"`);
-                        layer = await this.#layerIndex.createLayer(layerName);
+                        layer = await this.#layerIndex.createLayer(layerName, { type: desiredType });
                         createdLayers.push(layer);
                     } else {
                         return {
                             data: [],
                             count: 0,
                             error: `Layer "${layerName}" not found at path "${normalizedPath}" and autoCreateLayers is disabled`,
+                        };
+                    }
+                }
+                // If the leaf already exists but the caller requested a different leafType,
+                // we allow a safe "upgrade" from context->canvas (Canvas currently adds no behavior).
+                const isLeaf = layerName === layerNames[layerNames.length - 1];
+                if (isLeaf && leafType && layer.type !== leafType) {
+                    if (layer.type === 'context' && leafType === 'canvas') {
+                        debug(`Upgrading leaf layer "${layer.name}" from type "${layer.type}" to "${leafType}"`);
+                        layer.type = leafType;
+                        await this.#layerIndex.persistLayer(layer);
+                    } else {
+                        return {
+                            data: [],
+                            count: 0,
+                            error: `Leaf layer "${layerName}" exists with type "${layer.type}", cannot use as type "${leafType}"`,
                         };
                     }
                 }

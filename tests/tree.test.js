@@ -1,4 +1,3 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from '@jest/globals';
 import fs from 'fs';
 import SynapsD from '../src/index.js';
 

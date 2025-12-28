@@ -37,6 +37,7 @@ class Layer {
         this.color = options?.color;
         this.lockedBy = options?.lockedBy || [];
         this.metadata = options.metadata || {};
+        this.acl = options.acl || {};
     }
 
     /**
@@ -169,6 +170,7 @@ class Layer {
             locked: this.isLocked,
             lockedBy: this.lockedBy,
             metadata: this.metadata,
+            acl: this.acl,
         };
     }
 
@@ -184,6 +186,7 @@ class Layer {
             color: json.color,
             lockedBy: json.lockedBy || [],
             metadata: json.metadata,
+            acl: json.acl || {},
         });
         return layer;
     }

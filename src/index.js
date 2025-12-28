@@ -288,6 +288,92 @@ class SynapsD extends EventEmitter {
     listSchemas(prefix = null) { return schemaRegistry.listSchemas(prefix); }
 
     /**
+     * ============================================================================
+     * Canvas helpers (storable views as layers)
+     * ============================================================================
+     */
+
+    async createCanvas(path, options = {}) {
+        if (!path) { throw new Error('Canvas path required'); }
+
+        const { view = {}, acl } = options || {};
+
+        // Ensure the path exists and the leaf is a canvas layer
+        await this.tree.insertPath(path, { leafType: 'canvas' });
+
+        const layer = this.tree.getLayerForPath(path);
+        if (!layer) { throw new Error(`Canvas layer not found for path: ${path}`); }
+        if (layer.type !== 'canvas') { throw new Error(`Layer at path "${path}" is not a canvas (type: ${layer.type})`); }
+
+        const nextMetadata = { ...(layer.metadata || {}) };
+        if (view && typeof view === 'object') {
+            nextMetadata.view = { ...(nextMetadata.view || {}), ...view };
+        }
+
+        const updates = { metadata: nextMetadata };
+        if (acl !== undefined) { updates.acl = acl; }
+
+        return await this.tree.updateLayer(layer.id, updates);
+    }
+
+    getCanvas(pathOrLayerId) {
+        if (!pathOrLayerId) { throw new Error('Canvas path or layer id required'); }
+        if (typeof pathOrLayerId === 'string' && pathOrLayerId.startsWith('/')) {
+            const layer = this.tree.getLayerForPath(pathOrLayerId);
+            if (!layer) { throw new Error(`Canvas layer not found for path: ${pathOrLayerId}`); }
+            return layer;
+        }
+        const layer = this.tree.getLayerById(String(pathOrLayerId));
+        if (!layer) { throw new Error(`Canvas layer not found for id: ${pathOrLayerId}`); }
+        return layer;
+    }
+
+    async updateCanvas(pathOrLayerId, patch = {}) {
+        const layer = this.getCanvas(pathOrLayerId);
+        if (!layer) { throw new Error(`Canvas layer not found: ${pathOrLayerId}`); }
+
+        const { view, acl } = patch || {};
+        const nextMetadata = { ...(layer.metadata || {}) };
+        if (view && typeof view === 'object') {
+            nextMetadata.view = { ...(nextMetadata.view || {}), ...view };
+        }
+
+        const updates = {};
+        if (view !== undefined) { updates.metadata = nextMetadata; }
+        if (acl !== undefined) { updates.acl = acl; }
+
+        if (Object.keys(updates).length === 0) {
+            return layer;
+        }
+
+        return await this.tree.updateLayer(layer.id, updates);
+    }
+
+    async queryCanvas(pathOrLayerId, overrides = {}, options = { parse: true }) {
+        const layer = this.getCanvas(pathOrLayerId);
+        const view = layer?.metadata?.view || {};
+
+        const contextSpec =
+            overrides.contextSpec ??
+            view.contextSpec ??
+            (typeof pathOrLayerId === 'string' && pathOrLayerId.startsWith('/') ? pathOrLayerId : '/');
+
+        const featureBitmapArray =
+            overrides.featureBitmapArray ??
+            overrides.features ??
+            view.features ??
+            [];
+
+        const filterArray =
+            overrides.filterArray ??
+            overrides.filters ??
+            view.filters ??
+            [];
+
+        return await this.findDocuments(contextSpec, featureBitmapArray, filterArray, options);
+    }
+
+    /**
      * Validation methods
      */
 
