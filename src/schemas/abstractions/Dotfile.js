@@ -53,7 +53,7 @@ const documentDataSchema = z
 
                 // Mappings per device: deviceId -> localPath
                 links: z.record(
-                    z.string(), // Device ID / Name
+                    z.string(), // Device ID (deviceId)
                     z.string().regex(pathPattern, {
                         message: 'localPath must be an absolute path or contain a placeholder'
                     }).transform(normalizeHomePlaceholder)
