@@ -14,6 +14,7 @@ import Tab from './abstractions/Tab.js';
 import Todo from './abstractions/Todo.js';
 import Dotfile from './abstractions/Dotfile.js';
 import Device from './abstractions/Device.js';
+import Application from './abstractions/Application.js';
 
 // Tree Abstractions
 import Canvas from './internal/layers/Canvas.js';
@@ -38,6 +39,7 @@ const SCHEMA_REGISTRY = {
     'data/abstraction/todo': Todo,
     'data/abstraction/dotfile': Dotfile,
     'data/abstraction/device': Device,
+    'data/abstraction/application': Application,
 
     // Tree Abstractions
     'internal/layers/canvas': Canvas,           // Can store context, feature and filter bitmaps + dashboard / UI layouts
