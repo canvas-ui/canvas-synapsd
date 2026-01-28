@@ -33,17 +33,15 @@ class LayerIndex extends EventEmitter {
      *  - Trim
      *  - Collapse whitespace to single spaces
      *  - Lowercase for comparison only
-     *  - Keep valid chars: [a-zA-Z0-9._- ]
+     *  - Keep valid chars: UTF-8 letters/numbers + spaces and: . + - _ @
      * @param {string} name - The layer name.
      * @returns {string} - The normalized layer name for comparison.
      */
     normalizeLayerName(name) {
         if (name === '/') { return '/'; }
-        let normalized = String(name ?? '')
-            .trim()
+        return this.sanitizeLayerName(name)
             .replace(/\s+/g, ' ')
-            .toLowerCase();
-        return normalized || '_';
+            .toLowerCase() || '_';
     }
 
     /**
@@ -53,11 +51,13 @@ class LayerIndex extends EventEmitter {
      */
     sanitizeLayerName(name) {
         if (name === '/') { return '/'; }
-        return String(name ?? '')
+        const INVALID = /[^\p{L}\p{N}\p{M} .+_@-]/gu;
+        const sanitized = String(name ?? '').normalize('NFKC')
             .trim()
-            .replace(/\s+/g, '_')
-            .replace(/[^a-zA-Z0-9._-]/g, '_')
+            .replace(/\s+/g, ' ')
+            .replace(INVALID, '_')
             .replace(/_+/g, '_');
+        return sanitized || '_';
     }
 
     async initializeIndex() {

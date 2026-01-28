@@ -1252,9 +1252,9 @@ class ContextTree extends EventEmitter {
                 return null;
             }
 
-            // Layer names in the stored JSON should be normalized already
-            const normalizedName = nodeData.name;
-            let layer = this.#layerIndex.getLayerByName(normalizedName);
+            // Stored JSON uses display names; compare using normalized form.
+            const storedName = nodeData.name;
+            let layer = this.#layerIndex.getLayerByName(storedName);
 
             if (!layer) {
                 // This case implies inconsistency between stored tree and LayerIndex init
@@ -1267,15 +1267,15 @@ class ContextTree extends EventEmitter {
                     // Alternatively, throw new Error(`...`);
                 }
                 // If reconstructed, ensure its name matches what we expected
-                if (this.#layerIndex.normalizeLayerName(layer.name) !== normalizedName) {
-                    console.error(`Name mismatch after direct fetch for layer ID ${layer.id}: Expected '${normalizedName}', got '${layer.name}'. Skipping node.`);
+                if (this.#layerIndex.normalizeLayerName(layer.name) !== this.#layerIndex.normalizeLayerName(storedName)) {
+                    console.error(`Name mismatch after direct fetch for layer ID ${layer.id}: Expected '${storedName}', got '${layer.name}'. Skipping node.`);
                     return null;
                 }
 
             } else {
                 // Verify the ID from the map instance matches the stored tree data
                 if (layer.id !== nodeData.id) {
-                    console.error(`ID mismatch for layer '${normalizedName}': Map has ${layer.id}, JSON has ${nodeData.id}. Using instance from map.`);
+                    console.error(`ID mismatch for layer '${storedName}': Map has ${layer.id}, JSON has ${nodeData.id}. Using instance from map.`);
                     // Continue, trusting the instance from the map
                 }
             }
@@ -1454,9 +1454,11 @@ class ContextTree extends EventEmitter {
         const segments = normalized.split('/');
         const normalizedSegments = segments.map(segment => {
             if (segment === '') {return '';} // Keep empty segments from split('/')
-            // Replace whitespace with underscore, lowercase and remove invalid characters, collapse underscores
-            let s = segment.replace(/\s+/g, '_').toLowerCase().replace(/[^a-z0-9._-]/g, '_').replace(/_+/g, '_');
-            return s;
+            // Consumer apps may URL-encode paths; we accept both raw and encoded segments.
+            try { segment = decodeURIComponent(segment); } catch (_) { /* ignore */ }
+
+            // Keep UTF-8 + spaces; sanitize the same way layers do.
+            return this.#layerIndex.sanitizeLayerName(segment);
         });
 
         // Rejoin, handling potential empty segments if original was just '/' or '//'

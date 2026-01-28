@@ -115,17 +115,22 @@ class Layer {
             throw new Error('Name must be a string');
         }
 
+        // Root layer name is a special case
+        if (name === '/') {
+            return '/';
+        }
+
         if (name.length > 64) {
             throw new Error('Name must be less than 64 characters');
         }
 
-        // Normalize: trim, spaces->underscore, lowercase, allow [a-z0-9._-/], collapse multiple underscores
-        let n = String(name).trim();
-        n = n.replace(/\s+/g, '_');
-        n = n.toLowerCase();
-        n = n.replace(/[^a-z0-9._\/-]/g, '_');
-        n = n.replace(/_+/g, '_');
-        return n;
+        // Allow UTF-8 letters/numbers + spaces and: . + - _ @
+        // Disallow path/control characters (e.g. '/', '\', ':', '*', etc) by replacing them with '_'.
+        const INVALID = /[^\p{L}\p{N}\p{M} .+_@-]/gu;
+
+        let n = String(name).normalize('NFKC').trim().replace(/\s+/g, ' ');
+        n = n.replace(INVALID, '_').replace(/_+/g, '_');
+        return n || '_';
     }
 
     #sanitizeLabel(label) {
