@@ -177,6 +177,17 @@ class BitmapIndex {
         newKey = BitmapIndex.normalizeKey(newKey);
         debug(`Renaming bitmap "${oldKey}" to "${newKey}"`);
 
+        // If normalization makes both keys identical (e.g. case-only rename),
+        // renaming would otherwise delete the bitmap ("save" then delete same key).
+        if (oldKey === newKey) {
+            debug(`renameBitmap(): normalized keys identical ("${oldKey}"), no-op`);
+            const bitmap = await this.getBitmap(oldKey, false);
+            if (!bitmap) {
+                throw new Error(`Unable to rename bitmap "${oldKey}" to "${newKey}" because bitmap "${oldKey}" does not exist`);
+            }
+            return bitmap;
+        }
+
         const bitmap = await this.getBitmap(oldKey);
         if (!bitmap) { throw new Error(`Unable to rename bitmap "${oldKey}" to "${newKey}" because bitmap "${oldKey}" does not exist`); }
 
