@@ -11,10 +11,10 @@
     "debug": "^4.4.1",
     "eventemitter2": "^6.4.9",
     "flexsearch": "^0.8.205",
-    "llamaindex": "^0.11.26",
     "lmdb": "^3.4.2",
     "mkdirp": "^3.0.1",
     "roaring": "^2.4.0",
+    "ulid": "^3.0.2",
     "uuid": "^11.1.0",
     "zod": "^3.23.8"
   },
