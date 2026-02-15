@@ -229,6 +229,10 @@ class SynapsD extends EventEmitter {
 
             // Initialize context tree
             await this.#tree.initialize();
+
+            // Migrate bitmap keys from legacy format (one-time, idempotent)
+            await this.#migrateBitmapKeys();
+
             // Set status
             this.#status = 'running';
 
@@ -1434,6 +1438,55 @@ class SynapsD extends EventEmitter {
     /**
      * Internal methods
      */
+
+    /**
+     * One-time idempotent migration: rename legacy bitmap keys to new format.
+     *
+     * Context bitmaps: context/<name>  →  context/layer/<ulid>
+     *   Old code keyed context bitmaps by layer name; new code keys by layer ULID.
+     *
+     * Feature bitmaps: <prefix>/...  →  feature/<prefix>/...
+     *   Old code stored features directly in bitmapIndex (e.g. data/abstraction/note);
+     *   new code stores via featureBitmapCollection which prepends 'feature/'.
+     */
+    async #migrateBitmapKeys() {
+        let migrated = 0;
+
+        // --- Context bitmaps: name → ULID ---
+        const layerKeys = await this.tree.layers;
+        for (const layerKey of layerKeys) {
+            const layer = this.tree.getLayerById(layerKey);
+            if (!layer || layer.name === '/') continue;
+
+            const oldKey = this.contextBitmapCollection.makeKey(layer.name);
+            const newKey = this.contextBitmapCollection.makeKey(layer.id);
+            if (oldKey === newKey) continue;
+
+            if (this.bitmapIndex.hasBitmap(oldKey) && !this.bitmapIndex.hasBitmap(newKey)) {
+                await this.bitmapIndex.renameBitmap(oldKey, newKey);
+                migrated++;
+            }
+        }
+
+        // --- Feature bitmaps: raw prefix → feature/ prefix ---
+        // Old features lived at e.g. data/..., client/..., tag/...
+        // New features live at feature/data/..., feature/client/..., feature/tag/...
+        const featurePrefixes = ['data/', 'client/', 'tag/', 'custom/', 'nested/'];
+        for (const prefix of featurePrefixes) {
+            const keys = await this.bitmapIndex.listBitmaps(prefix);
+            for (const oldKey of keys) {
+                const newKey = `feature/${oldKey}`;
+                if (!this.bitmapIndex.hasBitmap(newKey)) {
+                    await this.bitmapIndex.renameBitmap(oldKey, newKey);
+                    migrated++;
+                }
+            }
+        }
+
+        if (migrated > 0) {
+            debug(`Bitmap key migration: renamed ${migrated} bitmap(s) to new format`);
+        }
+    }
 
     /**
      * Shared bitmap indexing for both insert and update operations.
