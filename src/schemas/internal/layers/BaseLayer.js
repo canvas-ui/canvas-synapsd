@@ -1,7 +1,7 @@
 import debugMessage from 'debug';
 const debug = debugMessage('synapsd:tree:layer');
 
-import { v4 as uuidv4 } from 'uuid';
+import { ulid } from 'ulid';
 
 class Layer {
     constructor(name, options = {}) {
@@ -26,8 +26,8 @@ class Layer {
         this.type = options.type ?? 'context';
         this.name = normalizedName;
 
-        // ID: prefer provided id; otherwise generate a UUID (do not derive from name)
-        this.id = options.id ?? uuidv4();
+        // ID: prefer provided id; otherwise generate a ULID (chronologically sortable)
+        this.id = options.id ?? ulid();
 
         // Label: preserve provided label (original user-facing string), else fallback to original name string
         const providedLabel = options.label ?? String(name ?? normalizedName);

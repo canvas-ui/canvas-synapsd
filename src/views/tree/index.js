@@ -5,12 +5,12 @@ import EventEmitter from 'eventemitter2';
 import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd:context-tree');
 
-// Node.js Crypto for UUIDs
-import crypto from 'crypto';
-
 // Modules
 import TreeNode from './lib/TreeNode.js';
 import LayerIndex from './lib/LayerIndex.js';
+
+// ULID/UUID detection: starts with 'layer/' or looks like a raw ID (26-char ULID or UUID with dashes)
+const looksLikeId = (s) => typeof s === 'string' && (s.startsWith('layer/') || /^[0-9A-Z]{26}$/.test(s) || s.includes('-'));
 
 /**
  * ContextTree
@@ -162,27 +162,15 @@ class ContextTree extends EventEmitter {
         if (!newName) { throw new Error('New name required'); }
         // Accept both ID and name. Prefer ID if it looks like one.
         let currentName = nameOrId;
-        // If the identifier contains a dash or begins with 'layer/', treat as ID
-        if (typeof nameOrId === 'string' && (nameOrId.startsWith('layer/') || nameOrId.includes('-'))) {
+        if (looksLikeId(nameOrId)) {
             const layer = this.getLayerById(nameOrId);
             if (!layer) { throw new Error(`Layer not found with ID: ${nameOrId}`); }
             currentName = layer.name;
         }
 
-        // Rename the associated bitmap in contextBitmapCollection
-        if (this.#db && this.#db.contextBitmapCollection && currentName !== newName) {
-            try {
-                debug(`Renaming bitmap for layer from "${currentName}" to "${newName}"`);
-                await this.#db.contextBitmapCollection.renameBitmap(currentName, newName);
-                debug(`Successfully renamed bitmap for layer from "${currentName}" to "${newName}"`);
-            } catch (error) {
-                debug(`Warning: Failed to rename bitmap from "${currentName}" to "${newName}": ${error.message}`);
-                // Don't fail the entire operation if bitmap rename fails
-            }
-        }
-
+        // Bitmaps are keyed by ULID, not by name. No bitmap rename needed - O(1) rename!
         const layer = await this.#layerIndex.renameLayer(String(currentName), String(newName));
-        // Persist updated tree JSON to reflect renamed layer names in stored tree
+        // Persist updated tree JSON to reflect renamed layer names
         await this.recalculateTree();
         return layer;
     }
@@ -190,7 +178,7 @@ class ContextTree extends EventEmitter {
     async updateLayer(nameOrId, updates = {}) {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
         let targetName = nameOrId;
-        if (typeof nameOrId === 'string' && (nameOrId.startsWith('layer/') || nameOrId.includes('-'))) {
+        if (looksLikeId(nameOrId)) {
             const layer = this.getLayerById(nameOrId);
             if (!layer) { throw new Error(`Layer not found with ID: ${nameOrId}`); }
             targetName = layer.name;
@@ -202,22 +190,21 @@ class ContextTree extends EventEmitter {
     async deleteLayer(nameOrId) {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
         let layer = null;
-        if (typeof nameOrId === 'string' && (nameOrId.startsWith('layer/') || nameOrId.includes('-'))) {
+        if (looksLikeId(nameOrId)) {
             layer = this.getLayerById(nameOrId);
         } else {
             layer = this.getLayer(String(nameOrId));
         }
         if (!layer) { throw new Error(`Layer not found: ${nameOrId}`); }
 
-        // Clean up the associated bitmap from contextBitmapCollection
+        // Clean up the associated bitmap (keyed by ULID)
         if (this.#db && this.#db.contextBitmapCollection) {
             try {
                 debug(`Cleaning up bitmap for layer ${layer.name} (ID: ${layer.id})`);
-                await this.#db.contextBitmapCollection.deleteBitmap(layer.name);
+                await this.#db.contextBitmapCollection.deleteBitmap(layer.id);
                 debug(`Successfully deleted bitmap for layer ${layer.name}`);
             } catch (error) {
                 debug(`Warning: Failed to delete bitmap for layer ${layer.name}: ${error.message}`);
-                // Don't fail the entire operation if bitmap cleanup fails
             }
         }
 
@@ -230,7 +217,7 @@ class ContextTree extends EventEmitter {
     async lockLayer(nameOrId, lockBy) {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
         if (!lockBy) { throw new Error('Locking layer requires a lockBy parameter'); }
-        const layer = (typeof nameOrId === 'string' && (nameOrId.startsWith('layer/') || nameOrId.includes('-')))
+        const layer = looksLikeId(nameOrId)
             ? this.getLayerById(nameOrId)
             : this.getLayer(String(nameOrId));
         if (!layer) { throw new Error(`Layer not found: ${nameOrId}`); }
@@ -242,7 +229,7 @@ class ContextTree extends EventEmitter {
     async unlockLayer(nameOrId, lockBy) {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
         if (!lockBy) { throw new Error('Unlocking layer requires a lockBy parameter'); }
-        const layer = (typeof nameOrId === 'string' && (nameOrId.startsWith('layer/') || nameOrId.includes('-')))
+        const layer = looksLikeId(nameOrId)
             ? this.getLayerById(nameOrId)
             : this.getLayer(String(nameOrId));
         if (!layer) { throw new Error(`Layer not found: ${nameOrId}`); }
@@ -260,7 +247,7 @@ class ContextTree extends EventEmitter {
             }
 
             const targetLayers = Array.isArray(layerArray) ? layerArray : [layerArray];
-            const targetNames = [];
+            const targetIds = [];
 
             for (const targetId of targetLayers) {
                 const targetLayer = this.getLayer(targetId) || this.getLayerById(targetId);
@@ -268,14 +255,14 @@ class ContextTree extends EventEmitter {
                     debug(`Target layer "${targetId}" not found, skipping.`);
                     continue;
                 }
-                targetNames.push(targetLayer.name);
+                targetIds.push(targetLayer.id);
             }
 
-            if (targetNames.length === 0) {
+            if (targetIds.length === 0) {
                 return { data: [], count: 0, error: 'No valid target layers found.' };
             }
 
-            const affected = await this.#db.contextBitmapCollection.mergeBitmap(sourceLayer.name, targetNames);
+            const affected = await this.#db.contextBitmapCollection.mergeBitmap(sourceLayer.id, targetIds);
             this.emit('tree.layer.merged', {
                 source: sourceLayer.name,
                 targets: targetNames,
@@ -297,7 +284,7 @@ class ContextTree extends EventEmitter {
             }
 
             const targetLayers = Array.isArray(layerArray) ? layerArray : [layerArray];
-            const targetNames = [];
+            const targetIds = [];
 
             for (const targetId of targetLayers) {
                 const targetLayer = this.getLayer(targetId) || this.getLayerById(targetId);
@@ -305,14 +292,14 @@ class ContextTree extends EventEmitter {
                     debug(`Target layer "${targetId}" not found, skipping.`);
                     continue;
                 }
-                targetNames.push(targetLayer.name);
+                targetIds.push(targetLayer.id);
             }
 
-            if (targetNames.length === 0) {
+            if (targetIds.length === 0) {
                 return { data: [], count: 0, error: 'No valid target layers found.' };
             }
 
-            const affected = await this.#db.contextBitmapCollection.subtractBitmap(sourceLayer.name, targetNames);
+            const affected = await this.#db.contextBitmapCollection.subtractBitmap(sourceLayer.id, targetIds);
             this.emit('tree.layer.subtracted', {
                 source: sourceLayer.name,
                 targets: targetNames,
@@ -1143,6 +1130,22 @@ class ContextTree extends EventEmitter {
             debug(`Failed to convert normalized path "${normalizedPath}" to layer IDs: ${error.message}`);
             return []; // Return empty array if path is invalid
         }
+    }
+
+    /**
+     * Resolve an array of layer names to their ULID-based IDs.
+     * Used by SynapsD to key bitmaps by ULID instead of name.
+     * @param {Array<string>} layerNames - Array of layer names
+     * @returns {Array<string>} Array of layer IDs (skips '/' root and unresolvable names)
+     */
+    resolveLayerIds(layerNames) {
+        const ids = [];
+        for (const name of layerNames) {
+            if (name === '/') { continue; } // Skip root for bitmap operations
+            const layer = this.#layerIndex.getLayerByName(name);
+            if (layer) { ids.push(layer.id); }
+        }
+        return ids;
     }
 
     buildJsonTree(node = this.root) {

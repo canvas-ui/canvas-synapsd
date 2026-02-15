@@ -17,6 +17,8 @@ import BitmapCollection from './lib/BitmapCollection.js';
 const ALLOWED_PREFIXES = [
     'internal/',
     'context/',
+    'vfs/',
+    'feature/',
     'client/',
     'server/',
     'user/',
@@ -424,27 +426,6 @@ class BitmapIndex {
         return this.untickMany(await this.listBitmaps(), ids);
     }
 
-    // For backward compatibility - these methods simply call the new async versions
-    async tickSync(key, ids) {
-        console.warn('DEPRECATED: tickSync is deprecated, use tick instead');
-        return this.tick(key, ids);
-    }
-
-    async untickSync(key, ids) {
-        console.warn('DEPRECATED: untickSync is deprecated, use untick instead');
-        return this.untick(key, ids);
-    }
-
-    async tickManySync(keyArray, ids) {
-        console.warn('DEPRECATED: tickManySync is deprecated, use tickMany instead');
-        return this.tickMany(keyArray, ids);
-    }
-
-    async untickManySync(keyArray, ids) {
-        console.warn('DEPRECATED: untickManySync is deprecated, use untickMany instead');
-        return this.untickMany(keyArray, ids);
-    }
-
     async applyToMany(sourceKey, targetKeys) {
         BitmapIndex.validateKey(sourceKey);
         debug(`applyToMany(): Applying source "${sourceKey}" to targets: "${targetKeys}"`);
@@ -497,8 +478,6 @@ class BitmapIndex {
         }
 
         const affectedKeys = [];
-        const bitmapsToSave = []; // Collect bitmaps to save
-        const keysToDelete = []; // Collect keys for empty bitmaps
 
         for (const targetKey of targetKeys) {
             BitmapIndex.validateKey(targetKey);
@@ -509,28 +488,19 @@ class BitmapIndex {
             }
 
             const originalSize = targetBitmap.size;
-            targetBitmap.andNotInPlace(sourceBitmap); // Subtract source from target
+            targetBitmap.andNotInPlace(sourceBitmap);
 
             if (targetBitmap.size !== originalSize) {
                 if (targetBitmap.isEmpty) {
-                    debug(`Target bitmap "${targetKey}" is now empty after subtraction, scheduling for deletion.`);
-                    keysToDelete.push(targetKey);
+                    debug(`Target bitmap "${targetKey}" is now empty after subtraction, deleting.`);
+                    await this.deleteBitmap(targetKey);
                 } else {
-                    bitmapsToSave.push(targetBitmap);
+                    this.#saveBitmapSync(targetBitmap.key, targetBitmap);
                 }
                 affectedKeys.push(targetKey);
             }
         }
 
-        // Perform batch save/delete
-        for (const bitmap of bitmapsToSave) {
-            this.#saveBitmapSync(bitmap.key, bitmap);
-        }
-        for (const key of keysToDelete) {
-            await this.deleteBitmap(key); // Ensure this line has await
-        }
-
-        // Return all keys that were affected (modified or deleted)
         return affectedKeys;
     }
 
@@ -636,9 +606,9 @@ class BitmapIndex {
         const result = new RoaringBitmap32();
         for (const key of positiveKeys) {
             BitmapIndex.validateKey(key);
-            const bmp = await this.getBitmap(key, true);
+            const bmp = await this.getBitmap(key, false); // Never auto-create in logical ops
             if (bmp) {
-                result.orInPlace(bmp); // Reverted to instance method
+                result.orInPlace(bmp);
             }
         }
 

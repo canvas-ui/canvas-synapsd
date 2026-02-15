@@ -8,7 +8,7 @@ import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd');
 
 // Errors
-import { ValidationError, NotFoundError, DuplicateError, DatabaseError, ArgumentError } from './utils/errors.js';
+import { ArgumentError } from './utils/errors.js';
 
 // DB Backends
 import BackendFactory from './backends/index.js';
@@ -23,15 +23,18 @@ import BitmapIndex from './indexes/bitmaps/index.js';
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
 import Synapses from './indexes/inverted/Synapses.js';
-//import FtsIndex from './indexes/fts/index.js';
-//import VectorIndex from './indexes/vector/index.js';
-import * as lancedb from '@lancedb/lancedb';
+import LanceIndex from './indexes/lance/index.js';
 
 // Views / Abstractions
 import ContextTree from './views/tree/index.js';
+import DirectoryTree from './views/tree/DirectoryTree.js';
+
+// Extracted utilities
+import { parseContextSpecForInsert, parseContextSpecForQuery, parseBitmapArray } from './utils/parsing.js';
+import { parseFilters, applyDatetimeFilter } from './utils/filters.js';
+import { parseDocumentData, initializeDocument, parseInitializeDocument, generateDocumentID } from './utils/document.js';
 
 // Constants
-const INTERNAL_BITMAP_ID_MIN = 0;
 const INTERNAL_BITMAP_ID_MAX = 100000;
 
 /**
@@ -51,9 +54,9 @@ class SynapsD extends EventEmitter {
     // Runtime
     #status;
 
-    // Tree Abstraction
+    // Tree Abstractions
     #tree;
-    #treeLayers;
+    #directoryTree;
 
     // Bitmap Indexes
     #bitmapStore;   // Bitmap store
@@ -64,14 +67,8 @@ class SynapsD extends EventEmitter {
     #timestampIndex;
     #synapses;
 
-    // Collections
-    #collections;
-
     // LanceDB
-    #lanceDb;
-    #lanceTable;
-    #lanceRootPath;
-    #lanceFtsBitmapKey = 'internal/lance/fts';
+    #lanceIndex;
 
     constructor(options = {
         backupOnOpen: false,
@@ -129,6 +126,7 @@ class SynapsD extends EventEmitter {
 
         // Bitmap Collections
         this.contextBitmapCollection = this.bitmapIndex.createCollection('context');
+        this.featureBitmapCollection = this.bitmapIndex.createCollection('feature');
 
         /**
          * Inverted indexes
@@ -138,22 +136,17 @@ class SynapsD extends EventEmitter {
         this.#timestampIndex = null;
 
         /**
-         * Collections Map (TODO: Implement an easy-to-use collection abstraction)
+         * Tree Abstractions
          */
 
-        this.#collections = new Map();
-
-        /**
-         * Tree Abstraction
-         */
-
-        // Instantiate Context Tree view
+        // Context Tree (AND semantics - shared layers)
         this.#tree = new ContextTree({
             dataStore: this.#internalStore,
-            db: this, // Pass the SynapsD instance for document operations
+            db: this,
         });
 
-        this.#treeLayers = null;
+        // Directory Tree (VFS semantics - unique path bitmaps)
+        this.#directoryTree = new DirectoryTree(this.bitmapIndex);
 
     }
 
@@ -188,10 +181,11 @@ class SynapsD extends EventEmitter {
         };
     }
 
-    // We need to simplify this growing mammoth interface with some delegation kung-fu
     get db() { return this.#db; } // For testing only
-    get tree() { return this.#tree; } // db.tree.insertPath()
-    get jsonTree() { return this.#tree.buildJsonTree(); } // db.tree.layers.renameLayer()
+    get tree() { return this.#tree; }
+    get contextTree() { return this.#tree; } // Alias
+    get directoryTree() { return this.#directoryTree; }
+    get jsonTree() { return this.#tree.buildJsonTree(); }
 
     // Inverted indexes
     get checksumIndex() { return this.#checksumIndex; }
@@ -226,15 +220,15 @@ class SynapsD extends EventEmitter {
             );
 
             // Initialize LanceDB under workspace root (rootPath/lance)
-            await this.#initLance();
-            await this.#backfillLance(1000);
-
-            // Ensure FTS membership bitmap exists
-            await this.bitmapIndex.createBitmap(this.#lanceFtsBitmapKey);
+            this.#lanceIndex = new LanceIndex({
+                rootPath: path.join(this.#rootPath, 'lance'),
+                bitmapIndex: this.bitmapIndex,
+            });
+            await this.#lanceIndex.initialize();
+            await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
 
             // Initialize context tree
             await this.#tree.initialize();
-            this.#treeLayers = this.#tree.layers;
             // Set status
             this.#status = 'running';
 
@@ -339,151 +333,69 @@ class SynapsD extends EventEmitter {
     async insertDocument(document, contextSpec = '/', featureBitmapArray = [], emitEvent = true) {
         if (!document) { throw new Error('Document is required'); }
 
-        // Support inserting by existing document ID to add context/feature memberships without resending the document
+        // Support options object: insertDocument(doc, { context, directory, features })
+        let directorySpec = null;
+        if (typeof contextSpec === 'object' && contextSpec !== null && !Array.isArray(contextSpec)) {
+            const opts = contextSpec;
+            contextSpec = opts.context ?? '/';
+            directorySpec = opts.directory ?? null;
+            featureBitmapArray = opts.features ?? featureBitmapArray;
+            emitEvent = opts.emitEvent ?? emitEvent;
+        }
+
+        // Support inserting by existing document ID to add context/feature memberships
         if (typeof document === 'number' || (typeof document === 'string' && /^\d+$/.test(document))) {
             const docId = typeof document === 'number' ? document : parseInt(document, 10);
-            // Delegate to updateDocument with null updateData to only adjust memberships
             return await this.updateDocument(docId, null, contextSpec, featureBitmapArray);
         }
 
-        // Parse context into array of independent path-layer-arrays
-        const pathLayersArray = this.#parseContextSpecForInsert(contextSpec);
-        const featureBitmaps = this.#parseBitmapArray(featureBitmapArray);
-        debug(`insertDocument: Attempting to insert document with ${pathLayersArray.length} context path(s), featureArray: ${featureBitmaps}`);
-
-        // Parse the document
-        let parsedDocument;
-        if (isDocumentInstance(document)) {
-            parsedDocument = document;
-        } else {
-            parsedDocument = this.#parseInitializeDocument(document);
-        }
-
-        // This will throw and we do not need to handle anything at this point
-        // so no need for any try/catch kung-fu here
+        const featureBitmaps = parseBitmapArray(featureBitmapArray);
+        const parsedDocument = isDocumentInstance(document) ? document : parseInitializeDocument(document);
         parsedDocument.validateData();
 
-        // Lets check if we are dealing with an update or a new document
+        // Dedup by checksum
         const primaryChecksum = parsedDocument.getPrimaryChecksum();
         const storedDocument = await this.getDocumentByChecksumString(primaryChecksum);
 
         if (storedDocument) {
-            debug(`insertDocument: Document found by checksum ${primaryChecksum}, setting existing document ID: ${storedDocument.id}`);
-            // Preserve the existing document ID
             parsedDocument.id = storedDocument.id;
-            // Only carry over timestamps if they exist on the stored document to avoid
-            // introducing undefined values that would fail schema validation in some environments
             if (storedDocument.createdAt) { parsedDocument.createdAt = storedDocument.createdAt; }
             if (storedDocument.updatedAt) { parsedDocument.updatedAt = storedDocument.updatedAt; }
         } else {
-            debug(`insertDocument: Document not found by checksum ${primaryChecksum}, generating new document ID.`);
-            parsedDocument.id = this.#generateDocumentID();
+            parsedDocument.id = generateDocumentID(this.#internalStore, INTERNAL_BITMAP_ID_MAX);
         }
 
-        // Validate the final state before saving
         parsedDocument.validate();
-        debug(`insertDocument: Document validated successfully. ID: ${parsedDocument.id}`);
 
-        // Wrap all database operations in a single transaction for atomicity
+        // Ensure schema is in features
+        if (!featureBitmaps.includes(parsedDocument.schema)) {
+            featureBitmaps.push(parsedDocument.schema);
+        }
+
         try {
             await this.#db.transaction(async () => {
-                // Main documents dataset
                 await this.documents.put(parsedDocument.id, parsedDocument);
-                debug(`insertDocument: Document ${parsedDocument.id} saved to 'documents' dataset.`);
-
-                // Inverted indexes: Checksums
                 await this.#checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
-                debug(`insertDocument: Checksums for document ${parsedDocument.id} added to index.`);
-
-                // Inverted indexes: Timestamps
                 await this.#timestampIndex.insert('created', parsedDocument.createdAt || new Date().toISOString(), parsedDocument.id);
                 await this.#timestampIndex.insert('updated', parsedDocument.updatedAt, parsedDocument.id);
-                debug(`insertDocument: Timestamps for document ${parsedDocument.id} added.`);
-
-                // Process each independent context path
-                for (const pathLayers of pathLayersArray) {
-                    // Ensure context tree path exists
-                    const pathString = pathLayers.join('/');
-                    const insertPathResult = await this.tree.insertPath(pathString);
-                    if (!insertPathResult || insertPathResult.error) {
-                        throw new Error(`insertDocument: Failed to ensure context path '${pathString}' in tree.`);
-                    }
-                    debug(`insertDocument: Context path '${pathString}' ensured in tree.`);
-
-                    // Update context bitmaps for this path
-                    const contextResult = await this.contextBitmapCollection.tickMany(pathLayers, parsedDocument.id);
-                    if (!contextResult) {
-                        throw new Error(`insertDocument: Failed to update context bitmaps for path '${pathString}' for document ${parsedDocument.id}`);
-                    }
-                    debug(`insertDocument: Context bitmaps updated for path '${pathString}' for document ${parsedDocument.id}.`);
-
-                    // Update Synapses index (Reverse Index) for context layers
-                    // We need to convert path layers to normalized keys if not already handled
-                    // contextBitmapCollection.tickMany does this internally, but Synapses expects normalized keys
-                    const normalizedLayers = pathLayers.map(l => this.contextBitmapCollection.makeKey(l));
-                    await this.#synapses.createSynapses(parsedDocument.id, normalizedLayers);
-                }
-
-                // Update feature bitmaps
-                if (!featureBitmaps.includes(parsedDocument.schema)) {
-                    featureBitmaps.push(parsedDocument.schema);
-                    debug(`insertDocument: Added document schema '${parsedDocument.schema}' to feature array.`);
-                }
-
-                const featureResult = await this.bitmapIndex.tickMany(featureBitmaps, parsedDocument.id);
-                if (!featureResult) {
-                    throw new Error(`insertDocument: Failed to update feature bitmaps for document ${parsedDocument.id}`);
-                }
-                debug(`insertDocument: Feature bitmaps updated for document ${parsedDocument.id}.`);
-
-                // Update Synapses index for features
-                // Features are direct bitmap keys usually, but let's normalize them
-                const normalizedFeatures = featureBitmaps.map(f => this.bitmapIndex.constructor.normalizeKey(f));
-                await this.#synapses.createSynapses(parsedDocument.id, normalizedFeatures);
+                await this.#indexDocument(parsedDocument.id, contextSpec, directorySpec, featureBitmaps);
             });
-
-            debug(`insertDocument: All operations completed atomically for document ID: ${parsedDocument.id}`);
         } catch (error) {
-            debug(`insertDocument: Transaction failed for document ID: ${parsedDocument.id}, error: ${error.message}`);
             throw new Error('Error inserting document atomically: ' + error.message);
         }
 
-        // Upsert into LanceDB (best-effort, non-fatal)
-        try {
-            // Ensure document is fully initialized with methods before Lance indexing
-            const docForLance = this.#parseInitializeDocument(parsedDocument);
-            await this.#upsertLanceDocument(docForLance);
-        } catch (e) {
-            debug(`insertDocument: Lance upsert failed for ${parsedDocument.id}: ${e.message}`);
+        // Best-effort Lance upsert
+        try { await this.#lanceIndex.upsert(parseInitializeDocument(parsedDocument)); } catch (_) { }
+
+        if (emitEvent) {
+            this.tree.emit('tree.document.inserted', {
+                documentId: parsedDocument.id,
+                contextSpec,
+                directorySpec,
+                timestamp: new Date().toISOString(),
+            });
+            this.emit('document.inserted', { id: parsedDocument.id, document: parsedDocument });
         }
-
-        // Emit tree event with contextSpec for workspace mode auto-opening support
-        // This ensures that tree.document.inserted events are emitted with the original contextSpec
-        if (emitEvent && this.tree) {
-            try {
-                // Emit the tree event directly since we've already inserted the document
-                debug(`insertDocument: Emitting tree event for document ID: ${parsedDocument.id} at contextSpec: ${contextSpec}`);
-
-                this.tree.emit('tree.document.inserted', {
-                    documentId: parsedDocument.id,
-                    contextSpec: contextSpec,
-                    layerNames: [], // Simple implementation for now - layerNames is not critical for tab auto-opening
-                    timestamp: new Date().toISOString(),
-                });
-
-                debug(`insertDocument: Tree event emitted for document ID: ${parsedDocument.id}`);
-            } catch (treeError) {
-                debug(`insertDocument: Failed to emit tree event for document ID: ${parsedDocument.id}, error: ${treeError.message}`);
-                // Don't fail the insert if tree event emission fails
-            }
-        }
-
-        // TODO: Send document ID to the embedding vector worker queue
-        // TODO: Implement actual batch/transactional operation in the backend if possible
-
-        // Avoid emitting if we update multiple documents in a batch operation(e.g., insertDocumentArray)
-        if (emitEvent) { this.emit('document.inserted', { id: parsedDocument.id, document: parsedDocument }); }
-        debug(`insertDocument: Successfully inserted document ID: ${parsedDocument.id}`);
 
         return parsedDocument.id;
     }
@@ -567,17 +479,17 @@ class SynapsD extends EventEmitter {
         const effectiveContextSpec = noContextFilterWanted ? '/' : contextSpec;
         const effectiveFeatureArray = noFeatureFilterWanted ? [] : featureBitmapArrayInput;
 
-        const parsedContextKeys = this.#parseContextSpecForQuery(effectiveContextSpec);
-        const parsedFeatureKeys = this.#parseBitmapArray(effectiveFeatureArray);
+        const parsedContextKeys = parseContextSpecForQuery(effectiveContextSpec);
+        const parsedFeatureKeys = parseBitmapArray(effectiveFeatureArray);
 
         let resultBitmap = null;
         let contextFilterApplied = false;
 
         // Apply context filter if caller actually wanted one OR if it defaulted to '/' but features are also specified.
         if (!noContextFilterWanted || (noContextFilterWanted && !noFeatureFilterWanted)) {
-            // This condition means: apply context filter if context was specified,
-            // OR if context was not specified (defaulting to '/') BUT features were specified.
-            resultBitmap = await this.contextBitmapCollection.AND(parsedContextKeys);
+            // Resolve context layer names to ULIDs
+            const contextLayerIds = this.tree.resolveLayerIds(parsedContextKeys);
+            resultBitmap = await this.contextBitmapCollection.AND(contextLayerIds);
             contextFilterApplied = true;
             // If context filter results in null/empty, and it was a specific request, then fail early.
             if (!resultBitmap || resultBitmap.isEmpty) {
@@ -589,7 +501,7 @@ class SynapsD extends EventEmitter {
         }
 
         if (!noFeatureFilterWanted && parsedFeatureKeys.length > 0) {
-            const featureOpBitmap = await this.bitmapIndex.OR(parsedFeatureKeys);
+            const featureOpBitmap = await this.featureBitmapCollection.OR(parsedFeatureKeys);
             if (!featureOpBitmap || featureOpBitmap.isEmpty) {
                 debug(`hasDocument: Doc ${id} - explicit feature filter ${JSON.stringify(parsedFeatureKeys)} yielded no results.`);
                 return false; // Feature filter must yield results if specified
@@ -663,7 +575,7 @@ class SynapsD extends EventEmitter {
         const offset = Math.max(0, providedOffset !== undefined ? providedOffset : (providedPage && providedPage > 0 ? (providedPage - 1) * (limit || 100) : 0));
 
         // Parse contextSpec for query (single path only, or null/undefined)
-        const contextBitmapArray = this.#parseContextSpecForQuery(contextSpec);
+        const contextBitmapArray = parseContextSpecForQuery(contextSpec);
         if (!Array.isArray(featureBitmapArray) && typeof featureBitmapArray === 'string') { featureBitmapArray = [featureBitmapArray]; }
         if (!Array.isArray(filterArray) && typeof filterArray === 'string') { filterArray = [filterArray]; }
         debug(`Listing documents with contextArray: ${contextBitmapArray}, features: ${featureBitmapArray}, filters: ${filterArray}, limit: ${limit}, offset: ${offset}`);
@@ -676,24 +588,25 @@ class SynapsD extends EventEmitter {
 
             // Apply context filters only if contextSpec was explicitly provided
             if (contextSpec !== null && contextSpec !== undefined && contextBitmapArray.length > 0) {
-                resultBitmap = await this.contextBitmapCollection.AND(contextBitmapArray);
+                const contextLayerIds = this.tree.resolveLayerIds(contextBitmapArray);
+                resultBitmap = await this.contextBitmapCollection.AND(contextLayerIds);
                 filtersApplied = true; // AND result assigned
             }
 
-            // Apply feature filters if provided
+            // Apply feature filters if provided (via collection for namespace safety)
             if (featureBitmapArray.length > 0) {
-                const featureBitmap = await this.bitmapIndex.OR(featureBitmapArray);
-                if (filtersApplied) { // Check if resultBitmap holds a meaningful value
+                const featureBitmap = await this.featureBitmapCollection.OR(featureBitmapArray);
+                if (filtersApplied) {
                     resultBitmap.andInPlace(featureBitmap);
                 } else {
                     resultBitmap = featureBitmap;
-                    filtersApplied = true; // OR result assigned
+                    filtersApplied = true;
                 }
             }
 
             // Apply additional filters (bitmaps and datetime filters)
             if (filterArray.length > 0) {
-                const { bitmapFilters, datetimeFilters } = this.#parseFilters(filterArray);
+                const { bitmapFilters, datetimeFilters } = parseFilters(filterArray);
 
                 // Apply bitmap filters
                 if (bitmapFilters.length > 0) {
@@ -708,7 +621,7 @@ class SynapsD extends EventEmitter {
 
                 // Apply datetime filters
                 for (const datetimeFilter of datetimeFilters) {
-                    const datetimeBitmap = await this.#applyDatetimeFilter(datetimeFilter);
+                    const datetimeBitmap = await applyDatetimeFilter(datetimeFilter, this.#timestampIndex);
                     if (datetimeBitmap) {
                         if (filtersApplied) {
                             resultBitmap.andInPlace(datetimeBitmap);
@@ -741,7 +654,7 @@ class SynapsD extends EventEmitter {
                     debug(`findDocuments: Count discrepancy detected. Database count: ${totalCount}, Actual retrievable documents: ${seen}, Returned: ${pagedDocs.length}`);
                 }
 
-                const resultArray = parseDocuments ? pagedDocs.map(doc => this.#parseInitializeDocument(doc)) : pagedDocs;
+                const resultArray = parseDocuments ? pagedDocs.map(doc => parseInitializeDocument(doc)) : pagedDocs;
                 // Attach metadata for compatibility
                 resultArray.count = pagedDocs.length; // Number of documents actually returned
                 resultArray.totalCount = totalCount;   // Total number of documents available
@@ -765,7 +678,7 @@ class SynapsD extends EventEmitter {
 
             // Get documents from database for the page
             const documents = await this.documents.getMany(slicedIds);
-            const resultArray = parseDocuments ? documents.map(doc => this.#parseInitializeDocument(doc)) : documents;
+            const resultArray = parseDocuments ? documents.map(doc => parseInitializeDocument(doc)) : documents;
             // Attach metadata for compatibility
             resultArray.count = documents.length; // Number of documents actually returned
             resultArray.totalCount = totalCount;  // Total number of documents available
@@ -784,104 +697,55 @@ class SynapsD extends EventEmitter {
 
     async updateDocument(docIdentifier, updateData = null, contextSpec = null, featureBitmapArray = []) {
         if (!docIdentifier) { throw new Error('Document identifier required'); }
+        if (typeof docIdentifier !== 'number') { throw new Error('Document identifier must be a numeric ID'); }
         if (!Array.isArray(featureBitmapArray)) { featureBitmapArray = [featureBitmapArray].filter(Boolean); }
 
-        // Ensure docIdentifier is a numeric ID
-        if (typeof docIdentifier !== 'number') {
-            throw new Error('Document identifier must be a numeric ID');
+        // Support options object
+        let directorySpec = null;
+        if (typeof contextSpec === 'object' && contextSpec !== null && !Array.isArray(contextSpec)) {
+            const opts = contextSpec;
+            contextSpec = opts.context ?? null;
+            directorySpec = opts.directory ?? null;
+            featureBitmapArray = opts.features ?? featureBitmapArray;
         }
 
         const docId = docIdentifier;
-        debug(`updateDocument: Attempting to update document with ID: ${docId}`);
+        const featureBitmaps = parseBitmapArray(featureBitmapArray);
 
-        // Parse context into array of independent path-layer-arrays
-        const pathLayersArray = this.#parseContextSpecForInsert(contextSpec);
-        const featureBitmaps = this.#parseBitmapArray(featureBitmapArray);
-        debug(`updateDocument: ${pathLayersArray.length} context path(s), Feature bitmaps: ${featureBitmaps}`);
-
-        // Get the stored document
         const storedDocument = await this.getDocumentById(docId);
-        if (!storedDocument) {
-            throw new Error(`Document with ID "${docId}" not found`);
-        }
-        debug(`updateDocument: Found existing document with ID: ${docId}`);
+        if (!storedDocument) { throw new Error(`Document with ID "${docId}" not found`); }
 
-        // If no update data provided, we're only updating context/feature memberships
+        // If no update data provided, we're only updating memberships
         if (updateData === null) {
-            debug('updateDocument: No update data provided, only updating document memberships');
-            // Use the stored document as our updated document
             updateData = storedDocument;
         } else if (typeof updateData === 'object' && !isDocumentInstance(updateData)) {
-            // Check if this looks like a full document (has schema) or a partial update
             if (updateData.schema) {
-                // Full document replacement - parse and initialize
-                try {
-                    updateData = this.#parseInitializeDocument(updateData);
-                    debug(`updateDocument: Parsed update data, schema: ${updateData.schema}`);
-                } catch (error) {
-                    throw new Error(`Invalid update data: ${error.message}`);
-                }
-            } else {
-                // Partial update (e.g., { metadata: {...}, data: {...} }) - pass through directly
-                debug('updateDocument: Partial update data provided, passing through to document.update()');
+                updateData = parseInitializeDocument(updateData);
             }
         }
 
-        // Perform the update using the document's update method
         const updatedDocument = storedDocument.update(updateData);
-        debug('updateDocument: Document updated in memory, validating...');
-
-        // Validate updated document
         updatedDocument.validate();
 
-        try {
-            // Update main document store
-            await this.documents.put(updatedDocument.id, updatedDocument);
+        // Ensure schema is in features
+        if (!featureBitmaps.includes(updatedDocument.schema)) {
+            featureBitmaps.push(updatedDocument.schema);
+        }
 
-            // Update checksum indexes
+        try {
+            await this.documents.put(updatedDocument.id, updatedDocument);
             await this.#checksumIndex.deleteArray(storedDocument.checksumArray);
             await this.#checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
-
-            // Update timestamps
             await this.#timestampIndex.insert('updated', updatedDocument.updatedAt, updatedDocument.id);
 
-            // Process each independent context path
-            for (const pathLayers of pathLayersArray) {
-                // Ensure context tree path exists
-                const pathString = pathLayers.join('/');
-                await this.tree.insertPath(pathString);
-                debug(`updateDocument: Ensured context path '${pathString}' exists in tree`);
+            // Index across all views using shared helper
+            await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
 
-                // Update context bitmaps for this path
-                await this.contextBitmapCollection.tickMany(pathLayers, updatedDocument.id);
-                debug(`updateDocument: Context bitmaps updated for path '${pathString}'`);
-
-                // Update Synapses index (Reverse Index) for context layers
-                const normalizedLayers = pathLayers.map(l => this.contextBitmapCollection.makeKey(l));
-                await this.#synapses.createSynapses(updatedDocument.id, normalizedLayers);
-            }
-
-            // Ensure schema is included in features
-            if (!featureBitmaps.includes(updatedDocument.schema)) {
-                featureBitmaps.push(updatedDocument.schema);
-            }
-
-            // Update feature bitmaps
-            await this.bitmapIndex.tickMany(featureBitmaps, updatedDocument.id);
-
-            // Update Synapses index for features
-            const normalizedFeatures = featureBitmaps.map(f => this.bitmapIndex.constructor.normalizeKey(f));
-            await this.#synapses.createSynapses(updatedDocument.id, normalizedFeatures);
-
-            // Emit event
             this.emit('document.updated', { id: updatedDocument.id, document: updatedDocument });
-            debug(`updateDocument: Successfully updated document ID: ${updatedDocument.id}`);
 
             // Best-effort Lance upsert
             try {
-                // Ensure document is fully initialized with methods before Lance indexing
-                const docForLance = this.#parseInitializeDocument(updatedDocument);
-                await this.#upsertLanceDocument(docForLance);
+                await this.#lanceIndex.upsert(parseInitializeDocument(updatedDocument));
             } catch (e) {
                 debug(`updateDocument: Lance upsert failed for ${updatedDocument.id}: ${e.message}`);
             }
@@ -942,7 +806,7 @@ class SynapsD extends EventEmitter {
         if (typeof options !== 'object') { options = { recursive: false }; }
 
         // Parse context into array of independent path-layer-arrays
-        const pathLayersArray = this.#parseContextSpecForInsert(contextSpec);
+        const pathLayersArray = parseContextSpecForInsert(contextSpec);
 
         // Collect all layers to remove from across all paths
         const allLayersToRemove = [];
@@ -983,15 +847,14 @@ class SynapsD extends EventEmitter {
             const layersToRemove = [];
 
             if (allLayersToRemove.length > 0) {
-                // await this.contextBitmapCollection.untickMany(allLayersToRemove, docId);
-                // Use Synapses instead to sync both indexes
-                const normalizedContexts = allLayersToRemove.map(l => this.contextBitmapCollection.makeKey(l));
+                // Resolve layer names to ULIDs for bitmap keying
+                const layerIds = this.tree.resolveLayerIds(allLayersToRemove);
+                const normalizedContexts = layerIds.map(l => this.contextBitmapCollection.makeKey(l));
                 layersToRemove.push(...normalizedContexts);
             }
             if (featureBitmapArray.length > 0) {
-                // await this.bitmapIndex.untickMany(featureBitmapArray, docId);
-                 const normalizedFeatures = featureBitmapArray.map(f => this.bitmapIndex.constructor.normalizeKey(f));
-                 layersToRemove.push(...normalizedFeatures);
+                const normalizedFeatures = featureBitmapArray.map(f => this.featureBitmapCollection.makeKey(f));
+                layersToRemove.push(...normalizedFeatures);
             }
 
             if (layersToRemove.length > 0) {
@@ -1075,7 +938,7 @@ class SynapsD extends EventEmitter {
                 debug(`deleteDocument: Document with ID "${docId}" not found`);
                 return false;
             }
-            document = this.#parseDocumentData(documentData);
+            document = parseDocumentData(documentData);
             debug('deleteDocument > Document: ', document);
 
             // Wrap all critical database operations in a single transaction for atomicity
@@ -1119,7 +982,7 @@ class SynapsD extends EventEmitter {
         // Best-effort Lance delete (outside transaction since it's a separate system)
         if (transactionSuccess) {
             try {
-                await this.#deleteLanceDocument(docId);
+                await this.#lanceIndex.delete(docId);
                 debug(`deleteDocument: LanceDB cleanup completed for document ${docId}`);
             } catch (e) {
                 debug(`deleteDocument: Lance delete failed for ${docId}: ${e.message}`);
@@ -1225,7 +1088,7 @@ class SynapsD extends EventEmitter {
         }
 
         // Return a JS object
-        return options.parse ? this.#parseInitializeDocument(rawDocData) : rawDocData;
+        return options.parse ? parseInitializeDocument(rawDocData) : rawDocData;
     }
 
     /**
@@ -1264,7 +1127,7 @@ class SynapsD extends EventEmitter {
             const limitedDocs = options.limit ? documents.slice(0, options.limit) : documents;
 
             return {
-                data: options.parse ? limitedDocs.map(doc => this.#parseInitializeDocument(doc)) : limitedDocs,
+                data: options.parse ? limitedDocs.map(doc => parseInitializeDocument(doc)) : limitedDocs,
                 count: totalMatchingCount, // This is the count of documents found for the (possibly context-filtered) IDs
                 error: null,
             };
@@ -1360,7 +1223,7 @@ class SynapsD extends EventEmitter {
                 // tickMany doesn't explicitly return success/failure per ID easily,
                 // but it should throw if the operation fails for the ID (e.g., DB error).
                 // Assuming success if no error is thrown.
-                await this.bitmapIndex.tickMany(featureBitmapArray, id);
+                await this.featureBitmapCollection.tickMany(featureBitmapArray, id);
                 result.successful.push({ index: i, id: id });
                 debug(`setDocumentArrayFeatures: Successfully set features for document ID ${id} (index ${i}).`);
             } catch (error) {
@@ -1404,7 +1267,7 @@ class SynapsD extends EventEmitter {
             }
             try {
                 // untickMany, like tickMany, is assumed to throw on operational failure.
-                await this.bitmapIndex.untickMany(featureBitmapArray, id);
+                await this.featureBitmapCollection.untickMany(featureBitmapArray, id);
                 result.successful.push({ index: i, id: id });
                 debug(`unsetDocumentArrayFeatures: Successfully unset features for document ID ${id} (index ${i}).`);
             } catch (error) {
@@ -1434,7 +1297,7 @@ class SynapsD extends EventEmitter {
     }
 
     async ftsQuery(queryString, contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true, limit: 50, offset: 0 }) {
-        if (!this.#lanceTable) {
+        if (!this.#lanceIndex || !this.#lanceIndex.isReady) {
             const empty = [];
             empty.count = 0;
             empty.totalCount = 0;
@@ -1451,20 +1314,21 @@ class SynapsD extends EventEmitter {
         // Build candidate set via bitmaps (context AND, features OR, filters AND)
         let candidateBitmap = null;
         let filtersApplied = false;
-        const contextBitmapArray = this.#parseContextSpecForQuery(contextSpec);
+        const contextBitmapArray = parseContextSpecForQuery(contextSpec);
 
         if (contextBitmapArray.length > 0) {
-            candidateBitmap = await this.contextBitmapCollection.AND(contextBitmapArray);
+            const contextLayerIds = this.tree.resolveLayerIds(contextBitmapArray);
+            candidateBitmap = await this.contextBitmapCollection.AND(contextLayerIds);
             filtersApplied = true;
         }
         if (Array.isArray(featureBitmapArray) && featureBitmapArray.length > 0) {
-            const featureBitmap = await this.bitmapIndex.OR(featureBitmapArray);
+            const featureBitmap = await this.featureBitmapCollection.OR(featureBitmapArray);
             if (filtersApplied && candidateBitmap) { candidateBitmap.andInPlace(featureBitmap); } else { candidateBitmap = featureBitmap; filtersApplied = true; }
         }
 
         // Parse and apply filters (including datetime)
         if (Array.isArray(filterArray) && filterArray.length > 0) {
-            const { bitmapFilters, datetimeFilters } = this.#parseFilters(filterArray);
+            const { bitmapFilters, datetimeFilters } = parseFilters(filterArray);
 
             // Apply bitmap filters
             if (bitmapFilters.length > 0) {
@@ -1474,7 +1338,7 @@ class SynapsD extends EventEmitter {
 
             // Apply datetime filters
             for (const datetimeFilter of datetimeFilters) {
-                const datetimeBitmap = await this.#applyDatetimeFilter(datetimeFilter);
+                const datetimeBitmap = await applyDatetimeFilter(datetimeFilter, this.#timestampIndex);
                 if (datetimeBitmap) {
                     if (filtersApplied && candidateBitmap) {
                         candidateBitmap.andInPlace(datetimeBitmap);
@@ -1494,9 +1358,11 @@ class SynapsD extends EventEmitter {
             empty.error = null;
             return empty;
         }
-        // MVP: use local FTS scoring over candidate IDs for deterministic results
+        // Use local FTS scoring over candidate IDs for deterministic results
         if (filtersApplied && candidateIds.length > 0) {
-            return await this.#localFtsFallback(queryString, candidateIds, { limit, offset, parse: parseDocuments });
+            const docs = await this.documents.getMany(candidateIds);
+            const parsedDocs = parseDocuments ? docs.map(d => parseInitializeDocument(d)) : docs;
+            return await this.#lanceIndex.ftsQuery(queryString, candidateIds, parsedDocs, { limit, offset });
         }
 
         // No filters: avoid scanning entire DB locally. Return empty for now.
@@ -1527,7 +1393,7 @@ class SynapsD extends EventEmitter {
 
         // Loop through all documents in the returned array
         for (let doc of documentArray) {
-            doc = this.#parseInitializeDocument(doc);
+            doc = parseInitializeDocument(doc);
 
             // Create a directory for each document schema
             const schemaDir = path.join(dstDir, doc.schema);
@@ -1562,511 +1428,46 @@ class SynapsD extends EventEmitter {
      */
 
     /**
-     * Parse a single path string into layer array
-     * @param {string} pathString - Path string like '/foo/bar'
-     * @returns {Array<string>} Array of layers ['/', 'foo', 'bar']
-     * @private
+     * Shared bitmap indexing for both insert and update operations.
+     * Handles: context tree bitmaps, directory tree bitmaps, feature bitmaps, synapses.
      */
-    #parsePathToLayers(pathString) {
-        debug('#parsePathToLayers: Received pathString:', pathString);
+    async #indexDocument(docId, contextSpec, directorySpec, featureBitmaps) {
+        const allSynapseKeys = [];
 
-        // Handle null/undefined/empty cases
-        if (!pathString || pathString === '') {
-            return ['/'];
-        }
+        // Context tree: resolve layer names to ULIDs and tick bitmaps
+        if (contextSpec) {
+            const pathLayersArray = parseContextSpecForInsert(contextSpec);
+            for (const pathLayers of pathLayersArray) {
+                const pathString = pathLayers.join('/');
+                await this.tree.insertPath(pathString);
 
-        // Must be a string
-        if (typeof pathString !== 'string') {
-            throw new Error('Path must be a string');
-        }
+                const layerIds = this.tree.resolveLayerIds(pathLayers);
+                await this.contextBitmapCollection.tickMany(layerIds, docId);
 
-        // Handle root path
-        if (pathString === '/') {
-            return ['/'];
-        }
-
-        // Split the string and filter empty elements
-        const parts = pathString.split('/').map(part => part.trim()).filter(Boolean);
-        if (parts.length === 0) {
-            return ['/'];
-        }
-
-        // Create layer contexts: ['/', 'foo', 'bar', 'baz']
-        const layers = ['/', ...parts];
-        debug('#parsePathToLayers: Parsed layers:', layers);
-        return layers;
-    }
-
-    /**
-     * Parse contextSpec for INSERT operations (supports arrays of independent paths)
-     * @param {string|Array<string>} contextSpec - Single path or array of paths
-     * @returns {Array<Array<string>>} Array of path-layer-arrays
-     * @private
-     */
-    #parseContextSpecForInsert(contextSpec) {
-        debug('#parseContextSpecForInsert: Received contextSpec:', contextSpec);
-
-        // Handle null/undefined/empty cases - default to root
-        if (!contextSpec || contextSpec === '') {
-            return [['/']];
-        }
-
-        // Handle array input - each path is independent
-        if (Array.isArray(contextSpec)) {
-            // Flatten the array and filter out empty/null values
-            const flattened = contextSpec.flat().filter(Boolean);
-            if (flattened.length === 0) {
-                return [['/']];
-            }
-
-            // Parse each path independently
-            const pathLayersArray = flattened.map(path => this.#parsePathToLayers(path));
-            debug('#parseContextSpecForInsert: Parsed path arrays:', pathLayersArray);
-            return pathLayersArray;
-        }
-
-        // Handle string input
-        if (typeof contextSpec === 'string') {
-            const layers = this.#parsePathToLayers(contextSpec);
-            return [layers]; // Return array containing single path-layer-array
-        }
-
-        throw new Error('Invalid contextSpec: Must be a path string or an array of path strings.');
-    }
-
-    /**
-     * Parse contextSpec for QUERY operations (single path only)
-     * @param {string|null} contextSpec - Single path string or null
-     * @returns {Array<string>} Single layer array
-     * @private
-     */
-    #parseContextSpecForQuery(contextSpec) {
-        debug('#parseContextSpecForQuery: Received contextSpec:', contextSpec);
-
-        // Handle null/undefined - means no context filter
-        if (contextSpec === null || contextSpec === undefined) {
-            return [];
-        }
-
-        // Handle empty string - default to root
-        if (contextSpec === '') {
-            return ['/'];
-        }
-
-        // Reject arrays in queries
-        if (Array.isArray(contextSpec)) {
-            throw new Error('Arrays are not supported in query contextSpec. Use a single path string or null.');
-        }
-
-        // Handle string input
-        if (typeof contextSpec === 'string') {
-            return this.#parsePathToLayers(contextSpec);
-        }
-
-        throw new Error('Invalid contextSpec for query: Must be a path string or null.');
-    }
-
-    #parseBitmapArray(bitmapArray) {
-        if (!Array.isArray(bitmapArray)) { bitmapArray = [bitmapArray]; }
-        return bitmapArray;
-    }
-
-    /**
-     * Parse filterArray into bitmap filters and datetime filters
-     * Supports both string-based and object-based filter formats
-     * @private
-     */
-    #parseFilters(filterArray) {
-        const bitmapFilters = [];
-        const datetimeFilters = [];
-
-        for (const filter of filterArray) {
-            // Object-based filter
-            if (typeof filter === 'object' && filter !== null && filter.type === 'datetime') {
-                datetimeFilters.push(filter);
-            }
-            // String-based datetime filter
-            else if (typeof filter === 'string' && filter.startsWith('datetime:')) {
-                const parsed = this.#parseDatetimeFilterString(filter);
-                if (parsed) {
-                    datetimeFilters.push(parsed);
-                }
-            }
-            // Regular bitmap filter
-            else {
-                bitmapFilters.push(filter);
+                const normalizedLayers = layerIds.map(l => this.contextBitmapCollection.makeKey(l));
+                allSynapseKeys.push(...normalizedLayers);
             }
         }
 
-        return { bitmapFilters, datetimeFilters };
-    }
-
-    /**
-     * Parse string-based datetime filter into object format
-     * Formats:
-     *   datetime:ACTION:TIMEFRAME (e.g., datetime:updated:today)
-     *   datetime:ACTION:range:START:END (e.g., datetime:created:range:2023-10-01:2023-10-31)
-     * @private
-     */
-    #parseDatetimeFilterString(filterString) {
-        const parts = filterString.split(':');
-
-        if (parts.length < 3) {
-            debug(`Invalid datetime filter format: ${filterString}`);
-            return null;
-        }
-
-        const [, action, specType, ...rest] = parts;
-
-        // Validate action
-        if (!['created', 'updated', 'deleted'].includes(action)) {
-            debug(`Invalid datetime action: ${action}`);
-            return null;
-        }
-
-        // Range filter: datetime:updated:range:2023-10-01:2023-10-31
-        if (specType === 'range' && rest.length === 2) {
-            return {
-                type: 'datetime',
-                action,
-                range: { start: rest[0], end: rest[1] }
-            };
-        }
-
-        // Timeframe filter: datetime:updated:today
-        const validTimeframes = ['today', 'yesterday', 'thisWeek', 'thisMonth', 'thisYear'];
-        if (validTimeframes.includes(specType)) {
-            return {
-                type: 'datetime',
-                action,
-                timeframe: specType
-            };
-        }
-
-        debug(`Invalid datetime filter spec: ${filterString}`);
-        return null;
-    }
-
-    /**
-     * Apply datetime filter and return bitmap of matching document IDs
-     * @private
-     */
-    async #applyDatetimeFilter(filter) {
-        if (!this.#timestampIndex) {
-            debug('Timestamp index not initialized, skipping datetime filter');
-            return null;
-        }
-
-        try {
-            const action = filter.action;
-            let ids = [];
-
-            // Timeframe-based filter
-            if (filter.timeframe) {
-                ids = await this.#timestampIndex.findByTimeframe(filter.timeframe, action);
-                debug(`Datetime filter (${action}:${filter.timeframe}) matched ${ids.length} documents`);
+        // Directory tree: index document at directory path(s)
+        if (directorySpec) {
+            const dirs = Array.isArray(directorySpec) ? directorySpec : [directorySpec];
+            const dirKeys = await this.#directoryTree.insertDocumentMany(docId, dirs);
+            if (dirKeys && dirKeys.length > 0) {
+                allSynapseKeys.push(...dirKeys);
             }
-            // Range-based filter
-            else if (filter.range) {
-                ids = await this.#timestampIndex.findByRangeAndAction(action, filter.range.start, filter.range.end);
-                debug(`Datetime filter (${action}:${filter.range.start} to ${filter.range.end}) matched ${ids.length} documents`);
-            }
-
-            // Convert to RoaringBitmap32
-            if (ids.length > 0) {
-                const roaring = await import('roaring');
-                const { RoaringBitmap32 } = roaring.default || roaring;
-                return new RoaringBitmap32(ids);
-            }
-
-            return null;
-        } catch (error) {
-            debug(`Error applying datetime filter: ${error.message}`);
-            return null;
-        }
-    }
-
-    async #initLance() {
-        try {
-            this.#lanceRootPath = path.join(this.#rootPath, 'lance');
-            if (!fs.existsSync(this.#lanceRootPath)) {
-                fs.mkdirSync(this.#lanceRootPath, { recursive: true });
-            }
-            this.#lanceDb = await lancedb.connect(this.#lanceRootPath);
-            try {
-                this.#lanceTable = await this.#lanceDb.openTable('documents');
-            } catch (e) {
-                // Create table with schema
-                const sampleRow = {
-                    id: 0,
-                    schema: 'sample',
-                    updatedAt: new Date().toISOString(),
-                    fts_text: 'sample text',
-                };
-                await this.#lanceDb.createTable('documents', [sampleRow]);
-                this.#lanceTable = await this.#lanceDb.openTable('documents');
-                // Remove the sample row
-                await this.#lanceTable.delete('id = 0');
-            }
-            // Ensure BM25 index on fts_text exists
-            await this.#ensureLanceFtsIndex();
-        } catch (error) {
-            debug(`LanceDB initialization failed: ${error.message}`);
-            // Non-fatal: allow DB to run without FTS
-            this.#lanceDb = null;
-            this.#lanceTable = null;
-        }
-    }
-
-    async #upsertLanceDocument(doc) {
-        if (!this.#lanceTable || !doc || !doc.id) { return; }
-        const ftsArray = typeof doc.generateFtsData === 'function' ? doc.generateFtsData() : null;
-        const ftsText = Array.isArray(ftsArray) ? ftsArray.join('\n') : '';
-        const row = {
-            id: doc.id,
-            schema: doc.schema,
-            updatedAt: doc.updatedAt,
-            fts_text: ftsText,
-        };
-        // Emulate upsert by deleting existing id then adding
-        try { await this.#lanceTable.delete?.(`id = ${doc.id}`); } catch (_) { }
-        await this.#lanceTable.add([row]);
-        // Mark as FTS-indexed in bitmap
-        try { await this.bitmapIndex.tick(this.#lanceFtsBitmapKey, doc.id); } catch (_) { }
-    }
-
-    async #deleteLanceDocument(docId) {
-        if (!this.#lanceTable || !docId) { return; }
-        await this.#lanceTable.delete?.(`id = ${docId}`);
-        try { await this.bitmapIndex.untick(this.#lanceFtsBitmapKey, docId); } catch (_) { /* ignore */ }
-    }
-
-    async #ensureLanceFtsIndex() {
-        if (!this.#lanceTable) { return; }
-        try {
-            await this.#lanceTable.createIndex?.({ type: 'BM25', columns: ['fts_text'] });
-        } catch (_) { /* ignore if already exists */ }
-    }
-
-    async #localFtsFallback(queryString, candidateIds, opts = { limit: 50, offset: 0, parse: true }) {
-        const limit = Math.max(0, Number(opts.limit ?? 50));
-        const offset = Math.max(0, Number(opts.offset ?? 0));
-        const parseDocs = opts.parse !== false;
-
-        const docs = await this.documents.getMany(candidateIds);
-        const tokens = String(queryString).toLowerCase().split(/\s+/).filter(Boolean);
-        const scored = [];
-
-        for (const raw of docs) {
-            const doc = parseDocs ? this.#parseInitializeDocument(raw) : raw;
-            const parts = (typeof doc.generateFtsData === 'function' ? doc.generateFtsData() : []) || [];
-            const text = parts.join('\n').toLowerCase();
-            let score = 0;
-            for (const token of tokens) { if (text.includes(token)) { score++; } }
-            // AND logic: only include documents where ALL tokens match
-            if (score === tokens.length) { scored.push({ id: doc.id, score, doc }); }
         }
 
-        scored.sort((a, b) => b.score - a.score || a.id - b.id);
-        const sliced = limit === 0 ? scored : scored.slice(offset, offset + limit);
-        const result = sliced.map(s => s.doc);
-        result.count = result.length;
-        result.totalCount = scored.length;
-        result.error = null;
-        return result;
-    }
-
-    async #backfillLance(limit = 2000) {
-        try {
-            if (!this.#lanceTable) { return; }
-
-            // Get bitmaps for all documents and processed documents
-            const allDocsBitmap = await this.bitmapIndex.getBitmap('context/', false);
-            const processedBitmap = await this.bitmapIndex.getBitmap(this.#lanceFtsBitmapKey, false);
-
-            if (!allDocsBitmap || allDocsBitmap.isEmpty) {
-                debug('#backfillLance: no documents found in context bitmap');
-                return;
-            }
-
-            // Calculate unprocessed documents using bitmap difference
-            let unprocessedBitmap = allDocsBitmap.clone();
-            if (processedBitmap && !processedBitmap.isEmpty) {
-                unprocessedBitmap.andNotInPlace(processedBitmap); // Remove processed docs
-            }
-
-            if (unprocessedBitmap.isEmpty) {
-                debug('#backfillLance: all documents already processed');
-                return;
-            }
-
-            // Convert to array and limit the processing
-            const unprocessedIds = unprocessedBitmap.toArray();
-            const idsToProcess = limit > 0 ? unprocessedIds.slice(0, limit) : unprocessedIds;
-
-            debug(`#backfillLance: found ${unprocessedIds.length} unprocessed documents, processing ${idsToProcess.length}`);
-
-            let processed = 0;
-            for (const docId of idsToProcess) {
-                try {
-                    const docData = await this.documents.get(docId);
-                    if (docData) {
-                        const doc = this.#parseInitializeDocument(docData);
-                        await this.#upsertLanceDocument(doc);
-                        processed++;
-                    }
-                } catch (e) {
-                    debug(`#backfillLance: failed to upsert doc ${docId}: ${e.message}`);
-                }
-            }
-
-            debug(`#backfillLance: backfilled ${processed} documents into Lance FTS`);
-        } catch (e) {
-            debug(`#backfillLance: error ${e.message}`);
-        }
-    }
-
-    /**
-     * Parse a document data object
-     * @param {String|Object} documentData - Document data as string or object
-     * @returns {Object} Parsed document data object (JSON parsed if string)
-     * @private
-     */
-    #parseDocumentData(documentData) {
-        debug('#parseDocumentData: Received data type:', typeof documentData);
-        if (!documentData) { throw new Error('Document data required'); }
-
-        let parsedData;
-
-        if (typeof documentData === 'string') {
-            try {
-                debug('#parseDocumentData: Parsing JSON string.');
-                parsedData = JSON.parse(documentData);
-                debug('#parseDocumentData: JSON parsed successfully.');
-            } catch (error) {
-                debug(`#parseDocumentData: Error parsing JSON string: ${error.message}`);
-                throw new Error(`Invalid JSON data provided: ${error.message}`);
-            }
-        } else if (typeof documentData === 'object' && documentData !== null) {
-            parsedData = documentData;
-        } else {
-            debug('#parseDocumentData: Error - Input data is not a string or object:', typeof documentData);
-            throw new Error(`Invalid document data type: Expected string or object, got ${typeof documentData}`);
+        // Feature bitmaps (via collection for namespace safety)
+        if (featureBitmaps && featureBitmaps.length > 0) {
+            await this.featureBitmapCollection.tickMany(featureBitmaps, docId);
+            const normalizedFeatures = featureBitmaps.map(f => this.featureBitmapCollection.makeKey(f));
+            allSynapseKeys.push(...normalizedFeatures);
         }
 
-        // Basic sanity check for schema and data properties after potential parsing
-        if (!parsedData.schema || parsedData.data === undefined) {
-            throw new Error('Parsed document data must have a schema and data property.', parsedData);
-        }
-
-        debug('#parseDocumentData: Returning parsed data.');
-        return parsedData;
-    }
-
-    /**
-     * Initialize a document (without validation)
-     * @param {Object} documentData - Document data object
-     * @returns {BaseDocument} Initialized document instance
-     * @private
-     */
-    #initializeDocument(documentData) {
-        debug('#initializeDocument: Initializing document. Input type:', typeof documentData, 'Is instance:', isDocumentInstance(documentData));
-        if (!documentData || typeof documentData !== 'object') {
-            throw new Error('Document data required for initialization (must be an object)');
-        }
-
-        let doc;
-
-        // Case 1: Already a document instance
-        if (isDocumentInstance(documentData)) {
-            debug('#initializeDocument: Input is already a Document instance, returning it.');
-            doc = documentData;
-
-            // Case 2: A plain data object that conforms to the basic document structure
-        } else if (isDocumentData(documentData)) {
-            debug(`#initializeDocument: Input is a plain data object. Schema: ${documentData.schema}`);
-            // Get the schema class for the document
-            const Schema = this.getSchema(documentData.schema); // This throws if schema not found
-            if (!Schema) { /* Redundant due to getSchema throwing, but belts and suspenders */ throw new Error(`Schema ${documentData.schema} not found`); }
-            debug(`#initializeDocument: Found Schema class for ${documentData.schema}.`);
-
-            // Create a document instance *from* the data using the specific class's factory
-            doc = Schema.fromData(documentData); // This handles setting defaults, validates before returning
-            debug(`#initializeDocument: Created new Document instance from data, CreatedAt: ${doc.createdAt}. running vaidation..`);
-
-        } else {
-            debug('#initializeDocument: Error - Input is not a Document instance or plain data object.');
-            throw new Error('Invalid document data type: Expected Document instance or plain data object.');
-
-        }
-
-        debug(`#initializeDocument: Initialization complete. Returning document instance, Schema: ${doc.schema}`);
-        return doc;
-    }
-
-    /**
-     * Parse and initialize a document
-     * @param {Object} document - Document data or instance to parse
-     * @returns {BaseDocument} Initialized document instance
-     * @private
-     */
-    #parseInitializeDocument(documentData) {
-        debug('#parseInitializeDocument: Starting parse and initialization.');
-        if (!documentData) {
-            debug('#parseInitializeDocument: Error - Input document data is required.');
-            throw new Error('Document data required');
-        }
-
-        let parsedData;
-        let initializedDoc;
-
-        try {
-            // Step 1: Parse the input (handles strings, ensures basic object structure)
-            parsedData = this.#parseDocumentData(documentData);
-            debug('#parseInitializeDocument: Document parsed successfully.');
-
-            // Step 2: Initialize the document (creates instance if needed, validates, generates checksums)
-            initializedDoc = this.#initializeDocument(parsedData);
-            debug('#parseInitializeDocument: Document initialized successfully.');
-
-        } catch (error) {
-            // Catch errors from either #parseDocumentData or #initializeDocument
-            debug(`#parseInitializeDocument: Failed during parse/initialize chain: ${error.message}`);
-            throw new Error(`Failed to parse and initialize document: ${error.message}`);
-        }
-
-        debug('#parseInitializeDocument: Parse and initialization complete. Returning document instance.');
-        return initializedDoc; // Return the fully validated and initialized BaseDocument instance
-    }
-
-    #generateDocumentID() {
-        try {
-            const counterKey = 'internal/document-id-counter';
-
-            // Use synchronous transaction for atomic ID generation
-            return this.#internalStore.transactionSync(() => {
-                // Get current counter within transaction
-                let currentCounter = this.#internalStore.get(counterKey);
-
-                // Initialize counter if it doesn't exist
-                if (currentCounter === undefined || currentCounter === null) {
-                    // Start from INTERNAL_BITMAP_ID_MAX to avoid conflicts with internal bitmaps
-                    currentCounter = INTERNAL_BITMAP_ID_MAX;
-                    debug(`Initializing document ID counter to: ${currentCounter}`);
-                }
-
-                // Increment counter
-                const newId = currentCounter + 1;
-
-                // Update counter atomically within transaction
-                this.#internalStore.putSync(counterKey, newId);
-
-                debug(`Generated document ID: ${newId}`);
-                return newId;
-            });
-        } catch (error) {
-            debug(`Error generating document ID: ${error.message}`);
-            throw error;
+        // Update Synapses reverse index
+        if (allSynapseKeys.length > 0) {
+            await this.#synapses.createSynapses(docId, allSynapseKeys);
         }
     }
 

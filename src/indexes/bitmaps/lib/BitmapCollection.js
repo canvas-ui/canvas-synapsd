@@ -4,9 +4,6 @@
 import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd:bitmap-collection');
 
-// Import BitmapIndex for static method access
-import BitmapIndex from '../index.js';
-
 export default class BitmapCollection {
 
     constructor(name, bitmapIndex, options = {}) {
@@ -32,35 +29,28 @@ export default class BitmapCollection {
      * Key management
      */
 
-	makeKey(key) {
-        // If the input key segment is already '/', it refers to the root of this collection.
-        // this.keyPrefix (e.g., 'context/') already correctly represents this root path.
-        if (key === '/') {
-            debug(`makeKey: segment is '/', returning keyPrefix directly: ${this.keyPrefix}`);
-            return this.keyPrefix;
-        }
+    makeKey(key) {
+        // Root of this collection
+        if (key === '/') { return this.keyPrefix; }
 
-		// Handle negation prefix before other normalizations
-		const isNegated = key.startsWith('!');
-		let normalizedSegment = isNegated ? key.slice(1) : key;
+        // Handle negation prefix
+        const isNegated = key.startsWith('!');
+        let segment = isNegated ? key.slice(1) : key;
 
-		// Normalize whitespace and case to ensure consistent keys
-		normalizedSegment = String(normalizedSegment)
-			.replace(/\s+/g, '_')
-			.toLowerCase()
-			// Remove/sanitize disallowed characters. Preserve '/', '.', '-', '_'
-			.replace(/[^a-z0-9_\-./]/g, '_')
-			.replace(/_+/g, '_');
+        // Normalize: lowercase, sanitize, collapse underscores
+        segment = String(segment)
+            .replace(/\\/g, '/')
+            .replace(/\s+/g, '_')
+            .toLowerCase()
+            .replace(/[^a-z0-9_\-./]/g, '_')
+            .replace(/_+/g, '_')
+            .replace(/\/+/g, '/');
 
-        if (normalizedSegment === '') {
-            return this.keyPrefix;
-        }
+        if (segment === '') { return this.keyPrefix; }
 
-        // Prepend '!' if it was originally negated
-        if (isNegated) { normalizedSegment = '!' + normalizedSegment; }
-
-        const constructedKey = `${this.keyPrefix}${normalizedSegment}`;
-        return BitmapIndex.normalizeKey(constructedKey);
+        // Construct final key - already normalized, no need for double normalization
+        const fullKey = `${this.keyPrefix}${segment}`;
+        return isNegated ? `!${fullKey}` : fullKey;
     }
 
     /**
