@@ -487,10 +487,14 @@ class SynapsD extends EventEmitter {
 
         // Apply context filter if caller actually wanted one OR if it defaulted to '/' but features are also specified.
         if (!noContextFilterWanted || (noContextFilterWanted && !noFeatureFilterWanted)) {
-            // Resolve context layer names to ULIDs
+            // Resolve context layer names to ULIDs (root '/' is skipped, yielding [] for root-only queries)
             const contextLayerIds = this.tree.resolveLayerIds(parsedContextKeys);
-            resultBitmap = await this.contextBitmapCollection.AND(contextLayerIds);
-            contextFilterApplied = true;
+            if (contextLayerIds.length === 0) {
+                // Root-only context — no bitmap filter to apply
+            } else {
+                resultBitmap = await this.contextBitmapCollection.AND(contextLayerIds);
+                contextFilterApplied = true;
+            }
             // If context filter results in null/empty, and it was a specific request, then fail early.
             if (!resultBitmap || resultBitmap.isEmpty) {
                 if (!noContextFilterWanted) { // only fail early if context was explicitly requested and yielded no results
@@ -589,8 +593,10 @@ class SynapsD extends EventEmitter {
             // Apply context filters only if contextSpec was explicitly provided
             if (contextSpec !== null && contextSpec !== undefined && contextBitmapArray.length > 0) {
                 const contextLayerIds = this.tree.resolveLayerIds(contextBitmapArray);
-                resultBitmap = await this.contextBitmapCollection.AND(contextLayerIds);
-                filtersApplied = true; // AND result assigned
+                if (contextLayerIds.length > 0) {
+                    resultBitmap = await this.contextBitmapCollection.AND(contextLayerIds);
+                    filtersApplied = true;
+                }
             }
 
             // Apply feature filters if provided (via collection for namespace safety)
@@ -1318,8 +1324,10 @@ class SynapsD extends EventEmitter {
 
         if (contextBitmapArray.length > 0) {
             const contextLayerIds = this.tree.resolveLayerIds(contextBitmapArray);
-            candidateBitmap = await this.contextBitmapCollection.AND(contextLayerIds);
-            filtersApplied = true;
+            if (contextLayerIds.length > 0) {
+                candidateBitmap = await this.contextBitmapCollection.AND(contextLayerIds);
+                filtersApplied = true;
+            }
         }
         if (Array.isArray(featureBitmapArray) && featureBitmapArray.length > 0) {
             const featureBitmap = await this.featureBitmapCollection.OR(featureBitmapArray);
