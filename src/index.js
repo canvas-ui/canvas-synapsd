@@ -664,10 +664,10 @@ class SynapsD extends EventEmitter {
                     debug(`findDocuments: Count discrepancy detected. Database count: ${totalCount}, Actual retrievable documents: ${seen}, Returned: ${pagedDocs.length}`);
                 }
 
-                const resultArray = parseDocuments ? pagedDocs.map(doc => parseInitializeDocument(doc)) : pagedDocs;
+                const resultArray = parseDocuments ? this.#safeParseDocuments(pagedDocs) : pagedDocs;
                 // Attach metadata for compatibility
-                resultArray.count = pagedDocs.length; // Number of documents actually returned
-                resultArray.totalCount = totalCount;   // Total number of documents available
+                resultArray.count = resultArray.length; // Number of documents actually returned (after filtering corrupted)
+                resultArray.totalCount = totalCount;    // Total number of documents available
                 resultArray.error = null;
                 return resultArray;
             }
@@ -688,9 +688,9 @@ class SynapsD extends EventEmitter {
 
             // Get documents from database for the page
             const documents = await this.documents.getMany(slicedIds);
-            const resultArray = parseDocuments ? documents.map(doc => parseInitializeDocument(doc)) : documents;
+            const resultArray = parseDocuments ? this.#safeParseDocuments(documents) : documents;
             // Attach metadata for compatibility
-            resultArray.count = documents.length; // Number of documents actually returned
+            resultArray.count = resultArray.length; // Number of documents actually returned (after filtering corrupted)
             resultArray.totalCount = totalCount;  // Total number of documents available
             resultArray.error = null;
             return resultArray;
@@ -1373,7 +1373,7 @@ class SynapsD extends EventEmitter {
         // Use local FTS scoring over candidate IDs for deterministic results
         if (filtersApplied && candidateIds.length > 0) {
             const docs = await this.documents.getMany(candidateIds);
-            const parsedDocs = parseDocuments ? docs.map(d => parseInitializeDocument(d)) : docs;
+            const parsedDocs = parseDocuments ? this.#safeParseDocuments(docs) : docs;
             return await this.#lanceIndex.ftsQuery(queryString, candidateIds, parsedDocs, { limit, offset });
         }
 
@@ -1530,6 +1530,21 @@ class SynapsD extends EventEmitter {
         if (allSynapseKeys.length > 0) {
             await this.#synapses.createSynapses(docId, allSynapseKeys);
         }
+    }
+
+    /**
+     * Safely parse an array of raw documents, skipping corrupted entries instead of crashing.
+     */
+    #safeParseDocuments(docs) {
+        const result = [];
+        for (const doc of docs) {
+            try {
+                result.push(parseInitializeDocument(doc));
+            } catch (e) {
+                debug(`safeParseDocuments: Skipping corrupted document (id=${doc?.id ?? 'unknown'}): ${e.message}`);
+            }
+        }
+        return result;
     }
 
     clearSync() {

@@ -27,8 +27,8 @@ export function parseDocumentData(documentData) {
         throw new Error(`Invalid document data type: Expected string or object, got ${typeof documentData}`);
     }
 
-    if (!parsedData.schema || parsedData.data === undefined) {
-        throw new Error('Parsed document data must have a schema and data property.');
+    if (!parsedData.schema || parsedData.data == null || typeof parsedData.data !== 'object') {
+        throw new Error('Parsed document data must have a schema and a non-null data object.');
     }
 
     return parsedData;

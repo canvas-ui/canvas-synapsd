@@ -65,11 +65,11 @@ export function isDocumentInstance(obj) {
 export function isDocumentData(obj) {
     if (!obj || typeof obj !== 'object') { return false; }
 
-    // Check for minimal proto object properties
+    // Check for minimal proto object properties (data must be a non-null object)
     return (
         obj.schema &&
         typeof obj.schema === 'string' &&
-        obj.data !== undefined &&
+        obj.data != null && typeof obj.data === 'object' &&
         !(obj instanceof BaseDocument)
     );
 }
