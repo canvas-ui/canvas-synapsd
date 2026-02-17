@@ -232,6 +232,9 @@ class SynapsD extends EventEmitter {
             // Migrate bitmap keys from legacy format (one-time, idempotent)
             await this.#migrateBitmapKeys();
 
+            // TODO: Remove after all instances have been reindexed (added 2026-02-17)
+            await this.reindexFeatures();
+
             // Set status
             this.#status = 'running';
 
