@@ -126,7 +126,6 @@ class SynapsD extends EventEmitter {
 
         // Bitmap Collections
         this.contextBitmapCollection = this.bitmapIndex.createCollection('context');
-        this.featureBitmapCollection = this.bitmapIndex.createCollection('feature');
 
         /**
          * Inverted indexes
@@ -509,7 +508,7 @@ class SynapsD extends EventEmitter {
         }
 
         if (!noFeatureFilterWanted && parsedFeatureKeys.length > 0) {
-            const featureOpBitmap = await this.featureBitmapCollection.OR(parsedFeatureKeys);
+            const featureOpBitmap = await this.bitmapIndex.OR(parsedFeatureKeys);
             if (!featureOpBitmap || featureOpBitmap.isEmpty) {
                 debug(`hasDocument: Doc ${id} - explicit feature filter ${JSON.stringify(parsedFeatureKeys)} yielded no results.`);
                 return false; // Feature filter must yield results if specified
@@ -603,9 +602,9 @@ class SynapsD extends EventEmitter {
                 }
             }
 
-            // Apply feature filters if provided (via collection for namespace safety)
+            // Apply feature filters if provided
             if (featureBitmapArray.length > 0) {
-                const featureBitmap = await this.featureBitmapCollection.OR(featureBitmapArray);
+                const featureBitmap = await this.bitmapIndex.OR(featureBitmapArray);
                 if (filtersApplied) {
                     resultBitmap.andInPlace(featureBitmap);
                 } else {
@@ -863,8 +862,7 @@ class SynapsD extends EventEmitter {
                 layersToRemove.push(...normalizedContexts);
             }
             if (featureBitmapArray.length > 0) {
-                const normalizedFeatures = featureBitmapArray.map(f => this.featureBitmapCollection.makeKey(f));
-                layersToRemove.push(...normalizedFeatures);
+                layersToRemove.push(...featureBitmapArray);
             }
 
             if (layersToRemove.length > 0) {
@@ -1233,7 +1231,7 @@ class SynapsD extends EventEmitter {
                 // tickMany doesn't explicitly return success/failure per ID easily,
                 // but it should throw if the operation fails for the ID (e.g., DB error).
                 // Assuming success if no error is thrown.
-                await this.featureBitmapCollection.tickMany(featureBitmapArray, id);
+                await this.bitmapIndex.tickMany(featureBitmapArray, id);
                 result.successful.push({ index: i, id: id });
                 debug(`setDocumentArrayFeatures: Successfully set features for document ID ${id} (index ${i}).`);
             } catch (error) {
@@ -1277,7 +1275,7 @@ class SynapsD extends EventEmitter {
             }
             try {
                 // untickMany, like tickMany, is assumed to throw on operational failure.
-                await this.featureBitmapCollection.untickMany(featureBitmapArray, id);
+                await this.bitmapIndex.untickMany(featureBitmapArray, id);
                 result.successful.push({ index: i, id: id });
                 debug(`unsetDocumentArrayFeatures: Successfully unset features for document ID ${id} (index ${i}).`);
             } catch (error) {
@@ -1334,7 +1332,7 @@ class SynapsD extends EventEmitter {
             }
         }
         if (Array.isArray(featureBitmapArray) && featureBitmapArray.length > 0) {
-            const featureBitmap = await this.featureBitmapCollection.OR(featureBitmapArray);
+            const featureBitmap = await this.bitmapIndex.OR(featureBitmapArray);
             if (filtersApplied && candidateBitmap) { candidateBitmap.andInPlace(featureBitmap); } else { candidateBitmap = featureBitmap; filtersApplied = true; }
         }
 
@@ -1445,9 +1443,8 @@ class SynapsD extends EventEmitter {
      * Context bitmaps: context/<name>  →  context/layer/<ulid>
      *   Old code keyed context bitmaps by layer name; new code keys by layer ULID.
      *
-     * Feature bitmaps: <prefix>/...  →  feature/<prefix>/...
-     *   Old code stored features directly in bitmapIndex (e.g. data/abstraction/note);
-     *   new code stores via featureBitmapCollection which prepends 'feature/'.
+     * Feature bitmaps: feature/<prefix>/...  →  <prefix>/...
+     *   Reverts the short-lived feature/ prefix; features are stored directly in bitmapIndex.
      */
     async #migrateBitmapKeys() {
         let migrated = 0;
@@ -1468,19 +1465,19 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        // --- Feature bitmaps: raw prefix → feature/ prefix ---
-        // Old features lived at e.g. data/..., client/..., tag/...
-        // New features live at feature/data/..., feature/client/..., feature/tag/...
-        const featurePrefixes = ['data/', 'client/', 'tag/', 'custom/', 'nested/'];
-        for (const prefix of featurePrefixes) {
-            const keys = await this.bitmapIndex.listBitmaps(prefix);
-            for (const oldKey of keys) {
-                const newKey = `feature/${oldKey}`;
-                if (!this.bitmapIndex.hasBitmap(newKey)) {
-                    await this.bitmapIndex.renameBitmap(oldKey, newKey);
-                    migrated++;
-                }
+        // --- Feature bitmaps: revert feature/ prefix back to raw keys ---
+        // Previous code stored features under feature/data/..., feature/client/..., etc.
+        // We now store them directly as data/..., client/..., tag/..., etc.
+        const featureKeys = await this.bitmapIndex.listBitmaps('feature/');
+        for (const oldKey of featureKeys) {
+            const naturalKey = oldKey.slice('feature/'.length);
+            if (!this.bitmapIndex.hasBitmap(naturalKey)) {
+                await this.bitmapIndex.renameBitmap(oldKey, naturalKey);
+            } else {
+                await this.bitmapIndex.mergeBitmap(oldKey, [naturalKey]);
+                await this.bitmapIndex.deleteBitmap(oldKey);
             }
+            migrated++;
         }
 
         if (migrated > 0) {
@@ -1519,17 +1516,38 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        // Feature bitmaps (via collection for namespace safety)
+        // Feature bitmaps
         if (featureBitmaps && featureBitmaps.length > 0) {
-            await this.featureBitmapCollection.tickMany(featureBitmaps, docId);
-            const normalizedFeatures = featureBitmaps.map(f => this.featureBitmapCollection.makeKey(f));
-            allSynapseKeys.push(...normalizedFeatures);
+            await this.bitmapIndex.tickMany(featureBitmaps, docId);
+            allSynapseKeys.push(...featureBitmaps);
         }
 
         // Update Synapses reverse index
         if (allSynapseKeys.length > 0) {
             await this.#synapses.createSynapses(docId, allSynapseKeys);
         }
+    }
+
+    /**
+     * Rebuild feature bitmaps from document data. Scans all documents and ensures
+     * each document's schema is indexed in the feature bitmap collection.
+     */
+    async reindexFeatures() {
+        if (!this.isRunning()) { throw new Error('Database is not running'); }
+        let indexed = 0;
+        for await (const { key, value } of this.documents.getRange()) {
+            try {
+                const doc = parseInitializeDocument(value);
+                if (doc.schema) {
+                    await this.bitmapIndex.tick(doc.schema, key);
+                    indexed++;
+                }
+            } catch (e) {
+                debug(`reindexFeatures: Skipping doc ${key}: ${e.message}`);
+            }
+        }
+        debug(`reindexFeatures: Indexed ${indexed} documents`);
+        return indexed;
     }
 
     /**
