@@ -265,7 +265,7 @@ class ContextTree extends EventEmitter {
             const affected = await this.#db.contextBitmapCollection.mergeBitmap(sourceLayer.id, targetIds);
             this.emit('tree.layer.merged', {
                 source: sourceLayer.name,
-                targets: targetNames,
+                targets: targetIds,
                 affected
             });
             return { data: affected, count: affected.length, error: null };
@@ -302,7 +302,7 @@ class ContextTree extends EventEmitter {
             const affected = await this.#db.contextBitmapCollection.subtractBitmap(sourceLayer.id, targetIds);
             this.emit('tree.layer.subtracted', {
                 source: sourceLayer.name,
-                targets: targetNames,
+                targets: targetIds,
                 affected
             });
             return { data: affected, count: affected.length, error: null };
