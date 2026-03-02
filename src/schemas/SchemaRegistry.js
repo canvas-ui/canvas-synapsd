@@ -8,6 +8,7 @@ import Document from './abstractions/Document.js';
 import Contact from './abstractions/Contact.js';
 import Email from './abstractions/Email.js';
 import File from './abstractions/File.js';
+import Folder from './abstractions/Folder.js';
 import Link from './abstractions/Link.js';
 import Note from './abstractions/Note.js';
 import Tab from './abstractions/Tab.js';
@@ -33,6 +34,7 @@ const SCHEMA_REGISTRY = {
     'data/abstraction/contact': Contact,
     'data/abstraction/email': Email,
     'data/abstraction/file': File,
+    'data/abstraction/folder': Folder,
     'data/abstraction/link': Link,
     'data/abstraction/note': Note,
     'data/abstraction/tab': Tab,
