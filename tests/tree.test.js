@@ -248,6 +248,37 @@ describe('SynapsD Tree Operations', () => {
             expect(ids).toContain(noteId);
             expect(ids).not.toContain(tabId);
         });
+
+        it('should support find() with attribute groups', async () => {
+            const noteId = await db.insertDocument(
+                {
+                    schema: 'data/abstraction/note',
+                    data: { title: 'Attribute Note', content: 'Find me via attributes' }
+                },
+                '/attributes/test',
+                ['tag/shared', 'tag/javascript']
+            );
+            const tabId = await db.insertDocument(
+                {
+                    schema: 'data/abstraction/tab',
+                    data: { title: 'Attribute Tab', url: 'https://example.com/attribute' }
+                },
+                '/attributes/test',
+                ['tag/shared', 'tag/browser']
+            );
+
+            const result = await db.find({
+                context: '/attributes/test',
+                attributes: {
+                    anyOf: ['tag/javascript', 'tag/browser'],
+                    noneOf: ['data/abstraction/tab']
+                }
+            });
+
+            const ids = result.map(d => d.id);
+            expect(ids).toContain(noteId);
+            expect(ids).not.toContain(tabId);
+        });
     });
 
     // ============================================================================

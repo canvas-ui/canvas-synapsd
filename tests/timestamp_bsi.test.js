@@ -79,6 +79,25 @@ describe('Timestamp Index (BSI)', () => {
         expect(ids).toContain(idA);
     });
 
+    test('should handle find() with timeline filter object', async () => {
+        const id = await db.insertDocument({
+            schema: 'data/abstraction/note',
+            data: { title: 'Timeline Note', content: 'Timeline content' },
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+        });
+
+        const result = await db.find({
+            context: '/',
+            filters: {
+                timeline: 'today',
+            },
+        });
+
+        const ids = result.map(d => d.id);
+        expect(ids).toContain(id);
+    });
+
     test('should handle removal correctly', async () => {
         const doc = {
             schema: 'data/abstraction/note',

@@ -572,13 +572,14 @@ class SynapsD extends EventEmitter {
         return await this.hasDocument(id, contextSpec, featureBitmapArray);
     }
 
-    // Legacy API, now alias for findDocuments,
-    // TODO: Implement for metedata retrieval only
-    async listDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
-        return await this.findDocuments(contextSpec, featureBitmapArray, filterArray, options);
-    }
+    async find(spec = {}) {
+        const {
+            contextSpec,
+            attributes,
+            filterArray,
+            options,
+        } = this.#normalizeFindSpec(spec);
 
-    async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
         // Normalize options and pagination defaults
         const effectiveOptions = typeof options === 'object' && options !== null ? { ...options } : { parse: true };
         const parseDocuments = effectiveOptions.parse !== false;
@@ -593,9 +594,8 @@ class SynapsD extends EventEmitter {
         // Parse contextSpec for query (single path only, or null/undefined)
         const contextBitmapArray = parseContextSpecForQuery(contextSpec);
         const hasExplicitContextPath = contextSpec !== null && contextSpec !== undefined && contextSpec !== '/';
-        if (!Array.isArray(featureBitmapArray) && typeof featureBitmapArray === 'string') { featureBitmapArray = [featureBitmapArray]; }
         if (!Array.isArray(filterArray) && typeof filterArray === 'string') { filterArray = [filterArray]; }
-        debug(`Listing documents with contextArray: ${contextBitmapArray}, features: ${featureBitmapArray}, filters: ${filterArray}, limit: ${limit}, offset: ${offset}`);
+        debug(`Listing documents with contextArray: ${contextBitmapArray}, attributes: ${JSON.stringify(attributes)}, filters: ${filterArray}, limit: ${limit}, offset: ${offset}`);
 
         try {
             // Start with null, will hold RoaringBitmap32 instance if filters are applied
@@ -620,13 +620,13 @@ class SynapsD extends EventEmitter {
                 }
             }
 
-            // Apply feature filters if provided
-            if (featureBitmapArray.length > 0) {
-                const featureBitmap = await this.#buildFeatureBitmap(featureBitmapArray);
-                if (filtersApplied) {
-                    resultBitmap.andInPlace(featureBitmap);
+            // Apply bitmap-backed attribute filters if provided
+            const attributeBitmap = await this.#buildAttributesBitmap(attributes);
+            if (attributeBitmap) {
+                if (filtersApplied && resultBitmap) {
+                    resultBitmap.andInPlace(attributeBitmap);
                 } else {
-                    resultBitmap = featureBitmap;
+                    resultBitmap = attributeBitmap;
                     filtersApplied = true;
                 }
             }
@@ -720,6 +720,15 @@ class SynapsD extends EventEmitter {
             errorArray.error = error.message;
             return errorArray;
         }
+    }
+
+    // Legacy API, now alias for find()
+    async listDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
+        return await this.findDocuments(contextSpec, featureBitmapArray, filterArray, options);
+    }
+
+    async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
+        return await this.find(this.#buildLegacyFindSpec(contextSpec, featureBitmapArray, filterArray, options));
     }
 
     async updateDocument(docIdentifier, updateData = null, contextSpec = null, featureBitmapArray = []) {
@@ -1558,6 +1567,164 @@ class SynapsD extends EventEmitter {
         if (allSynapseKeys.length > 0) {
             await this.#synapses.createSynapses(docId, allSynapseKeys, { syncBitmaps: false });
         }
+    }
+
+    #buildLegacyFindSpec(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
+        const allOf = [];
+        const noneOf = [];
+
+        for (const key of parseBitmapArray(featureBitmapArray).filter(Boolean)) {
+            if (key.startsWith('!')) {
+                noneOf.push(key.slice(1));
+            } else {
+                allOf.push(key);
+            }
+        }
+
+        return {
+            context: contextSpec,
+            attributes: {
+                allOf,
+                noneOf,
+            },
+            filterArray,
+            ...options,
+        };
+    }
+
+    #normalizeFindSpec(spec = {}) {
+        if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+            throw new Error('find() expects a query spec object');
+        }
+
+        const {
+            context,
+            contextSpec,
+            directory = null,
+            attributes = null,
+            filters = null,
+            filterArray = [],
+            options,
+            parse,
+            limit,
+            offset,
+            page,
+        } = spec;
+
+        if (directory !== null && directory !== undefined) {
+            throw new Error('find(): directory queries are not implemented yet');
+        }
+
+        const normalizedFilterArray = Array.isArray(filterArray) ? [...filterArray] : [filterArray].filter(Boolean);
+        normalizedFilterArray.push(...this.#normalizeFiltersObject(filters));
+
+        return {
+            contextSpec: context ?? contextSpec ?? null,
+            attributes: this.#normalizeAttributes(attributes),
+            filterArray: normalizedFilterArray,
+            options: {
+                ...(typeof options === 'object' && options !== null ? options : {}),
+                ...(parse !== undefined ? { parse } : {}),
+                ...(limit !== undefined ? { limit } : {}),
+                ...(offset !== undefined ? { offset } : {}),
+                ...(page !== undefined ? { page } : {}),
+            },
+        };
+    }
+
+    #normalizeAttributes(attributes) {
+        if (!attributes) {
+            return null;
+        }
+
+        if (Array.isArray(attributes)) {
+            return {
+                allOf: attributes.filter(Boolean),
+                anyOf: [],
+                noneOf: [],
+            };
+        }
+
+        if (typeof attributes !== 'object') {
+            throw new Error('find(): attributes must be an array or object');
+        }
+
+        return {
+            allOf: parseBitmapArray(attributes.allOf ?? []).filter(Boolean),
+            anyOf: parseBitmapArray(attributes.anyOf ?? []).filter(Boolean),
+            noneOf: parseBitmapArray(attributes.noneOf ?? []).filter(Boolean),
+        };
+    }
+
+    #normalizeFiltersObject(filters) {
+        if (!filters) {
+            return [];
+        }
+
+        if (Array.isArray(filters)) {
+            return filters.filter(Boolean);
+        }
+
+        if (typeof filters !== 'object') {
+            throw new Error('find(): filters must be an array or object');
+        }
+
+        const normalizedFilters = [];
+        const supportedKeys = new Set(['timeline']);
+
+        for (const key of Object.keys(filters)) {
+            if (!supportedKeys.has(key)) {
+                throw new Error(`find(): unsupported filter "${key}"`);
+            }
+        }
+
+        if (filters.timeline) {
+            const timelineValues = Array.isArray(filters.timeline) ? filters.timeline : [filters.timeline];
+            for (const timelineValue of timelineValues.filter(Boolean)) {
+                normalizedFilters.push(`datetime:updated:${timelineValue}`);
+            }
+        }
+
+        return normalizedFilters;
+    }
+
+    async #buildAttributesBitmap(attributes) {
+        const normalizedAttributes = this.#normalizeAttributes(attributes);
+        if (!normalizedAttributes) {
+            return null;
+        }
+
+        const { allOf, anyOf, noneOf } = normalizedAttributes;
+        if (allOf.length === 0 && anyOf.length === 0 && noneOf.length === 0) {
+            return null;
+        }
+
+        let attributeBitmap = null;
+
+        if (allOf.length > 0) {
+            attributeBitmap = await this.bitmapIndex.AND(allOf);
+        }
+
+        if (anyOf.length > 0) {
+            const anyBitmap = await this.bitmapIndex.OR(anyOf);
+            if (attributeBitmap) {
+                attributeBitmap.andInPlace(anyBitmap);
+            } else {
+                attributeBitmap = anyBitmap;
+            }
+        }
+
+        if (noneOf.length > 0) {
+            if (!attributeBitmap) {
+                attributeBitmap = await this.#buildAllDocumentsBitmap();
+            }
+            const noneBitmap = await this.bitmapIndex.OR(noneOf);
+            if (noneBitmap && !noneBitmap.isEmpty) {
+                attributeBitmap.andNotInPlace(noneBitmap);
+            }
+        }
+
+        return attributeBitmap || new RoaringBitmap32();
     }
 
     async #buildFeatureBitmap(featureBitmapArray) {
