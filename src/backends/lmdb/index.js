@@ -32,19 +32,19 @@ class Db {
             options = {
                 // Database paths
                 path: options.path,
-                backupPath: options.backupPath || path.join(options.path, 'backup'),
+                backupPath: options.backupPath ?? path.join(options.path, 'backup'),
 
                 // Backup options
-                backupOnOpen: options.backupOnOpen || true,
-                backupOnClose: options.backupOnClose || false,
-                maxBackupRetention: options.maxBackupRetention || 14,
+                backupOnOpen: options.backupOnOpen ?? true,
+                backupOnClose: options.backupOnClose ?? false,
+                maxBackupRetention: options.maxBackupRetention ?? 14,
 
                 // Internals
-                maxDbs: options.maxDbs || 64,
-                readOnly: options.readOnly || false,
-                logLevel: options.logLevel || 'info',
-                compression: options.compression || true,
-                cache: options.cache || true,
+                maxDbs: options.maxDbs ?? 64,
+                readOnly: options.readOnly ?? false,
+                logLevel: options.logLevel ?? 'info',
+                compression: options.compression ?? true,
+                cache: options.cache ?? true,
                 strictAsyncOrder: options.strictAsyncOrder ?? true, // Ensure strict ordering for document ID generation
                 // keyEncoding: options.keyEncoding || 'uint32',// ?ordered-binary
                 // encoding: options.encoding || 'binary',

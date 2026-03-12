@@ -220,6 +220,34 @@ describe('SynapsD Tree Operations', () => {
             const ids = result.map(d => d.id);
             expect(ids).toContain(docId);
         });
+
+        it('should support negated feature filters within a context', async () => {
+            const noteId = await db.insertDocument(
+                {
+                    schema: 'data/abstraction/note',
+                    data: { title: 'Visible Note', content: 'Keep me' }
+                },
+                '/features/negation',
+                ['tag/shared']
+            );
+            const tabId = await db.insertDocument(
+                {
+                    schema: 'data/abstraction/tab',
+                    data: { title: 'Hidden Tab', url: 'https://example.com/hidden' }
+                },
+                '/features/negation',
+                ['tag/shared']
+            );
+
+            const result = await db.findDocuments(
+                '/features/negation',
+                ['tag/shared', '!data/abstraction/tab']
+            );
+
+            const ids = result.map(d => d.id);
+            expect(ids).toContain(noteId);
+            expect(ids).not.toContain(tabId);
+        });
     });
 
     // ============================================================================

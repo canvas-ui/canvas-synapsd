@@ -4,14 +4,17 @@
 import EventEmitter from 'eventemitter2';
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'module';
 import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd');
+const require = createRequire(import.meta.url);
+const { RoaringBitmap32 } = require('roaring');
 
 // Errors
 import { ArgumentError } from './utils/errors.js';
 
-// DB Backends
-import BackendFactory from './backends/index.js';
+// DB Backend
+import LmdbBackend from './backends/lmdb/index.js';
 
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
@@ -44,7 +47,7 @@ const INTERNAL_BITMAP_ID_MAX = 100000;
 class SynapsD extends EventEmitter {
 
     // Database Backend
-    #dbBackend = 'lmdb';  // Default backend type
+    #dbBackend = 'lmdb';
     #rootPath;  // Root path of the database
     #db;        // Database backend instance
 
@@ -75,7 +78,6 @@ class SynapsD extends EventEmitter {
         backupOnClose: true,
         compression: true,
         eventEmitterOptions: {},
-        backend: 'lmdb',  // Default backend type
         // TODO: Add per dataset versioning support to the underlying db backend!
     }) {
         super(options.eventEmitterOptions);
@@ -89,19 +91,14 @@ class SynapsD extends EventEmitter {
         this.#rootPath = options.rootPath ?? options.path;
         if (!this.#rootPath) { throw new Error('Database path required'); }
 
-        // Set backend type
-        this.#dbBackend = options.backend || 'lmdb';
-
-        // Validate backend type
-        if (!BackendFactory.isValidBackendType(this.#dbBackend)) {
-            throw new Error(`Invalid backend type: ${this.#dbBackend}. Available backends: ${BackendFactory.getAvailableBackends().join(', ')}`);
+        if (options.backend && options.backend !== 'lmdb') {
+            throw new Error(`Unsupported backend "${options.backend}". SynapsD only supports "lmdb" now.`);
         }
 
         debug('Database path:', this.#rootPath);
         debug('Backend type:', this.#dbBackend);
 
-        // Create backend instance using factory
-        this.#db = BackendFactory.createBackend(this.#dbBackend, {
+        this.#db = new LmdbBackend({
             ...options,
             path: this.#rootPath,
         });
@@ -486,7 +483,13 @@ class SynapsD extends EventEmitter {
         const effectiveFeatureArray = noFeatureFilterWanted ? [] : featureBitmapArrayInput;
 
         const parsedContextKeys = parseContextSpecForQuery(effectiveContextSpec);
-        const parsedFeatureKeys = parseBitmapArray(effectiveFeatureArray);
+        const hasExplicitRootContext = effectiveContextSpec === '/';
+        const hasExplicitContextPath = !hasExplicitRootContext && !noContextFilterWanted;
+        if (hasExplicitContextPath && !this.tree.getLayerForPath(effectiveContextSpec)) {
+            debug(`hasDocument: Doc ${id} - explicit context path "${effectiveContextSpec}" does not exist.`);
+            return false;
+        }
+        const parsedFeatureKeys = parseBitmapArray(effectiveFeatureArray).filter(Boolean);
 
         let resultBitmap = null;
         let contextFilterApplied = false;
@@ -503,7 +506,7 @@ class SynapsD extends EventEmitter {
             }
             // If context filter results in null/empty, and it was a specific request, then fail early.
             if (!resultBitmap || resultBitmap.isEmpty) {
-                if (!noContextFilterWanted) { // only fail early if context was explicitly requested and yielded no results
+                if (!noContextFilterWanted && !hasExplicitRootContext) {
                     debug(`hasDocument: Doc ${id} - explicit context filter ${JSON.stringify(parsedContextKeys)} yielded no results.`);
                     return false;
                 }
@@ -511,7 +514,7 @@ class SynapsD extends EventEmitter {
         }
 
         if (!noFeatureFilterWanted && parsedFeatureKeys.length > 0) {
-            const featureOpBitmap = await this.bitmapIndex.OR(parsedFeatureKeys);
+            const featureOpBitmap = await this.#buildFeatureBitmap(parsedFeatureKeys);
             if (!featureOpBitmap || featureOpBitmap.isEmpty) {
                 debug(`hasDocument: Doc ${id} - explicit feature filter ${JSON.stringify(parsedFeatureKeys)} yielded no results.`);
                 return false; // Feature filter must yield results if specified
@@ -536,7 +539,10 @@ class SynapsD extends EventEmitter {
             return true;
         }
 
-        return resultBitmap ? resultBitmap.has(id) : false;
+        if (resultBitmap) {
+            return resultBitmap.has(id);
+        }
+        return hasExplicitRootContext ? true : false;
     }
 
     async getBitmapsForDocument(id, prefix = '') {
@@ -586,6 +592,7 @@ class SynapsD extends EventEmitter {
 
         // Parse contextSpec for query (single path only, or null/undefined)
         const contextBitmapArray = parseContextSpecForQuery(contextSpec);
+        const hasExplicitContextPath = contextSpec !== null && contextSpec !== undefined && contextSpec !== '/';
         if (!Array.isArray(featureBitmapArray) && typeof featureBitmapArray === 'string') { featureBitmapArray = [featureBitmapArray]; }
         if (!Array.isArray(filterArray) && typeof filterArray === 'string') { filterArray = [filterArray]; }
         debug(`Listing documents with contextArray: ${contextBitmapArray}, features: ${featureBitmapArray}, filters: ${filterArray}, limit: ${limit}, offset: ${offset}`);
@@ -597,6 +604,14 @@ class SynapsD extends EventEmitter {
             let filtersApplied = false;
 
             // Apply context filters only if contextSpec was explicitly provided
+            if (hasExplicitContextPath && !this.tree.getLayerForPath(contextSpec)) {
+                const emptyArray = [];
+                emptyArray.count = 0;
+                emptyArray.totalCount = 0;
+                emptyArray.error = null;
+                return emptyArray;
+            }
+
             if (contextSpec !== null && contextSpec !== undefined && contextBitmapArray.length > 0) {
                 const contextLayerIds = this.tree.resolveLayerIds(contextBitmapArray);
                 if (contextLayerIds.length > 0) {
@@ -607,7 +622,7 @@ class SynapsD extends EventEmitter {
 
             // Apply feature filters if provided
             if (featureBitmapArray.length > 0) {
-                const featureBitmap = await this.bitmapIndex.OR(featureBitmapArray);
+                const featureBitmap = await this.#buildFeatureBitmap(featureBitmapArray);
                 if (filtersApplied) {
                     resultBitmap.andInPlace(featureBitmap);
                 } else {
@@ -1318,14 +1333,22 @@ class SynapsD extends EventEmitter {
 
         // Normalize options
         const effectiveOptions = typeof options === 'object' && options !== null ? { ...options } : { parse: true };
-        const parseDocuments = effectiveOptions.parse !== false;
         const limit = Number.isFinite(effectiveOptions.limit) ? Math.max(0, Number(effectiveOptions.limit)) : 50;
         const offset = Math.max(0, Number.isFinite(effectiveOptions.offset) ? Number(effectiveOptions.offset) : 0);
 
-        // Build candidate set via bitmaps (context AND, features OR, filters AND)
+        // Build candidate set via bitmaps (context AND, features AND/NOT, filters AND)
         let candidateBitmap = null;
         let filtersApplied = false;
         const contextBitmapArray = parseContextSpecForQuery(contextSpec);
+        const hasExplicitContextPath = contextSpec !== null && contextSpec !== undefined && contextSpec !== '/';
+
+        if (hasExplicitContextPath && !this.tree.getLayerForPath(contextSpec)) {
+            const empty = [];
+            empty.count = 0;
+            empty.totalCount = 0;
+            empty.error = null;
+            return empty;
+        }
 
         if (contextBitmapArray.length > 0) {
             const contextLayerIds = this.tree.resolveLayerIds(contextBitmapArray);
@@ -1334,8 +1357,14 @@ class SynapsD extends EventEmitter {
                 filtersApplied = true;
             }
         }
+        if (!Array.isArray(featureBitmapArray) && typeof featureBitmapArray === 'string') {
+            featureBitmapArray = [featureBitmapArray];
+        }
+        if (!Array.isArray(filterArray) && typeof filterArray === 'string') {
+            filterArray = [filterArray];
+        }
         if (Array.isArray(featureBitmapArray) && featureBitmapArray.length > 0) {
-            const featureBitmap = await this.bitmapIndex.OR(featureBitmapArray);
+            const featureBitmap = await this.#buildFeatureBitmap(featureBitmapArray);
             if (filtersApplied && candidateBitmap) { candidateBitmap.andInPlace(featureBitmap); } else { candidateBitmap = featureBitmap; filtersApplied = true; }
         }
 
@@ -1374,16 +1403,16 @@ class SynapsD extends EventEmitter {
         // Use local FTS scoring over candidate IDs for deterministic results
         if (filtersApplied && candidateIds.length > 0) {
             const docs = await this.documents.getMany(candidateIds);
-            const parsedDocs = parseDocuments ? this.#safeParseDocuments(docs) : docs;
+            const parsedDocs = this.#safeParseDocuments(docs);
             return await this.#lanceIndex.ftsQuery(queryString, candidateIds, parsedDocs, { limit, offset });
         }
 
-        // No filters: avoid scanning entire DB locally. Return empty for now.
-        const emptyNoFilter = [];
-        emptyNoFilter.count = 0;
-        emptyNoFilter.totalCount = 0;
-        emptyNoFilter.error = null;
-        return emptyNoFilter;
+        const docs = [];
+        for await (const { value } of this.documents.getRange()) {
+            docs.push(value);
+        }
+        const parsedDocs = this.#safeParseDocuments(docs);
+        return await this.#lanceIndex.ftsQuery(queryString, [], parsedDocs, { limit, offset });
     }
 
     /**
@@ -1527,8 +1556,45 @@ class SynapsD extends EventEmitter {
 
         // Update Synapses reverse index
         if (allSynapseKeys.length > 0) {
-            await this.#synapses.createSynapses(docId, allSynapseKeys);
+            await this.#synapses.createSynapses(docId, allSynapseKeys, { syncBitmaps: false });
         }
+    }
+
+    async #buildFeatureBitmap(featureBitmapArray) {
+        const featureKeys = parseBitmapArray(featureBitmapArray).filter(Boolean);
+        if (featureKeys.length === 0) {
+            return null;
+        }
+
+        const positiveKeys = featureKeys.filter(key => !key.startsWith('!'));
+        const negativeKeys = featureKeys.filter(key => key.startsWith('!')).map(key => key.slice(1));
+
+        let featureBitmap = null;
+        if (positiveKeys.length > 0) {
+            featureBitmap = await this.bitmapIndex.AND(positiveKeys);
+        } else {
+            featureBitmap = await this.#buildAllDocumentsBitmap();
+        }
+
+        if (negativeKeys.length > 0 && featureBitmap && !featureBitmap.isEmpty) {
+            const negativeBitmap = await this.bitmapIndex.OR(negativeKeys);
+            if (negativeBitmap && !negativeBitmap.isEmpty) {
+                featureBitmap.andNotInPlace(negativeBitmap);
+            }
+        }
+
+        return featureBitmap || new RoaringBitmap32();
+    }
+
+    async #buildAllDocumentsBitmap() {
+        const ids = [];
+        for await (const { key } of this.documents.getRange()) {
+            const id = Number(key);
+            if (Number.isInteger(id) && id > 0) {
+                ids.push(id);
+            }
+        }
+        return new RoaringBitmap32(ids);
     }
 
     /**

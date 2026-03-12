@@ -131,23 +131,28 @@ class LanceIndex {
         try {
             if (!this.#table) { return; }
 
-            const allDocsBitmap = await bitmapIndex.getBitmap('context/', false);
             const processedBitmap = await bitmapIndex.getBitmap(this.#ftsBitmapKey, false);
 
-            if (!allDocsBitmap || allDocsBitmap.isEmpty) { return; }
-
-            let unprocessedBitmap = allDocsBitmap.clone();
-            if (processedBitmap && !processedBitmap.isEmpty) {
-                unprocessedBitmap.andNotInPlace(processedBitmap);
+            const idsToProcess = [];
+            let skipped = 0;
+            for await (const { key } of documentsStore.getRange()) {
+                const docId = Number(key);
+                if (!Number.isInteger(docId) || docId <= 0) {
+                    continue;
+                }
+                if (processedBitmap && processedBitmap.has(docId)) {
+                    skipped++;
+                    continue;
+                }
+                idsToProcess.push(docId);
+                if (limit > 0 && idsToProcess.length >= limit) {
+                    break;
+                }
             }
 
-            if (unprocessedBitmap.isEmpty) { return; }
+            if (idsToProcess.length === 0) { return; }
 
-            const unprocessedIds = unprocessedBitmap.toArray();
-            const idsToProcess = limit > 0 ? unprocessedIds.slice(0, limit) : unprocessedIds;
-
-            debug(`backfill: ${unprocessedIds.length} unprocessed, processing ${idsToProcess.length}`);
-
+            debug(`backfill: skipped ${skipped} already indexed docs, processing ${idsToProcess.length}`);
             let processed = 0;
             for (const docId of idsToProcess) {
                 try {

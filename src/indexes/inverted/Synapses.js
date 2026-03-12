@@ -7,8 +7,7 @@ const debug = debugInstance('canvas:synapsd:synapses');
 /**
  * Synapses - Inverted index for bidirectional Document <-> Layer linking
  *
- * Manages the "Reverse Index" (DocID -> LayerID[]) while keeping the
- * "Forward Index" (LayerID -> Bitmap[DocID]) in sync via BitmapIndex.
+ * Manages the reverse index (DocID -> LayerID[]).
  */
 export default class Synapses {
 
@@ -23,25 +22,22 @@ export default class Synapses {
 
     /**
      * Link a document to one or more layers.
-     * Updates both the reverse index (Synapses) and forward index (Bitmaps).
-     *
      * @param {number} docId - Document ID
      * @param {string|string[]} layerIds - Single layer ID or array of layer IDs
+     * @param {object} options - Sync options
      * @returns {Promise<boolean>} True on success
      */
-    async createSynapses(docId, layerIds) {
+    async createSynapses(docId, layerIds, options = {}) {
         if (!docId) { throw new Error('Document ID required'); }
         const layers = Array.isArray(layerIds) ? layerIds : [layerIds];
         if (layers.length === 0) { return false; }
 
         debug(`createSynapses: Linking doc ${docId} to ${layers.length} layers`);
 
-        // 1. Update Forward Index (Bitmaps)
-        // This ensures that context/feature queries find the document
-        await this.bitmapIndex.tickMany(layers, docId);
+        if (options.syncBitmaps !== false) {
+            await this.bitmapIndex.tickMany(layers, docId);
+        }
 
-        // 2. Update Reverse Index (Synapses)
-        // This ensures we know where the document lives
         const existingLayers = await this.listSynapses(docId);
 
         // Merge new layers with existing ones (Set Union)
@@ -111,17 +107,17 @@ export default class Synapses {
      * @param {number} docId
      * @param {string|string[]} layerIds
      */
-    async removeSynapses(docId, layerIds) {
+    async removeSynapses(docId, layerIds, options = {}) {
         if (!docId) { return; }
         const layersToRemove = Array.isArray(layerIds) ? layerIds : [layerIds];
         if (layersToRemove.length === 0) { return; }
 
         debug(`removeSynapses: Removing doc ${docId} from ${layersToRemove.length} layers`);
 
-        // 1. Update Forward Index (Bitmaps)
-        await this.bitmapIndex.untickMany(layersToRemove, docId);
+        if (options.syncBitmaps !== false) {
+            await this.bitmapIndex.untickMany(layersToRemove, docId);
+        }
 
-        // 2. Update Reverse Index (Synapses)
         const currentLayers = await this.listSynapses(docId);
         if (currentLayers.length === 0) { return; }
 
