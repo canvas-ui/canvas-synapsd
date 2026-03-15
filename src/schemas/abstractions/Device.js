@@ -4,14 +4,15 @@ import Document, { documentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/device';
-const DOCUMENT_SCHEMA_VERSION = '1.0';
+const DOCUMENT_SCHEMA_VERSION = '1.1';
 
 const documentDataSchema = z.object({
     schema: z.string(),
     schemaVersion: z.string().optional(),
     data: z.object({
-        id: z.string().min(1), // deviceId (UUID)
+        deviceId: z.string().min(1),
         name: z.string().min(1),
+        description: z.string().optional(),
         platform: z.string().optional(),
         arch: z.string().optional(),
         type: z.string().optional(),
@@ -28,9 +29,9 @@ export default class Device extends Document {
 
         options.indexOptions = {
             ...(options.indexOptions || {}),
-            ftsSearchFields: ['data.name', 'data.id'],
+            ftsSearchFields: ['data.name', 'data.deviceId', 'data.description'],
             vectorEmbeddingFields: ['data.name'],
-            checksumFields: ['data.id'],
+            checksumFields: ['data.deviceId'],
         };
 
         super(options);
@@ -53,8 +54,9 @@ export default class Device extends Document {
         return {
             schema: DOCUMENT_SCHEMA_NAME,
             data: {
-                id: 'string',
+                deviceId: 'string',
                 name: 'string',
+                description: 'string',
                 platform: 'string',
                 arch: 'string',
                 type: 'string',
