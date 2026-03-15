@@ -19,6 +19,7 @@ const ALLOWED_PREFIXES = [
     'context/',
     'vfs/',
     'feature/',
+    'device/',
     'client/',
     'server/',
     'user/',
