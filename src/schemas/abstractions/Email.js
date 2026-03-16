@@ -5,6 +5,12 @@ import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/email';
 const DOCUMENT_SCHEMA_VERSION = '3.0';
+const EMAIL_FEATURE_BITMAPS = {
+    sent: 'data/abstraction/email/sent',
+    received: 'data/abstraction/email/received',
+    attachment: 'data/abstraction/email/attachment',
+    flagged: 'data/abstraction/email/flagged',
+};
 
 const emailAddressSchema = z.object({
     address: z.string().email(),
@@ -292,5 +298,28 @@ export default class Email extends Document {
 
     static validateData(documentData) {
         return documentDataSchema.parse(documentData);
+    }
+
+    static getFeatureBitmapArray(emailDocument, options = {}) {
+        const data = emailDocument?.data || emailDocument || {};
+        const folderPath = String(options.mailboxPath || data.folder?.path || data.folder?.name || '').toLowerCase();
+        const flags = Array.isArray(data.platformMetadata?.flags) ? data.platformMetadata.flags : [];
+        const features = [];
+
+        const isSentMailbox = /(^|[^a-z])sent([^a-z]|$)/i.test(folderPath);
+        features.push(isSentMailbox ? EMAIL_FEATURE_BITMAPS.sent : EMAIL_FEATURE_BITMAPS.received);
+
+        if (Array.isArray(data.attachments) && data.attachments.length > 0) {
+            features.push(EMAIL_FEATURE_BITMAPS.attachment);
+        }
+
+        if (
+            data.isFlagged === true ||
+            flags.some((flag) => String(flag).toLowerCase().includes('flagged'))
+        ) {
+            features.push(EMAIL_FEATURE_BITMAPS.flagged);
+        }
+
+        return Array.from(new Set(features));
     }
 }
