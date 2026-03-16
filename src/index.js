@@ -965,8 +965,9 @@ class SynapsD extends EventEmitter {
     }
 
     // Deletes documents from all bitmaps and the main dataset
-    async deleteDocument(docId) {
+    async deleteDocument(docId, options = {}) {
         if (!docId) { throw new Error('Document id required'); }
+        const { emitEvent = true } = options;
         debug(`deleteDocument: Document with ID "${docId}" found (or context check passed), proceeding to delete..`);
 
         let document = null;
@@ -1030,8 +1031,9 @@ class SynapsD extends EventEmitter {
                 // Don't fail the entire operation if Lance cleanup fails
             }
 
-            // Emit success event
-            this.emit('document.deleted', { id: docId });
+            if (emitEvent) {
+                this.emit('document.deleted', { id: docId });
+            }
             debug(`deleteDocument: Successfully deleted document ID: ${docId}`);
             return true;
         }
@@ -1039,7 +1041,7 @@ class SynapsD extends EventEmitter {
         return false;
     }
 
-    async deleteDocumentArray(docIdArray) {
+    async deleteDocumentArray(docIdArray, options = {}) {
         if (!Array.isArray(docIdArray)) {
             throw new Error('Document ID array must be an array');
         }
@@ -1066,7 +1068,7 @@ class SynapsD extends EventEmitter {
             try {
                 // deleteDocument returns true on success, false if not found (or not in context if spec was passed to it, but here we check context first)
                 // Pass null for contextSpec to deleteDocument as we've already done the check for the array method.
-                const success = await this.deleteDocument(id); // Context check already done for the array method
+                const success = await this.deleteDocument(id, options); // Context check already done for the array method
                 if (success) {
                     result.successful.push({ index: i, id: id });
                     debug(`deleteDocumentArray: Successfully deleted document ID ${id} (index ${i}).`);

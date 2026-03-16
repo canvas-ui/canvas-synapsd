@@ -114,6 +114,6 @@
   - [ ] attribute-filtered search
   - [ ] timeline-filtered search
 - [ ] Add workspace integration tests against new API translation layer.
-
+git sta
 ## Immediate Next Step
 - [ ] Refactor `findDocuments(...)` into `find(spec)` and migrate `Workspace.list(...)` first.git
