@@ -11,6 +11,7 @@ const EMAIL_FEATURE_BITMAPS = {
     attachment: 'data/abstraction/email/attachment',
     flagged: 'data/abstraction/email/flagged',
 };
+const DEFAULT_EMAIL_SUBJECT = '(no subject)';
 
 const emailAddressSchema = z.object({
     address: z.string().email(),
@@ -127,6 +128,114 @@ const documentDataSchema = z.object({
     }).passthrough().optional(),
 });
 
+function normalizeEmailAddress(address) {
+    if (!address?.address) {
+        return undefined;
+    }
+
+    return {
+        address: address.address,
+        ...(address.name ? { name: address.name } : {}),
+    };
+}
+
+function normalizeEmailAddressList(list) {
+    return list?.value?.map(normalizeEmailAddress).filter(Boolean);
+}
+
+function formatEmailAddress(address) {
+    const email = String(address?.address || '').trim();
+    const name = String(address?.name || '').trim();
+
+    if (!email) {
+        return name || undefined;
+    }
+
+    return name && name !== email ? `${name} <${email}>` : email;
+}
+
+function normalizeHeaderParams(params) {
+    const entries = params instanceof Map
+        ? Array.from(params.entries())
+        : Object.entries(params || {});
+    const parts = [];
+
+    for (const [key, value] of entries) {
+        const normalized = normalizeHeaderValue(value);
+        if (normalized) {
+            parts.push(`${key}=${normalized}`);
+        }
+    }
+
+    return parts.length ? parts.join('; ') : undefined;
+}
+
+function normalizeHeaderValue(value) {
+    if (value == null) {
+        return undefined;
+    }
+
+    if (typeof value === 'string') {
+        return value;
+    }
+
+    if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+        return String(value);
+    }
+
+    if (value instanceof Date) {
+        return value.toISOString();
+    }
+
+    if (Buffer.isBuffer(value)) {
+        return value.toString('utf8');
+    }
+
+    if (Array.isArray(value)) {
+        const items = value.map(normalizeHeaderValue).filter(Boolean);
+        return items.length ? items.join(', ') : undefined;
+    }
+
+    if (value instanceof Map) {
+        const items = Array.from(value.entries())
+            .map(([key, entryValue]) => {
+                const normalized = normalizeHeaderValue(entryValue);
+                return normalized ? `${key}=${normalized}` : null;
+            })
+            .filter(Boolean);
+        return items.length ? items.join('; ') : undefined;
+    }
+
+    if (typeof value === 'object') {
+        if (typeof value.text === 'string' && value.text.trim()) {
+            return value.text.trim();
+        }
+
+        if (value.address || value.name) {
+            return formatEmailAddress(value);
+        }
+
+        if (Array.isArray(value.value)) {
+            const items = value.value.map(normalizeHeaderValue).filter(Boolean);
+            if (items.length) {
+                return items.join(', ');
+            }
+        }
+
+        if (typeof value.value === 'string' && value.value.trim()) {
+            const params = normalizeHeaderParams(value.params);
+            return params ? `${value.value}; ${params}` : value.value;
+        }
+
+        const params = normalizeHeaderParams(value.params || value);
+        if (params) {
+            return params;
+        }
+    }
+
+    return undefined;
+}
+
 export default class Email extends Document {
     constructor(options = {}) {
         // Set schema before calling super
@@ -161,34 +270,33 @@ export default class Email extends Document {
      * @returns {Email} New Email instance
      */
     static fromIMAP(parsed, imapMetadata = {}) {
-        const normalizeAddress = (address) => {
-            if (!address?.address) { return undefined; }
-            return {
-                address: address.address,
-                ...(address.name ? { name: address.name } : {}),
-            };
-        };
-
-        const normalizeAddressList = (list) => list?.value
-            ?.map(normalizeAddress)
-            .filter(Boolean);
-
         const headers = parsed.headers
-            ? Object.fromEntries(Array.from(parsed.headers.entries()).map(([key, value]) => [key, String(value)]))
+            ? Object.fromEntries(
+                Array.from(parsed.headers.entries())
+                    .map(([key, value]) => [key, normalizeHeaderValue(value)])
+                    .filter(([, value]) => Boolean(value)),
+            )
             : undefined;
+        const subject = String(parsed.subject || '').trim() || DEFAULT_EMAIL_SUBJECT;
+        const bodyPreview = String(parsed.text || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 200);
 
         return new Email({
             schema: DOCUMENT_SCHEMA_NAME,
             data: {
-                subject: parsed.subject || '(no subject)',
+                title: subject,
+                name: subject,
+                subject,
                 body: parsed.text || '',
                 bodyHtml: parsed.html || undefined,
-                bodyPreview: parsed.textAsHtml ? undefined : (parsed.text?.substring(0, 200) || ''),
-                from: normalizeAddress(parsed.from?.value?.[0]) || 'unknown@localhost',
-                to: normalizeAddressList(parsed.to) || [],
-                cc: normalizeAddressList(parsed.cc) || undefined,
-                bcc: normalizeAddressList(parsed.bcc) || undefined,
-                replyTo: normalizeAddressList(parsed.replyTo) || undefined,
+                bodyPreview: bodyPreview || undefined,
+                from: normalizeEmailAddress(parsed.from?.value?.[0]) || 'unknown@localhost',
+                to: normalizeEmailAddressList(parsed.to) || [],
+                cc: normalizeEmailAddressList(parsed.cc) || undefined,
+                bcc: normalizeEmailAddressList(parsed.bcc) || undefined,
+                replyTo: normalizeEmailAddressList(parsed.replyTo) || undefined,
                 date: parsed.date?.toISOString() || new Date().toISOString(),
                 receivedAt: new Date().toISOString(),
                 messageId: parsed.messageId || `imap-${imapMetadata.uid || Date.now()}`,

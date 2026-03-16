@@ -116,4 +116,4 @@
 - [ ] Add workspace integration tests against new API translation layer.
 
 ## Immediate Next Step
-- [ ] Refactor `findDocuments(...)` into `find(spec)` and migrate `Workspace.list(...)` first.
+- [ ] Refactor `findDocuments(...)` into `find(spec)` and migrate `Workspace.list(...)` first.git
