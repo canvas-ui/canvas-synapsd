@@ -72,6 +72,10 @@ const documentDataSchema = z.object({
             isInline: z.boolean().optional(),
             url: z.string().optional(),
             checksum: z.string().optional(),
+            storageRef: z.object({
+                backend: z.string(),
+                key: z.string(),
+            }).optional(),
         })).optional(),
 
         // Headers
@@ -151,6 +155,22 @@ export default class Email extends Document {
      * @returns {Email} New Email instance
      */
     static fromIMAP(parsed, imapMetadata = {}) {
+        const normalizeAddress = (address) => {
+            if (!address?.address) { return undefined; }
+            return {
+                address: address.address,
+                ...(address.name ? { name: address.name } : {}),
+            };
+        };
+
+        const normalizeAddressList = (list) => list?.value
+            ?.map(normalizeAddress)
+            .filter(Boolean);
+
+        const headers = parsed.headers
+            ? Object.fromEntries(Array.from(parsed.headers.entries()).map(([key, value]) => [key, String(value)]))
+            : undefined;
+
         return new Email({
             schema: DOCUMENT_SCHEMA_NAME,
             data: {
@@ -158,11 +178,11 @@ export default class Email extends Document {
                 body: parsed.text || '',
                 bodyHtml: parsed.html || undefined,
                 bodyPreview: parsed.textAsHtml ? undefined : (parsed.text?.substring(0, 200) || ''),
-                from: parsed.from?.text || parsed.from?.value?.[0]?.address || '',
-                to: parsed.to?.value?.map(addr => ({ address: addr.address, name: addr.name })) || [],
-                cc: parsed.cc?.value?.map(addr => ({ address: addr.address, name: addr.name })) || undefined,
-                bcc: parsed.bcc?.value?.map(addr => ({ address: addr.address, name: addr.name })) || undefined,
-                replyTo: parsed.replyTo?.value?.map(addr => ({ address: addr.address, name: addr.name })) || undefined,
+                from: normalizeAddress(parsed.from?.value?.[0]) || 'unknown@localhost',
+                to: normalizeAddressList(parsed.to) || [],
+                cc: normalizeAddressList(parsed.cc) || undefined,
+                bcc: normalizeAddressList(parsed.bcc) || undefined,
+                replyTo: normalizeAddressList(parsed.replyTo) || undefined,
                 date: parsed.date?.toISOString() || new Date().toISOString(),
                 receivedAt: new Date().toISOString(),
                 messageId: parsed.messageId || `imap-${imapMetadata.uid || Date.now()}`,
@@ -176,7 +196,7 @@ export default class Email extends Document {
                     isInline: att.contentDisposition === 'inline',
                     checksum: att.checksum,
                 })),
-                headers: parsed.headers ? Object.fromEntries(parsed.headers) : undefined,
+                headers,
                 platform: 'imap',
                 platformMetadata: {
                     uid: imapMetadata.uid,

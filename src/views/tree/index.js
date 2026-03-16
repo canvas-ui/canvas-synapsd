@@ -50,7 +50,13 @@ class ContextTree extends EventEmitter {
     #layerIndex;
 
     constructor(options = {}) {
-        super(options.eventEmitterOptions || {});
+        super({
+            wildcard: true,
+            delimiter: '.',
+            newListener: false,
+            maxListeners: 100,
+            ...(options.eventEmitterOptions || {})
+        });
 
         if (!options.dataStore) { throw new Error('ContextTree requires a dataStore reference'); }
         this.#dataStore = options.dataStore;

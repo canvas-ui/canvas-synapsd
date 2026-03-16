@@ -80,7 +80,13 @@ class SynapsD extends EventEmitter {
         eventEmitterOptions: {},
         // TODO: Add per dataset versioning support to the underlying db backend!
     }) {
-        super(options.eventEmitterOptions);
+        super({
+            wildcard: true,
+            delimiter: '.',
+            newListener: false,
+            maxListeners: 100,
+            ...(options.eventEmitterOptions || {}),
+        });
         debug('Initializing SynapsD');
         debug('DB Options:', options);
 
