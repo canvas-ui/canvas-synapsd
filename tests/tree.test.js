@@ -393,6 +393,26 @@ describe('SynapsD Tree Operations', () => {
             expect(await db.hasDocument(docId, '/')).toBe(true);
         });
 
+        it('should promote documents out of incoming using existing context updates', async () => {
+            const docId = await db.insertDocument(
+                {
+                    schema: 'data/abstraction/note',
+                    data: { title: 'Promoted Note', content: 'Keep this one' }
+                },
+                '/.incoming/email/account/inbox'
+            );
+
+            await db.insertDocument(docId, '/projects/kept');
+
+            expect(await db.hasDocument(docId, '/.incoming/email/account/inbox')).toBe(true);
+            expect(await db.hasDocument(docId, '/projects/kept')).toBe(true);
+
+            await db.removeDocument(docId, '/.incoming/email/account/inbox');
+
+            expect(await db.hasDocument(docId, '/.incoming/email/account/inbox')).toBe(false);
+            expect(await db.hasDocument(docId, '/projects/kept')).toBe(true);
+        });
+
         it('should prevent removal from root context', async () => {
             const doc = {
                 schema: 'data/abstraction/note',

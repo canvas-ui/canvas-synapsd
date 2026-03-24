@@ -34,4 +34,57 @@ describe('Search', () => {
         expect(result.error).toBeNull();
         expect(ids).toContain(matchingId);
     });
+
+    it('should exclude incoming documents from root listings when requested', async () => {
+        const visibleId = await db.insertDocument({
+            schema: 'data/abstraction/note',
+            data: {
+                title: 'Visible Result',
+                content: 'This should stay in the normal root view'
+            }
+        }, '/projects/visible');
+
+        const hiddenId = await db.insertDocument({
+            schema: 'data/abstraction/note',
+            data: {
+                title: 'Incoming Result',
+                content: 'This should stay quarantined'
+            }
+        }, '/.incoming/email/test-account/inbox');
+
+        const rootResult = await db.findDocuments('/', [], [], {
+            excludeContextSpec: '/.incoming',
+        });
+        const incomingResult = await db.findDocuments('/.incoming');
+
+        expect(rootResult.map(doc => doc.id)).toContain(visibleId);
+        expect(rootResult.map(doc => doc.id)).not.toContain(hiddenId);
+        expect(incomingResult.map(doc => doc.id)).toContain(hiddenId);
+    });
+
+    it('should exclude incoming documents from full-text search when requested', async () => {
+        await db.insertDocument({
+            schema: 'data/abstraction/note',
+            data: {
+                title: 'Visible Search Hit',
+                content: 'searchterm-visible'
+            }
+        }, '/projects/search');
+
+        const hiddenId = await db.insertDocument({
+            schema: 'data/abstraction/note',
+            data: {
+                title: 'Incoming Search Hit',
+                content: 'searchterm-hidden'
+            }
+        }, '/.incoming/message/slack/random');
+
+        const hiddenResults = await db.ftsQuery('searchterm-hidden', '/', [], [], {
+            excludeContextSpec: '/.incoming',
+        });
+        const incomingResults = await db.ftsQuery('searchterm-hidden', '/.incoming');
+
+        expect(hiddenResults.map(doc => doc.id)).not.toContain(hiddenId);
+        expect(incomingResults.map(doc => doc.id)).toContain(hiddenId);
+    });
 });

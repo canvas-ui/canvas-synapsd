@@ -579,10 +579,11 @@ class SynapsD extends EventEmitter {
     }
 
     async find(spec = {}) {
-        const {
+        let {
             contextSpec,
             attributes,
             filterArray,
+            excludeContextSpecs,
             options,
         } = this.#normalizeFindSpec(spec);
 
@@ -664,6 +665,11 @@ class SynapsD extends EventEmitter {
                         }
                     }
                 }
+            }
+
+            resultBitmap = await this.#applyExcludedContexts(resultBitmap, excludeContextSpecs);
+            if (resultBitmap) {
+                filtersApplied = true;
             }
 
             // Convert the final bitmap result (which might be null) to an ID array
@@ -1358,6 +1364,12 @@ class SynapsD extends EventEmitter {
         let filtersApplied = false;
         const contextBitmapArray = parseContextSpecForQuery(contextSpec);
         const hasExplicitContextPath = contextSpec !== null && contextSpec !== undefined && contextSpec !== '/';
+        const excludeContextSpecs = this.#normalizeExcludeContextSpecs(
+            effectiveOptions.excludeContextSpecs
+                ?? effectiveOptions.excludeContextSpec
+                ?? effectiveOptions.excludeContexts
+                ?? effectiveOptions.excludeContext
+        );
 
         if (hasExplicitContextPath && !this.tree.getLayerForPath(contextSpec)) {
             const empty = [];
@@ -1407,6 +1419,11 @@ class SynapsD extends EventEmitter {
                     }
                 }
             }
+        }
+
+        candidateBitmap = await this.#applyExcludedContexts(candidateBitmap, excludeContextSpecs);
+        if (candidateBitmap) {
+            filtersApplied = true;
         }
 
         const candidateIds = candidateBitmap ? candidateBitmap.toArray() : [];
@@ -1612,6 +1629,10 @@ class SynapsD extends EventEmitter {
             attributes = null,
             filters = null,
             filterArray = [],
+            excludeContext,
+            excludeContextSpec,
+            excludeContexts,
+            excludeContextSpecs,
             options,
             parse,
             limit,
@@ -1626,12 +1647,29 @@ class SynapsD extends EventEmitter {
         const normalizedFilterArray = Array.isArray(filterArray) ? [...filterArray] : [filterArray].filter(Boolean);
         normalizedFilterArray.push(...this.#normalizeFiltersObject(filters));
 
+        const baseOptions = typeof options === 'object' && options !== null ? { ...options } : {};
+        const normalizedExcludeContextSpecs = this.#normalizeExcludeContextSpecs(
+            excludeContextSpecs
+            ?? excludeContexts
+            ?? excludeContextSpec
+            ?? excludeContext
+            ?? baseOptions.excludeContextSpecs
+            ?? baseOptions.excludeContexts
+            ?? baseOptions.excludeContextSpec
+            ?? baseOptions.excludeContext
+        );
+        delete baseOptions.excludeContextSpecs;
+        delete baseOptions.excludeContexts;
+        delete baseOptions.excludeContextSpec;
+        delete baseOptions.excludeContext;
+
         return {
             contextSpec: context ?? contextSpec ?? null,
             attributes: this.#normalizeAttributes(attributes),
             filterArray: normalizedFilterArray,
+            excludeContextSpecs: normalizedExcludeContextSpecs,
             options: {
-                ...(typeof options === 'object' && options !== null ? options : {}),
+                ...baseOptions,
                 ...(parse !== undefined ? { parse } : {}),
                 ...(limit !== undefined ? { limit } : {}),
                 ...(offset !== undefined ? { offset } : {}),
@@ -1770,6 +1808,60 @@ class SynapsD extends EventEmitter {
             }
         }
         return new RoaringBitmap32(ids);
+    }
+
+    #normalizeExcludeContextSpecs(value) {
+        const contextSpecs = Array.isArray(value) ? value : [value];
+        return contextSpecs
+            .filter((contextSpec) => typeof contextSpec === 'string' && contextSpec.trim().length > 0)
+            .map((contextSpec) => contextSpec.trim())
+            .filter((contextSpec, index, array) => array.indexOf(contextSpec) === index);
+    }
+
+    async #buildExcludedContextBitmap(contextSpecs = []) {
+        if (!Array.isArray(contextSpecs) || contextSpecs.length === 0) {
+            return null;
+        }
+
+        let excludedBitmap = null;
+        for (const contextSpec of contextSpecs) {
+            if (!contextSpec || contextSpec === '/') {
+                continue;
+            }
+
+            const layer = this.tree.getLayerForPath(contextSpec);
+            if (!layer?.id) {
+                continue;
+            }
+
+            const layerBitmap = await this.contextBitmapCollection.getBitmap(layer.id, false);
+            if (!layerBitmap || layerBitmap.isEmpty) {
+                continue;
+            }
+
+            if (!excludedBitmap) {
+                excludedBitmap = layerBitmap.clone();
+            } else {
+                excludedBitmap.orInPlace(layerBitmap);
+            }
+        }
+
+        return excludedBitmap;
+    }
+
+    async #applyExcludedContexts(bitmap, contextSpecs = []) {
+        const excludedBitmap = await this.#buildExcludedContextBitmap(contextSpecs);
+        if (!excludedBitmap || excludedBitmap.isEmpty) {
+            return bitmap;
+        }
+
+        const nextBitmap = bitmap || await this.#buildAllDocumentsBitmap();
+        if (!nextBitmap || nextBitmap.isEmpty) {
+            return nextBitmap;
+        }
+
+        nextBitmap.andNotInPlace(excludedBitmap);
+        return nextBitmap;
     }
 
     /**
