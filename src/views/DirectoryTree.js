@@ -3,7 +3,8 @@
 import EventEmitter from 'eventemitter2';
 import debugInstance from 'debug';
 import { ulid } from 'ulid';
-import TreeNode from './tree/lib/TreeNode.js';
+import TreeNode from './lib/TreeNode.js';
+import { buildTreeEventPayload } from './lib/treeEvents.js';
 
 const debug = debugInstance('canvas:synapsd:directory-tree');
 
@@ -47,13 +48,13 @@ class DirectoryTree extends EventEmitter {
         this.#initialized = true;
     }
 
-    async insertDocument(oid, path) {
+    async put(oid, path) {
         const node = await this.#ensureNode(path);
         await this.#collection.tick(node.id, oid);
         return this.#collection.makeKey(node.id);
     }
 
-    async insertDocumentMany(oid, pathArray) {
+    async putMany(oid, pathArray) {
         const paths = Array.isArray(pathArray) ? pathArray : [pathArray];
         const nodeIds = [];
         for (const path of paths) {
@@ -65,13 +66,13 @@ class DirectoryTree extends EventEmitter {
         return nodeIds.map((id) => this.#collection.makeKey(id));
     }
 
-    async removeDocument(oid, path) {
+    async unlink(oid, path) {
         const node = this.#getNodeForPath(this.#normalizePath(path));
         if (!node) { return; }
         await this.#collection.untick(node.id, oid);
     }
 
-    async deleteDocument(oid) {
+    async unlinkMany(oid) {
         const ids = this.#collectNodeIds(this.root).filter((id) => id !== ROOT_NODE_ID);
         if (ids.length === 0) { return; }
         await this.#collection.untickMany(ids, oid);
@@ -106,11 +107,9 @@ class DirectoryTree extends EventEmitter {
     async insertPath(path = '/') {
         const normalizedPath = this.#normalizePath(path);
         const node = await this.#ensureNode(normalizedPath);
-        this.emit('tree.path.inserted', {
+        this.#emitTreeEvent('tree.path.inserted', {
             path: normalizedPath,
             nodeId: node.id,
-            treeType: this.type,
-            timestamp: new Date().toISOString(),
         });
         return {
             data: [node.id],
@@ -150,12 +149,10 @@ class DirectoryTree extends EventEmitter {
             this.#persistNode(node),
         ]);
 
-        this.emit('tree.path.moved', {
+        this.#emitTreeEvent('tree.path.moved', {
             pathFrom: sourcePath,
             pathTo: targetPath,
             nodeId: node.id,
-            treeType: this.type,
-            timestamp: new Date().toISOString(),
         });
 
         return { data: { nodeId: node.id }, count: 1, error: null };
@@ -180,13 +177,11 @@ class DirectoryTree extends EventEmitter {
         await this.#persistSubtree(copiedNode);
         await this.#persistNode(targetParent);
 
-        this.emit('tree.path.copied', {
+        this.#emitTreeEvent('tree.path.copied', {
             pathFrom: sourcePath,
             pathTo: targetPath,
             recursive,
             nodeId: copiedNode.id,
-            treeType: this.type,
-            timestamp: new Date().toISOString(),
         });
 
         return true;
@@ -210,12 +205,10 @@ class DirectoryTree extends EventEmitter {
         await this.#persistNode(parent);
         await this.#deleteSubtree(node);
 
-        this.emit('tree.path.removed', {
+        this.#emitTreeEvent('tree.path.removed', {
             path: normalizedPath,
             recursive,
             nodeId: node.id,
-            treeType: this.type,
-            timestamp: new Date().toISOString(),
         });
 
         return {
@@ -423,6 +416,10 @@ class DirectoryTree extends EventEmitter {
 
     #normalizeSegmentForCompare(value) {
         return this.#sanitizeSegment(value).toLowerCase();
+    }
+
+    #emitTreeEvent(eventName, payload = {}) {
+        this.emit(eventName, buildTreeEventPayload(this, payload));
     }
 }
 

@@ -6,7 +6,7 @@ import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd:context-tree:layer-index');
 
 // Modules
-import SchemaRegistry from '../../../schemas/SchemaRegistry.js';
+import SchemaRegistry from '../../schemas/SchemaRegistry.js';
 const RootLayer = SchemaRegistry.getSchema('internal/layers/universe');
 
 /**

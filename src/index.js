@@ -1844,7 +1844,7 @@ class SynapsD extends EventEmitter {
         if (directorySpec) {
             const { tree: directoryTree, path: directoryPath } = this.#resolveTreeSelection('directory', directorySpec, null);
             const dirs = Array.isArray(directoryPath) ? directoryPath : [directoryPath];
-            const dirKeys = await directoryTree.insertDocumentMany(docId, dirs);
+            const dirKeys = await directoryTree.putMany(docId, dirs);
             if (dirKeys && dirKeys.length > 0) {
                 allSynapseKeys.push(...dirKeys);
             }
