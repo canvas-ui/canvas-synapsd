@@ -361,7 +361,7 @@ describe('SynapsD Tree Operations', () => {
                 '/tree-test/branch-b'
             );
 
-            const tree = db.tree.buildJsonTree();
+            const tree = db.getDefaultContextTree().buildJsonTree();
 
             expect(tree).toBeDefined();
             expect(tree.name).toBe('/');

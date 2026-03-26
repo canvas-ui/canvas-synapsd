@@ -42,6 +42,9 @@ class ContextTree extends EventEmitter {
     // Data store
     #dataStore = null; // Single data store for layers and the persistent tree structure
     #showHiddenLayers;
+    #bitmapCollection = null;
+    #treeId = null;
+    #treeName = null;
 
     // Runtime state
     #initialized = false;
@@ -67,6 +70,9 @@ class ContextTree extends EventEmitter {
         if (options.db) {
             this.#db = options.db;
         }
+        this.#bitmapCollection = options.bitmapCollection || null;
+        this.#treeId = options.treeId || null;
+        this.#treeName = options.treeName || options.name || this.#treeId;
 
         // Options
         this.#showHiddenLayers = options.showHiddenLayers || false;
@@ -108,6 +114,11 @@ class ContextTree extends EventEmitter {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
         return this.#layerIndex.listLayers();
     }
+
+    get id() { return this.#treeId; }
+    get name() { return this.#treeName; }
+    get type() { return 'context'; }
+    get collection() { return this.#bitmapCollection; }
 
     get paths() {
         return this.#buildPathArray();
@@ -204,10 +215,10 @@ class ContextTree extends EventEmitter {
         if (!layer) { throw new Error(`Layer not found: ${nameOrId}`); }
 
         // Clean up the associated bitmap (keyed by ULID)
-        if (this.#db && this.#db.contextBitmapCollection) {
+        if (this.#bitmapCollection) {
             try {
                 debug(`Cleaning up bitmap for layer ${layer.name} (ID: ${layer.id})`);
-                await this.#db.contextBitmapCollection.deleteBitmap(layer.id);
+                await this.#bitmapCollection.deleteBitmap(layer.id);
                 debug(`Successfully deleted bitmap for layer ${layer.name}`);
             } catch (error) {
                 debug(`Warning: Failed to delete bitmap for layer ${layer.name}: ${error.message}`);
@@ -245,7 +256,7 @@ class ContextTree extends EventEmitter {
     }
 
     async mergeLayer(layerId, layerArray) {
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        if (!this.#bitmapCollection) { throw new Error('Bitmap collection not passed to ContextTree, functionality not available'); }
         try {
             const sourceLayer = this.getLayer(layerId) || this.getLayerById(layerId);
             if (!sourceLayer) {
@@ -268,7 +279,7 @@ class ContextTree extends EventEmitter {
                 return { data: [], count: 0, error: 'No valid target layers found.' };
             }
 
-            const affected = await this.#db.contextBitmapCollection.mergeBitmap(sourceLayer.id, targetIds);
+            const affected = await this.#bitmapCollection.mergeBitmap(sourceLayer.id, targetIds);
             this.emit('tree.layer.merged', {
                 source: sourceLayer.name,
                 targets: targetIds,
@@ -282,7 +293,7 @@ class ContextTree extends EventEmitter {
     }
 
     async subtractLayer(layerId, layerArray) {
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        if (!this.#bitmapCollection) { throw new Error('Bitmap collection not passed to ContextTree, functionality not available'); }
         try {
             const sourceLayer = this.getLayer(layerId) || this.getLayerById(layerId);
             if (!sourceLayer) {
@@ -305,7 +316,7 @@ class ContextTree extends EventEmitter {
                 return { data: [], count: 0, error: 'No valid target layers found.' };
             }
 
-            const affected = await this.#db.contextBitmapCollection.subtractBitmap(sourceLayer.id, targetIds);
+            const affected = await this.#bitmapCollection.subtractBitmap(sourceLayer.id, targetIds);
             this.emit('tree.layer.subtracted', {
                 source: sourceLayer.name,
                 targets: targetIds,
@@ -819,7 +830,7 @@ class ContextTree extends EventEmitter {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         // Await the async DB call
-        const resultId = await this.#db.insertDocument(document, normalizedContextSpec, featureBitmapArray);
+        const resultId = await this.#db.insertDocument(document, this.#buildContextSelector(normalizedContextSpec), featureBitmapArray);
         // Assuming insertDocument returns the generated ID
         if (resultId) {
             // Use the returned ID for the event
@@ -838,7 +849,10 @@ class ContextTree extends EventEmitter {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         // Await the async DB call
-        const results = await this.#db.insertDocumentArray(docArray, normalizedContextSpec, featureBitmapArray);
+        const results = await this.#db.putMany(docArray, {
+            context: this.#buildContextSelector(normalizedContextSpec),
+            attributes: { allOf: featureBitmapArray },
+        });
         // Assuming insertDocumentArray returns generated IDs or success status
         if (results) { // Adjust condition based on actual return
             // Need to know what `results` contains to get IDs accurately
@@ -858,7 +872,7 @@ class ContextTree extends EventEmitter {
     async updateDocument(document, contextSpec = null, featureBitmapArray = []) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        const result = await this.#db.updateDocument(document, normalizedContextSpec, featureBitmapArray);
+        const result = await this.#db.updateDocument(document, this.#buildContextSelector(normalizedContextSpec), featureBitmapArray);
         if (result && document.id) { // Check document.id as it MUST be provided for update
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
             this.emit('tree.document.updated', {
@@ -875,7 +889,10 @@ class ContextTree extends EventEmitter {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         // Await the async DB call
-        const results = await this.#db.updateDocumentArray(docArray, normalizedContextSpec, featureBitmapArray);
+        const results = await this.#db.putMany(docArray, {
+            context: this.#buildContextSelector(normalizedContextSpec),
+            attributes: { allOf: featureBitmapArray },
+        });
         if (results) { // Adjust condition
             const documentIds = docArray.map(doc => doc.id); // IDs must be in input array
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
@@ -893,7 +910,7 @@ class ContextTree extends EventEmitter {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         // Await the async DB call
-        const result = await this.#db.removeDocument(documentId, normalizedContextSpec, featureBitmapArray);
+        const result = await this.#db.removeDocument(documentId, this.#buildContextSelector(normalizedContextSpec), featureBitmapArray);
 
         if (result) {
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
@@ -913,7 +930,10 @@ class ContextTree extends EventEmitter {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         // Await the async DB call
-        const results = await this.#db.removeDocumentArray(docIdArray, normalizedContextSpec, featureBitmapArray);
+        const results = await this.#db.unlinkMany(docIdArray, {
+            context: this.#buildContextSelector(normalizedContextSpec),
+            attributes: { allOf: featureBitmapArray },
+        });
         if (results) { // Adjust condition
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
             this.emit('tree.document.removed.batch', {
@@ -942,7 +962,7 @@ class ContextTree extends EventEmitter {
     async deleteDocumentArray(docIdArray) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         // Await the async DB call
-        const results = await this.#db.deleteDocumentArray(docIdArray);
+        const results = await this.#db.deleteMany(docIdArray);
         if (results) { // Adjust condition
             this.emit('tree.document.deleted.batch', {
                 documentIds: docIdArray, // Use the IDs passed in
@@ -958,28 +978,34 @@ class ContextTree extends EventEmitter {
      * ============================================================================
      */
 
-    async query(queryString, contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
+    async search(spec = {}) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return await this.#db.query(queryString , contextSpec, featureBitmapArray, filterArray, options);
+        const normalizedContextSpec = this.#normalizePath(spec.path ?? spec.context ?? '/');
+        return await this.#db.search({
+            ...spec,
+            context: this.#buildContextSelector(normalizedContextSpec),
+        });
     }
 
-    async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
-        const normalizedContextSpec = this.#normalizePath(contextSpec);
+    async find(spec = {}) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        // findDocuments doesn't modify, typically no event needed unless logging access
-        return await this.#db.findDocuments(normalizedContextSpec, featureBitmapArray, filterArray, options);
+        const normalizedContextSpec = this.#normalizePath(spec.path ?? spec.context ?? '/');
+        return await this.#db.find({
+            ...spec,
+            context: this.#buildContextSelector(normalizedContextSpec),
+        });
     }
 
     hasDocument(id, contextSpec = '/', featureBitmapArray = []) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.hasDocument(id, normalizedContextSpec, featureBitmapArray);
+        return this.#db.hasDocument(id, this.#buildContextSelector(normalizedContextSpec), featureBitmapArray);
     }
 
     hasDocumentByChecksum(checksum, contextSpec = null, featureBitmapArray = []) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.hasDocumentByChecksum(checksum, normalizedContextSpec, featureBitmapArray);
+        return this.#db.hasDocumentByChecksum(checksum, this.#buildContextSelector(normalizedContextSpec), featureBitmapArray);
     }
 
     /**
@@ -1304,6 +1330,13 @@ class ContextTree extends EventEmitter {
             debug(`Could not resolve path "${path}" to layer names for event: ${error.message}`);
             return []; // Return empty array for safety
         }
+    }
+
+    #buildContextSelector(path) {
+        return {
+            tree: this.#treeId,
+            path,
+        };
     }
 
     #normalizePath(path) {

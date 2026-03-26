@@ -14,7 +14,7 @@
 - [x] Fix global search without bitmap prefilters.
 - [x] Confirm adapter/source integrations stay outside `synapsd`.
 
-## Phase 1: Define V2 Core API
+## Phase 1: Canonical V2 API
 - [ ] Finalize public db API:
   - [ ] `get(id, options?)`
   - [ ] `put(record, memberships?)`
@@ -26,7 +26,8 @@
 - [ ] Finalize naming:
   - [ ] use `attributes` instead of `features`/`facets`
   - [ ] use `filters` for operator-like constraints
-- [ ] Finalize query object shape:
+  - [ ] keep `Context` vs `ContextTree` naming explicit everywhere
+- [ ] Finalize canonical query object shape:
   - [ ] `context`
   - [ ] `directory`
   - [ ] `attributes.allOf`
@@ -36,45 +37,42 @@
   - [ ] `filters.glob`
   - [ ] `filters.regexp`
   - [ ] pagination/options
-- [ ] Decide whether `search(spec)` supports all `find(spec)` constraints plus `query`.
+- [ ] Make `find(spec)` the only structural query entrypoint worth keeping.
+- [ ] Make `search(spec)` the only ranked/text query entrypoint worth keeping.
 
-## Phase 2: Introduce V2 API Without Breaking Everything
-- [ ] Implement `db.find(spec)` as the new canonical structural query method.
-- [ ] Implement `db.search(spec)` as the new canonical ranked/text query method.
-- [ ] Make old methods delegate internally:
-  - [ ] `findDocuments(...) -> find(spec)`
-  - [ ] `ftsQuery(...) -> search(spec)`
-  - [ ] `query(...) -> search(spec)` or remove after migration
-- [ ] Add normalization helpers:
-  - [ ] legacy args -> v2 spec
-  - [ ] route query params -> v2 spec
-  - [ ] workspace list/search options -> v2 spec
-
-## Phase 3: Workspace Migration
-- [ ] Replace `Workspace.list(options)` old signature with v2 `find(spec)` usage.
-- [ ] Replace any workspace search wrapper to call `db.search(spec)`.
+## Phase 2: Migrate Runtime Callers Directly
+- [ ] Replace workspace-facing code with canonical `find(spec)` / `search(spec)` usage.
+- [ ] Replace context-facing code with canonical `find(spec)` / `search(spec)` usage.
+- [ ] Replace transport branching between structural/text query wrappers with canonical query builders.
 - [ ] Remove `contextSpec`, `featureBitmapArray`, `filterArray` plumbing from workspace-facing code.
-- [ ] Add a workspace query builder/helper if needed:
-  - [ ] merge active context
+- [ ] Add narrow query-builder helpers only where they remove code instead of hiding complexity:
+  - [ ] merge active context focus
   - [ ] merge client/server context
   - [ ] merge user-provided attributes
   - [ ] merge filters/pagination
-- [ ] Update route handlers that currently branch between `findDocuments` and `ftsQuery`.
+
+## Phase 3: Delete Legacy API Surface
+- [ ] Remove `findDocuments(...)`.
+- [ ] Remove `ftsQuery(...)`.
+- [ ] Remove `query(...)`.
+- [ ] Remove old positional argument normalization.
+- [ ] Remove route/query helpers that exist only to translate legacy shapes.
+- [ ] Remove dead wrappers in `Workspace`, `Context`, `ContextTree`, and transports.
 
 ## Phase 4: Context/Directory Tree Cleanup
-- [ ] Export trees cleanly from db:
-  - [ ] `db.contextTree`
-  - [ ] `db.directoryTree`
-- [ ] Keep tree APIs on the tree objects, not flattened onto db.
+- [x] Export trees cleanly from db:
+  - [x] `db.contextTree`
+  - [x] `db.directoryTree`
+- [x] Keep tree APIs on the tree objects, not flattened onto db.
 - [ ] Unify shared tree internals:
-  - [ ] path normalization
-  - [ ] document membership linking
+  - [x] path normalization
+  - [x] document membership linking
   - [ ] unlinking
-  - [ ] event shapes
+  - [x] event shapes
   - [ ] shared list/find helpers where possible
-- [ ] Keep different public semantics:
-  - [ ] `ContextTree` = layered/intersection semantics
-  - [ ] `DirectoryTree` = exact location semantics
+- [x] Keep different public semantics:
+  - [x] `ContextTree` = layered/intersection semantics
+  - [x] `DirectoryTree` = exact location semantics
 
 ## Phase 5: Membership Engine Extraction
 - [ ] Extract shared document-target linking into one internal module/service.

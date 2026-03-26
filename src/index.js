@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
 import debugInstance from 'debug';
+import { ulid } from 'ulid';
 const debug = debugInstance('canvas:synapsd');
 const require = createRequire(import.meta.url);
 const { RoaringBitmap32 } = require('roaring');
@@ -29,13 +30,14 @@ import Synapses from './indexes/inverted/Synapses.js';
 import LanceIndex from './indexes/lance/index.js';
 
 // Views / Abstractions
-import ContextTree from './views/tree/index.js';
-import DirectoryTree from './views/tree/DirectoryTree.js';
+import ContextTree from './views/ContextTree.js';
+import DirectoryTree from './views/DirectoryTree.js';
 
 // Extracted utilities
 import { parseContextSpecForInsert, parseContextSpecForQuery, parseBitmapArray } from './utils/parsing.js';
 import { parseFilters, applyDatetimeFilter } from './utils/filters.js';
 import { parseDocumentData, initializeDocument, parseInitializeDocument, generateDocumentID } from './utils/document.js';
+import PrefixedStore from './utils/PrefixedStore.js';
 
 // Constants
 const INTERNAL_BITMAP_ID_MAX = 100000;
@@ -58,8 +60,12 @@ class SynapsD extends EventEmitter {
     #status;
 
     // Tree Abstractions
-    #tree;
-    #directoryTree;
+    #treeCache = new Map();
+    #treeMetadata = new Map();
+    #defaultTreeIds = {
+        context: null,
+        directory: null,
+    };
 
     // Bitmap Indexes
     #bitmapStore;   // Bitmap store
@@ -127,9 +133,6 @@ class SynapsD extends EventEmitter {
             this.#bitmapCache,
         );
 
-        // Bitmap Collections
-        this.contextBitmapCollection = this.bitmapIndex.createCollection('context');
-
         /**
          * Inverted indexes
          */
@@ -137,18 +140,7 @@ class SynapsD extends EventEmitter {
         this.#checksumIndex = new ChecksumIndex(this.#db.createDataset('checksums'));
         this.#timestampIndex = null;
 
-        /**
-         * Tree Abstractions
-         */
-
-        // Context Tree (AND semantics - shared layers)
-        this.#tree = new ContextTree({
-            dataStore: this.#internalStore,
-            db: this,
-        });
-
-        // Directory Tree (VFS semantics - unique path bitmaps)
-        this.#directoryTree = new DirectoryTree(this.bitmapIndex);
+        this.contextBitmapCollection = null;
 
     }
 
@@ -184,10 +176,6 @@ class SynapsD extends EventEmitter {
     }
 
     get db() { return this.#db; } // For testing only
-    get tree() { return this.#tree; }
-    get contextTree() { return this.#tree; } // Alias
-    get directoryTree() { return this.#directoryTree; }
-    get jsonTree() { return this.#tree.buildJsonTree(); }
 
     // Inverted indexes
     get checksumIndex() { return this.#checksumIndex; }
@@ -229,8 +217,8 @@ class SynapsD extends EventEmitter {
             await this.#lanceIndex.initialize();
             await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
 
-            // Initialize context tree
-            await this.#tree.initialize();
+            await this.#loadTreeRegistry();
+            await this.#ensureDefaultTrees();
 
             // Migrate bitmap keys from legacy format (one-time, idempotent)
             await this.#migrateBitmapKeys();
@@ -248,6 +236,99 @@ class SynapsD extends EventEmitter {
             debug('SynapsD database error during startup: ', error);
             throw error;
         }
+    }
+
+    async listTrees(type = null) {
+        const trees = Array.from(this.#treeMetadata.values());
+        return type ? trees.filter((tree) => tree.type === type) : trees;
+    }
+
+    getTree(nameOrId) {
+        if (!nameOrId) {
+            return null;
+        }
+
+        const directMatch = this.#treeMetadata.get(String(nameOrId));
+        if (directMatch) {
+            return this.#instantiateTree(directMatch);
+        }
+
+        const normalized = this.#normalizeTreeName(nameOrId);
+        for (const meta of this.#treeMetadata.values()) {
+            if (this.#normalizeTreeName(meta.name) === normalized) {
+                return this.#instantiateTree(meta);
+            }
+        }
+
+        return null;
+    }
+
+    getDefaultContextTree() {
+        return this.#getDefaultTreeByType('context');
+    }
+
+    getDefaultDirectoryTree() {
+        return this.#getDefaultTreeByType('directory');
+    }
+
+    async createTree(name, type = 'context', options = {}) {
+        const normalizedName = this.#normalizeTreeName(name);
+        if (!normalizedName) { throw new Error('Tree name is required'); }
+        if (!['context', 'directory'].includes(type)) { throw new Error(`Unsupported tree type "${type}"`); }
+        if (this.getTree(name)) { throw new Error(`Tree already exists: ${name}`); }
+
+        const now = new Date().toISOString();
+        const meta = {
+            id: options.id || ulid(),
+            name: String(name).trim(),
+            type,
+            createdAt: now,
+            updatedAt: now,
+            isDefault: options.isDefault ?? !this.#defaultTreeIds[type],
+        };
+
+        await this.#internalStore.put(this.#treeMetaKey(meta.id), meta);
+        this.#treeMetadata.set(meta.id, meta);
+        if (meta.isDefault || !this.#defaultTreeIds[type]) {
+            this.#defaultTreeIds[type] = meta.id;
+        }
+
+        const tree = this.#instantiateTree(meta);
+        await tree.initialize();
+        if (type === 'context' && meta.id === this.#defaultTreeIds.context) {
+            this.contextBitmapCollection = tree.collection || this.#contextBitmapCollectionForTree(meta.id);
+        }
+
+        this.emit('tree.created', { treeId: meta.id, treeName: meta.name, treeType: meta.type });
+        return meta;
+    }
+
+    async destroyTree(nameOrId) {
+        const meta = this.#resolveTreeMeta(nameOrId);
+        if (!meta) { throw new Error(`Tree not found: ${nameOrId}`); }
+        await this.#deleteTreeStorage(meta);
+        this.#treeMetadata.delete(meta.id);
+        this.#treeCache.delete(meta.id);
+        if (this.#defaultTreeIds[meta.type] === meta.id) {
+            this.#defaultTreeIds[meta.type] = null;
+            const next = (await this.listTrees(meta.type))[0];
+            if (next) {
+                this.#defaultTreeIds[meta.type] = next.id;
+            }
+        }
+        this.emit('tree.deleted', { treeId: meta.id, treeName: meta.name, treeType: meta.type });
+        return true;
+    }
+
+    async renameTree(nameOrId, newName) {
+        const meta = this.#resolveTreeMeta(nameOrId);
+        if (!meta) { throw new Error(`Tree not found: ${nameOrId}`); }
+        if (this.getTree(newName)) { throw new Error(`Tree already exists: ${newName}`); }
+        meta.name = String(newName).trim();
+        meta.updatedAt = new Date().toISOString();
+        await this.#internalStore.put(this.#treeMetaKey(meta.id), meta);
+        this.emit('tree.renamed', { treeId: meta.id, treeName: meta.name, treeType: meta.type });
+        return meta;
     }
 
     async stop() { return this.shutdown(); }
@@ -339,14 +420,201 @@ class SynapsD extends EventEmitter {
      * CRUD methods
      */
 
-    async insertDocument(document, contextSpec = '/', featureBitmapArray = [], emitEvent = true) {
+    async get(id, options = { parse: true }) {
+        if (!id) { throw new Error('Document id required'); }
+        return await this.getDocumentById(id, options);
+    }
+
+    async put(record, memberships = {}) {
+        const features = memberships.attributes?.allOf
+            ?? memberships.attributes
+            ?? memberships.features
+            ?? [];
+
+        const spec = {
+            context: memberships.context ?? { path: '/' },
+            directory: memberships.directory ?? null,
+            features,
+            emitEvent: memberships.emitEvent,
+        };
+
+        if (typeof record === 'number' || (typeof record === 'string' && /^\d+$/.test(record))) {
+            const id = typeof record === 'number' ? record : parseInt(record, 10);
+            return await this.updateDocument(id, null, spec);
+        }
+
+        if (!record || typeof record !== 'object' || Array.isArray(record)) {
+            throw new Error('Record object or numeric document id is required');
+        }
+
+        if (record.id !== undefined && record.id !== null) {
+            const existing = await this.getDocumentById(record.id);
+            if (existing) {
+                return await this.updateDocument(record.id, record, spec);
+            }
+        }
+
+        return await this.insertDocument(record, spec);
+    }
+
+    async has(id, spec = {}) {
+        if (!id) { throw new Error('Document id required'); }
+        const features = spec.attributes?.allOf
+            ?? spec.attributes
+            ?? spec.features
+            ?? [];
+        return await this.hasDocument(id, spec.context ?? { path: '/' }, features);
+    }
+
+    async unlink(id, membershipsOrSpec = {}, options = {}) {
+        if (!id) { throw new Error('Document id required'); }
+        const features = membershipsOrSpec.attributes?.allOf
+            ?? membershipsOrSpec.attributes
+            ?? membershipsOrSpec.features
+            ?? [];
+        return await this.removeDocument(
+            id,
+            membershipsOrSpec.context ?? { path: '/' },
+            features,
+            options,
+        );
+    }
+
+    async delete(id, options = {}) {
+        if (!id) { throw new Error('Document id required'); }
+        return await this.deleteDocument(id, options);
+    }
+
+    async putMany(records, memberships = {}) {
+        const features = memberships.attributes?.allOf
+            ?? memberships.attributes
+            ?? memberships.features
+            ?? [];
+        const contextSpec = memberships.context ?? { path: '/' };
+        if (!Array.isArray(records)) {
+            throw new Error('Document array must be an array');
+        }
+        if (!Array.isArray(features)) {
+            throw new Error('Feature array must be an array');
+        }
+
+        debug(`putMany: Attempting to store ${records.length} records`);
+        const storedIds = [];
+        for (let i = 0; i < records.length; i++) {
+            const record = records[i];
+            try {
+                const id = await this.put(record, {
+                    context: contextSpec,
+                    attributes: { allOf: features },
+                    emitEvent: false,
+                });
+                storedIds.push(id);
+            } catch (error) {
+                const contextualError = new Error(`Failed to store record at index ${i}: ${error.message}`);
+                contextualError.cause = error;
+                contextualError.failedItem = record;
+                contextualError.failedIndex = i;
+                throw contextualError;
+            }
+        }
+
+        if (storedIds.length > 0 && this.getDefaultContextTree()) {
+            try {
+                this.#resolveTreeSelection('context', contextSpec, '/').tree.emit('tree.document.inserted.batch', {
+                    documentIds: storedIds,
+                    contextSpec,
+                    layerNames: [],
+                    timestamp: new Date().toISOString(),
+                });
+            } catch (treeError) {
+                debug(`putMany: Failed to emit tree batch event, error: ${treeError.message}`);
+            }
+        }
+
+        return storedIds;
+    }
+
+    async unlinkMany(ids, membershipsOrSpec = {}, options = {}) {
+        const features = membershipsOrSpec.attributes?.allOf
+            ?? membershipsOrSpec.attributes
+            ?? membershipsOrSpec.features
+            ?? [];
+        const contextSpec = membershipsOrSpec.context ?? { path: '/' };
+
+        if (!Array.isArray(ids)) {
+            throw new Error('Document ID array must be an array');
+        }
+        if (!Array.isArray(features)) {
+            throw new Error('Feature array must be an array');
+        }
+        if (typeof options !== 'object') { options = { recursive: false }; }
+
+        const result = {
+            successful: [],
+            failed: [],
+            count: ids.length,
+        };
+
+        for (let i = 0; i < ids.length; i++) {
+            const id = ids[i];
+            if (typeof id !== 'number') {
+                result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
+                continue;
+            }
+            try {
+                const removedId = await this.unlink(id, {
+                    context: contextSpec,
+                    attributes: { allOf: features },
+                }, options);
+                result.successful.push({ index: i, id: removedId });
+            } catch (error) {
+                result.failed.push({ index: i, id, error: error.message || 'Unknown error' });
+            }
+        }
+
+        return result;
+    }
+
+    async deleteMany(ids, options = {}) {
+        if (!Array.isArray(ids)) {
+            throw new Error('Document ID array must be an array');
+        }
+
+        const result = {
+            successful: [],
+            failed: [],
+            count: ids.length,
+        };
+
+        for (let i = 0; i < ids.length; i++) {
+            const id = ids[i];
+            if (typeof id !== 'number') {
+                result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
+                continue;
+            }
+            try {
+                const success = await this.delete(id, options);
+                if (success) {
+                    result.successful.push({ index: i, id });
+                } else {
+                    result.failed.push({ index: i, id, error: 'Document not found or already deleted' });
+                }
+            } catch (error) {
+                result.failed.push({ index: i, id, error: error.message || 'Unknown error' });
+            }
+        }
+
+        return result;
+    }
+
+    async insertDocument(document, contextSpec = { path: '/' }, featureBitmapArray = [], emitEvent = true) {
         if (!document) { throw new Error('Document is required'); }
 
-        // Support options object: insertDocument(doc, { context, directory, features })
+        // Canonical document insert signature accepts a selector/options object.
         let directorySpec = null;
-        if (typeof contextSpec === 'object' && contextSpec !== null && !Array.isArray(contextSpec)) {
+        if (this.#isDocumentOperationOptions(contextSpec)) {
             const opts = contextSpec;
-            contextSpec = opts.context ?? '/';
+            contextSpec = opts.context ?? { path: '/' };
             directorySpec = opts.directory ?? null;
             featureBitmapArray = opts.features ?? featureBitmapArray;
             emitEvent = opts.emitEvent ?? emitEvent;
@@ -364,7 +632,7 @@ class SynapsD extends EventEmitter {
 
         // Dedup by checksum
         const primaryChecksum = parsedDocument.getPrimaryChecksum();
-        const storedDocument = await this.getDocumentByChecksumString(primaryChecksum);
+        const storedDocument = await this.getByChecksumString(primaryChecksum);
 
         if (storedDocument) {
             parsedDocument.id = storedDocument.id;
@@ -397,7 +665,8 @@ class SynapsD extends EventEmitter {
         try { await this.#lanceIndex.upsert(parseInitializeDocument(parsedDocument)); } catch (_) { }
 
         if (emitEvent) {
-            this.tree.emit('tree.document.inserted', {
+            const { tree: contextTree } = this.#resolveTreeSelection('context', contextSpec, '/');
+            contextTree.emit('tree.document.inserted', {
                 documentId: parsedDocument.id,
                 contextSpec,
                 directorySpec,
@@ -409,64 +678,14 @@ class SynapsD extends EventEmitter {
         return parsedDocument.id;
     }
 
-    async insertDocumentArray(docArray, contextSpec = '/', featureBitmapArray = []) {
-        if (!Array.isArray(docArray)) {
-            throw new Error('Document array must be an array');
-        }
-        if (!Array.isArray(featureBitmapArray)) {
-            throw new Error('Feature array must be an array');
-        }
-        debug(`insertDocumentArray: Attempting to insert ${docArray.length} documents with contextSpec: ${contextSpec} and featureBitmapArray: ${featureBitmapArray}`);
-
-        const insertedIds = [];
-        // TODO: Implement actual batch/transactional operation in the backend if possible
-        for (let i = 0; i < docArray.length; i++) {
-            const doc = docArray[i];
-            try {
-                // Pass emitEvent = false to prevent multiple events
-                const id = await this.insertDocument(doc, contextSpec, featureBitmapArray, false);
-                insertedIds.push(id);
-                debug(`insertDocumentArray: Successfully inserted document at index ${i}, ID: ${id}`);
-            } catch (error) {
-                debug(`insertDocumentArray: Error inserting document at index ${i} (ID: ${doc.id ?? 'N/A'}). Aborting batch. Error: ${error.message}`);
-                // Re-throw the error to stop the batch operation immediately
-                // Add context about the failed item - create a new error instead of modifying the existing one
-                const contextualError = new Error(`Failed to insert document at index ${i}: ${error.message}`);
-                contextualError.cause = error; // Preserve original error
-                contextualError.failedItem = doc;
-                contextualError.failedIndex = i;
-                throw contextualError;
-            }
-        }
-
-        // If loop completes, all documents were inserted successfully
-        debug(`insertDocumentArray: Successfully inserted all ${insertedIds.length} documents.`);
-
-        // Emit tree event for batch insertion with contextSpec for workspace mode auto-opening support
-        if (insertedIds.length > 0 && this.tree) {
-            try {
-                debug(`insertDocumentArray: Emitting tree batch event for ${insertedIds.length} documents at contextSpec: ${contextSpec}`);
-
-                this.tree.emit('tree.document.inserted.batch', {
-                    documentIds: insertedIds,
-                    contextSpec: contextSpec,
-                    layerNames: [], // Simple implementation for now - layerNames is not critical for tab auto-opening
-                    timestamp: new Date().toISOString(),
-                });
-
-                debug(`insertDocumentArray: Tree batch event emitted for ${insertedIds.length} documents`);
-            } catch (treeError) {
-                debug(`insertDocumentArray: Failed to emit tree batch event, error: ${treeError.message}`);
-                // Don't fail the insert if tree event emission fails
-            }
-        }
-
-        // Emit a single event for the batch success if needed (optional)
-        // this.emit('document:inserted:batch', { ids: insertedIds, count: insertedIds.length });
-        return insertedIds; // Return array of IDs on full success
+    async insertDocumentArray(docArray, contextSpec = { path: '/' }, featureBitmapArray = []) {
+        return await this.putMany(docArray, {
+            context: contextSpec,
+            attributes: { allOf: featureBitmapArray },
+        });
     }
 
-    async hasDocument(id, contextSpec = '/', featureBitmapArrayInput) {
+    async hasDocument(id, contextSpec = { path: '/' }, featureBitmapArrayInput) {
         if (!id) { throw new Error('Document id required'); }
 
         if (!await this.documents.has(id)) {
@@ -476,7 +695,11 @@ class SynapsD extends EventEmitter {
 
         // If the caller did not provide any specific context or feature filters,
         // then existence in the main document store is sufficient.
-        const noContextFilterWanted = contextSpec === undefined || contextSpec === null || contextSpec.length === 0;
+        const rawContextSpec = contextSpec && typeof contextSpec === 'object' && !Array.isArray(contextSpec)
+            ? (contextSpec.path ?? contextSpec.context ?? null)
+            : contextSpec;
+        const { tree: contextTree, collection: contextCollection } = this.#resolveTreeSelection('context', contextSpec, '/');
+        const noContextFilterWanted = rawContextSpec === undefined || rawContextSpec === null || rawContextSpec.length === 0;
         const noFeatureFilterWanted = featureBitmapArrayInput === undefined || featureBitmapArrayInput === null || featureBitmapArrayInput.length === 0;
 
         if (noContextFilterWanted && noFeatureFilterWanted) {
@@ -485,13 +708,13 @@ class SynapsD extends EventEmitter {
         }
 
         // At least one filter criterion was provided or will be defaulted if only one part of the filter was given.
-        const effectiveContextSpec = noContextFilterWanted ? '/' : contextSpec;
+        const effectiveContextSpec = noContextFilterWanted ? '/' : rawContextSpec;
         const effectiveFeatureArray = noFeatureFilterWanted ? [] : featureBitmapArrayInput;
 
         const parsedContextKeys = parseContextSpecForQuery(effectiveContextSpec);
         const hasExplicitRootContext = effectiveContextSpec === '/';
         const hasExplicitContextPath = !hasExplicitRootContext && !noContextFilterWanted;
-        if (hasExplicitContextPath && !this.tree.getLayerForPath(effectiveContextSpec)) {
+        if (hasExplicitContextPath && !contextTree.getLayerForPath(effectiveContextSpec)) {
             debug(`hasDocument: Doc ${id} - explicit context path "${effectiveContextSpec}" does not exist.`);
             return false;
         }
@@ -503,11 +726,11 @@ class SynapsD extends EventEmitter {
         // Apply context filter if caller actually wanted one OR if it defaulted to '/' but features are also specified.
         if (!noContextFilterWanted || (noContextFilterWanted && !noFeatureFilterWanted)) {
             // Resolve context layer names to ULIDs (root '/' is skipped, yielding [] for root-only queries)
-            const contextLayerIds = this.tree.resolveLayerIds(parsedContextKeys);
+            const contextLayerIds = contextTree.resolveLayerIds(parsedContextKeys);
             if (contextLayerIds.length === 0) {
                 // Root-only context — no bitmap filter to apply
             } else {
-                resultBitmap = await this.contextBitmapCollection.AND(contextLayerIds);
+                resultBitmap = await contextCollection.AND(contextLayerIds);
                 contextFilterApplied = true;
             }
             // If context filter results in null/empty, and it was a specific request, then fail early.
@@ -569,13 +792,11 @@ class SynapsD extends EventEmitter {
         return matchingKeys;
     }
 
-    async hasDocumentByChecksum(checksum, contextSpec = '/', featureBitmapArray) {
-        if (!checksum) { throw new Error('Checksum required'); }
-
-        const id = await this.#checksumIndex.checksumStringToId(checksum);
-        if (!id) { return false; }
-
-        return await this.hasDocument(id, contextSpec, featureBitmapArray);
+    async hasDocumentByChecksum(checksum, contextSpec = { path: '/' }, featureBitmapArray) {
+        return await this.hasByChecksumString(checksum, {
+            context: contextSpec,
+            attributes: { allOf: featureBitmapArray },
+        });
     }
 
     async find(spec = {}) {
@@ -598,9 +819,12 @@ class SynapsD extends EventEmitter {
         const limit = providedLimit !== undefined ? Math.max(0, providedLimit) : 0;
         const offset = Math.max(0, providedOffset !== undefined ? providedOffset : (providedPage && providedPage > 0 ? (providedPage - 1) * (limit || 100) : 0));
 
-        // Parse contextSpec for query (single path only, or null/undefined)
-        const contextBitmapArray = parseContextSpecForQuery(contextSpec);
-        const hasExplicitContextPath = contextSpec !== null && contextSpec !== undefined && contextSpec !== '/';
+        const rawContextSpec = contextSpec && typeof contextSpec === 'object' && !Array.isArray(contextSpec)
+            ? (contextSpec.path ?? contextSpec.context ?? null)
+            : contextSpec;
+        const { tree: contextTree, collection: contextCollection } = this.#resolveTreeSelection('context', contextSpec ?? { path: '/' }, '/');
+        const contextBitmapArray = parseContextSpecForQuery(rawContextSpec);
+        const hasExplicitContextPath = rawContextSpec !== null && rawContextSpec !== undefined && rawContextSpec !== '/';
         if (!Array.isArray(filterArray) && typeof filterArray === 'string') { filterArray = [filterArray]; }
         debug(`Listing documents with contextArray: ${contextBitmapArray}, attributes: ${JSON.stringify(attributes)}, filters: ${filterArray}, limit: ${limit}, offset: ${offset}`);
 
@@ -611,7 +835,7 @@ class SynapsD extends EventEmitter {
             let filtersApplied = false;
 
             // Apply context filters only if contextSpec was explicitly provided
-            if (hasExplicitContextPath && !this.tree.getLayerForPath(contextSpec)) {
+            if (hasExplicitContextPath && !contextTree.getLayerForPath(rawContextSpec)) {
                 const emptyArray = [];
                 emptyArray.count = 0;
                 emptyArray.totalCount = 0;
@@ -619,10 +843,10 @@ class SynapsD extends EventEmitter {
                 return emptyArray;
             }
 
-            if (contextSpec !== null && contextSpec !== undefined && contextBitmapArray.length > 0) {
-                const contextLayerIds = this.tree.resolveLayerIds(contextBitmapArray);
+            if (rawContextSpec !== null && rawContextSpec !== undefined && contextBitmapArray.length > 0) {
+                const contextLayerIds = contextTree.resolveLayerIds(contextBitmapArray);
                 if (contextLayerIds.length > 0) {
-                    resultBitmap = await this.contextBitmapCollection.AND(contextLayerIds);
+                    resultBitmap = await contextCollection.AND(contextLayerIds);
                     filtersApplied = true;
                 }
             }
@@ -734,13 +958,120 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    // Legacy API, now alias for find()
-    async listDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
-        return await this.findDocuments(contextSpec, featureBitmapArray, filterArray, options);
-    }
+    async search(spec = {}) {
+        if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+            throw new Error('search() expects a query spec object');
+        }
 
-    async findDocuments(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
-        return await this.find(this.#buildLegacyFindSpec(contextSpec, featureBitmapArray, filterArray, options));
+        const queryString = spec.query ?? spec.search ?? spec.q ?? null;
+        if (typeof queryString !== 'string') {
+            throw new ArgumentError('Query must be a string', 'query');
+        }
+
+        let {
+            contextSpec,
+            attributes,
+            filterArray,
+            excludeContextSpecs,
+            options,
+        } = this.#normalizeFindSpec(spec);
+
+        if (!this.#lanceIndex || !this.#lanceIndex.isReady) {
+            const empty = [];
+            empty.count = 0;
+            empty.totalCount = 0;
+            empty.error = 'FTS not initialized';
+            return empty;
+        }
+
+        const effectiveOptions = typeof options === 'object' && options !== null ? { ...options } : { parse: true };
+        const limit = Number.isFinite(effectiveOptions.limit) ? Math.max(0, Number(effectiveOptions.limit)) : 50;
+        const offset = Math.max(0, Number.isFinite(effectiveOptions.offset) ? Number(effectiveOptions.offset) : 0);
+
+        let candidateBitmap = null;
+        let filtersApplied = false;
+        const rawContextSpec = contextSpec && typeof contextSpec === 'object' && !Array.isArray(contextSpec)
+            ? (contextSpec.path ?? contextSpec.context ?? null)
+            : contextSpec;
+        const { tree: contextTree, collection: contextCollection } = this.#resolveTreeSelection('context', contextSpec ?? { path: '/' }, '/');
+        const contextBitmapArray = parseContextSpecForQuery(rawContextSpec);
+
+        if (rawContextSpec !== null && rawContextSpec !== undefined && rawContextSpec !== '/' && !contextTree.getLayerForPath(rawContextSpec)) {
+            const empty = [];
+            empty.count = 0;
+            empty.totalCount = 0;
+            empty.error = null;
+            return empty;
+        }
+
+        if (contextBitmapArray.length > 0) {
+            const contextLayerIds = contextTree.resolveLayerIds(contextBitmapArray);
+            if (contextLayerIds.length > 0) {
+                candidateBitmap = await contextCollection.AND(contextLayerIds);
+                filtersApplied = true;
+            }
+        }
+
+        const attributeBitmap = await this.#buildAttributesBitmap(attributes);
+        if (attributeBitmap) {
+            if (filtersApplied && candidateBitmap) {
+                candidateBitmap.andInPlace(attributeBitmap);
+            } else {
+                candidateBitmap = attributeBitmap;
+                filtersApplied = true;
+            }
+        }
+
+        if (Array.isArray(filterArray) && filterArray.length > 0) {
+            const { bitmapFilters, datetimeFilters } = parseFilters(filterArray);
+            if (bitmapFilters.length > 0) {
+                const extraFilter = await this.bitmapIndex.AND(bitmapFilters);
+                if (filtersApplied && candidateBitmap) {
+                    candidateBitmap.andInPlace(extraFilter);
+                } else {
+                    candidateBitmap = extraFilter;
+                    filtersApplied = true;
+                }
+            }
+
+            for (const datetimeFilter of datetimeFilters) {
+                const datetimeBitmap = await applyDatetimeFilter(datetimeFilter, this.#timestampIndex);
+                if (!datetimeBitmap) { continue; }
+                if (filtersApplied && candidateBitmap) {
+                    candidateBitmap.andInPlace(datetimeBitmap);
+                } else {
+                    candidateBitmap = datetimeBitmap;
+                    filtersApplied = true;
+                }
+            }
+        }
+
+        candidateBitmap = await this.#applyExcludedContexts(candidateBitmap, excludeContextSpecs);
+        if (candidateBitmap) {
+            filtersApplied = true;
+        }
+
+        const candidateIds = candidateBitmap ? candidateBitmap.toArray() : [];
+        if (filtersApplied && candidateIds.length === 0) {
+            const empty = [];
+            empty.count = 0;
+            empty.totalCount = 0;
+            empty.error = null;
+            return empty;
+        }
+
+        if (filtersApplied && candidateIds.length > 0) {
+            const docs = await this.documents.getMany(candidateIds);
+            const parsedDocs = this.#safeParseDocuments(docs);
+            return await this.#lanceIndex.ftsQuery(queryString, candidateIds, parsedDocs, { limit, offset });
+        }
+
+        const docs = [];
+        for await (const { value } of this.documents.getRange()) {
+            docs.push(value);
+        }
+        const parsedDocs = this.#safeParseDocuments(docs);
+        return await this.#lanceIndex.ftsQuery(queryString, [], parsedDocs, { limit, offset });
     }
 
     async updateDocument(docIdentifier, updateData = null, contextSpec = null, featureBitmapArray = []) {
@@ -748,9 +1079,9 @@ class SynapsD extends EventEmitter {
         if (typeof docIdentifier !== 'number') { throw new Error('Document identifier must be a numeric ID'); }
         if (!Array.isArray(featureBitmapArray)) { featureBitmapArray = [featureBitmapArray].filter(Boolean); }
 
-        // Support options object
+        // Canonical update signature accepts a selector/options object.
         let directorySpec = null;
-        if (typeof contextSpec === 'object' && contextSpec !== null && !Array.isArray(contextSpec)) {
+        if (this.#isDocumentOperationOptions(contextSpec)) {
             const opts = contextSpec;
             contextSpec = opts.context ?? null;
             directorySpec = opts.directory ?? null;
@@ -806,55 +1137,22 @@ class SynapsD extends EventEmitter {
     }
 
     async updateDocumentArray(docArray, contextSpec = null, featureBitmapArray = []) {
-        if (!Array.isArray(docArray)) {
-            throw new Error('Document array must be an array');
-        }
-        if (!Array.isArray(featureBitmapArray)) {
-            throw new Error('Feature array must be an array');
-        }
-        debug(`updateDocumentArray: Attempting to update ${docArray.length} documents`);
-
-        const updatedIds = [];
-        // TODO: Implement actual batch/transactional operation
-        for (let i = 0; i < docArray.length; i++) {
-            const docUpdate = docArray[i]; // Assuming docArray contains { id, updateData } or just the full document to update
-            if (!docUpdate || typeof docUpdate.id !== 'number') {
-                // Add context about the failed item
-                const error = new Error(`Invalid document data at index ${i}: Missing or invalid ID.`);
-                error.failedItem = docUpdate;
-                error.failedIndex = i;
-                throw error;
-            }
-            try {
-                // Assuming updateDocument returns the ID and handles its own event emission logic for individual updates
-                // For batch, we might want to suppress individual events and emit one batch event
-                const id = await this.updateDocument(docUpdate.id, docUpdate.data, contextSpec, featureBitmapArray);
-                updatedIds.push(id);
-                debug(`updateDocumentArray: Successfully updated document at index ${i}, ID: ${id}`);
-            } catch (error) {
-                debug(`updateDocumentArray: Error updating document at index ${i} (ID: ${docUpdate.id}). Aborting batch. Error: ${error.message}`);
-                // Add context about the failed item
-                error.message = `Failed to update document at index ${i} (ID: ${docUpdate.id}): ${error.message}`;
-                error.failedItem = docUpdate;
-                error.failedIndex = i;
-                throw error;
-            }
-        }
-
-        debug(`updateDocumentArray: Successfully updated all ${updatedIds.length} documents.`);
-        // Emit a single event for the batch success if needed (optional)
-        // this.emit('document:updated:batch', { ids: updatedIds, count: updatedIds.length });
-        return updatedIds; // Return array of IDs on full success
+        return await this.putMany(docArray, {
+            context: contextSpec,
+            attributes: { allOf: featureBitmapArray },
+        });
     }
 
     // Removes documents from context and/or feature bitmaps
-    async removeDocument(docId, contextSpec = '/', featureBitmapArray = [], options = { recursive: false }) {
+    async removeDocument(docId, contextSpec = { path: '/' }, featureBitmapArray = [], options = { recursive: false }) {
         if (!docId) { throw new Error('Document id required'); }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
         if (typeof options !== 'object') { options = { recursive: false }; }
 
+        const { tree: contextTree, collection: contextCollection, path: normalizedContextSpec } = this.#resolveTreeSelection('context', contextSpec, '/');
+
         // Parse context into array of independent path-layer-arrays
-        const pathLayersArray = parseContextSpecForInsert(contextSpec);
+        const pathLayersArray = parseContextSpecForInsert(normalizedContextSpec);
 
         // Collect all layers to remove from across all paths
         const allLayersToRemove = [];
@@ -896,8 +1194,8 @@ class SynapsD extends EventEmitter {
 
             if (allLayersToRemove.length > 0) {
                 // Resolve layer names to ULIDs for bitmap keying
-                const layerIds = this.tree.resolveLayerIds(allLayersToRemove);
-                const normalizedContexts = layerIds.map(l => this.contextBitmapCollection.makeKey(l));
+                const layerIds = contextTree.resolveLayerIds(allLayersToRemove);
+                const normalizedContexts = layerIds.map((layerId) => contextCollection.makeKey(layerId));
                 layersToRemove.push(...normalizedContexts);
             }
             if (featureBitmapArray.length > 0) {
@@ -922,52 +1220,11 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    async removeDocumentArray(docIdArray, contextSpec = '/', featureBitmapArray = [], options = { recursive: false }) {
-        if (!Array.isArray(docIdArray)) {
-            throw new Error('Document ID array must be an array');
-        }
-        if (!Array.isArray(featureBitmapArray)) {
-            throw new Error('Feature array must be an array');
-        }
-        if (typeof options !== 'object') { options = { recursive: false }; }
-        debug(`removeDocumentArray: Attempting to remove ${docIdArray.length} documents from context/features (recursive: ${options.recursive})`);
-
-        const result = {
-            successful: [], // Array of { index: number, id: number }
-            failed: [],    // Array of { index: number, id: number, error: string }
-            count: docIdArray.length,
-        };
-
-        // TODO: Implement actual batch/transactional operation
-        for (let i = 0; i < docIdArray.length; i++) {
-            const id = docIdArray[i];
-            if (typeof id !== 'number') {
-                result.failed.push({
-                    index: i,
-                    id: id,
-                    error: 'Invalid document ID: Must be a number.',
-                });
-                continue;
-            }
-            try {
-                // removeDocument returns the ID on success, throws on failure
-                const removedId = await this.removeDocument(id, contextSpec, featureBitmapArray, options);
-                result.successful.push({ index: i, id: removedId });
-                debug(`removeDocumentArray: Successfully removed document ID ${id} (index ${i}) from context/features.`);
-            } catch (error) {
-                // Errors during removeDocument (e.g., DB error) are collected
-                debug(`removeDocumentArray: Error removing document at index ${i} (ID: ${id}). Error: ${error.message}`);
-                result.failed.push({
-                    index: i,
-                    id: id,
-                    error: error.message || 'Unknown error',
-                });
-            }
-        }
-
-        debug(`removeDocumentArray: Processed ${result.count} requests. Successful: ${result.successful.length}, Failed: ${result.failed.length}`);
-        // Emit event based on outcome (optional)
-        return result; // Return the detailed result object
+    async removeDocumentArray(docIdArray, contextSpec = { path: '/' }, featureBitmapArray = [], options = { recursive: false }) {
+        return await this.unlinkMany(docIdArray, {
+            context: contextSpec,
+            attributes: { allOf: featureBitmapArray },
+        }, options);
     }
 
     // Deletes documents from all bitmaps and the main dataset
@@ -1048,60 +1305,7 @@ class SynapsD extends EventEmitter {
     }
 
     async deleteDocumentArray(docIdArray, options = {}) {
-        if (!Array.isArray(docIdArray)) {
-            throw new Error('Document ID array must be an array');
-        }
-        debug(`deleteDocumentArray: Attempting to delete ${docIdArray.length} documents`);
-
-        const result = {
-            successful: [], // Array of { index: number, id: number }
-            failed: [],    // Array of { index: number, id: number, error: string }
-            count: docIdArray.length,
-        };
-
-        // TODO: Implement actual batch/transactional operation
-        for (let i = 0; i < docIdArray.length; i++) {
-            const id = docIdArray[i];
-            if (typeof id !== 'number') {
-                result.failed.push({
-                    index: i,
-                    id: id,
-                    error: 'Invalid document ID: Must be a number.',
-                });
-                continue; // Skip to the next ID
-            }
-
-            try {
-                // deleteDocument returns true on success, false if not found (or not in context if spec was passed to it, but here we check context first)
-                // Pass null for contextSpec to deleteDocument as we've already done the check for the array method.
-                const success = await this.deleteDocument(id, options); // Context check already done for the array method
-                if (success) {
-                    result.successful.push({ index: i, id: id });
-                    debug(`deleteDocumentArray: Successfully deleted document ID ${id} (index ${i}).`);
-                } else {
-                    // Document not found is considered a failure in this context for reporting,
-                    // but doesn't stop the batch.
-                    result.failed.push({
-                        index: i,
-                        id: id,
-                        error: 'Document not found or already deleted',
-                    });
-                    debug(`deleteDocumentArray: Document not found or already deleted (ID: ${id}, index ${i}).`);
-                }
-            } catch (error) {
-                debug(`deleteDocumentArray: Error deleting document at index ${i} (ID: ${id}). Error: ${error.message}`);
-                result.failed.push({
-                    index: i,
-                    id: id,
-                    error: error.message || 'Unknown error',
-                });
-            }
-        }
-
-        debug(`deleteDocumentArray: Processed ${result.count} requests. Successful: ${result.successful.length}, Failed: ${result.failed.length}`);
-        // Emit event based on outcome (optional)
-        // if (result.failed.length === 0) ... else ...
-        return result; // Return the detailed result object
+        return await this.deleteMany(docIdArray, options);
     }
 
     /**
@@ -1195,9 +1399,9 @@ class SynapsD extends EventEmitter {
      * @param {string} checksumString - Checksum string
      * @returns {BaseDocument|null} Document instance or null if not found
      */
-    async getDocumentByChecksumString(checksumString, options = { parse: true }) {
+    async getByChecksumString(checksumString, options = { parse: true }) {
         if (!checksumString) { throw new Error('Checksum string required'); }
-        debug(`getDocumentByChecksumString: Searching for document with checksum ${checksumString}`);
+        debug(`getByChecksumString: Searching for document with checksum ${checksumString}`);
 
         // Get document ID from checksum index
         const id = await this.#checksumIndex.checksumStringToId(checksumString);
@@ -1205,6 +1409,13 @@ class SynapsD extends EventEmitter {
 
         // Return the document instance, passing the contextSpec through
         return await this.getDocumentById(id, options);
+    }
+
+    async hasByChecksumString(checksumString, spec = {}) {
+        if (!checksumString) { throw new Error('Checksum string required'); }
+        const id = await this.#checksumIndex.checksumStringToId(checksumString);
+        if (!id) { return false; }
+        return await this.has(id, spec);
     }
 
     /**
@@ -1337,123 +1548,11 @@ class SynapsD extends EventEmitter {
      * Query methods
      */
 
-    async query(queryString, contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
-        if (typeof queryString !== 'string') {
-            throw new ArgumentError('Query must be a string', 'query');
-        }
-
-        return await this.ftsQuery(queryString, contextSpec, featureBitmapArray, filterArray, options);
-    }
-
-    async ftsQuery(queryString, contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true, limit: 50, offset: 0 }) {
-        if (!this.#lanceIndex || !this.#lanceIndex.isReady) {
-            const empty = [];
-            empty.count = 0;
-            empty.totalCount = 0;
-            empty.error = 'FTS not initialized';
-            return empty;
-        }
-
-        // Normalize options
-        const effectiveOptions = typeof options === 'object' && options !== null ? { ...options } : { parse: true };
-        const limit = Number.isFinite(effectiveOptions.limit) ? Math.max(0, Number(effectiveOptions.limit)) : 50;
-        const offset = Math.max(0, Number.isFinite(effectiveOptions.offset) ? Number(effectiveOptions.offset) : 0);
-
-        // Build candidate set via bitmaps (context AND, features AND/NOT, filters AND)
-        let candidateBitmap = null;
-        let filtersApplied = false;
-        const contextBitmapArray = parseContextSpecForQuery(contextSpec);
-        const hasExplicitContextPath = contextSpec !== null && contextSpec !== undefined && contextSpec !== '/';
-        const excludeContextSpecs = this.#normalizeExcludeContextSpecs(
-            effectiveOptions.excludeContextSpecs
-                ?? effectiveOptions.excludeContextSpec
-                ?? effectiveOptions.excludeContexts
-                ?? effectiveOptions.excludeContext
-        );
-
-        if (hasExplicitContextPath && !this.tree.getLayerForPath(contextSpec)) {
-            const empty = [];
-            empty.count = 0;
-            empty.totalCount = 0;
-            empty.error = null;
-            return empty;
-        }
-
-        if (contextBitmapArray.length > 0) {
-            const contextLayerIds = this.tree.resolveLayerIds(contextBitmapArray);
-            if (contextLayerIds.length > 0) {
-                candidateBitmap = await this.contextBitmapCollection.AND(contextLayerIds);
-                filtersApplied = true;
-            }
-        }
-        if (!Array.isArray(featureBitmapArray) && typeof featureBitmapArray === 'string') {
-            featureBitmapArray = [featureBitmapArray];
-        }
-        if (!Array.isArray(filterArray) && typeof filterArray === 'string') {
-            filterArray = [filterArray];
-        }
-        if (Array.isArray(featureBitmapArray) && featureBitmapArray.length > 0) {
-            const featureBitmap = await this.#buildFeatureBitmap(featureBitmapArray);
-            if (filtersApplied && candidateBitmap) { candidateBitmap.andInPlace(featureBitmap); } else { candidateBitmap = featureBitmap; filtersApplied = true; }
-        }
-
-        // Parse and apply filters (including datetime)
-        if (Array.isArray(filterArray) && filterArray.length > 0) {
-            const { bitmapFilters, datetimeFilters } = parseFilters(filterArray);
-
-            // Apply bitmap filters
-            if (bitmapFilters.length > 0) {
-                const extraFilter = await this.bitmapIndex.AND(bitmapFilters);
-                if (filtersApplied && candidateBitmap) { candidateBitmap.andInPlace(extraFilter); } else { candidateBitmap = extraFilter; filtersApplied = true; }
-            }
-
-            // Apply datetime filters
-            for (const datetimeFilter of datetimeFilters) {
-                const datetimeBitmap = await applyDatetimeFilter(datetimeFilter, this.#timestampIndex);
-                if (datetimeBitmap) {
-                    if (filtersApplied && candidateBitmap) {
-                        candidateBitmap.andInPlace(datetimeBitmap);
-                    } else {
-                        candidateBitmap = datetimeBitmap;
-                        filtersApplied = true;
-                    }
-                }
-            }
-        }
-
-        candidateBitmap = await this.#applyExcludedContexts(candidateBitmap, excludeContextSpecs);
-        if (candidateBitmap) {
-            filtersApplied = true;
-        }
-
-        const candidateIds = candidateBitmap ? candidateBitmap.toArray() : [];
-        if (filtersApplied && candidateIds.length === 0) {
-            const empty = [];
-            empty.count = 0;
-            empty.totalCount = 0;
-            empty.error = null;
-            return empty;
-        }
-        // Use local FTS scoring over candidate IDs for deterministic results
-        if (filtersApplied && candidateIds.length > 0) {
-            const docs = await this.documents.getMany(candidateIds);
-            const parsedDocs = this.#safeParseDocuments(docs);
-            return await this.#lanceIndex.ftsQuery(queryString, candidateIds, parsedDocs, { limit, offset });
-        }
-
-        const docs = [];
-        for await (const { value } of this.documents.getRange()) {
-            docs.push(value);
-        }
-        const parsedDocs = this.#safeParseDocuments(docs);
-        return await this.#lanceIndex.ftsQuery(queryString, [], parsedDocs, { limit, offset });
-    }
-
     /**
      * Utils
      */
 
-    async dumpDocuments(dstDir, contextSpec = '/', featureBitmapArray = [], filterArray = []) {
+    async dumpDocuments(dstDir, contextSpec = { path: '/' }, featureBitmapArray = [], filterArray = []) {
         if (!dstDir) { throw new Error('Destination directory required'); }
         if (typeof dstDir !== 'string') { throw new Error('Destination directory must be a string'); }
         debug('Dumping DB documents to directory: ', dstDir);
@@ -1464,7 +1563,11 @@ class SynapsD extends EventEmitter {
         if (!fs.existsSync(dstDir)) { fs.mkdirSync(dstDir, { recursive: true }); }
 
         // Get all documents from the documents dataset
-        const documentArray = await this.findDocuments(contextSpec, featureBitmapArray, filterArray);
+        const documentArray = await this.find({
+            context: contextSpec,
+            attributes: { allOf: parseBitmapArray(featureBitmapArray).filter(Boolean) },
+            filters: filterArray,
+        });
         debug(`Found ${documentArray.length} documents to dump..`);
 
         // Loop through all documents in the returned array
@@ -1503,6 +1606,197 @@ class SynapsD extends EventEmitter {
      * Internal methods
      */
 
+    async #loadTreeRegistry() {
+        this.#treeMetadata.clear();
+        this.#defaultTreeIds = { context: null, directory: null };
+
+        const treeIds = new Set();
+        for await (const key of this.#internalStore.getKeys({
+            start: 'tree/',
+            end: 'tree/\uffff',
+        })) {
+            const match = String(key).match(/^tree\/([^/]+)\/meta$/);
+            if (match) {
+                treeIds.add(match[1]);
+            }
+        }
+
+        for (const treeId of treeIds) {
+            const meta = this.#internalStore.get(this.#treeMetaKey(treeId));
+            if (!meta) { continue; }
+            this.#treeMetadata.set(meta.id, meta);
+            if (meta.isDefault && !this.#defaultTreeIds[meta.type]) {
+                this.#defaultTreeIds[meta.type] = meta.id;
+            }
+        }
+    }
+
+    async #ensureDefaultTrees() {
+        if ((await this.listTrees('context')).length === 0) {
+            await this.createTree('context', 'context', { isDefault: true });
+        }
+        if ((await this.listTrees('directory')).length === 0) {
+            await this.createTree('directory', 'directory', { isDefault: true });
+        }
+
+        if (!this.#defaultTreeIds.context) {
+            this.#defaultTreeIds.context = (await this.listTrees('context'))[0]?.id || null;
+        }
+        if (!this.#defaultTreeIds.directory) {
+            this.#defaultTreeIds.directory = (await this.listTrees('directory'))[0]?.id || null;
+        }
+
+        if (this.#defaultTreeIds.context) {
+            this.contextBitmapCollection = this.#contextBitmapCollectionForTree(this.#defaultTreeIds.context);
+        }
+
+        for (const meta of this.#treeMetadata.values()) {
+            await this.#instantiateTree(meta).initialize();
+        }
+    }
+
+    #resolveTreeMeta(nameOrId, type = null) {
+        const tree = this.getTree(nameOrId);
+        if (!tree) {
+            return null;
+        }
+        const meta = this.#treeMetadata.get(tree.id) || null;
+        if (type && meta?.type !== type) {
+            return null;
+        }
+        return meta;
+    }
+
+    #getDefaultTreeByType(type) {
+        const treeId = this.#defaultTreeIds[type] || null;
+        return treeId ? this.getTree(treeId) : null;
+    }
+
+    #instantiateTree(meta) {
+        if (!meta) { return null; }
+        if (this.#treeCache.has(meta.id)) {
+            return this.#treeCache.get(meta.id);
+        }
+
+        const dataStore = new PrefixedStore(this.#internalStore, `tree/${meta.id}`);
+        const tree = meta.type === 'directory'
+            ? new DirectoryTree({
+                dataStore,
+                bitmapIndex: this.bitmapIndex,
+                treeId: meta.id,
+                treeName: meta.name,
+                bitmapCollection: this.#directoryBitmapCollectionForTree(meta.id),
+            })
+            : new ContextTree({
+                dataStore,
+                db: this,
+                treeId: meta.id,
+                treeName: meta.name,
+                bitmapCollection: this.#contextBitmapCollectionForTree(meta.id),
+            });
+
+        this.#registerTreeEvents(tree, meta);
+        this.#treeCache.set(meta.id, tree);
+        return tree;
+    }
+
+    #registerTreeEvents(tree, meta) {
+        if (tree.__synapsdTreeEventsBound) {
+            return;
+        }
+        tree.__synapsdTreeEventsBound = true;
+        const db = this;
+        tree.on('**', function (payload = {}) {
+            const eventName = this.event;
+            if (!eventName) { return; }
+            const nextPayload = payload && typeof payload === 'object'
+                ? { ...payload }
+                : { value: payload };
+            nextPayload.treeId = meta.id;
+            nextPayload.treeName = meta.name;
+            nextPayload.treeType = meta.type;
+            if (!nextPayload.source) {
+                nextPayload.source = 'tree';
+            }
+            db.emit(eventName, nextPayload);
+        });
+    }
+
+    #treeMetaKey(treeId) {
+        return `tree/${treeId}/meta`;
+    }
+
+    #contextBitmapCollectionForTree(treeId) {
+        return this.bitmapIndex.createCollection(`context/${treeId}`);
+    }
+
+    #directoryBitmapCollectionForTree(treeId) {
+        return this.bitmapIndex.createCollection(`vfs/${treeId}`);
+    }
+
+    #normalizeTreeName(name) {
+        return String(name ?? '')
+            .normalize('NFKC')
+            .trim()
+            .replace(/\s+/g, ' ')
+            .toLowerCase();
+    }
+
+    async #deleteTreeStorage(meta) {
+        const internalKeys = [];
+        for await (const key of this.#internalStore.getKeys({
+            start: `tree/${meta.id}/`,
+            end: `tree/${meta.id}/\uffff`,
+        })) {
+            internalKeys.push(key);
+        }
+        for (const key of internalKeys) {
+            await this.#internalStore.remove(key);
+        }
+
+        const bitmapPrefix = meta.type === 'directory' ? `vfs/${meta.id}` : `context/${meta.id}`;
+        const bitmapKeys = await this.bitmapIndex.listBitmaps(bitmapPrefix);
+        for (const key of bitmapKeys) {
+            await this.bitmapIndex.deleteBitmap(key);
+        }
+    }
+
+    #resolveTreeSelection(type, spec, defaultPath = null) {
+        if (typeof spec === 'string' || Array.isArray(spec)) {
+            throw new Error(`Legacy ${type} path strings are no longer supported. Pass { tree, path } instead.`);
+        }
+        const pathFallbackKey = type === 'directory' ? 'directory' : 'context';
+        const treeSelector = spec && typeof spec === 'object' && !Array.isArray(spec)
+            ? (spec.tree ?? spec.treeId ?? spec.nameOrId ?? null)
+            : null;
+        const path = spec && typeof spec === 'object' && !Array.isArray(spec)
+            ? (spec.path ?? spec[pathFallbackKey] ?? defaultPath)
+            : (spec ?? defaultPath);
+        const tree = treeSelector ? this.getTree(treeSelector) : this.#getDefaultTreeByType(type);
+        if (!tree) {
+            throw new Error(`No ${type} tree available`);
+        }
+        if (tree.type !== type) {
+            throw new Error(`Tree "${tree.name}" is not a ${type} tree`);
+        }
+        return {
+            tree,
+            collection: type === 'context'
+                ? this.#contextBitmapCollectionForTree(tree.id)
+                : this.#directoryBitmapCollectionForTree(tree.id),
+            path,
+        };
+    }
+
+    #isDocumentOperationOptions(value) {
+        return Boolean(
+            value &&
+            typeof value === 'object' &&
+            !Array.isArray(value) &&
+            ['context', 'directory', 'features', 'emitEvent'].some((key) => Object.prototype.hasOwnProperty.call(value, key))
+        );
+    }
+
     /**
      * One-time idempotent migration: rename legacy bitmap keys to new format.
      *
@@ -1516,18 +1810,22 @@ class SynapsD extends EventEmitter {
         let migrated = 0;
 
         // --- Context bitmaps: name → ULID ---
-        const layerKeys = await this.tree.layers;
-        for (const layerKey of layerKeys) {
-            const layer = this.tree.getLayerById(layerKey);
-            if (!layer || layer.name === '/') continue;
+        for (const meta of await this.listTrees('context')) {
+            const tree = this.getTree(meta.id);
+            const collection = this.#contextBitmapCollectionForTree(meta.id);
+            const layerKeys = await tree.layers;
+            for (const layerKey of layerKeys) {
+                const layer = tree.getLayerById(layerKey);
+                if (!layer || layer.name === '/') continue;
 
-            const oldKey = this.contextBitmapCollection.makeKey(layer.name);
-            const newKey = this.contextBitmapCollection.makeKey(layer.id);
-            if (oldKey === newKey) continue;
+                const oldKey = collection.makeKey(layer.name);
+                const newKey = collection.makeKey(layer.id);
+                if (oldKey === newKey) continue;
 
-            if (this.bitmapIndex.hasBitmap(oldKey) && !this.bitmapIndex.hasBitmap(newKey)) {
-                await this.bitmapIndex.renameBitmap(oldKey, newKey);
-                migrated++;
+                if (this.bitmapIndex.hasBitmap(oldKey) && !this.bitmapIndex.hasBitmap(newKey)) {
+                    await this.bitmapIndex.renameBitmap(oldKey, newKey);
+                    migrated++;
+                }
             }
         }
 
@@ -1560,23 +1858,25 @@ class SynapsD extends EventEmitter {
 
         // Context tree: resolve layer names to ULIDs and tick bitmaps
         if (contextSpec) {
-            const pathLayersArray = parseContextSpecForInsert(contextSpec);
+            const { tree: contextTree, collection, path: contextPath } = this.#resolveTreeSelection('context', contextSpec, '/');
+            const pathLayersArray = parseContextSpecForInsert(contextPath);
             for (const pathLayers of pathLayersArray) {
                 const pathString = pathLayers.join('/');
-                await this.tree.insertPath(pathString);
+                await contextTree.insertPath(pathString);
 
-                const layerIds = this.tree.resolveLayerIds(pathLayers);
-                await this.contextBitmapCollection.tickMany(layerIds, docId);
+                const layerIds = contextTree.resolveLayerIds(pathLayers);
+                await collection.tickMany(layerIds, docId);
 
-                const normalizedLayers = layerIds.map(l => this.contextBitmapCollection.makeKey(l));
+                const normalizedLayers = layerIds.map((layerId) => collection.makeKey(layerId));
                 allSynapseKeys.push(...normalizedLayers);
             }
         }
 
         // Directory tree: index document at directory path(s)
         if (directorySpec) {
-            const dirs = Array.isArray(directorySpec) ? directorySpec : [directorySpec];
-            const dirKeys = await this.#directoryTree.insertDocumentMany(docId, dirs);
+            const { tree: directoryTree, path: directoryPath } = this.#resolveTreeSelection('directory', directorySpec, null);
+            const dirs = Array.isArray(directoryPath) ? directoryPath : [directoryPath];
+            const dirKeys = await directoryTree.insertDocumentMany(docId, dirs);
             if (dirKeys && dirKeys.length > 0) {
                 allSynapseKeys.push(...dirKeys);
             }
@@ -1592,29 +1892,6 @@ class SynapsD extends EventEmitter {
         if (allSynapseKeys.length > 0) {
             await this.#synapses.createSynapses(docId, allSynapseKeys, { syncBitmaps: false });
         }
-    }
-
-    #buildLegacyFindSpec(contextSpec = null, featureBitmapArray = [], filterArray = [], options = { parse: true }) {
-        const allOf = [];
-        const noneOf = [];
-
-        for (const key of parseBitmapArray(featureBitmapArray).filter(Boolean)) {
-            if (key.startsWith('!')) {
-                noneOf.push(key.slice(1));
-            } else {
-                allOf.push(key);
-            }
-        }
-
-        return {
-            context: contextSpec,
-            attributes: {
-                allOf,
-                noneOf,
-            },
-            filterArray,
-            ...options,
-        };
     }
 
     #normalizeFindSpec(spec = {}) {
@@ -1823,18 +2100,24 @@ class SynapsD extends EventEmitter {
             return null;
         }
 
+        const contextTree = this.getDefaultContextTree();
+        const contextCollection = contextTree ? this.#contextBitmapCollectionForTree(contextTree.id) : null;
+        if (!contextTree || !contextCollection) {
+            return null;
+        }
+
         let excludedBitmap = null;
         for (const contextSpec of contextSpecs) {
             if (!contextSpec || contextSpec === '/') {
                 continue;
             }
 
-            const layer = this.tree.getLayerForPath(contextSpec);
+            const layer = contextTree.getLayerForPath(contextSpec);
             if (!layer?.id) {
                 continue;
             }
 
-            const layerBitmap = await this.contextBitmapCollection.getBitmap(layer.id, false);
+            const layerBitmap = await contextCollection.getBitmap(layer.id, false);
             if (!layerBitmap || layerBitmap.isEmpty) {
                 continue;
             }
