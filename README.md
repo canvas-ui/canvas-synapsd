@@ -1,185 +1,89 @@
 # SynapsD
 
-A very simple, naive implementation of a JSON document store with some bitmap indexes in the mix. Module primarily but not exclusively for use with Canvas (https://github.com/canvas-ai/canvas-server)
+SynapsD is the indexed store behind Canvas. It keeps document records, roaring bitmap memberships, timestamp/checksum indexes, and named tree views on top of LMDB.
 
-## Architecture
+It is not the app layer. Source adapters, device logic, workspace hooks, and other domain-specific mapping stay outside `synapsd`.
 
-### Components
+## Core pieces
 
-- **LMDB**, to-be-replaced by pouchdb or rxdb as the main KV backend (https://www.npmjs.com/package/lmdb)
-- **Compressed (roaring) bitmaps** (https://www.npmjs.com/package/roaring)
-- **FlexSearch** for full-text search (https://www.npmjs.com/package/flexsearch)
-- **LanceDB** (https://www.npmjs.com/package/@lancedb/lancedb)
+- `LMDB` is the storage backend.
+- `Roaring bitmaps` power attribute and membership lookups.
+- `LanceDB` handles ranked/full-text search.
+- `ContextTree` provides layered/intersection semantics.
+- `DirectoryTree` provides exact folder semantics with unique node IDs.
 
-### JSON Document Store
+## Canonical API
 
-- Simple LMDB KV store with enforced document schemas (See `./src/schemas` for more details)
-- Every data abstraction schema (File, Note, Browser tab, Email etc) defines its own set of indexing options
-  
-### Index implementation
+The current public API shape is:
 
-#### Hashmaps / Inverted indexes
+- `get(id, options?)`
+- `put(record, memberships?)`
+- `putMany(records, memberships?)`
+- `has(id, spec?)`
+- `getByChecksumString(checksum, options?)`
+- `hasByChecksumString(checksum, spec?)`
+- `unlink(id, membershipsOrSpec, options?)`
+- `unlinkMany(ids, membershipsOrSpec, options?)`
+- `delete(id, options?)`
+- `deleteMany(ids, options?)`
+- `find(spec)`
+- `search(spec)`
 
-- **algorithm/checksum | docID**  
-  Example: sha1/4e1243.. => document ID)
-- **timestamp | docID** (Bit-Sliced Index)
-  We use Bit-Sliced Indexing (BSI) to map timestamps (seconds precision) to document IDs. This allows for highly efficient range queries (>, <, BETWEEN) using bitwise operations on 32 bit-slices per action (created, updated, deleted).
+Legacy method names like `findDocuments`, `ftsQuery`, `insertDocument`, and friends are no longer the intended API and should be treated as dead.
 
-#### Bitmap indexes
+## Query shape
 
-The following bitmap index prefixes are enforced to organize and filter documents:
+`find(spec)` and `search(spec)` use explicit object-shaped inputs.
 
-- `internal/` - Internal bitmaps
-- `context/` - Context path bitmaps, used internally by Canvas (as context tree nodes, context/uuid)
-- `data/abstraction/<schema>` - Schema type filters (incl subtrees like data/abstraction/file/ext/json)
-- `data/mime/<type>`
-- `data/content/encoding/<encoding>`
-- `client/os/<os>`
-- `client/application/<application>`
-- `client/device/<device-id>`
-- `client/network/<network-id>` -We support storing documents on multiple backends(StoreD), when a canvas application connects from a certain network, not all backends may be reachable(your home NAS from work for example)
-- `user/`
-- `tag/` - Generic tag bitmaps
-- `custom/` - Throw what you need here
+Common fields:
 
-## API Documentation
-
-### API Patterns
-
-SynapsD follows a hybrid API pattern - for better or worse - 
-
-#### Single Document Operations
-
-Single document operations:
-
-```javascript
-try {
-    const docId = await db.insertDocument(doc);
-    // Success case
-} catch (error) {
-    // Error handling
-}
-```
-
-Available single document operations:
-
-- `insertDocument(doc, contextSpec, featureBitmapArray)`
-- `updateDocument(docId, updateData, contextSpec, featureBitmapArray)`
-- `deleteDocument(docId)`
-- `getDocument(docId)`
-- `getDocumentById(id)`
-- `getDocumentByChecksumString(checksumString)`
-
-#### Batch Operations
-
-Batch operations return a result object:
-
-```javascript
-const result = await db.insertDocumentArray(docs);
-if (result.failed.length > 0) {
-    // Handle partial failures
-}
-// Access successful operations
-const successfulIds = result.successful.map(s => s.id);
-
-// Using findDocuments
-const result = await db.findDocuments('/some/path', ['feature1'], ['filter1']);
-if (result.error) {
-    console.error('Query failed:', result.error);
-} else {
-    console.log(`Found ${result.count} documents:`, result.data);
-}
-
-// Using query
-const queryResult = await db.query('some query', ['context1'], ['feature1']);
-if (queryResult.error) {
-    console.error('Query failed:', queryResult.error);
-} else {
-    console.log(`Found ${queryResult.count} documents:`, queryResult.data);
-}
-```
-
-Result object structure:
-
-```typescript
-interface BatchResult {
-    successful: Array<{
-        index: number;    // Original array index
-        id: number;       // Document ID
-    }>;
-    failed: Array<{
-        index: number;    // Original array index
-        error: string;    // Error message
-        doc: any;        // Original document
-    }>;
-    total: number;       // Total number of operations
-}
-```
-
-Available batch operations:
-
-- `insertDocumentArray(docs, contextSpec, featureBitmapArray)`
-- `updateDocumentArray(docs, contextSpec, featureBitmapArray)`
-- `deleteDocumentArray(docIds)`
-- `getDocumentsByIdArray(ids)`
-- `getDocumentsByChecksumStringArray(checksums)`
-
-#### Query Operations
-
-Pagination is supported for all queries. Default page size is 100 documents.
-
-Options:
-- `limit` (number): page size (default 100)
-- `offset` (number): starting index (default 0)
-- `page` (number): 1-based page number (ignored if `offset` provided)
-- `parse` (boolean): parse into schema instances (default true)
-
-Usage:
-
-```javascript
-// First page (implicit): limit=100, offset=0
-const docs = await db.findDocuments(contextSpec, featureBitmapArray, [], { limit: 100 });
-console.log(docs.length, docs.count); // docs has .count metadata
-
-// Second page via page
-const page2 = await db.findDocuments(contextSpec, featureBitmapArray, [], { page: 2, limit: 100 });
-
-// Or using offset directly
-const next100 = await db.findDocuments(contextSpec, featureBitmapArray, [], { offset: 100, limit: 100 });
-```
-
-Return shape:
-```typescript
-type QueryResultArray = Array<any> & { count: number; error: string | null };
-```
-
-Available query operations:
-
-- `findDocuments(contextSpec, featureBitmapArray, filterArray, options)`
-- `query(query, contextBitmapArray, featureBitmapArray, filterArray)`
-- `ftsQuery(query, contextBitmapArray, featureBitmapArray, filterArray)`
-
-### Error Handling
-
-SynapsD uses standard JavaScript Error objects with specific error types:
-
-- `ValidationError`: Document validation failed
-- `NotFoundError`: Document not found
-- `DuplicateError`: Document already exists
-- `DatabaseError`: General database errors
+- `context`
+- `directory`
+- `attributes.allOf`
+- `attributes.anyOf`
+- `attributes.noneOf`
+- `filters`
+- `limit`
+- `offset`
+- `page`
+- `parse`
 
 Example:
-```javascript
-try {
-    await db.insertDocument(doc);
-} catch (error) {
-    if (error instanceof ValidationError) {
-        // Handle validation error
-    } else if (error instanceof DatabaseError) {
-        // Handle database error
-    }
-}
+
+```js
+const docs = await db.find({
+    context: { tree: 'projects', path: '/foo/bar' },
+    attributes: {
+        allOf: ['data/abstraction/file'],
+        noneOf: ['tag/deleted'],
+    },
+    filters: ['datetime:updated:today'],
+    limit: 100,
+});
+
+const ranked = await db.search({
+    query: 'invoice',
+    context: { tree: 'projects', path: '/finance/2026' },
+    attributes: { allOf: ['data/abstraction/file'] },
+    limit: 20,
+});
 ```
+
+## Trees
+
+SynapsD supports multiple named trees per workspace database.
+
+- `context` trees use shared logical layers and path-intersection semantics
+- `directory` trees use unique folder nodes and filesystem-like semantics
+
+Tree metadata lives in the internal store, while tree memberships are mapped to typed bitmap namespaces.
+
+## Notes
+
+- Checksums are first-class lookup keys.
+- Batch methods return structured success/failure results.
+- Query results are arrays with attached `count`, `totalCount`, and `error` metadata.
+- Event payloads should include `treeId`, `treeName`, and `treeType` consistently.
 
 ## References
 
@@ -197,4 +101,3 @@ Licensed under AGPL-3.0-or-later. See main project LICENSE file.
 
 ---
 This project is funded by [Augmentd Labs](https://augmentd.eu/en/labs)
-

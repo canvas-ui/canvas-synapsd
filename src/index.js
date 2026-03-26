@@ -900,11 +900,11 @@ class SynapsD extends EventEmitter {
 
                 // Debug: Log the discrepancy if it exists
                 if (limit > 0 && pagedDocs.length < limit && totalCount > pagedDocs.length) {
-                    debug(`findDocuments: Count discrepancy detected. Database count: ${totalCount}, Actual retrievable documents: ${seen}, Returned: ${pagedDocs.length}`);
+                    debug(`find: Count discrepancy detected. Database count: ${totalCount}, Actual retrievable documents: ${seen}, Returned: ${pagedDocs.length}`);
                 }
 
                 const resultArray = parseDocuments ? this.#safeParseDocuments(pagedDocs) : pagedDocs;
-                // Attach metadata for compatibility
+                // Attach count metadata on the returned array.
                 resultArray.count = resultArray.length; // Number of documents actually returned (after filtering corrupted)
                 resultArray.totalCount = totalCount;    // Total number of documents available
                 resultArray.error = null;
@@ -913,7 +913,7 @@ class SynapsD extends EventEmitter {
 
             // Case 2: Filters were applied, but the resulting bitmap is null or empty
             if (finalDocumentIds.length === 0) {
-                debug('findDocuments: Resulting bitmap is null or empty after applying filters.');
+                debug('find: Resulting bitmap is null or empty after applying filters.');
                 const emptyArray = [];
                 emptyArray.count = 0;      // Number of documents returned (0)
                 emptyArray.totalCount = 0; // Total available (0)
@@ -928,14 +928,14 @@ class SynapsD extends EventEmitter {
             // Get documents from database for the page
             const documents = await this.documents.getMany(slicedIds);
             const resultArray = parseDocuments ? this.#safeParseDocuments(documents) : documents;
-            // Attach metadata for compatibility
+            // Attach count metadata on the returned array.
             resultArray.count = resultArray.length; // Number of documents actually returned (after filtering corrupted)
             resultArray.totalCount = totalCount;  // Total number of documents available
             resultArray.error = null;
             return resultArray;
 
         } catch (error) {
-            debug(`Error in findDocuments: ${error.message}`);
+            debug(`Error in find: ${error.message}`);
             const errorArray = [];
             errorArray.count = 0;      // Number of documents returned (0)
             errorArray.totalCount = 0; // Total available (unknown due to error)
@@ -1112,12 +1112,12 @@ class SynapsD extends EventEmitter {
             try {
                 await this.#lanceIndex.upsert(parseInitializeDocument(updatedDocument));
             } catch (e) {
-                debug(`updateDocument: Lance upsert failed for ${updatedDocument.id}: ${e.message}`);
+                debug(`put/update: Lance upsert failed for ${updatedDocument.id}: ${e.message}`);
             }
 
             return updatedDocument.id;
         } catch (error) {
-            debug(`updateDocument: Error during update: ${error.message}`);
+            debug(`put/update: Error during update: ${error.message}`);
             throw error;
         }
     }
@@ -1139,16 +1139,16 @@ class SynapsD extends EventEmitter {
         for (const pathLayers of pathLayersArray) {
             // Check if we're trying to remove from root context only
             if (pathLayers.length === 1 && pathLayers[0] === '/') {
-                throw new Error('Cannot remove document from root context "/". Use deleteDocument to permanently delete documents.');
+                throw new Error('Cannot unlink from root context "/". Use delete() to permanently delete documents.');
             }
 
             // Remove root "/" from the array if it exists alongside other contexts
-            // We should never untick documents from the root context via removeDocument
+            // We should never unlink documents from the root context.
             let filteredLayers = pathLayers.filter(context => context !== '/');
 
             // After filtering, we need at least one context to operate on
             if (filteredLayers.length === 0) {
-                throw new Error('Cannot remove document from root context "/". Use deleteDocument to permanently delete documents.');
+                throw new Error('Cannot unlink from root context "/". Use delete() to permanently delete documents.');
             }
 
             // Handle recursive vs non-recursive removal
@@ -1156,17 +1156,17 @@ class SynapsD extends EventEmitter {
                 // Non-recursive: remove from leaf context only (last element in the path)
                 const leafContext = filteredLayers[filteredLayers.length - 1];
                 allLayersToRemove.push(leafContext);
-                debug(`removeDocument: Non-recursive removal from leaf context only: ${leafContext}`);
+                debug(`unlink: Non-recursive removal from leaf context only: ${leafContext}`);
             } else {
                 // Recursive: remove from all contexts in the hierarchy (current behavior)
                 allLayersToRemove.push(...filteredLayers);
-                debug(`removeDocument: Recursive removal from all contexts: ${filteredLayers.join(', ')}`);
+                debug(`unlink: Recursive removal from all contexts: ${filteredLayers.join(', ')}`);
             }
         }
 
-        debug(`removeDocument: Removing document ${docId} from contexts: ${allLayersToRemove.join(', ')}`);
+        debug(`unlink: Removing document ${docId} from contexts: ${allLayersToRemove.join(', ')}`);
 
-        // Remove document will only remove the document from the supplied bitmaps
+        // unlink() only removes the document from the supplied memberships/bitmaps.
         // It will not delete the document from the database.
         try {
             const layersToRemove = [];
@@ -1183,7 +1183,7 @@ class SynapsD extends EventEmitter {
 
             if (layersToRemove.length > 0) {
                 await this.#synapses.removeSynapses(docId, layersToRemove);
-                debug(`removeDocument: Removed doc ${docId} from ${layersToRemove.length} layers via Synapses`);
+                debug(`unlink: Removed doc ${docId} from ${layersToRemove.length} layers via Synapses`);
             }
 
             // If the operations completed without throwing, return the ID.
@@ -1193,7 +1193,7 @@ class SynapsD extends EventEmitter {
 
         } catch (error) {
             // Catch unexpected errors (DB connection, etc.)
-            debug(`Error during removeDocument for ID ${docId}: ${error.message}`);
+            debug(`Error during unlink for ID ${docId}: ${error.message}`);
             // Re-throw the error so callers know something went wrong
             throw error;
         }
@@ -1203,7 +1203,7 @@ class SynapsD extends EventEmitter {
     async #deleteOne(docId, options = {}) {
         if (!docId) { throw new Error('Document id required'); }
         const { emitEvent = true } = options;
-        debug(`deleteDocument: Document with ID "${docId}" found (or context check passed), proceeding to delete..`);
+        debug(`delete: Document with ID "${docId}" found (or context check passed), proceeding to delete..`);
 
         let document = null;
         let transactionSuccess = false;
@@ -1212,45 +1212,45 @@ class SynapsD extends EventEmitter {
             // Get document before deletion (outside transaction to check existence)
             const documentData = await this.documents.get(docId);
             if (!documentData) {
-                debug(`deleteDocument: Document with ID "${docId}" not found`);
+                debug(`delete: Document with ID "${docId}" not found`);
                 return false;
             }
             document = parseDocumentData(documentData);
-            debug('deleteDocument > Document: ', document);
+            debug('delete > Document: ', document);
 
             // Wrap all critical database operations in a single transaction for atomicity
             await this.#db.transaction(async () => {
                 // Delete document from main database
                 await this.documents.delete(docId);
-                debug(`deleteDocument: Document ${docId} deleted from main store`);
+                debug(`delete: Document ${docId} deleted from main store`);
 
                 // Delete document from all bitmaps AND Reverse Index via Synapses
                 // await this.bitmapIndex.untickAll(docId);
                 await this.#synapses.clearSynapses(docId);
-                debug(`deleteDocument: Document ${docId} removed from all bitmaps and Synapses index`);
+                debug(`delete: Document ${docId} removed from all bitmaps and Synapses index`);
 
                 // Remove document from timestamp indices (created, updated)
                 await this.#timestampIndex.remove(null, docId);
-                debug(`deleteDocument: Document ${docId} removed from timestamp indices`);
+                debug(`delete: Document ${docId} removed from timestamp indices`);
 
                 // Delete document checksums from inverted index
                 await this.#checksumIndex.deleteArray(document.checksumArray);
-                debug(`deleteDocument: Checksums for document ${docId} deleted from index`);
+                debug(`delete: Checksums for document ${docId} deleted from index`);
 
                 // Add document ID to deleted documents bitmap
                 await this.deletedDocumentsBitmap.tick(docId);
-                debug(`deleteDocument: Document ${docId} added to deleted documents bitmap`);
+                debug(`delete: Document ${docId} added to deleted documents bitmap`);
 
                 // Update timestamp index
                 await this.#timestampIndex.insert('deleted', document.updatedAt || new Date().toISOString(), docId);
-                debug(`deleteDocument: Timestamp for document ${docId} updated in index`);
+                debug(`delete: Timestamp for document ${docId} updated in index`);
             });
 
             transactionSuccess = true;
-            debug(`deleteDocument: All database operations completed atomically for document ID: ${docId}`);
+            debug(`delete: All database operations completed atomically for document ID: ${docId}`);
 
         } catch (error) {
-            debug(`deleteDocument: Transaction failed for document ID: ${docId}, error: ${error.message}`);
+            debug(`delete: Transaction failed for document ID: ${docId}, error: ${error.message}`);
             // If transaction failed, ensure we don't attempt Lance cleanup
             transactionSuccess = false;
             throw new Error(`Failed to delete document atomically: ${error.message}`);
@@ -1260,16 +1260,16 @@ class SynapsD extends EventEmitter {
         if (transactionSuccess) {
             try {
                 await this.#lanceIndex.delete(docId);
-                debug(`deleteDocument: LanceDB cleanup completed for document ${docId}`);
+                debug(`delete: LanceDB cleanup completed for document ${docId}`);
             } catch (e) {
-                debug(`deleteDocument: Lance delete failed for ${docId}: ${e.message}`);
+                debug(`delete: Lance delete failed for ${docId}: ${e.message}`);
                 // Don't fail the entire operation if Lance cleanup fails
             }
 
             if (emitEvent) {
                 this.emit('document.deleted', { id: docId });
             }
-            debug(`deleteDocument: Successfully deleted document ID: ${docId}`);
+            debug(`delete: Successfully deleted document ID: ${docId}`);
             return true;
         }
 
