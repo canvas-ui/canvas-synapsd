@@ -422,7 +422,7 @@ class SynapsD extends EventEmitter {
 
     async get(id, options = { parse: true }) {
         if (!id) { throw new Error('Document id required'); }
-        return await this.getDocumentById(id, options);
+        return await this.#getById(id, options);
     }
 
     async put(record, memberships = {}) {
@@ -440,7 +440,7 @@ class SynapsD extends EventEmitter {
 
         if (typeof record === 'number' || (typeof record === 'string' && /^\d+$/.test(record))) {
             const id = typeof record === 'number' ? record : parseInt(record, 10);
-            return await this.updateDocument(id, null, spec);
+            return await this.#updateOne(id, null, spec);
         }
 
         if (!record || typeof record !== 'object' || Array.isArray(record)) {
@@ -448,13 +448,13 @@ class SynapsD extends EventEmitter {
         }
 
         if (record.id !== undefined && record.id !== null) {
-            const existing = await this.getDocumentById(record.id);
+            const existing = await this.#getById(record.id);
             if (existing) {
-                return await this.updateDocument(record.id, record, spec);
+                return await this.#updateOne(record.id, record, spec);
             }
         }
 
-        return await this.insertDocument(record, spec);
+        return await this.#putOne(record, spec);
     }
 
     async has(id, spec = {}) {
@@ -463,7 +463,7 @@ class SynapsD extends EventEmitter {
             ?? spec.attributes
             ?? spec.features
             ?? [];
-        return await this.hasDocument(id, spec.context ?? { path: '/' }, features);
+        return await this.#hasOne(id, spec.context ?? { path: '/' }, features);
     }
 
     async unlink(id, membershipsOrSpec = {}, options = {}) {
@@ -472,7 +472,7 @@ class SynapsD extends EventEmitter {
             ?? membershipsOrSpec.attributes
             ?? membershipsOrSpec.features
             ?? [];
-        return await this.removeDocument(
+        return await this.#unlinkOne(
             id,
             membershipsOrSpec.context ?? { path: '/' },
             features,
@@ -482,7 +482,7 @@ class SynapsD extends EventEmitter {
 
     async delete(id, options = {}) {
         if (!id) { throw new Error('Document id required'); }
-        return await this.deleteDocument(id, options);
+        return await this.#deleteOne(id, options);
     }
 
     async putMany(records, memberships = {}) {
@@ -607,7 +607,7 @@ class SynapsD extends EventEmitter {
         return result;
     }
 
-    async insertDocument(document, contextSpec = { path: '/' }, featureBitmapArray = [], emitEvent = true) {
+    async #putOne(document, contextSpec = { path: '/' }, featureBitmapArray = [], emitEvent = true) {
         if (!document) { throw new Error('Document is required'); }
 
         // Canonical document insert signature accepts a selector/options object.
@@ -623,7 +623,7 @@ class SynapsD extends EventEmitter {
         // Support inserting by existing document ID to add context/feature memberships
         if (typeof document === 'number' || (typeof document === 'string' && /^\d+$/.test(document))) {
             const docId = typeof document === 'number' ? document : parseInt(document, 10);
-            return await this.updateDocument(docId, null, contextSpec, featureBitmapArray);
+            return await this.#updateOne(docId, null, contextSpec, featureBitmapArray);
         }
 
         const featureBitmaps = parseBitmapArray(featureBitmapArray);
@@ -678,14 +678,7 @@ class SynapsD extends EventEmitter {
         return parsedDocument.id;
     }
 
-    async insertDocumentArray(docArray, contextSpec = { path: '/' }, featureBitmapArray = []) {
-        return await this.putMany(docArray, {
-            context: contextSpec,
-            attributes: { allOf: featureBitmapArray },
-        });
-    }
-
-    async hasDocument(id, contextSpec = { path: '/' }, featureBitmapArrayInput) {
+    async #hasOne(id, contextSpec = { path: '/' }, featureBitmapArrayInput) {
         if (!id) { throw new Error('Document id required'); }
 
         if (!await this.documents.has(id)) {
@@ -790,13 +783,6 @@ class SynapsD extends EventEmitter {
             }
         }
         return matchingKeys;
-    }
-
-    async hasDocumentByChecksum(checksum, contextSpec = { path: '/' }, featureBitmapArray) {
-        return await this.hasByChecksumString(checksum, {
-            context: contextSpec,
-            attributes: { allOf: featureBitmapArray },
-        });
     }
 
     async find(spec = {}) {
@@ -1074,7 +1060,7 @@ class SynapsD extends EventEmitter {
         return await this.#lanceIndex.ftsQuery(queryString, [], parsedDocs, { limit, offset });
     }
 
-    async updateDocument(docIdentifier, updateData = null, contextSpec = null, featureBitmapArray = []) {
+    async #updateOne(docIdentifier, updateData = null, contextSpec = null, featureBitmapArray = []) {
         if (!docIdentifier) { throw new Error('Document identifier required'); }
         if (typeof docIdentifier !== 'number') { throw new Error('Document identifier must be a numeric ID'); }
         if (!Array.isArray(featureBitmapArray)) { featureBitmapArray = [featureBitmapArray].filter(Boolean); }
@@ -1091,7 +1077,7 @@ class SynapsD extends EventEmitter {
         const docId = docIdentifier;
         const featureBitmaps = parseBitmapArray(featureBitmapArray);
 
-        const storedDocument = await this.getDocumentById(docId);
+        const storedDocument = await this.#getById(docId);
         if (!storedDocument) { throw new Error(`Document with ID "${docId}" not found`); }
 
         // If no update data provided, we're only updating memberships
@@ -1136,15 +1122,8 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    async updateDocumentArray(docArray, contextSpec = null, featureBitmapArray = []) {
-        return await this.putMany(docArray, {
-            context: contextSpec,
-            attributes: { allOf: featureBitmapArray },
-        });
-    }
-
     // Removes documents from context and/or feature bitmaps
-    async removeDocument(docId, contextSpec = { path: '/' }, featureBitmapArray = [], options = { recursive: false }) {
+    async #unlinkOne(docId, contextSpec = { path: '/' }, featureBitmapArray = [], options = { recursive: false }) {
         if (!docId) { throw new Error('Document id required'); }
         if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
         if (typeof options !== 'object') { options = { recursive: false }; }
@@ -1220,15 +1199,8 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    async removeDocumentArray(docIdArray, contextSpec = { path: '/' }, featureBitmapArray = [], options = { recursive: false }) {
-        return await this.unlinkMany(docIdArray, {
-            context: contextSpec,
-            attributes: { allOf: featureBitmapArray },
-        }, options);
-    }
-
     // Deletes documents from all bitmaps and the main dataset
-    async deleteDocument(docId, options = {}) {
+    async #deleteOne(docId, options = {}) {
         if (!docId) { throw new Error('Document id required'); }
         const { emitEvent = true } = options;
         debug(`deleteDocument: Document with ID "${docId}" found (or context check passed), proceeding to delete..`);
@@ -1304,10 +1276,6 @@ class SynapsD extends EventEmitter {
         return false;
     }
 
-    async deleteDocumentArray(docIdArray, options = {}) {
-        return await this.deleteMany(docIdArray, options);
-    }
-
     /**
      * Convenience methods
      */
@@ -1315,7 +1283,7 @@ class SynapsD extends EventEmitter {
     async getDocument(docId, contextSpec = '/', options = { parse: true }) {
         if (!docId) { throw new Error('Document id required'); }
         if (options.parse) {
-            return await this.getDocumentById(docId);
+            return await this.#getById(docId);
         } else {
             return await this.documents.get(docId, contextSpec, options);
         }
@@ -1328,7 +1296,7 @@ class SynapsD extends EventEmitter {
      * @param {boolean} options.parse - Whether to parse the documents
      * @returns {BaseDocument|null} Document instance or null if not found
      */
-    async getDocumentById(id, options = { parse: true }) {
+    async #getById(id, options = { parse: true }) {
         if (!id) { throw new Error('Document id required'); }
         if (typeof id === 'string') { id = parseInt(id); }
         debug(`getById: Searching for document with ID ${id} of type ${typeof id}`);
@@ -1408,7 +1376,7 @@ class SynapsD extends EventEmitter {
         if (!id) { return null; }
 
         // Return the document instance, passing the contextSpec through
-        return await this.getDocumentById(id, options);
+        return await this.#getById(id, options);
     }
 
     async hasByChecksumString(checksumString, spec = {}) {
