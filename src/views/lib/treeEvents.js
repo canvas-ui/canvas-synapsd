@@ -1,11 +1,7 @@
 'use strict';
 
-export function buildTreeEventPayload(tree, payload = {}) {
-    return {
-        treeId: tree?.id ?? null,
-        treeName: tree?.name ?? null,
-        treeType: tree?.type ?? null,
-        timestamp: payload.timestamp ?? new Date().toISOString(),
-        ...payload,
-    };
+import { createTreeEvent } from '../../utils/events.js';
+
+export function buildTreeEventPayload(tree, eventName, payload = {}) {
+    return createTreeEvent(eventName, tree, payload);
 }

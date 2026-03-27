@@ -73,11 +73,11 @@
 - [x] Keep different public semantics:
   - [x] `ContextTree` = layered/intersection semantics
   - [x] `DirectoryTree` = exact location semantics
-- [ ] Review and normalize all emitted event shapes across `synapsd`:
-  - [ ] tree events
-  - [ ] document lifecycle events
-  - [ ] payload naming consistency (`treeId`, `treeName`, `treeType`, etc.)
-  - [ ] transport forwarding expectations
+- [x] Review and normalize all emitted event shapes across `synapsd`:
+  - [x] tree events
+  - [x] document lifecycle events
+  - [x] payload naming consistency (`treeId`, `treeName`, `treeType`, etc.)
+  - [x] transport forwarding expectations
 
 ## Phase 5: Membership Engine Extraction
 - [ ] Extract shared document-target linking into one internal module/service.

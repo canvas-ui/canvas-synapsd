@@ -5,86 +5,91 @@ describe('Search', () => {
 
     beforeAll(async () => {
         db = await initializeTestDB();
+        await db.createTree('projects', 'context');
+        await db.createTree('incoming', 'directory');
     });
 
     afterAll(async () => {
         await cleanupTestDB(db);
     });
 
-    it('should query all documents without requiring bitmap filters', async () => {
-        const matchingId = await db.insertDocument({
-            schema: 'data/abstraction/note',
-            data: {
-                title: 'Alpha Incident',
-                content: 'GPU driver alpha failure on workstation'
-            }
+    describe('Basic search', () => {
+        it('queries documents without requiring tree filters', async () => {
+            const matchingId = await db.put({
+                schema: 'data/abstraction/note',
+                data: {
+                    title: 'Alpha Incident',
+                    content: 'GPU driver alpha failure on workstation',
+                },
+            });
+
+            await db.put({
+                schema: 'data/abstraction/note',
+                data: {
+                    title: 'Beta Incident',
+                    content: 'Routine browser tab sync noise',
+                },
+            });
+
+            const result = await db.search({ query: 'alpha' });
+            const ids = result.map((doc) => doc.id);
+
+            expect(result.error).toBeNull();
+            expect(ids).toContain(matchingId);
         });
-
-        await db.insertDocument({
-            schema: 'data/abstraction/note',
-            data: {
-                title: 'Beta Incident',
-                content: 'Routine browser tab sync noise'
-            }
-        });
-
-        const result = await db.query('alpha');
-        const ids = result.map(doc => doc.id);
-
-        expect(result.error).toBeNull();
-        expect(ids).toContain(matchingId);
     });
 
-    it('should exclude incoming documents from root listings when requested', async () => {
-        const visibleId = await db.insertDocument({
-            schema: 'data/abstraction/note',
-            data: {
-                title: 'Visible Result',
-                content: 'This should stay in the normal root view'
-            }
-        }, '/projects/visible');
+    describe('Incoming exclusion', () => {
+        it('excludes incoming-tree memberships from unrestricted listings when requested', async () => {
+            const visibleId = await db.put({
+                schema: 'data/abstraction/note',
+                data: {
+                    title: 'Visible Result',
+                    content: 'This should stay in the normal root view',
+                },
+            }, { tree: 'projects', path: '/visible' });
 
-        const hiddenId = await db.insertDocument({
-            schema: 'data/abstraction/note',
-            data: {
-                title: 'Incoming Result',
-                content: 'This should stay quarantined'
-            }
-        }, '/.incoming/email/test-account/inbox');
+            const hiddenId = await db.put({
+                schema: 'data/abstraction/note',
+                data: {
+                    title: 'Incoming Result',
+                    content: 'This should stay quarantined',
+                },
+            }, { tree: 'incoming', path: '/email/test-account/inbox' });
 
-        const rootResult = await db.findDocuments('/', [], [], {
-            excludeContextSpec: '/.incoming',
+            const rootResult = await db.find({ excludeTree: 'incoming' });
+            const incomingResult = await db.find({ tree: 'incoming', path: '/email/test-account/inbox' });
+
+            expect(rootResult.map((doc) => doc.id)).toContain(visibleId);
+            expect(rootResult.map((doc) => doc.id)).not.toContain(hiddenId);
+            expect(incomingResult.map((doc) => doc.id)).toContain(hiddenId);
         });
-        const incomingResult = await db.findDocuments('/.incoming');
 
-        expect(rootResult.map(doc => doc.id)).toContain(visibleId);
-        expect(rootResult.map(doc => doc.id)).not.toContain(hiddenId);
-        expect(incomingResult.map(doc => doc.id)).toContain(hiddenId);
-    });
+        it('excludes incoming-tree memberships from full-text search when requested', async () => {
+            await db.put({
+                schema: 'data/abstraction/note',
+                data: {
+                    title: 'Visible Search Hit',
+                    content: 'searchterm-visible',
+                },
+            }, { tree: 'projects', path: '/search' });
 
-    it('should exclude incoming documents from full-text search when requested', async () => {
-        await db.insertDocument({
-            schema: 'data/abstraction/note',
-            data: {
-                title: 'Visible Search Hit',
-                content: 'searchterm-visible'
-            }
-        }, '/projects/search');
+            const hiddenId = await db.put({
+                schema: 'data/abstraction/note',
+                data: {
+                    title: 'Incoming Search Hit',
+                    content: 'searchterm-hidden',
+                },
+            }, { tree: 'incoming', path: '/message/slack/random' });
 
-        const hiddenId = await db.insertDocument({
-            schema: 'data/abstraction/note',
-            data: {
-                title: 'Incoming Search Hit',
-                content: 'searchterm-hidden'
-            }
-        }, '/.incoming/message/slack/random');
+            const hiddenResults = await db.search({
+                query: 'searchterm-hidden',
+                excludeTree: 'incoming',
+            });
+            const allResults = await db.search({ query: 'searchterm-hidden' });
 
-        const hiddenResults = await db.ftsQuery('searchterm-hidden', '/', [], [], {
-            excludeContextSpec: '/.incoming',
+            expect(hiddenResults.map((doc) => doc.id)).not.toContain(hiddenId);
+            expect(allResults.map((doc) => doc.id)).toContain(hiddenId);
         });
-        const incomingResults = await db.ftsQuery('searchterm-hidden', '/.incoming');
-
-        expect(hiddenResults.map(doc => doc.id)).not.toContain(hiddenId);
-        expect(incomingResults.map(doc => doc.id)).toContain(hiddenId);
     });
 });

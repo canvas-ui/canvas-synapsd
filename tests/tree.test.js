@@ -1,523 +1,104 @@
-import fs from 'fs';
-import SynapsD from '../src/index.js';
+import { initializeTestDB, cleanupTestDB } from './helpers.js';
 
-const TEST_DB_PATH = '/tmp/synapsd-tree-test';
-
-describe('SynapsD Tree Operations', () => {
+describe('SynapsD tree memberships', () => {
     let db;
 
     beforeAll(async () => {
-        if (fs.existsSync(TEST_DB_PATH)) {
-            fs.rmSync(TEST_DB_PATH, { recursive: true, force: true });
-        }
-        fs.mkdirSync(TEST_DB_PATH, { recursive: true });
-
-        db = new SynapsD({ path: TEST_DB_PATH });
-        await db.start();
+        db = await initializeTestDB();
+        await db.createTree('projects', 'context');
+        await db.createTree('incoming', 'directory');
     });
 
     afterAll(async () => {
-        if (db && db.isRunning()) {
-            await db.shutdown();
-        }
-        if (fs.existsSync(TEST_DB_PATH)) {
-            fs.rmSync(TEST_DB_PATH, { recursive: true, force: true });
-        }
+        await cleanupTestDB(db);
     });
 
-
-    // ============================================================================
-    // Basic Document Insertion with Paths
-    // ============================================================================
-
-    describe('Basic Document Insertion', () => {
-        it('should insert document at root path', async () => {
-            const doc = {
+    describe('Context tree semantics', () => {
+        it('treats "/" as all real memberships in a context tree', async () => {
+            const projectId = await db.put({
                 schema: 'data/abstraction/note',
-                data: { title: 'Root Note', content: 'Content at root' }
-            };
+                data: { title: 'Project Note', content: 'ships in projects only' },
+            }, { tree: 'projects', path: '/work/project-a' });
 
-            const docId = await db.insertDocument(doc, '/');
-
-            expect(docId).toBeDefined();
-            expect(typeof docId).toBe('number');
-            expect(docId).toBeGreaterThan(100000);
-
-            const retrieved = await db.getDocumentById(docId);
-            expect(retrieved.data.title).toBe('Root Note');
-        });
-
-        it('should insert document at nested path', async () => {
-            const doc = {
+            const stagedId = await db.put({
                 schema: 'data/abstraction/note',
-                data: { title: 'Nested Note', content: 'Content in project' }
-            };
+                data: { title: 'Staged Note', content: 'sits only in incoming' },
+            }, { tree: 'incoming', path: '/mail/inbox' });
 
-            const docId = await db.insertDocument(doc, '/projects/alpha');
+            expect(await db.has(projectId, { tree: 'projects', path: '/' })).toBe(true);
+            expect(await db.has(stagedId, { tree: 'projects', path: '/' })).toBe(false);
 
-            expect(docId).toBeDefined();
-            const retrieved = await db.getDocumentById(docId);
-            expect(retrieved.data.title).toBe('Nested Note');
+            const rootMatches = await db.find({ tree: 'projects', path: '/' });
+            const ids = rootMatches.map((doc) => doc.id);
+            expect(ids).toContain(projectId);
+            expect(ids).not.toContain(stagedId);
         });
 
-        it('should insert document at deeply nested path', async () => {
-            const doc = {
-                schema: 'data/abstraction/tab',
-                data: {
-                    title: 'Deep Tab',
-                    url: 'https://example.com/deep'
-                }
-            };
-
-            const docId = await db.insertDocument(doc, '/projects/beta/frontend/components');
-
-            expect(docId).toBeDefined();
-            const retrieved = await db.getDocumentById(docId);
-            expect(retrieved.data.url).toBe('https://example.com/deep');
-        });
-
-        it('should normalize path with extra slashes', async () => {
-            const doc = {
+        it('refuses unlinking the synthetic context root', async () => {
+            const id = await db.put({
                 schema: 'data/abstraction/note',
-                data: { title: 'Normalized Path', content: 'Test content' }
-            };
-
-            const docId = await db.insertDocument(doc, '//projects//test//');
-
-            expect(docId).toBeDefined();
-            const hasDoc = await db.hasDocument(docId, '/projects/test');
-            expect(hasDoc).toBe(true);
-        });
-    });
-
-    // ============================================================================
-    // Context Hierarchy and Layer Operations
-    // ============================================================================
-
-    describe('Context Hierarchy', () => {
-        it('should create all parent layers when inserting at nested path', async () => {
-            const doc = {
-                schema: 'data/abstraction/note',
-                data: { title: 'Layer Test', content: 'Layer content' }
-            };
-
-            const docId = await db.insertDocument(doc, '/work/project-x/docs');
-
-            // Document should exist in all parent contexts
-            expect(await db.hasDocument(docId, '/')).toBe(true);
-            expect(await db.hasDocument(docId, '/work')).toBe(true);
-            expect(await db.hasDocument(docId, '/work/project-x')).toBe(true);
-            expect(await db.hasDocument(docId, '/work/project-x/docs')).toBe(true);
-        });
-
-        it('should maintain separate context hierarchies', async () => {
-            const doc1 = {
-                schema: 'data/abstraction/note',
-                data: { title: 'Doc 1', content: 'Content 1' }
-            };
-            const doc2 = {
-                schema: 'data/abstraction/note',
-                data: { title: 'Doc 2', content: 'Content 2' }
-            };
-
-            const id1 = await db.insertDocument(doc1, '/workspace/project-a');
-            const id2 = await db.insertDocument(doc2, '/workspace/project-b');
-
-            // Both should be in /workspace
-            expect(await db.hasDocument(id1, '/workspace')).toBe(true);
-            expect(await db.hasDocument(id2, '/workspace')).toBe(true);
-
-            // But not in each other's specific paths
-            expect(await db.hasDocument(id1, '/workspace/project-b')).toBe(false);
-            expect(await db.hasDocument(id2, '/workspace/project-a')).toBe(false);
-        });
-
-        it('should find documents by context path', async () => {
-            const doc1 = {
-                schema: 'data/abstraction/tab',
-                data: { title: 'Tab 1', url: 'https://example.com/1' }
-            };
-            const doc2 = {
-                schema: 'data/abstraction/tab',
-                data: { title: 'Tab 2', url: 'https://example.com/2' }
-            };
-
-            await db.insertDocument(doc1, '/browser/session-1');
-            await db.insertDocument(doc2, '/browser/session-1');
-
-            const result = await db.findDocuments('/browser/session-1');
-
-            expect(result).not.toBeNull();
-            expect(result.count).toBeGreaterThanOrEqual(2);
-        });
-    });
-
-    // ============================================================================
-    // Bitmap Operations (Features)
-    // ============================================================================
-
-    describe('Feature Bitmap Operations', () => {
-        it('should automatically index document by schema', async () => {
-            const doc = {
-                schema: 'data/abstraction/note',
-                data: { title: 'Schema Test', content: 'Schema content' }
-            };
-
-            const docId = await db.insertDocument(doc);
-
-            // Document should be findable by its schema
-            const result = await db.findDocuments('/', ['data/abstraction/note']);
-
-            expect(result).not.toBeNull();
-            expect(result.count).toBeGreaterThan(0);
-
-            const ids = result.map(d => d.id);
-            expect(ids).toContain(docId);
-        });
-
-        it('should index document with custom features', async () => {
-            const doc = {
-                schema: 'data/abstraction/tab',
-                data: {
-                    title: 'Feature Test',
-                    url: 'https://example.com'
-                }
-            };
-
-            const docId = await db.insertDocument(
-                doc,
-                '/features',
-                ['custom/important', 'custom/archived']
-            );
-
-            // Should find by custom feature
-            const result = await db.findDocuments('/', ['custom/important']);
-
-            expect(result).not.toBeNull();
-            const ids = result.map(d => d.id);
-            expect(ids).toContain(docId);
-        });
-
-        it('should support multiple feature filters with AND logic', async () => {
-            const doc = {
-                schema: 'data/abstraction/note',
-                data: { title: 'Multi Feature', content: 'Multi content' }
-            };
-
-            const docId = await db.insertDocument(
-                doc,
-                '/',
-                ['tag/javascript', 'tag/tutorial', 'tag/beginner']
-            );
-
-            // Should find with multiple filters
-            const result = await db.findDocuments(
-                '/',
-                ['tag/javascript', 'tag/tutorial']
-            );
-
-            expect(result).not.toBeNull();
-            const ids = result.map(d => d.id);
-            expect(ids).toContain(docId);
-        });
-
-        it('should support negated feature filters within a context', async () => {
-            const noteId = await db.insertDocument(
-                {
-                    schema: 'data/abstraction/note',
-                    data: { title: 'Visible Note', content: 'Keep me' }
-                },
-                '/features/negation',
-                ['tag/shared']
-            );
-            const tabId = await db.insertDocument(
-                {
-                    schema: 'data/abstraction/tab',
-                    data: { title: 'Hidden Tab', url: 'https://example.com/hidden' }
-                },
-                '/features/negation',
-                ['tag/shared']
-            );
-
-            const result = await db.findDocuments(
-                '/features/negation',
-                ['tag/shared', '!data/abstraction/tab']
-            );
-
-            const ids = result.map(d => d.id);
-            expect(ids).toContain(noteId);
-            expect(ids).not.toContain(tabId);
-        });
-
-        it('should support find() with attribute groups', async () => {
-            const noteId = await db.insertDocument(
-                {
-                    schema: 'data/abstraction/note',
-                    data: { title: 'Attribute Note', content: 'Find me via attributes' }
-                },
-                '/attributes/test',
-                ['tag/shared', 'tag/javascript']
-            );
-            const tabId = await db.insertDocument(
-                {
-                    schema: 'data/abstraction/tab',
-                    data: { title: 'Attribute Tab', url: 'https://example.com/attribute' }
-                },
-                '/attributes/test',
-                ['tag/shared', 'tag/browser']
-            );
-
-            const result = await db.find({
-                context: '/attributes/test',
-                attributes: {
-                    anyOf: ['tag/javascript', 'tag/browser'],
-                    noneOf: ['data/abstraction/tab']
-                }
-            });
-
-            const ids = result.map(d => d.id);
-            expect(ids).toContain(noteId);
-            expect(ids).not.toContain(tabId);
-        });
-    });
-
-    // ============================================================================
-    // Combined Context and Feature Queries
-    // ============================================================================
-
-    describe('Combined Context and Feature Queries', () => {
-        it('should filter by both context and features', async () => {
-            const doc1 = {
-                schema: 'data/abstraction/note',
-                data: { title: 'JavaScript Note', content: 'JS content' }
-            };
-            const doc2 = {
-                schema: 'data/abstraction/note',
-                data: { title: 'Python Note', content: 'Python content' }
-            };
-
-            const id1 = await db.insertDocument(
-                doc1,
-                '/tutorials/web',
-                ['tag/javascript']
-            );
-            const id2 = await db.insertDocument(
-                doc2,
-                '/tutorials/backend',
-                ['tag/python']
-            );
-
-            // Find only JavaScript notes in web tutorials
-            const result = await db.findDocuments(
-                '/tutorials/web',
-                ['tag/javascript']
-            );
-
-            expect(result).not.toBeNull();
-            const ids = result.map(d => d.id);
-            expect(ids).toContain(id1);
-            expect(ids).not.toContain(id2);
-        });
-
-        it('should handle complex nested paths with multiple features', async () => {
-            const doc = {
-                schema: 'data/abstraction/tab',
-                data: {
-                    title: 'Complex Doc',
-                    url: 'https://complex.example.com'
-                }
-            };
-
-            const docId = await db.insertDocument(
-                doc,
-                '/company/department/team/project',
-                ['client/os/linux', 'client/browser/chrome', 'tag/important']
-            );
-
-            // Should be findable with all filters
-            const result = await db.findDocuments(
-                '/company/department/team/project',
-                ['client/os/linux', 'tag/important']
-            );
-
-            expect(result).not.toBeNull();
-            const ids = result.map(d => d.id);
-            expect(ids).toContain(docId);
-        });
-    });
-
-    // ============================================================================
-    // Tree Structure and Integrity
-    // ============================================================================
-
-    describe('Tree Structure', () => {
-        it('should build valid JSON tree structure', async () => {
-            await db.insertDocument(
-                { schema: 'data/abstraction/note', data: { title: 'N1', content: 'C1' } },
-                '/tree-test/branch-a'
-            );
-            await db.insertDocument(
-                { schema: 'data/abstraction/note', data: { title: 'N2', content: 'C2' } },
-                '/tree-test/branch-b'
-            );
-
-            const tree = db.getDefaultContextTree().buildJsonTree();
-
-            expect(tree).toBeDefined();
-            expect(tree.name).toBe('/');
-            expect(tree.children).toBeDefined();
-        });
-
-        it('should handle document removal from specific context', async () => {
-            const doc = {
-                schema: 'data/abstraction/note',
-                data: { title: 'Removal Test', content: 'Removal content' }
-            };
-
-            const docId = await db.insertDocument(doc, '/removal/test/deep');
-
-            // Verify it exists in all contexts
-            expect(await db.hasDocument(docId, '/removal/test/deep')).toBe(true);
-            expect(await db.hasDocument(docId, '/removal/test')).toBe(true);
-            expect(await db.hasDocument(docId, '/removal')).toBe(true);
-
-            // Remove from specific context only (non-recursive)
-            await db.removeDocument(docId, '/removal/test/deep');
-
-            // Should not exist in specific context
-            expect(await db.hasDocument(docId, '/removal/test/deep')).toBe(false);
-
-            // Should still exist in parent contexts
-            expect(await db.hasDocument(docId, '/removal/test')).toBe(true);
-            expect(await db.hasDocument(docId, '/removal')).toBe(true);
-            expect(await db.hasDocument(docId, '/')).toBe(true);
-        });
-
-        it('should promote documents out of incoming using existing context updates', async () => {
-            const docId = await db.insertDocument(
-                {
-                    schema: 'data/abstraction/note',
-                    data: { title: 'Promoted Note', content: 'Keep this one' }
-                },
-                '/.incoming/email/account/inbox'
-            );
-
-            await db.insertDocument(docId, '/projects/kept');
-
-            expect(await db.hasDocument(docId, '/.incoming/email/account/inbox')).toBe(true);
-            expect(await db.hasDocument(docId, '/projects/kept')).toBe(true);
-
-            await db.removeDocument(docId, '/.incoming/email/account/inbox');
-
-            expect(await db.hasDocument(docId, '/.incoming/email/account/inbox')).toBe(false);
-            expect(await db.hasDocument(docId, '/projects/kept')).toBe(true);
-        });
-
-        it('should prevent removal from root context', async () => {
-            const doc = {
-                schema: 'data/abstraction/note',
-                data: { title: 'Root Protection', content: 'Protected content' }
-            };
-
-            const docId = await db.insertDocument(doc, '/protected/path');
+                data: { title: 'Protected Root', content: 'context root is a selector, not a real layer' },
+            }, { tree: 'projects', path: '/ops/release' });
 
             await expect(
-                db.removeDocument(docId, '/')
-            ).rejects.toThrow();
-
-            // Document should still exist
-            expect(await db.hasDocument(docId, '/')).toBe(true);
+                db.unlink(id, { tree: 'projects', path: '/' })
+            ).rejects.toThrow('Cannot unlink from root context "/"');
         });
     });
 
-    // ============================================================================
-    // Batch Operations with Tree
-    // ============================================================================
+    describe('Directory tree semantics', () => {
+        it('keeps directory "/" literal while still exposing tree memberships', async () => {
+            const rootId = await db.put({
+                schema: 'data/abstraction/note',
+                data: { title: 'Root Folder Doc', content: 'lives directly in /' },
+            }, { tree: 'incoming', path: '/' });
 
-    describe('Batch Operations', () => {
-        it('should insert multiple documents at same path', async () => {
-            const docs = [
-                { schema: 'data/abstraction/note', data: { title: 'Batch 1', content: 'BC1' } },
-                { schema: 'data/abstraction/note', data: { title: 'Batch 2', content: 'BC2' } },
-                { schema: 'data/abstraction/note', data: { title: 'Batch 3', content: 'BC3' } }
-            ];
+            const nestedId = await db.put({
+                schema: 'data/abstraction/note',
+                data: { title: 'Nested Folder Doc', content: 'lives under /email/inbox' },
+            }, { tree: 'incoming', path: '/email/inbox' });
 
-            const result = await db.insertDocumentArray(docs, '/batch/test');
+            const rootFolderDocs = await db.find({ tree: 'incoming', path: '/' });
+            const rootFolderIds = rootFolderDocs.map((doc) => doc.id);
+            expect(rootFolderIds).toContain(rootId);
+            expect(rootFolderIds).not.toContain(nestedId);
 
-            expect(result).toHaveLength(3);
-            expect(Array.isArray(result)).toBe(true);
-
-            // All should be in the same context
-            for (const docId of result) {
-                expect(await db.hasDocument(docId, '/batch/test')).toBe(true);
-            }
+            expect(await db.hasDocumentTreeMembership(rootId, 'incoming')).toBe(true);
+            expect(await db.hasDocumentTreeMembership(nestedId, 'incoming')).toBe(true);
         });
 
-        it('should insert documents at different paths within same batch', async () => {
-            const docs = [
-                { schema: 'data/abstraction/note', data: { title: 'Path A', content: 'CA' } },
-                { schema: 'data/abstraction/note', data: { title: 'Path B', content: 'CB' } }
-            ];
+        it('removes tree membership after the last directory unlink', async () => {
+            const id = await db.put({
+                schema: 'data/abstraction/note',
+                data: { title: 'Multi Path Stage', content: 'linked into two staging folders' },
+            }, { tree: 'incoming', path: ['/mail/inbox', '/mail/review'] });
 
-            // Note: insertDocumentArray puts all in same context
-            // For different paths, need individual inserts
-            const id1 = await db.insertDocument(docs[0], '/different/path-a');
-            const id2 = await db.insertDocument(docs[1], '/different/path-b');
+            expect(await db.listDocumentTreePaths(id, 'incoming')).toEqual(
+                expect.arrayContaining(['/mail/inbox', '/mail/review'])
+            );
 
-            expect(await db.hasDocument(id1, '/different/path-a')).toBe(true);
-            expect(await db.hasDocument(id2, '/different/path-b')).toBe(true);
-            expect(await db.hasDocument(id1, '/different/path-b')).toBe(false);
-            expect(await db.hasDocument(id2, '/different/path-a')).toBe(false);
+            await db.unlink(id, { tree: 'incoming', path: '/mail/inbox' });
+            expect(await db.hasDocumentTreeMembership(id, 'incoming')).toBe(true);
+
+            await db.unlink(id, { tree: 'incoming', path: '/mail/review' });
+            expect(await db.hasDocumentTreeMembership(id, 'incoming')).toBe(false);
+            expect(await db.listDocumentTreePaths(id, 'incoming')).toEqual([]);
         });
     });
 
-    // ============================================================================
-    // Edge Cases
-    // ============================================================================
-
-    describe('Edge Cases', () => {
-        it('should handle empty path (defaults to root)', async () => {
-            const doc = {
+    describe('Incoming promotion flow', () => {
+        it('promotes a staged document into a user tree without keeping stale incoming paths', async () => {
+            const id = await db.put({
                 schema: 'data/abstraction/note',
-                data: { title: 'Empty Path', content: 'Empty content' }
-            };
+                data: { title: 'Promoted Note', content: 'keep this one' },
+            }, { tree: 'incoming', path: '/email/account/inbox' });
 
-            const docId = await db.insertDocument(doc, '');
+            await db.link(id, { tree: 'projects', path: '/kept' });
+            await db.unlink(id, { tree: 'incoming', path: '/email/account/inbox' });
 
-            expect(await db.hasDocument(docId, '/')).toBe(true);
-        });
-
-        it('should handle null path (defaults to root)', async () => {
-            const doc = {
-                schema: 'data/abstraction/note',
-                data: { title: 'Null Path', content: 'Null content' }
-            };
-
-            const docId = await db.insertDocument(doc, null);
-
-            expect(await db.hasDocument(docId, '/')).toBe(true);
-        });
-
-        it('should handle path with special characters', async () => {
-            const doc = {
-                schema: 'data/abstraction/note',
-                data: { title: 'Special Chars', content: 'Special content' }
-            };
-
-            // Special chars should be normalized
-            const docId = await db.insertDocument(doc, '/test-path_123/item.name');
-
-            expect(docId).toBeDefined();
-            expect(await db.hasDocument(docId, '/test-path_123/item.name')).toBe(true);
-        });
-
-        it('should not find documents in non-existent paths', async () => {
-            const result = await db.findDocuments('/non/existent/path');
-
-            expect(result).not.toBeNull();
-            expect(result.count).toBe(0);
-            expect(result).toHaveLength(0);
+            expect(await db.has(id, { tree: 'projects', path: '/kept' })).toBe(true);
+            expect(await db.hasDocumentTreeMembership(id, 'incoming')).toBe(false);
+            expect(await db.has(id, { tree: 'incoming', path: '/email/account/inbox' })).toBe(false);
         });
     });
 });
-

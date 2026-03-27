@@ -1,7 +1,6 @@
 'use strict';
 
 // Utils
-import EventEmitter from 'eventemitter2';
 import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd:context-tree:layer-index');
 
@@ -12,15 +11,13 @@ const RootLayer = SchemaRegistry.getSchema('internal/layers/universe');
 /**
  * Layer Index
  */
-class LayerIndex extends EventEmitter {
+class LayerIndex {
 
     #store;
     #nameToLayerMap = new Map();
     #initialized = false;
 
     constructor(dataStore, options = {}) {
-        super(options.eventEmitterOptions || {}); // EventEmitter
-
         if (!dataStore) { throw new Error('A LayerIndex dataStore reference required'); }
         this.#store = dataStore;
     }

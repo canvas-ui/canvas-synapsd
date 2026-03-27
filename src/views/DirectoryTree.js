@@ -4,6 +4,7 @@ import EventEmitter from 'eventemitter2';
 import debugInstance from 'debug';
 import { ulid } from 'ulid';
 import TreeNode from './lib/TreeNode.js';
+import { EVENTS } from '../utils/events.js';
 import { buildTreeEventPayload } from './lib/treeEvents.js';
 
 const debug = debugInstance('canvas:synapsd:directory-tree');
@@ -94,6 +95,29 @@ class DirectoryTree extends EventEmitter {
         return await this.#collection.OR(nodeIds);
     }
 
+    async getPathByNodeId(nodeId) {
+        if (!nodeId) { return null; }
+        if (nodeId === ROOT_NODE_ID) { return '/'; }
+
+        const segments = [];
+        let currentId = nodeId;
+        while (currentId && currentId !== ROOT_NODE_ID) {
+            const nodeData = this.#dataStore.get(this.#nodeKey(currentId));
+            if (!nodeData) { return null; }
+            segments.unshift(nodeData.name);
+            currentId = nodeData.parentId || ROOT_NODE_ID;
+        }
+
+        return segments.length > 0 ? `/${segments.join('/')}` : '/';
+    }
+
+    getNodeIdsForPath(path = '/', { recursive = false } = {}) {
+        const node = this.#getNodeForPath(this.#normalizePath(path));
+        if (!node) { return []; }
+        if (!recursive) { return [node.id]; }
+        return this.#collectNodeIds(node);
+    }
+
     pathExists(path = '/') {
         return Boolean(this.#getNodeForPath(this.#normalizePath(path)));
     }
@@ -107,7 +131,7 @@ class DirectoryTree extends EventEmitter {
     async insertPath(path = '/') {
         const normalizedPath = this.#normalizePath(path);
         const node = await this.#ensureNode(normalizedPath);
-        this.#emitTreeEvent('tree.path.inserted', {
+        this.#emitTreeEvent(EVENTS.TREE_PATH_INSERTED, {
             path: normalizedPath,
             nodeId: node.id,
         });
@@ -149,7 +173,7 @@ class DirectoryTree extends EventEmitter {
             this.#persistNode(node),
         ]);
 
-        this.#emitTreeEvent('tree.path.moved', {
+        this.#emitTreeEvent(EVENTS.TREE_PATH_MOVED, {
             pathFrom: sourcePath,
             pathTo: targetPath,
             nodeId: node.id,
@@ -177,7 +201,7 @@ class DirectoryTree extends EventEmitter {
         await this.#persistSubtree(copiedNode);
         await this.#persistNode(targetParent);
 
-        this.#emitTreeEvent('tree.path.copied', {
+        this.#emitTreeEvent(EVENTS.TREE_PATH_COPIED, {
             pathFrom: sourcePath,
             pathTo: targetPath,
             recursive,
@@ -205,7 +229,7 @@ class DirectoryTree extends EventEmitter {
         await this.#persistNode(parent);
         await this.#deleteSubtree(node);
 
-        this.#emitTreeEvent('tree.path.removed', {
+        this.#emitTreeEvent(EVENTS.TREE_PATH_REMOVED, {
             path: normalizedPath,
             recursive,
             nodeId: node.id,
@@ -419,7 +443,7 @@ class DirectoryTree extends EventEmitter {
     }
 
     #emitTreeEvent(eventName, payload = {}) {
-        this.emit(eventName, buildTreeEventPayload(this, payload));
+        this.emit(eventName, buildTreeEventPayload(this, eventName, payload));
     }
 }
 

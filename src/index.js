@@ -14,6 +14,9 @@ const { RoaringBitmap32 } = require('roaring');
 // Errors
 import { ArgumentError } from './utils/errors.js';
 
+// Events
+import { EVENTS, createEvent } from './utils/events.js';
+
 // DB Backend
 import LmdbBackend from './backends/lmdb/index.js';
 
@@ -34,7 +37,7 @@ import ContextTree from './views/ContextTree.js';
 import DirectoryTree from './views/DirectoryTree.js';
 
 // Extracted utilities
-import { parseContextSpecForInsert, parseContextSpecForQuery, parseBitmapArray } from './utils/parsing.js';
+import { parseContextSpecForInsert, parseBitmapArray } from './utils/parsing.js';
 import { parseFilters, applyDatetimeFilter } from './utils/filters.js';
 import { parseDocumentData, initializeDocument, parseInitializeDocument, generateDocumentID } from './utils/document.js';
 import PrefixedStore from './utils/PrefixedStore.js';
@@ -229,7 +232,7 @@ class SynapsD extends EventEmitter {
             // TODO: Remove after all instances have been reindexed (added 2026-02-17)
             await this.reindexFeatures();
 
-            this.emit('started');
+            this.emit(EVENTS.STARTED, createEvent(EVENTS.STARTED));
             debug('SynapsD started');
         } catch (error) {
             this.#status = 'error';
@@ -299,7 +302,7 @@ class SynapsD extends EventEmitter {
             this.contextBitmapCollection = tree.collection || this.#contextBitmapCollectionForTree(meta.id);
         }
 
-        this.emit('tree.created', { treeId: meta.id, treeName: meta.name, treeType: meta.type });
+        this.emit(EVENTS.TREE_CREATED, createEvent(EVENTS.TREE_CREATED, { treeId: meta.id, treeName: meta.name, treeType: meta.type }));
         return meta;
     }
 
@@ -316,7 +319,7 @@ class SynapsD extends EventEmitter {
                 this.#defaultTreeIds[meta.type] = next.id;
             }
         }
-        this.emit('tree.deleted', { treeId: meta.id, treeName: meta.name, treeType: meta.type });
+        this.emit(EVENTS.TREE_DELETED, createEvent(EVENTS.TREE_DELETED, { treeId: meta.id, treeName: meta.name, treeType: meta.type }));
         return true;
     }
 
@@ -327,7 +330,7 @@ class SynapsD extends EventEmitter {
         meta.name = String(newName).trim();
         meta.updatedAt = new Date().toISOString();
         await this.#internalStore.put(this.#treeMetaKey(meta.id), meta);
-        this.emit('tree.renamed', { treeId: meta.id, treeName: meta.name, treeType: meta.type });
+        this.emit(EVENTS.TREE_RENAMED, createEvent(EVENTS.TREE_RENAMED, { treeId: meta.id, treeName: meta.name, treeType: meta.type }));
         return meta;
     }
 
@@ -337,14 +340,14 @@ class SynapsD extends EventEmitter {
         debug('Shutting down SynapsD');
         try {
             this.#status = 'shutting down';
-            this.emit('beforeShutdown');
+            this.emit(EVENTS.BEFORE_SHUTDOWN, createEvent(EVENTS.BEFORE_SHUTDOWN));
             // Close index backends
             // LanceDB uses filesystem-based storage; no explicit close needed.
             // Close database backend
             await this.#db.close();
 
             this.#status = 'shutdown';
-            this.emit('shutdown');
+            this.emit(EVENTS.SHUTDOWN, createEvent(EVENTS.SHUTDOWN));
 
             debug('SynapsD database closed');
         } catch (error) {
@@ -425,26 +428,11 @@ class SynapsD extends EventEmitter {
         return await this.#getById(id, options);
     }
 
-    async put(record, memberships = {}) {
-        const features = memberships.attributes?.allOf
-            ?? memberships.attributes
-            ?? memberships.features
-            ?? [];
-
-        const spec = {
-            context: memberships.context ?? { path: '/' },
-            directory: memberships.directory ?? null,
-            features,
-            emitEvent: memberships.emitEvent,
-        };
-
-        if (typeof record === 'number' || (typeof record === 'string' && /^\d+$/.test(record))) {
-            const id = typeof record === 'number' ? record : parseInt(record, 10);
-            return await this.#updateOne(id, null, spec);
-        }
+    async put(record, treeSelector = null, features = [], options = {}) {
+        const spec = this.#normalizeDocumentOperationSpec(treeSelector, features, options);
 
         if (!record || typeof record !== 'object' || Array.isArray(record)) {
-            throw new Error('Record object or numeric document id is required');
+            throw new Error('Record object is required');
         }
 
         if (record.id !== undefined && record.id !== null) {
@@ -457,27 +445,28 @@ class SynapsD extends EventEmitter {
         return await this.#putOne(record, spec);
     }
 
-    async has(id, spec = {}) {
-        if (!id) { throw new Error('Document id required'); }
-        const features = spec.attributes?.allOf
-            ?? spec.attributes
-            ?? spec.features
-            ?? [];
-        return await this.#hasOne(id, spec.context ?? { path: '/' }, features);
+    async link(idOrIds, treeSelector = null, features = [], options = {}) {
+        if (Array.isArray(idOrIds)) {
+            return await this.linkMany(idOrIds, treeSelector, features, options);
+        }
+        if (!idOrIds) { throw new Error('Document id required'); }
+        const spec = this.#normalizeDocumentOperationSpec(treeSelector, features, options);
+        return await this.#linkOne(idOrIds, spec);
     }
 
-    async unlink(id, membershipsOrSpec = {}, options = {}) {
+    async has(id, treeSelector = null, features = []) {
         if (!id) { throw new Error('Document id required'); }
-        const features = membershipsOrSpec.attributes?.allOf
-            ?? membershipsOrSpec.attributes
-            ?? membershipsOrSpec.features
-            ?? [];
-        return await this.#unlinkOne(
-            id,
-            membershipsOrSpec.context ?? { path: '/' },
-            features,
-            options,
-        );
+        const spec = this.#normalizeDocumentOperationSpec(treeSelector, features, {});
+        return await this.#hasOne(id, spec);
+    }
+
+    async unlink(idOrIds, treeSelector = null, features = [], options = {}) {
+        if (Array.isArray(idOrIds)) {
+            return await this.unlinkMany(idOrIds, treeSelector, features, options);
+        }
+        if (!idOrIds) { throw new Error('Document id required'); }
+        const spec = this.#normalizeDocumentOperationSpec(treeSelector, features, options);
+        return await this.#unlinkOne(idOrIds, spec, options);
     }
 
     async delete(id, options = {}) {
@@ -485,29 +474,19 @@ class SynapsD extends EventEmitter {
         return await this.#deleteOne(id, options);
     }
 
-    async putMany(records, memberships = {}) {
-        const features = memberships.attributes?.allOf
-            ?? memberships.attributes
-            ?? memberships.features
-            ?? [];
-        const contextSpec = memberships.context ?? { path: '/' };
+    async putMany(records, treeSelector = null, features = [], options = {}) {
+        const spec = this.#normalizeDocumentOperationSpec(treeSelector, features, options);
         if (!Array.isArray(records)) {
             throw new Error('Document array must be an array');
-        }
-        if (!Array.isArray(features)) {
-            throw new Error('Feature array must be an array');
         }
 
         debug(`putMany: Attempting to store ${records.length} records`);
         const storedIds = [];
+        const batchSpec = { ...spec, emitEvent: false };
         for (let i = 0; i < records.length; i++) {
             const record = records[i];
             try {
-                const id = await this.put(record, {
-                    context: contextSpec,
-                    attributes: { allOf: features },
-                    emitEvent: false,
-                });
+                const id = await this.put(record, batchSpec);
                 storedIds.push(id);
             } catch (error) {
                 const contextualError = new Error(`Failed to store record at index ${i}: ${error.message}`);
@@ -518,14 +497,15 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        if (storedIds.length > 0 && this.getDefaultContextTree()) {
+        if (storedIds.length > 0 && spec.context) {
             try {
-                this.#resolveTreeSelection('context', contextSpec, '/').tree.emit('tree.document.inserted.batch', {
+                const { tree: batchTree } = this.#resolveTreeSelection('context', spec.context, '/');
+                batchTree.emit(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, createEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, {
                     documentIds: storedIds,
-                    contextSpec,
+                    contextSpec: spec.context,
                     layerNames: [],
-                    timestamp: new Date().toISOString(),
-                });
+                    source: 'tree',
+                }));
             } catch (treeError) {
                 debug(`putMany: Failed to emit tree batch event, error: ${treeError.message}`);
             }
@@ -534,20 +514,11 @@ class SynapsD extends EventEmitter {
         return storedIds;
     }
 
-    async unlinkMany(ids, membershipsOrSpec = {}, options = {}) {
-        const features = membershipsOrSpec.attributes?.allOf
-            ?? membershipsOrSpec.attributes
-            ?? membershipsOrSpec.features
-            ?? [];
-        const contextSpec = membershipsOrSpec.context ?? { path: '/' };
-
+    async linkMany(ids, treeSelector = null, features = [], options = {}) {
+        const spec = this.#normalizeDocumentOperationSpec(treeSelector, features, options);
         if (!Array.isArray(ids)) {
             throw new Error('Document ID array must be an array');
         }
-        if (!Array.isArray(features)) {
-            throw new Error('Feature array must be an array');
-        }
-        if (typeof options !== 'object') { options = { recursive: false }; }
 
         const result = {
             successful: [],
@@ -562,10 +533,36 @@ class SynapsD extends EventEmitter {
                 continue;
             }
             try {
-                const removedId = await this.unlink(id, {
-                    context: contextSpec,
-                    attributes: { allOf: features },
-                }, options);
+                const linkedId = await this.link(id, spec);
+                result.successful.push({ index: i, id: linkedId });
+            } catch (error) {
+                result.failed.push({ index: i, id, error: error.message || 'Unknown error' });
+            }
+        }
+
+        return result;
+    }
+
+    async unlinkMany(ids, treeSelector = null, features = [], options = {}) {
+        const spec = this.#normalizeDocumentOperationSpec(treeSelector, features, options);
+        if (!Array.isArray(ids)) {
+            throw new Error('Document ID array must be an array');
+        }
+
+        const result = {
+            successful: [],
+            failed: [],
+            count: ids.length,
+        };
+
+        for (let i = 0; i < ids.length; i++) {
+            const id = ids[i];
+            if (typeof id !== 'number') {
+                result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
+                continue;
+            }
+            try {
+                const removedId = await this.unlink(id, spec, options);
                 result.successful.push({ index: i, id: removedId });
             } catch (error) {
                 result.failed.push({ index: i, id, error: error.message || 'Unknown error' });
@@ -620,12 +617,6 @@ class SynapsD extends EventEmitter {
             emitEvent = opts.emitEvent ?? emitEvent;
         }
 
-        // Support inserting by existing document ID to add context/feature memberships
-        if (typeof document === 'number' || (typeof document === 'string' && /^\d+$/.test(document))) {
-            const docId = typeof document === 'number' ? document : parseInt(document, 10);
-            return await this.#updateOne(docId, null, contextSpec, featureBitmapArray);
-        }
-
         const featureBitmaps = parseBitmapArray(featureBitmapArray);
         const parsedDocument = isDocumentInstance(document) ? document : parseInitializeDocument(document);
         parsedDocument.validateData();
@@ -666,19 +657,69 @@ class SynapsD extends EventEmitter {
 
         if (emitEvent) {
             const { tree: contextTree } = this.#resolveTreeSelection('context', contextSpec, '/');
-            contextTree.emit('tree.document.inserted', {
+            contextTree.emit(EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
                 documentId: parsedDocument.id,
                 contextSpec,
                 directorySpec,
-                timestamp: new Date().toISOString(),
-            });
-            this.emit('document.inserted', { id: parsedDocument.id, document: parsedDocument });
+                source: 'tree',
+            }));
+            this.emit(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, { id: parsedDocument.id, document: parsedDocument }));
         }
 
         return parsedDocument.id;
     }
 
-    async #hasOne(id, contextSpec = { path: '/' }, featureBitmapArrayInput) {
+    async #linkOne(docId, contextSpec = { path: '/' }, featureBitmapArray = [], emitEvent = true) {
+        if (!docId) { throw new Error('Document id required'); }
+
+        let directorySpec = null;
+        if (this.#isDocumentOperationOptions(contextSpec)) {
+            const opts = contextSpec;
+            contextSpec = opts.context ?? null;
+            directorySpec = opts.directory ?? null;
+            featureBitmapArray = opts.features ?? featureBitmapArray;
+            emitEvent = opts.emitEvent ?? emitEvent;
+        }
+
+        const numericId = typeof docId === 'string' ? parseInt(docId, 10) : docId;
+        if (!Number.isInteger(numericId)) {
+            throw new Error('Document identifier must be a numeric ID');
+        }
+
+        const storedDocument = await this.#getById(numericId);
+        if (!storedDocument) {
+            throw new Error(`Document with ID "${numericId}" not found`);
+        }
+
+        const featureBitmaps = parseBitmapArray(featureBitmapArray).filter(Boolean);
+        if (!featureBitmaps.includes(storedDocument.schema)) {
+            featureBitmaps.push(storedDocument.schema);
+        }
+
+        await this.#indexDocument(numericId, contextSpec, directorySpec, featureBitmaps);
+
+        if (emitEvent) {
+            const treeType = contextSpec ? 'context' : (directorySpec ? 'directory' : null);
+            const treeSpec = contextSpec ?? directorySpec;
+            if (treeType && treeSpec) {
+                const { tree } = this.#resolveTreeSelection(treeType, treeSpec, treeType === 'context' ? '/' : null);
+                tree.emit(EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
+                    documentId: numericId,
+                    contextSpec,
+                    directorySpec,
+                    source: 'tree',
+                }));
+            }
+            this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
+                id: numericId,
+                memberships: { context: contextSpec, directory: directorySpec, features: featureBitmaps },
+            }));
+        }
+
+        return numericId;
+    }
+
+    async #hasOne(id, spec = {}) {
         if (!id) { throw new Error('Document id required'); }
 
         if (!await this.documents.has(id)) {
@@ -686,85 +727,34 @@ class SynapsD extends EventEmitter {
             return false;
         }
 
-        // If the caller did not provide any specific context or feature filters,
-        // then existence in the main document store is sufficient.
-        const rawContextSpec = contextSpec && typeof contextSpec === 'object' && !Array.isArray(contextSpec)
-            ? (contextSpec.path ?? contextSpec.context ?? null)
-            : contextSpec;
-        const { tree: contextTree, collection: contextCollection } = this.#resolveTreeSelection('context', contextSpec, '/');
-        const noContextFilterWanted = rawContextSpec === undefined || rawContextSpec === null || rawContextSpec.length === 0;
-        const noFeatureFilterWanted = featureBitmapArrayInput === undefined || featureBitmapArrayInput === null || featureBitmapArrayInput.length === 0;
+        const selectorBitmap = await this.#buildSelectorBitmap({
+            context: spec.context ?? null,
+            directory: spec.directory ?? null,
+        });
+        if (selectorBitmap && selectorBitmap.isEmpty) {
+            return false;
+        }
 
-        if (noContextFilterWanted && noFeatureFilterWanted) {
+        const featureBitmap = await this.#buildFeaturesBitmap(spec.features ?? null);
+        if (featureBitmap && featureBitmap.isEmpty) {
+            return false;
+        }
+
+        let resultBitmap = selectorBitmap;
+        if (featureBitmap) {
+            if (resultBitmap) {
+                resultBitmap.andInPlace(featureBitmap);
+            } else {
+                resultBitmap = featureBitmap;
+            }
+        }
+
+        if (!resultBitmap) {
             debug(`hasDocument: Document ID "${id}" exists in store, and no specific filters were provided by the caller.`);
             return true;
         }
 
-        // At least one filter criterion was provided or will be defaulted if only one part of the filter was given.
-        const effectiveContextSpec = noContextFilterWanted ? '/' : rawContextSpec;
-        const effectiveFeatureArray = noFeatureFilterWanted ? [] : featureBitmapArrayInput;
-
-        const parsedContextKeys = parseContextSpecForQuery(effectiveContextSpec);
-        const hasExplicitRootContext = effectiveContextSpec === '/';
-        const hasExplicitContextPath = !hasExplicitRootContext && !noContextFilterWanted;
-        if (hasExplicitContextPath && !contextTree.getLayerForPath(effectiveContextSpec)) {
-            debug(`hasDocument: Doc ${id} - explicit context path "${effectiveContextSpec}" does not exist.`);
-            return false;
-        }
-        const parsedFeatureKeys = parseBitmapArray(effectiveFeatureArray).filter(Boolean);
-
-        let resultBitmap = null;
-        let contextFilterApplied = false;
-
-        // Apply context filter if caller actually wanted one OR if it defaulted to '/' but features are also specified.
-        if (!noContextFilterWanted || (noContextFilterWanted && !noFeatureFilterWanted)) {
-            // Resolve context layer names to ULIDs (root '/' is skipped, yielding [] for root-only queries)
-            const contextLayerIds = contextTree.resolveLayerIds(parsedContextKeys);
-            if (contextLayerIds.length === 0) {
-                // Root-only context — no bitmap filter to apply
-            } else {
-                resultBitmap = await contextCollection.AND(contextLayerIds);
-                contextFilterApplied = true;
-            }
-            // If context filter results in null/empty, and it was a specific request, then fail early.
-            if (!resultBitmap || resultBitmap.isEmpty) {
-                if (!noContextFilterWanted && !hasExplicitRootContext) {
-                    debug(`hasDocument: Doc ${id} - explicit context filter ${JSON.stringify(parsedContextKeys)} yielded no results.`);
-                    return false;
-                }
-            }
-        }
-
-        if (!noFeatureFilterWanted && parsedFeatureKeys.length > 0) {
-            const featureOpBitmap = await this.#buildFeatureBitmap(parsedFeatureKeys);
-            if (!featureOpBitmap || featureOpBitmap.isEmpty) {
-                debug(`hasDocument: Doc ${id} - explicit feature filter ${JSON.stringify(parsedFeatureKeys)} yielded no results.`);
-                return false; // Feature filter must yield results if specified
-            }
-
-            if (contextFilterApplied && resultBitmap) {
-                resultBitmap.andInPlace(featureOpBitmap);
-            } else {
-                resultBitmap = featureOpBitmap; // RoaringBitmap32.or(new RoaringBitmap32(), featureOpBitmap) for a new instance if needed
-            }
-        } else if (contextFilterApplied && (!resultBitmap || resultBitmap.isEmpty) && !noContextFilterWanted) {
-            // If context filter was applied (explicitly), was the only filter, and yielded no results.
-            debug(`hasDocument: Doc ${id} - explicit context filter (as only filter) ${JSON.stringify(parsedContextKeys)} yielded no results.`);
-            return false;
-        }
-
-        // If resultBitmap is null here, it means no filters were effectively run that produced a bitmap
-        // (e.g. context was default '/' and no features). In this case, existence is enough (already checked).
-        // However, if filters *were* run, resultBitmap must exist.
-        if (noContextFilterWanted && noFeatureFilterWanted) {
-            // This should have been caught by the top check, but as a safeguard:
-            return true;
-        }
-
-        if (resultBitmap) {
-            return resultBitmap.has(id);
-        }
-        return hasExplicitRootContext ? true : false;
+        return resultBitmap.has(id);
     }
 
     async getBitmapsForDocument(id, prefix = '') {
@@ -785,12 +775,86 @@ class SynapsD extends EventEmitter {
         return matchingKeys;
     }
 
+    async listDocumentTreePaths(id, treeNameOrId) {
+        if (!id) { throw new Error('Document ID required'); }
+        const tree = this.getTree(treeNameOrId);
+        if (!tree) {
+            throw new Error(`Tree not found: ${treeNameOrId}`);
+        }
+        if (tree.type !== 'directory') {
+            throw new Error(`Tree "${tree.name}" is not a directory tree`);
+        }
+
+        const collection = this.#directoryBitmapCollectionForTree(tree.id);
+        const layerKeys = await this.#synapses.listSynapses(id);
+        const prefix = collection.prefix;
+        const paths = [];
+
+        for (const layerKey of layerKeys) {
+            if (!layerKey.startsWith(prefix)) {
+                continue;
+            }
+            const nodeId = layerKey.slice(prefix.length);
+            const path = await tree.getPathByNodeId(nodeId);
+            if (path) {
+                paths.push(path);
+            }
+        }
+
+        return Array.from(new Set(paths));
+    }
+
+    async listDocumentTreeMemberships(id, treeNameOrId) {
+        if (!id) { throw new Error('Document ID required'); }
+        const tree = this.getTree(treeNameOrId);
+        if (!tree) {
+            throw new Error(`Tree not found: ${treeNameOrId}`);
+        }
+
+        const layerKeys = await this.#synapses.listSynapses(id);
+        if (tree.type === 'directory') {
+            return await this.listDocumentTreePaths(id, tree.id);
+        }
+
+        const collection = this.#contextBitmapCollectionForTree(tree.id);
+        const prefix = collection.prefix;
+        const paths = [];
+
+        for (const layerKey of layerKeys) {
+            if (!layerKey.startsWith(prefix)) {
+                continue;
+            }
+            const layerId = layerKey.slice(prefix.length);
+            const path = tree.getPathByLayerId(layerId);
+            if (path) {
+                paths.push(path);
+            }
+        }
+
+        return Array.from(new Set(paths));
+    }
+
+    async hasDocumentTreeMembership(id, treeNameOrId) {
+        if (!id) { throw new Error('Document ID required'); }
+        const tree = this.getTree(treeNameOrId);
+        if (!tree) {
+            throw new Error(`Tree not found: ${treeNameOrId}`);
+        }
+
+        const prefix = tree.type === 'directory'
+            ? this.#directoryBitmapCollectionForTree(tree.id).prefix
+            : this.#contextBitmapCollectionForTree(tree.id).prefix;
+        const layerKeys = await this.#synapses.listSynapses(id);
+        return layerKeys.some((layerKey) => layerKey.startsWith(prefix));
+    }
+
     async find(spec = {}) {
         let {
-            contextSpec,
-            attributes,
+            treeSelector,
+            features,
             filterArray,
             excludeContextSpecs,
+            excludeTreeSelectors,
             options,
         } = this.#normalizeFindSpec(spec);
 
@@ -805,14 +869,8 @@ class SynapsD extends EventEmitter {
         const limit = providedLimit !== undefined ? Math.max(0, providedLimit) : 0;
         const offset = Math.max(0, providedOffset !== undefined ? providedOffset : (providedPage && providedPage > 0 ? (providedPage - 1) * (limit || 100) : 0));
 
-        const rawContextSpec = contextSpec && typeof contextSpec === 'object' && !Array.isArray(contextSpec)
-            ? (contextSpec.path ?? contextSpec.context ?? null)
-            : contextSpec;
-        const { tree: contextTree, collection: contextCollection } = this.#resolveTreeSelection('context', contextSpec ?? { path: '/' }, '/');
-        const contextBitmapArray = parseContextSpecForQuery(rawContextSpec);
-        const hasExplicitContextPath = rawContextSpec !== null && rawContextSpec !== undefined && rawContextSpec !== '/';
         if (!Array.isArray(filterArray) && typeof filterArray === 'string') { filterArray = [filterArray]; }
-        debug(`Listing documents with contextArray: ${contextBitmapArray}, attributes: ${JSON.stringify(attributes)}, filters: ${filterArray}, limit: ${limit}, offset: ${offset}`);
+        debug(`Listing documents with treeSelector: ${JSON.stringify(treeSelector)}, features: ${JSON.stringify(features)}, filters: ${filterArray}, limit: ${limit}, offset: ${offset}`);
 
         try {
             // Start with null, will hold RoaringBitmap32 instance if filters are applied
@@ -820,30 +878,18 @@ class SynapsD extends EventEmitter {
             // Flag to track if any filters actually modified the initial empty bitmap
             let filtersApplied = false;
 
-            // Apply context filters only if contextSpec was explicitly provided
-            if (hasExplicitContextPath && !contextTree.getLayerForPath(rawContextSpec)) {
-                const emptyArray = [];
-                emptyArray.count = 0;
-                emptyArray.totalCount = 0;
-                emptyArray.error = null;
-                return emptyArray;
+            const selectorBitmap = await this.#buildSelectorBitmap(treeSelector);
+            if (selectorBitmap) {
+                resultBitmap = selectorBitmap;
+                filtersApplied = true;
             }
 
-            if (rawContextSpec !== null && rawContextSpec !== undefined && contextBitmapArray.length > 0) {
-                const contextLayerIds = contextTree.resolveLayerIds(contextBitmapArray);
-                if (contextLayerIds.length > 0) {
-                    resultBitmap = await contextCollection.AND(contextLayerIds);
-                    filtersApplied = true;
-                }
-            }
-
-            // Apply bitmap-backed attribute filters if provided
-            const attributeBitmap = await this.#buildAttributesBitmap(attributes);
-            if (attributeBitmap) {
+            const featureBitmap = await this.#buildFeaturesBitmap(features);
+            if (featureBitmap) {
                 if (filtersApplied && resultBitmap) {
-                    resultBitmap.andInPlace(attributeBitmap);
+                    resultBitmap.andInPlace(featureBitmap);
                 } else {
-                    resultBitmap = attributeBitmap;
+                    resultBitmap = featureBitmap;
                     filtersApplied = true;
                 }
             }
@@ -878,6 +924,7 @@ class SynapsD extends EventEmitter {
             }
 
             resultBitmap = await this.#applyExcludedContexts(resultBitmap, excludeContextSpecs);
+            resultBitmap = await this.#applyExcludedTrees(resultBitmap, excludeTreeSelectors);
             if (resultBitmap) {
                 filtersApplied = true;
             }
@@ -955,10 +1002,11 @@ class SynapsD extends EventEmitter {
         }
 
         let {
-            contextSpec,
-            attributes,
+            treeSelector,
+            features,
             filterArray,
             excludeContextSpecs,
+            excludeTreeSelectors,
             options,
         } = this.#normalizeFindSpec(spec);
 
@@ -976,34 +1024,19 @@ class SynapsD extends EventEmitter {
 
         let candidateBitmap = null;
         let filtersApplied = false;
-        const rawContextSpec = contextSpec && typeof contextSpec === 'object' && !Array.isArray(contextSpec)
-            ? (contextSpec.path ?? contextSpec.context ?? null)
-            : contextSpec;
-        const { tree: contextTree, collection: contextCollection } = this.#resolveTreeSelection('context', contextSpec ?? { path: '/' }, '/');
-        const contextBitmapArray = parseContextSpecForQuery(rawContextSpec);
 
-        if (rawContextSpec !== null && rawContextSpec !== undefined && rawContextSpec !== '/' && !contextTree.getLayerForPath(rawContextSpec)) {
-            const empty = [];
-            empty.count = 0;
-            empty.totalCount = 0;
-            empty.error = null;
-            return empty;
+        const selectorBitmap = await this.#buildSelectorBitmap(treeSelector);
+        if (selectorBitmap) {
+            candidateBitmap = selectorBitmap;
+            filtersApplied = true;
         }
 
-        if (contextBitmapArray.length > 0) {
-            const contextLayerIds = contextTree.resolveLayerIds(contextBitmapArray);
-            if (contextLayerIds.length > 0) {
-                candidateBitmap = await contextCollection.AND(contextLayerIds);
-                filtersApplied = true;
-            }
-        }
-
-        const attributeBitmap = await this.#buildAttributesBitmap(attributes);
-        if (attributeBitmap) {
+        const featureBitmap = await this.#buildFeaturesBitmap(features);
+        if (featureBitmap) {
             if (filtersApplied && candidateBitmap) {
-                candidateBitmap.andInPlace(attributeBitmap);
+                candidateBitmap.andInPlace(featureBitmap);
             } else {
-                candidateBitmap = attributeBitmap;
+                candidateBitmap = featureBitmap;
                 filtersApplied = true;
             }
         }
@@ -1033,6 +1066,7 @@ class SynapsD extends EventEmitter {
         }
 
         candidateBitmap = await this.#applyExcludedContexts(candidateBitmap, excludeContextSpecs);
+        candidateBitmap = await this.#applyExcludedTrees(candidateBitmap, excludeTreeSelectors);
         if (candidateBitmap) {
             filtersApplied = true;
         }
@@ -1106,7 +1140,7 @@ class SynapsD extends EventEmitter {
             // Index across all views using shared helper
             await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
 
-            this.emit('document.updated', { id: updatedDocument.id, document: updatedDocument });
+            this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument }));
 
             // Best-effort Lance upsert
             try {
@@ -1125,76 +1159,75 @@ class SynapsD extends EventEmitter {
     // Removes documents from context and/or feature bitmaps
     async #unlinkOne(docId, contextSpec = { path: '/' }, featureBitmapArray = [], options = { recursive: false }) {
         if (!docId) { throw new Error('Document id required'); }
-        if (!Array.isArray(featureBitmapArray)) { throw new Error('Feature array must be an array'); }
         if (typeof options !== 'object') { options = { recursive: false }; }
 
-        const { tree: contextTree, collection: contextCollection, path: normalizedContextSpec } = this.#resolveTreeSelection('context', contextSpec, '/');
+        let directorySpec = null;
+        if (this.#isDocumentOperationOptions(contextSpec)) {
+            const opts = contextSpec;
+            contextSpec = opts.context ?? null;
+            directorySpec = opts.directory ?? null;
+            featureBitmapArray = opts.features ?? featureBitmapArray;
+        }
 
-        // Parse context into array of independent path-layer-arrays
-        const pathLayersArray = parseContextSpecForInsert(normalizedContextSpec);
+        const featureKeys = parseBitmapArray(featureBitmapArray).filter(Boolean);
+        const layersToRemove = [];
+        const removedContextPaths = [];
+        const removedDirectoryPaths = [];
 
-        // Collect all layers to remove from across all paths
-        const allLayersToRemove = [];
+        if (contextSpec) {
+            const { tree: contextTree, collection: contextCollection, path: normalizedContextSpec } = this.#resolveTreeSelection('context', contextSpec, '/');
+            const pathLayersArray = parseContextSpecForInsert(normalizedContextSpec);
 
-        for (const pathLayers of pathLayersArray) {
-            // Check if we're trying to remove from root context only
-            if (pathLayers.length === 1 && pathLayers[0] === '/') {
-                throw new Error('Cannot unlink from root context "/". Use delete() to permanently delete documents.');
-            }
+            for (const pathLayers of pathLayersArray) {
+                if (pathLayers.length === 1 && pathLayers[0] === '/') {
+                    throw new Error('Cannot unlink from root context "/". Unlink a real path or delete the document.');
+                }
 
-            // Remove root "/" from the array if it exists alongside other contexts
-            // We should never unlink documents from the root context.
-            let filteredLayers = pathLayers.filter(context => context !== '/');
+                const filteredLayers = pathLayers.filter((context) => context !== '/');
+                if (filteredLayers.length === 0) {
+                    throw new Error('Cannot unlink from root context "/". Unlink a real path or delete the document.');
+                }
 
-            // After filtering, we need at least one context to operate on
-            if (filteredLayers.length === 0) {
-                throw new Error('Cannot unlink from root context "/". Use delete() to permanently delete documents.');
-            }
-
-            // Handle recursive vs non-recursive removal
-            if (!options.recursive) {
-                // Non-recursive: remove from leaf context only (last element in the path)
-                const leafContext = filteredLayers[filteredLayers.length - 1];
-                allLayersToRemove.push(leafContext);
-                debug(`unlink: Non-recursive removal from leaf context only: ${leafContext}`);
-            } else {
-                // Recursive: remove from all contexts in the hierarchy (current behavior)
-                allLayersToRemove.push(...filteredLayers);
-                debug(`unlink: Recursive removal from all contexts: ${filteredLayers.join(', ')}`);
+                const targetLayers = options.recursive
+                    ? filteredLayers
+                    : [filteredLayers[filteredLayers.length - 1]];
+                const layerIds = contextTree.resolveLayerIds(targetLayers);
+                layersToRemove.push(...layerIds.map((layerId) => contextCollection.makeKey(layerId)));
+                removedContextPaths.push(...targetLayers);
             }
         }
 
-        debug(`unlink: Removing document ${docId} from contexts: ${allLayersToRemove.join(', ')}`);
+        if (directorySpec) {
+            const { tree: directoryTree, collection: directoryCollection, path: normalizedDirectoryPath } = this.#resolveTreeSelection('directory', directorySpec, '/');
+            const directoryPaths = Array.isArray(normalizedDirectoryPath) ? normalizedDirectoryPath : [normalizedDirectoryPath];
 
-        // unlink() only removes the document from the supplied memberships/bitmaps.
-        // It will not delete the document from the database.
+            for (const directoryPath of directoryPaths) {
+                const nodeIds = directoryTree.getNodeIdsForPath(directoryPath, { recursive: Boolean(options.recursive) });
+                layersToRemove.push(...nodeIds.map((nodeId) => directoryCollection.makeKey(nodeId)));
+                if (nodeIds.length > 0) {
+                    removedDirectoryPaths.push(directoryPath);
+                }
+            }
+        }
+
+        layersToRemove.push(...featureKeys);
+
         try {
-            const layersToRemove = [];
-
-            if (allLayersToRemove.length > 0) {
-                // Resolve layer names to ULIDs for bitmap keying
-                const layerIds = contextTree.resolveLayerIds(allLayersToRemove);
-                const normalizedContexts = layerIds.map((layerId) => contextCollection.makeKey(layerId));
-                layersToRemove.push(...normalizedContexts);
-            }
-            if (featureBitmapArray.length > 0) {
-                layersToRemove.push(...featureBitmapArray);
-            }
-
             if (layersToRemove.length > 0) {
-                await this.#synapses.removeSynapses(docId, layersToRemove);
+                await this.#synapses.removeSynapses(docId, Array.from(new Set(layersToRemove)));
                 debug(`unlink: Removed doc ${docId} from ${layersToRemove.length} layers via Synapses`);
             }
 
-            // If the operations completed without throwing, return the ID.
-            // This signals the removal *attempt* was successful.
-            this.emit('document.removed', { id: docId, contextArray: allLayersToRemove, featureArray: featureBitmapArray, recursive: options.recursive });
+            this.emit(EVENTS.DOCUMENT_REMOVED, createEvent(EVENTS.DOCUMENT_REMOVED, {
+                id: docId,
+                contextArray: removedContextPaths,
+                directoryArray: removedDirectoryPaths,
+                featureArray: featureKeys,
+                recursive: options.recursive,
+            }));
             return docId;
-
         } catch (error) {
-            // Catch unexpected errors (DB connection, etc.)
             debug(`Error during unlink for ID ${docId}: ${error.message}`);
-            // Re-throw the error so callers know something went wrong
             throw error;
         }
     }
@@ -1267,7 +1300,7 @@ class SynapsD extends EventEmitter {
             }
 
             if (emitEvent) {
-                this.emit('document.deleted', { id: docId });
+                this.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: docId }));
             }
             debug(`delete: Successfully deleted document ID: ${docId}`);
             return true;
@@ -1379,11 +1412,11 @@ class SynapsD extends EventEmitter {
         return await this.#getById(id, options);
     }
 
-    async hasByChecksumString(checksumString, spec = {}) {
+    async hasByChecksumString(checksumString, treeSelector = null, features = []) {
         if (!checksumString) { throw new Error('Checksum string required'); }
         const id = await this.#checksumIndex.checksumStringToId(checksumString);
         if (!id) { return false; }
-        return await this.has(id, spec);
+        return await this.has(id, treeSelector, features);
     }
 
     /**
@@ -1533,7 +1566,7 @@ class SynapsD extends EventEmitter {
         // Get all documents from the documents dataset
         const documentArray = await this.find({
             context: contextSpec,
-            attributes: { allOf: parseBitmapArray(featureBitmapArray).filter(Boolean) },
+            features: { allOf: parseBitmapArray(featureBitmapArray).filter(Boolean) },
             filters: filterArray,
         });
         debug(`Found ${documentArray.length} documents to dump..`);
@@ -1669,24 +1702,18 @@ class SynapsD extends EventEmitter {
     }
 
     #registerTreeEvents(tree, meta) {
-        if (tree.__synapsdTreeEventsBound) {
-            return;
-        }
+        if (tree.__synapsdTreeEventsBound) { return; }
         tree.__synapsdTreeEventsBound = true;
         const db = this;
         tree.on('**', function (payload = {}) {
             const eventName = this.event;
             if (!eventName) { return; }
-            const nextPayload = payload && typeof payload === 'object'
-                ? { ...payload }
-                : { value: payload };
-            nextPayload.treeId = meta.id;
-            nextPayload.treeName = meta.name;
-            nextPayload.treeType = meta.type;
-            if (!nextPayload.source) {
-                nextPayload.source = 'tree';
-            }
-            db.emit(eventName, nextPayload);
+            const forwarded = payload && typeof payload === 'object' ? { ...payload } : { value: payload };
+            if (!forwarded.treeId) { forwarded.treeId = meta.id; }
+            if (!forwarded.treeName) { forwarded.treeName = meta.name; }
+            if (!forwarded.treeType) { forwarded.treeType = meta.type; }
+            if (!forwarded.source) { forwarded.source = 'tree'; }
+            db.emit(eventName, forwarded);
         });
     }
 
@@ -1761,8 +1788,150 @@ class SynapsD extends EventEmitter {
             value &&
             typeof value === 'object' &&
             !Array.isArray(value) &&
-            ['context', 'directory', 'features', 'emitEvent'].some((key) => Object.prototype.hasOwnProperty.call(value, key))
+            ['context', 'directory', 'features', 'attributes', 'emitEvent'].some((key) => Object.prototype.hasOwnProperty.call(value, key))
         );
+    }
+
+    #normalizeWriteFeatures(features) {
+        if (features == null) {
+            return [];
+        }
+        if (Array.isArray(features)) {
+            return features.filter(Boolean);
+        }
+        if (typeof features === 'object') {
+            return parseBitmapArray(features.allOf ?? features.features ?? []).filter(Boolean);
+        }
+        return [features].filter(Boolean);
+    }
+
+    #normalizeQueryFeatures(features) {
+        if (!features) {
+            return null;
+        }
+
+        if (Array.isArray(features)) {
+            return {
+                allOf: [],
+                anyOf: features.filter(Boolean),
+                noneOf: [],
+            };
+        }
+
+        if (typeof features !== 'object') {
+            throw new Error('find(): features must be an array or object');
+        }
+
+        return {
+            allOf: parseBitmapArray(features.allOf ?? []).filter(Boolean),
+            anyOf: parseBitmapArray(features.anyOf ?? []).filter(Boolean),
+            noneOf: parseBitmapArray(features.noneOf ?? []).filter(Boolean),
+        };
+    }
+
+    #resolveGenericTreeSelection(selector = null, defaultPath = '/', fallbackType = 'context') {
+        if (selector == null) {
+            const tree = this.#getDefaultTreeByType(fallbackType);
+            if (!tree) {
+                throw new Error(`No ${fallbackType} tree available`);
+            }
+            return {
+                type: tree.type,
+                tree,
+                path: defaultPath,
+                spec: { tree: tree.id, path: defaultPath },
+            };
+        }
+
+        if (typeof selector === 'string' || Array.isArray(selector)) {
+            const tree = this.#getDefaultTreeByType(fallbackType);
+            if (!tree) {
+                throw new Error(`No ${fallbackType} tree available`);
+            }
+            return {
+                type: tree.type,
+                tree,
+                path: selector,
+                spec: { tree: tree.id, path: selector },
+            };
+        }
+
+        if (typeof selector !== 'object' || Array.isArray(selector)) {
+            throw new Error('Invalid tree selector');
+        }
+
+        if (Object.prototype.hasOwnProperty.call(selector, 'context')) {
+            const { tree, path } = this.#resolveTreeSelection('context', {
+                tree: selector.tree ?? selector.treeId ?? selector.nameOrId ?? null,
+                path: selector.path ?? selector.context ?? defaultPath,
+            }, defaultPath);
+            return {
+                type: 'context',
+                tree,
+                path,
+                spec: { tree: tree.id, path },
+            };
+        }
+
+        if (Object.prototype.hasOwnProperty.call(selector, 'directory')) {
+            const { tree, path } = this.#resolveTreeSelection('directory', {
+                tree: selector.tree ?? selector.treeId ?? selector.nameOrId ?? null,
+                path: selector.path ?? selector.directory ?? defaultPath,
+            }, defaultPath);
+            return {
+                type: 'directory',
+                tree,
+                path,
+                spec: { tree: tree.id, path },
+            };
+        }
+
+        const treeSelector = selector.tree ?? selector.treeId ?? selector.nameOrId ?? null;
+        const tree = treeSelector ? this.getTree(treeSelector) : this.#getDefaultTreeByType(fallbackType);
+        if (!tree) {
+            throw new Error(`Tree not found: ${treeSelector}`);
+        }
+
+        const path = selector.path ?? defaultPath;
+        return {
+            type: tree.type,
+            tree,
+            path,
+            spec: { tree: tree.id, path },
+        };
+    }
+
+    #normalizeDocumentOperationSpec(treeSelector = null, features = [], options = {}) {
+        if (this.#isDocumentOperationOptions(treeSelector)) {
+            const legacyFeatures = treeSelector.features
+                ?? treeSelector.attributes?.allOf
+                ?? treeSelector.attributes
+                ?? [];
+            return {
+                context: treeSelector.context ?? { path: '/' },
+                directory: treeSelector.directory ?? null,
+                features: this.#normalizeWriteFeatures(legacyFeatures),
+                emitEvent: treeSelector.emitEvent ?? options.emitEvent ?? true,
+            };
+        }
+
+        if (
+            features &&
+            typeof features === 'object' &&
+            !Array.isArray(features) &&
+            Object.keys(options || {}).length === 0
+        ) {
+            options = features;
+            features = [];
+        }
+
+        const selection = this.#resolveGenericTreeSelection(treeSelector, '/', 'context');
+        return {
+            context: selection.type === 'context' ? selection.spec : null,
+            directory: selection.type === 'directory' ? selection.spec : null,
+            features: this.#normalizeWriteFeatures(features),
+            emitEvent: options.emitEvent ?? true,
+        };
     }
 
     /**
@@ -1868,12 +2037,17 @@ class SynapsD extends EventEmitter {
         }
 
         const {
+            tree,
+            path,
             context,
             contextSpec,
             directory = null,
             attributes = null,
+            features = null,
             filters = null,
             filterArray = [],
+            excludeTree,
+            excludeTrees,
             excludeContext,
             excludeContextSpec,
             excludeContexts,
@@ -1884,10 +2058,6 @@ class SynapsD extends EventEmitter {
             offset,
             page,
         } = spec;
-
-        if (directory !== null && directory !== undefined) {
-            throw new Error('find(): directory queries are not implemented yet');
-        }
 
         const normalizedFilterArray = Array.isArray(filterArray) ? [...filterArray] : [filterArray].filter(Boolean);
         normalizedFilterArray.push(...this.#normalizeFiltersObject(filters));
@@ -1907,12 +2077,25 @@ class SynapsD extends EventEmitter {
         delete baseOptions.excludeContexts;
         delete baseOptions.excludeContextSpec;
         delete baseOptions.excludeContext;
+        const normalizedExcludeTreeSelectors = this.#normalizeExcludeTreeSelectors(
+            excludeTrees
+            ?? excludeTree
+            ?? baseOptions.excludeTrees
+            ?? baseOptions.excludeTree
+        );
+        delete baseOptions.excludeTrees;
+        delete baseOptions.excludeTree;
+
+        const selectorInput = tree !== undefined || path !== undefined
+            ? { tree, path }
+            : (directory ?? context ?? contextSpec ?? null);
 
         return {
-            contextSpec: context ?? contextSpec ?? null,
-            attributes: this.#normalizeAttributes(attributes),
+            treeSelector: selectorInput == null ? null : this.#resolveGenericTreeSelection(selectorInput, '/', 'context'),
+            features: this.#normalizeQueryFeatures(features ?? attributes),
             filterArray: normalizedFilterArray,
             excludeContextSpecs: normalizedExcludeContextSpecs,
+            excludeTreeSelectors: normalizedExcludeTreeSelectors,
             options: {
                 ...baseOptions,
                 ...(parse !== undefined ? { parse } : {}),
@@ -1920,30 +2103,6 @@ class SynapsD extends EventEmitter {
                 ...(offset !== undefined ? { offset } : {}),
                 ...(page !== undefined ? { page } : {}),
             },
-        };
-    }
-
-    #normalizeAttributes(attributes) {
-        if (!attributes) {
-            return null;
-        }
-
-        if (Array.isArray(attributes)) {
-            return {
-                allOf: attributes.filter(Boolean),
-                anyOf: [],
-                noneOf: [],
-            };
-        }
-
-        if (typeof attributes !== 'object') {
-            throw new Error('find(): attributes must be an array or object');
-        }
-
-        return {
-            allOf: parseBitmapArray(attributes.allOf ?? []).filter(Boolean),
-            anyOf: parseBitmapArray(attributes.anyOf ?? []).filter(Boolean),
-            noneOf: parseBitmapArray(attributes.noneOf ?? []).filter(Boolean),
         };
     }
 
@@ -1979,69 +2138,182 @@ class SynapsD extends EventEmitter {
         return normalizedFilters;
     }
 
-    async #buildAttributesBitmap(attributes) {
-        const normalizedAttributes = this.#normalizeAttributes(attributes);
-        if (!normalizedAttributes) {
+    async #buildSelectorBitmap(selector = null) {
+        if (!selector) {
             return null;
         }
 
-        const { allOf, anyOf, noneOf } = normalizedAttributes;
+        if (selector.context || selector.directory) {
+            const contextBitmap = selector.context ? await this.#buildContextSelectorBitmap(selector.context) : null;
+            const directoryBitmap = selector.directory ? await this.#buildDirectorySelectorBitmap(selector.directory) : null;
+
+            if (contextBitmap && directoryBitmap) {
+                contextBitmap.andInPlace(directoryBitmap);
+                return contextBitmap;
+            }
+            return contextBitmap ?? directoryBitmap ?? null;
+        }
+
+        if (selector.type === 'context') {
+            return await this.#buildContextSelectorBitmap(selector.spec);
+        }
+        if (selector.type === 'directory') {
+            return await this.#buildDirectorySelectorBitmap(selector.spec);
+        }
+
+        return await this.#buildSelectorBitmap(this.#normalizeDocumentOperationSpec(selector, [], {}));
+    }
+
+    async #buildContextSelectorBitmap(contextSpec) {
+        if (!contextSpec) {
+            return null;
+        }
+
+        const { tree, collection, path } = this.#resolveTreeSelection('context', contextSpec, '/');
+        const pathLayersArray = parseContextSpecForInsert(path);
+        let resultBitmap = null;
+        let sawExplicitPath = false;
+        let sawExistingPath = false;
+
+        for (const pathLayers of pathLayersArray) {
+            if (pathLayers.length === 1 && pathLayers[0] === '/') {
+                sawExplicitPath = true;
+                const treeBitmap = await this.#buildContextTreeMembershipBitmap(tree);
+                if (treeBitmap) {
+                    if (resultBitmap) {
+                        resultBitmap.orInPlace(treeBitmap);
+                    } else {
+                        resultBitmap = treeBitmap;
+                    }
+                    sawExistingPath = true;
+                }
+                continue;
+            }
+
+            sawExplicitPath = true;
+            const pathString = pathLayers.join('/');
+            if (!tree.getLayerForPath(pathString)) {
+                continue;
+            }
+
+            sawExistingPath = true;
+            const layerIds = tree.resolveLayerIds(pathLayers);
+            if (layerIds.length === 0) {
+                continue;
+            }
+
+            const pathBitmap = await collection.AND(layerIds);
+            if (!pathBitmap || pathBitmap.isEmpty) {
+                continue;
+            }
+
+            if (resultBitmap) {
+                resultBitmap.orInPlace(pathBitmap);
+            } else {
+                resultBitmap = pathBitmap;
+            }
+        }
+
+        if (!sawExplicitPath) {
+            return null;
+        }
+
+        return sawExistingPath ? (resultBitmap || new RoaringBitmap32()) : new RoaringBitmap32();
+    }
+
+    async #buildDirectorySelectorBitmap(directorySpec) {
+        if (!directorySpec) {
+            return null;
+        }
+
+        const { tree, path } = this.#resolveTreeSelection('directory', directorySpec, '/');
+        const directoryPaths = Array.isArray(path) ? path.filter(Boolean) : [path].filter(Boolean);
+        if (directoryPaths.length === 0) {
+            return null;
+        }
+
+        let resultBitmap = null;
+        let sawExistingPath = false;
+        for (const directoryPath of directoryPaths) {
+            if (!tree.pathExists(directoryPath)) {
+                continue;
+            }
+
+            sawExistingPath = true;
+            const directoryBitmap = await tree.find(directoryPath);
+            if (!directoryBitmap || directoryBitmap.isEmpty) {
+                continue;
+            }
+
+            if (resultBitmap) {
+                resultBitmap.orInPlace(directoryBitmap);
+            } else {
+                resultBitmap = directoryBitmap;
+            }
+        }
+
+        return sawExistingPath ? (resultBitmap || new RoaringBitmap32()) : new RoaringBitmap32();
+    }
+
+    async #buildFeaturesBitmap(features) {
+        const normalizedFeatures = this.#normalizeQueryFeatures(features);
+        if (!normalizedFeatures) {
+            return null;
+        }
+
+        const { allOf, anyOf, noneOf } = normalizedFeatures;
         if (allOf.length === 0 && anyOf.length === 0 && noneOf.length === 0) {
             return null;
         }
 
-        let attributeBitmap = null;
-
+        let featureBitmap = null;
         if (allOf.length > 0) {
-            attributeBitmap = await this.bitmapIndex.AND(allOf);
+            featureBitmap = await this.bitmapIndex.AND(allOf);
         }
 
         if (anyOf.length > 0) {
             const anyBitmap = await this.bitmapIndex.OR(anyOf);
-            if (attributeBitmap) {
-                attributeBitmap.andInPlace(anyBitmap);
+            if (featureBitmap) {
+                featureBitmap.andInPlace(anyBitmap);
             } else {
-                attributeBitmap = anyBitmap;
+                featureBitmap = anyBitmap;
             }
         }
 
         if (noneOf.length > 0) {
-            if (!attributeBitmap) {
-                attributeBitmap = await this.#buildAllDocumentsBitmap();
+            if (!featureBitmap) {
+                featureBitmap = await this.#buildAllDocumentsBitmap();
             }
             const noneBitmap = await this.bitmapIndex.OR(noneOf);
             if (noneBitmap && !noneBitmap.isEmpty) {
-                attributeBitmap.andNotInPlace(noneBitmap);
-            }
-        }
-
-        return attributeBitmap || new RoaringBitmap32();
-    }
-
-    async #buildFeatureBitmap(featureBitmapArray) {
-        const featureKeys = parseBitmapArray(featureBitmapArray).filter(Boolean);
-        if (featureKeys.length === 0) {
-            return null;
-        }
-
-        const positiveKeys = featureKeys.filter(key => !key.startsWith('!'));
-        const negativeKeys = featureKeys.filter(key => key.startsWith('!')).map(key => key.slice(1));
-
-        let featureBitmap = null;
-        if (positiveKeys.length > 0) {
-            featureBitmap = await this.bitmapIndex.AND(positiveKeys);
-        } else {
-            featureBitmap = await this.#buildAllDocumentsBitmap();
-        }
-
-        if (negativeKeys.length > 0 && featureBitmap && !featureBitmap.isEmpty) {
-            const negativeBitmap = await this.bitmapIndex.OR(negativeKeys);
-            if (negativeBitmap && !negativeBitmap.isEmpty) {
-                featureBitmap.andNotInPlace(negativeBitmap);
+                featureBitmap.andNotInPlace(noneBitmap);
             }
         }
 
         return featureBitmap || new RoaringBitmap32();
+    }
+
+    async #buildContextTreeMembershipBitmap(tree) {
+        const collection = this.#contextBitmapCollectionForTree(tree.id);
+        const layerIds = (await tree.layers).filter((layerId) => layerId && layerId !== tree.rootLayer?.id);
+        if (layerIds.length === 0) {
+            return new RoaringBitmap32();
+        }
+        return await collection.OR(layerIds);
+    }
+
+    async #buildTreeMembershipBitmap(treeSelector) {
+        const selection = this.#resolveGenericTreeSelection(treeSelector, '/', 'context');
+        if (selection.type === 'directory') {
+            const rootBitmap = await selection.tree.find('/');
+            const recursiveBitmap = await selection.tree.findRecursive('/');
+            if (rootBitmap && recursiveBitmap) {
+                rootBitmap.orInPlace(recursiveBitmap);
+                return rootBitmap;
+            }
+            return rootBitmap ?? recursiveBitmap ?? new RoaringBitmap32();
+        }
+        return await this.#buildContextTreeMembershipBitmap(selection.tree);
     }
 
     async #buildAllDocumentsBitmap() {
@@ -2061,6 +2333,11 @@ class SynapsD extends EventEmitter {
             .filter((contextSpec) => typeof contextSpec === 'string' && contextSpec.trim().length > 0)
             .map((contextSpec) => contextSpec.trim())
             .filter((contextSpec, index, array) => array.indexOf(contextSpec) === index);
+    }
+
+    #normalizeExcludeTreeSelectors(value) {
+        const selectors = Array.isArray(value) ? value : [value];
+        return selectors.filter(Boolean);
     }
 
     async #buildExcludedContextBitmap(contextSpecs = []) {
@@ -2102,6 +2379,38 @@ class SynapsD extends EventEmitter {
 
     async #applyExcludedContexts(bitmap, contextSpecs = []) {
         const excludedBitmap = await this.#buildExcludedContextBitmap(contextSpecs);
+        if (!excludedBitmap || excludedBitmap.isEmpty) {
+            return bitmap;
+        }
+
+        const nextBitmap = bitmap || await this.#buildAllDocumentsBitmap();
+        if (!nextBitmap || nextBitmap.isEmpty) {
+            return nextBitmap;
+        }
+
+        nextBitmap.andNotInPlace(excludedBitmap);
+        return nextBitmap;
+    }
+
+    async #applyExcludedTrees(bitmap, treeSelectors = []) {
+        if (!Array.isArray(treeSelectors) || treeSelectors.length === 0) {
+            return bitmap;
+        }
+
+        let excludedBitmap = null;
+        for (const treeSelector of treeSelectors) {
+            const treeBitmap = await this.#buildTreeMembershipBitmap(treeSelector);
+            if (!treeBitmap || treeBitmap.isEmpty) {
+                continue;
+            }
+
+            if (!excludedBitmap) {
+                excludedBitmap = treeBitmap;
+            } else {
+                excludedBitmap.orInPlace(treeBitmap);
+            }
+        }
+
         if (!excludedBitmap || excludedBitmap.isEmpty) {
             return bitmap;
         }
@@ -2171,7 +2480,4 @@ class SynapsD extends EventEmitter {
 }
 
 export default SynapsD;
-
-
-
-
+export { EVENTS } from './utils/events.js';

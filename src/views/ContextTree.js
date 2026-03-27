@@ -8,6 +8,7 @@ const debug = debugInstance('canvas:synapsd:context-tree');
 // Modules
 import TreeNode from './lib/TreeNode.js';
 import LayerIndex from './lib/LayerIndex.js';
+import { EVENTS } from '../utils/events.js';
 import { buildTreeEventPayload } from './lib/treeEvents.js';
 
 // ULID/UUID detection: starts with 'layer/' or looks like a raw ID (26-char ULID or UUID with dashes)
@@ -135,6 +136,33 @@ class ContextTree extends EventEmitter {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
         if (!id) { return undefined; }
         return this.#layerIndex.getLayerByID(id);
+    }
+
+    getPathByLayerId(id) {
+        if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
+        if (!id) { return null; }
+        if (id === this.rootLayer?.id) { return '/'; }
+
+        const findPath = (node, parentPath = '') => {
+            const currentPath = node.payload?.name === '/'
+                ? '/'
+                : (!parentPath || parentPath === '/' ? `/${node.payload.name}` : `${parentPath}/${node.payload.name}`);
+
+            if (node.id === id) {
+                return currentPath === '//' ? '/' : currentPath;
+            }
+
+            for (const child of node.getSortedChildren()) {
+                const childPath = findPath(child, currentPath);
+                if (childPath) {
+                    return childPath;
+                }
+            }
+
+            return null;
+        };
+
+        return findPath(this.root, '');
     }
 
     getLayerForPath(path) {
@@ -281,7 +309,7 @@ class ContextTree extends EventEmitter {
             }
 
             const affected = await this.#bitmapCollection.mergeBitmap(sourceLayer.id, targetIds);
-            this.#emitTreeEvent('tree.layer.merged', {
+            this.#emitTreeEvent(EVENTS.TREE_LAYER_MERGED, {
                 source: sourceLayer.name,
                 targets: targetIds,
                 affected
@@ -318,7 +346,7 @@ class ContextTree extends EventEmitter {
             }
 
             const affected = await this.#bitmapCollection.subtractBitmap(sourceLayer.id, targetIds);
-            this.#emitTreeEvent('tree.layer.subtracted', {
+            this.#emitTreeEvent(EVENTS.TREE_LAYER_SUBTRACTED, {
                 source: sourceLayer.name,
                 targets: targetIds,
                 affected
@@ -431,7 +459,7 @@ class ContextTree extends EventEmitter {
             await this.#saveTreeToDataStore();
             debug(`Path "${normalizedPath}" inserted successfully.`);
 
-            this.#emitTreeEvent('tree.path.inserted', {
+            this.#emitTreeEvent(EVENTS.TREE_PATH_INSERTED, {
                 path: normalizedPath,
                 layerIds,
                 createdLayers: createdLayers.map(layer => ({
@@ -511,7 +539,7 @@ class ContextTree extends EventEmitter {
             await this.#saveTreeToDataStore();
 
             // Emit event
-            this.#emitTreeEvent('tree.path.moved', {
+            this.#emitTreeEvent(EVENTS.TREE_PATH_MOVED, {
                 pathFrom: normalizedPathFrom,
                 pathTo: normalizedPathTo,
                 recursive,
@@ -617,7 +645,7 @@ class ContextTree extends EventEmitter {
         await this.#saveTreeToDataStore();
 
         // Emit an event with the normalized source and destination paths
-        this.#emitTreeEvent('tree.path.copied', {
+        this.#emitTreeEvent(EVENTS.TREE_PATH_COPIED, {
             pathFrom: normalizedPathFrom,
             pathTo: normalizedPathTo,
             recursive,
@@ -674,7 +702,7 @@ class ContextTree extends EventEmitter {
             await this.#saveTreeToDataStore();
 
             // Emit an event with path and removal details
-            this.#emitTreeEvent('tree.path.removed', {
+            this.#emitTreeEvent(EVENTS.TREE_PATH_REMOVED, {
                 path: normalizedPath,
                 recursive,
                 layerId: layer.id,
@@ -740,7 +768,7 @@ class ContextTree extends EventEmitter {
             }
 
             if (changed) { // <-- Event emitted only if changed === true
-                this.#emitTreeEvent('tree.path.locked', { path: normalizedPath, lockBy });
+                this.#emitTreeEvent(EVENTS.TREE_PATH_LOCKED, { path: normalizedPath, lockBy });
             }
 
             return {
@@ -796,7 +824,7 @@ class ContextTree extends EventEmitter {
             }
 
             if (changed) {
-                this.#emitTreeEvent('tree.path.unlocked', { path: normalizedPath, lockBy, stillLockedIds });
+                this.#emitTreeEvent(EVENTS.TREE_PATH_UNLOCKED, { path: normalizedPath, lockBy, stillLockedIds });
             }
 
             return {
@@ -828,13 +856,11 @@ class ContextTree extends EventEmitter {
     async put(document, contextSpec = '/', featureBitmapArray = []) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        const resultId = await this.#db.put(document, {
-            context: this.#buildContextSelector(normalizedContextSpec),
-            attributes: { allOf: featureBitmapArray },
-        });
+        const selector = this.#buildContextSelector(normalizedContextSpec);
+        const resultId = await this.#db.put(document, selector, featureBitmapArray);
         if (resultId) {
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
-            this.#emitTreeEvent('tree.document.inserted', {
+            this.#emitTreeEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
                 documentId: resultId,
                 contextSpec: normalizedContextSpec,
                 layerNames,
@@ -846,14 +872,12 @@ class ContextTree extends EventEmitter {
     async putMany(docArray, contextSpec = '/', featureBitmapArray = []) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        const results = await this.#db.putMany(docArray, {
-            context: this.#buildContextSelector(normalizedContextSpec),
-            attributes: { allOf: featureBitmapArray },
-        });
+        const selector = this.#buildContextSelector(normalizedContextSpec);
+        const results = await this.#db.putMany(docArray, selector, featureBitmapArray);
         if (results) {
             const documentIds = Array.isArray(results) ? results : docArray.map((doc, index) => results[index] || doc.id); // Placeholder logic
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
-            this.#emitTreeEvent('tree.document.inserted.batch', {
+            this.#emitTreeEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, {
                 documentIds,
                 contextSpec: normalizedContextSpec,
                 layerNames,
@@ -862,16 +886,14 @@ class ContextTree extends EventEmitter {
         return results;
     }
 
-    async unlink(documentId, contextSpec = null, featureBitmapArray = [], options = {}) {
+    async link(documentId, contextSpec = '/', featureBitmapArray = [], options = {}) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        const result = await this.#db.unlink(documentId, {
-            context: this.#buildContextSelector(normalizedContextSpec),
-            attributes: { allOf: featureBitmapArray },
-        }, options);
+        const selector = this.#buildContextSelector(normalizedContextSpec);
+        const result = await this.#db.link(documentId, selector, featureBitmapArray, options);
         if (result) {
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
-            this.#emitTreeEvent('tree.document.removed', {
+            this.#emitTreeEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
                 documentId,
                 contextSpec: normalizedContextSpec,
                 layerNames,
@@ -880,16 +902,46 @@ class ContextTree extends EventEmitter {
         return result;
     }
 
+    async unlink(documentId, contextSpec = null, featureBitmapArray = [], options = {}) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        const selector = this.#buildContextSelector(normalizedContextSpec);
+        const result = await this.#db.unlink(documentId, selector, featureBitmapArray, options);
+        if (result) {
+            const layerNames = this.#pathToLayerNames(normalizedContextSpec);
+            this.#emitTreeEvent(EVENTS.TREE_DOCUMENT_REMOVED, {
+                documentId,
+                contextSpec: normalizedContextSpec,
+                layerNames,
+            });
+        }
+        return result;
+    }
+
+    async linkMany(docIdArray, contextSpec = '/', featureBitmapArray = [], options = {}) {
+        const normalizedContextSpec = this.#normalizePath(contextSpec);
+        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
+        const selector = this.#buildContextSelector(normalizedContextSpec);
+        const results = await this.#db.linkMany(docIdArray, selector, featureBitmapArray, options);
+        if (results) {
+            const layerNames = this.#pathToLayerNames(normalizedContextSpec);
+            this.#emitTreeEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, {
+                documentIds: docIdArray,
+                contextSpec: normalizedContextSpec,
+                layerNames,
+            });
+        }
+        return results;
+    }
+
     async unlinkMany(docIdArray, contextSpec = null, featureBitmapArray = [], options = {}) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        const results = await this.#db.unlinkMany(docIdArray, {
-            context: this.#buildContextSelector(normalizedContextSpec),
-            attributes: { allOf: featureBitmapArray },
-        }, options);
+        const selector = this.#buildContextSelector(normalizedContextSpec);
+        const results = await this.#db.unlinkMany(docIdArray, selector, featureBitmapArray, options);
         if (results) {
             const layerNames = this.#pathToLayerNames(normalizedContextSpec);
-            this.#emitTreeEvent('tree.document.removed.batch', {
+            this.#emitTreeEvent(EVENTS.TREE_DOCUMENT_REMOVED_BATCH, {
                 documentIds: docIdArray,
                 contextSpec: normalizedContextSpec,
                 layerNames,
@@ -902,7 +954,7 @@ class ContextTree extends EventEmitter {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         const result = await this.#db.delete(documentId);
         if (result) {
-            this.#emitTreeEvent('tree.document.deleted', {
+            this.#emitTreeEvent(EVENTS.TREE_DOCUMENT_DELETED, {
                 documentId,
             });
         }
@@ -913,7 +965,7 @@ class ContextTree extends EventEmitter {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         const results = await this.#db.deleteMany(docIdArray, options);
         if (results) {
-            this.#emitTreeEvent('tree.document.deleted.batch', {
+            this.#emitTreeEvent(EVENTS.TREE_DOCUMENT_DELETED_BATCH, {
                 documentIds: docIdArray,
             });
         }
@@ -931,7 +983,9 @@ class ContextTree extends EventEmitter {
         const normalizedContextSpec = this.#normalizePath(spec.path ?? spec.context ?? '/');
         return await this.#db.search({
             ...spec,
-            context: this.#buildContextSelector(normalizedContextSpec),
+            tree: this.id,
+            path: normalizedContextSpec,
+            features: spec.features ?? spec.attributes ?? null,
         });
     }
 
@@ -940,26 +994,22 @@ class ContextTree extends EventEmitter {
         const normalizedContextSpec = this.#normalizePath(spec.path ?? spec.context ?? '/');
         return await this.#db.find({
             ...spec,
-            context: this.#buildContextSelector(normalizedContextSpec),
+            tree: this.id,
+            path: normalizedContextSpec,
+            features: spec.features ?? spec.attributes ?? null,
         });
     }
 
     has(id, contextSpec = '/', featureBitmapArray = []) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.has(id, {
-            context: this.#buildContextSelector(normalizedContextSpec),
-            attributes: { allOf: featureBitmapArray },
-        });
+        return this.#db.has(id, this.#buildContextSelector(normalizedContextSpec), featureBitmapArray);
     }
 
     hasByChecksumString(checksum, contextSpec = null, featureBitmapArray = []) {
         const normalizedContextSpec = this.#normalizePath(contextSpec);
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.hasByChecksumString(checksum, {
-            context: this.#buildContextSelector(normalizedContextSpec),
-            attributes: { allOf: featureBitmapArray },
-        });
+        return this.#db.hasByChecksumString(checksum, this.#buildContextSelector(normalizedContextSpec), featureBitmapArray);
     }
 
     /**
@@ -1063,7 +1113,7 @@ class ContextTree extends EventEmitter {
         await this.#saveTreeToDataStore();
 
         // Emit a recalculation event
-        this.#emitTreeEvent('tree.recalculated');
+        this.#emitTreeEvent(EVENTS.TREE_RECALCULATED);
     }
 
     #getParentPath(path) {
@@ -1169,14 +1219,14 @@ class ContextTree extends EventEmitter {
             debug('Tree saved successfully.');
 
             // Emit a save event
-            this.#emitTreeEvent('tree.saved');
+            this.#emitTreeEvent(EVENTS.TREE_SAVED);
 
             return true;
         } catch (error) {
             debug(`Error saving tree to database: ${error.message}`);
 
             // Emit an error event
-            this.#emitTreeEvent('tree.error', {
+            this.#emitTreeEvent(EVENTS.TREE_ERROR, {
                 operation: 'save',
                 error: error.message,
             });
@@ -1214,7 +1264,7 @@ class ContextTree extends EventEmitter {
         this.root = loadedRootNode; // Assign the successfully built tree
 
         // Emit a load event
-        this.#emitTreeEvent('tree.loaded');
+        this.#emitTreeEvent(EVENTS.TREE_LOADED);
 
         return true;
     }
@@ -1339,7 +1389,7 @@ class ContextTree extends EventEmitter {
     }
 
     #emitTreeEvent(eventName, payload = {}) {
-        this.emit(eventName, buildTreeEventPayload(this, payload));
+        this.emit(eventName, buildTreeEventPayload(this, eventName, payload));
     }
 }
 
