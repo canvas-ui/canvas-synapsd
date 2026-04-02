@@ -8,6 +8,10 @@
 /server/**
 /users/**
 
+# Local test db
+.db/
+.db-test/
+
 # Dev
 /.fossil-settings
 /_SCRATCH_

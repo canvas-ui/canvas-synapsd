@@ -306,7 +306,7 @@ class SynapsD extends EventEmitter {
         return meta;
     }
 
-    async destroyTree(nameOrId) {
+    async deleteTree(nameOrId) {
         const meta = this.#resolveTreeMeta(nameOrId);
         if (!meta) { throw new Error(`Tree not found: ${nameOrId}`); }
         await this.#deleteTreeStorage(meta);
@@ -332,6 +332,18 @@ class SynapsD extends EventEmitter {
         await this.#internalStore.put(this.#treeMetaKey(meta.id), meta);
         this.emit(EVENTS.TREE_RENAMED, createEvent(EVENTS.TREE_RENAMED, { treeId: meta.id, treeName: meta.name, treeType: meta.type }));
         return meta;
+    }
+
+    getTreePaths(nameOrId) {
+        const tree = this.getTree(nameOrId);
+        if (!tree) { throw new Error(`Tree not found: ${nameOrId}`); }
+        return tree.paths;
+    }
+
+    getTreeJson(nameOrId) {
+        const tree = this.getTree(nameOrId);
+        if (!tree) { throw new Error(`Tree not found: ${nameOrId}`); }
+        return tree.buildJsonTree();
     }
 
     async stop() { return this.shutdown(); }
@@ -428,21 +440,21 @@ class SynapsD extends EventEmitter {
         return await this.#getById(id, options);
     }
 
-    async put(record, treeSelector = null, features = [], options = {}) {
+    async put(document, treeSelector = null, features = [], options = {}) {
         const spec = this.#normalizeDocumentOperationSpec(treeSelector, features, options);
 
-        if (!record || typeof record !== 'object' || Array.isArray(record)) {
-            throw new Error('Record object is required');
+        if (!document || typeof document !== 'object' || Array.isArray(document)) {
+            throw new Error('Document object is required');
         }
 
-        if (record.id !== undefined && record.id !== null) {
-            const existing = await this.#getById(record.id);
+        if (document.id !== undefined && document.id !== null) {
+            const existing = await this.#getById(document.id);
             if (existing) {
-                return await this.#updateOne(record.id, record, spec);
+                return await this.#updateOne(document.id, document, spec);
             }
         }
 
-        return await this.#putOne(record, spec);
+        return await this.#putOne(document, spec);
     }
 
     async link(idOrIds, treeSelector = null, features = [], options = {}) {
@@ -474,24 +486,24 @@ class SynapsD extends EventEmitter {
         return await this.#deleteOne(id, options);
     }
 
-    async putMany(records, treeSelector = null, features = [], options = {}) {
+    async putMany(documents, treeSelector = null, features = [], options = {}) {
         const spec = this.#normalizeDocumentOperationSpec(treeSelector, features, options);
-        if (!Array.isArray(records)) {
+        if (!Array.isArray(documents)) {
             throw new Error('Document array must be an array');
         }
 
-        debug(`putMany: Attempting to store ${records.length} records`);
+        debug(`putMany: Attempting to store ${documents.length} documents`);
         const storedIds = [];
         const batchSpec = { ...spec, emitEvent: false };
-        for (let i = 0; i < records.length; i++) {
-            const record = records[i];
+        for (let i = 0; i < documents.length; i++) {
+            const document = documents[i];
             try {
-                const id = await this.put(record, batchSpec);
+                const id = await this.put(document, batchSpec);
                 storedIds.push(id);
             } catch (error) {
-                const contextualError = new Error(`Failed to store record at index ${i}: ${error.message}`);
+                const contextualError = new Error(`Failed to store document at index ${i}: ${error.message}`);
                 contextualError.cause = error;
-                contextualError.failedItem = record;
+                contextualError.failedItem = document;
                 contextualError.failedIndex = i;
                 throw contextualError;
             }

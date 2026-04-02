@@ -43,6 +43,10 @@ class DirectoryTree extends EventEmitter {
     get type() { return 'directory'; }
     get collection() { return this.#collection; }
 
+    get paths() {
+        return this.#buildPathArray();
+    }
+
     async initialize() {
         if (this.#initialized) { return; }
         this.root = await this.#loadTree();
@@ -440,6 +444,19 @@ class DirectoryTree extends EventEmitter {
 
     #normalizeSegmentForCompare(value) {
         return this.#sanitizeSegment(value).toLowerCase();
+    }
+
+    #buildPathArray() {
+        const paths = ['/'];
+        const traverse = (node, parentPath) => {
+            for (const child of node.getSortedChildren()) {
+                const childPath = parentPath === '/' ? `/${child.payload.name}` : `${parentPath}/${child.payload.name}`;
+                paths.push(childPath);
+                traverse(child, childPath);
+            }
+        };
+        traverse(this.root, '/');
+        return paths;
     }
 
     #emitTreeEvent(eventName, payload = {}) {

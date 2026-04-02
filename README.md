@@ -1,6 +1,6 @@
 # SynapsD
 
-SynapsD is the indexed store behind Canvas. It keeps document records, roaring bitmap memberships, timestamp/checksum indexes, and named tree views on top of LMDB.
+SynapsD is the indexed store behind Canvas. It keeps documents, roaring bitmap memberships, timestamp/checksum indexes, and named tree views on top of LMDB.
 
 It is not the app layer. Source adapters, device logic, workspace hooks, and other domain-specific mapping stay outside `synapsd`.
 
@@ -17,8 +17,8 @@ It is not the app layer. Source adapters, device logic, workspace hooks, and oth
 The current public API shape is:
 
 - `get(id, options?)`
-- `put(record, treeSelector?, features?, options?)`
-- `putMany(records, treeSelector?, features?, options?)`
+- `put(document, treeSelector?, features?, options?)`
+- `putMany(documents, treeSelector?, features?, options?)`
 - `link(id, treeSelector?, features?, options?)`
 - `linkMany(ids, treeSelector?, features?, options?)`
 - `has(id, treeSelector?, features?)`
@@ -33,6 +33,15 @@ The current public API shape is:
 - `listDocumentTreePaths(id, treeNameOrId)`
 - `listDocumentTreeMemberships(id, treeNameOrId)`
 - `hasDocumentTreeMembership(id, treeNameOrId)`
+- `createTree(name, type?, options?)`
+- `listTrees(type?)`
+- `getTree(nameOrId)`
+- `deleteTree(nameOrId)`
+- `renameTree(nameOrId, newName)`
+- `getTreePaths(nameOrId)`
+- `getTreeJson(nameOrId)`
+- `getDefaultContextTree()`
+- `getDefaultDirectoryTree()`
 
 Legacy method names like `findDocuments`, `ftsQuery`, `insertDocument`, and friends are no longer the intended API and should be treated as dead.
 
@@ -56,7 +65,7 @@ Write methods tick every feature you pass. Query methods treat `features: ['a', 
 
 ### Create
 
-`put()` creates a new row when the record has no existing `id`. It returns the numeric document id.
+`put()` creates a new row when the document has no existing `id`. It returns the numeric document id.
 
 ```js
 const id = await db.put(
@@ -112,7 +121,7 @@ Structural and ranked listing use `find(spec)` and `search(spec)`; see **Query s
 
 ### Update
 
-`put()` updates when `record.id` already exists.
+`put()` updates when `document.id` already exists.
 
 Important fix: `put({ id, data: ... })` replaces `data`; it does not deep-merge fields. If you want to change a single field, read the document first and send the full updated `data` object. If you only want to change memberships, use `link()` / `unlink()`.
 
@@ -163,29 +172,61 @@ const deleteResult = await db.deleteMany([id1, id2]);
 
 `unlinkMany()` and `deleteMany()` return `{ successful, failed, count }`. Batch delete/unlink ids must be numbers; numeric strings are accepted by `get()` / `put()` but rejected by the batch helpers.
 
-## Query shape
+## Querying: `find` vs `search`
 
-`find(spec)` and `search(spec)` use explicit object-shaped inputs.
+SynapsD has two query methods. They accept the same filtering/scoping fields but serve different purposes.
 
-Common fields:
+### `find(spec)` — bitmap-filtered listing
 
-- `tree`
-- `path`
-- `features`
-- `features.allOf`
-- `features.anyOf`
-- `features.noneOf`
-- `filters`
-- `excludeTree`
-- `excludeTrees`
-- `limit`
-- `offset`
-- `page`
-- `parse`
+Returns documents that match structural criteria: tree membership, features, and datetime/bitmap filters. Results are returned in insertion order (by numeric ID). No ranking is performed.
 
-Example:
+Use `find` when you know *where* or *what kind* of documents you want — "all notes in this project", "files updated today", "everything except staging".
+
+With no filters, `find` returns all documents in the store.
+
+### `search(spec)` — full-text ranked search
+
+Requires a `query` string. First applies the same bitmap filters as `find` to narrow the candidate set, then runs a full-text search (via LanceDB) over those candidates. Results are ranked by relevance.
+
+Use `search` when you have a text query and want the best matches — "find invoices mentioning 'overdue' in the finance tree".
+
+Default limit is 50 (vs unlimited for `find`).
+
+### Shared spec fields
+
+Both methods accept:
+
+| Field | Description |
+|-------|-------------|
+| `tree` | Tree name or ID to scope the query |
+| `path` | Path(s) within the tree — string or array of strings |
+| `features` | Feature keys as array (treated as `anyOf`) or `{ allOf, anyOf, noneOf }` |
+| `filters` | Array of filter strings — bitmap keys and `datetime:` expressions |
+| `excludeTree` | Tree name/ID to exclude from results |
+| `excludeTrees` | Array of tree names/IDs to exclude |
+| `limit` | Max documents to return (`find`: unlimited, `search`: 50) |
+| `offset` | Skip N documents before returning results |
+| `page` | Page number (alternative to offset, uses limit as page size) |
+| `parse` | Set `false` to return raw stored data instead of parsed document instances |
+
+`search` additionally requires:
+
+| Field | Description |
+|-------|-------------|
+| `query` | The full-text search string (also accepts `search` or `q` as aliases) |
+
+### Return value
+
+Both return an array with attached metadata:
+
+- `result.count` — number of documents in this page
+- `result.totalCount` — total matching documents (before pagination)
+- `result.error` — error message string, or `null`
+
+### Examples
 
 ```js
+// find: all notes in a project, excluding deleted
 const docs = await db.find({
     tree: 'projects',
     path: '/foo/bar',
@@ -197,6 +238,20 @@ const docs = await db.find({
     limit: 100,
 });
 
+// find: directory tree, multiple paths
+const exactDirectoryMatches = await db.find({
+    tree: 'filesystem',
+    path: ['/docs/contracts', '/docs/invoices'],
+    features: ['data/abstraction/file'],
+});
+
+// find: everything except a specific tree
+const withoutStaging = await db.find({
+    excludeTree: 'incoming',
+    features: ['data/abstraction/file'],
+});
+
+// search: ranked full-text within a scoped tree
 const ranked = await db.search({
     query: 'invoice',
     tree: 'projects',
@@ -204,30 +259,52 @@ const ranked = await db.search({
     features: ['data/abstraction/file', 'tag/finance'],
     limit: 20,
 });
-
-const exactDirectoryMatches = await db.find({
-    tree: 'filesystem',
-    path: ['/docs/contracts', '/docs/invoices'],
-    features: ['data/abstraction/file'],
-});
-
-const rootListingWithoutStaging = await db.find({
-    excludeTree: 'incoming',
-    features: ['data/abstraction/file'],
-});
 ```
 
 ## Trees
 
-SynapsD supports multiple named trees per workspace database.
+SynapsD supports multiple named trees per workspace database. Trees are views on top of your documents — they organise membership and structure, not data. A single document can live in many trees at once.
 
-- `context` trees use shared logical layers and path-intersection semantics
-- `directory` trees use unique folder nodes and filesystem-like semantics
+Two tree types:
 
-`incoming` should be a normal named `directory` tree used for staged records. Promotion is just link/unlink:
+- **`context`** — layers with path-intersection semantics. Nodes in a context tree are called **layers**. Querying a path ANDs the bitmaps of every layer along that path.
+- **`directory`** — unique folder nodes with filesystem-like semantics. Nodes are **directories**. Each directory has its own bitmap; recursive queries OR them.
+
+### Tree management
 
 ```js
-const stagedId = await db.put(
+const meta = await db.createTree('projects', 'context');
+const fsMeta = await db.createTree('filesystem', 'directory');
+
+const trees = await db.listTrees();              // all trees
+const contextTrees = await db.listTrees('context'); // filtered by type
+
+const tree = db.getTree('projects');              // by name or ID
+const defaultCtx = db.getDefaultContextTree();
+const defaultDir = db.getDefaultDirectoryTree();
+
+await db.renameTree('projects', 'workspaces');
+await db.deleteTree('workspaces');
+```
+
+### Tree introspection
+
+```js
+db.getTreePaths('filesystem');
+// ['/', '/docs', '/docs/contracts', '/docs/invoices', '/archive']
+
+db.getTreeJson('projects');
+// { id, type, name, children: [{ id, type, name, children: [...] }, ...] }
+```
+
+### Staging pattern (consumer convention)
+
+SynapsD has no built-in concept of "incoming" or "staging". If your app needs a staging area, create a dedicated tree and use the standard `link`/`unlink` API to promote documents. For example:
+
+```js
+await db.createTree('incoming', 'directory');
+
+const id = await db.put(
     {
         schema: 'data/abstraction/email',
         data: { subject: 'Invoice', from: 'billing@example.com' },
@@ -235,8 +312,12 @@ const stagedId = await db.put(
     { tree: 'incoming', path: '/email/imap/account-a/inbox' },
 );
 
-await db.link(stagedId, { tree: 'projects', path: '/finance/invoices' }, ['tag/triaged']);
-await db.unlink(stagedId, { tree: 'incoming', path: '/email/imap/account-a/inbox' });
+// promote into a user tree, then remove from staging
+await db.link(id, { tree: 'projects', path: '/finance/invoices' }, ['tag/triaged']);
+await db.unlink(id, { tree: 'incoming', path: '/email/imap/account-a/inbox' });
+
+// exclude staging from broad queries
+const docs = await db.find({ excludeTree: 'incoming' });
 ```
 
 Tree metadata lives in the internal store, while tree memberships are mapped to typed bitmap namespaces.
