@@ -2188,39 +2188,48 @@ class SynapsD extends EventEmitter {
      * every startup.
      */
     async #migrateLegacyTreeStructure() {
-        // Already migrated or fresh install — nothing to do.
-        if (this.#treeMetadata.size > 0) { return; }
+        const MARKER_KEY = 'migration/legacy-tree-v1';
 
-        // Detect legacy layer records sitting directly in #internalStore.
+        // Already completed — idempotency marker present.
+        if (this.#internalStore.get(MARKER_KEY)) { return; }
+
+        // Detect legacy layer records sitting directly in #internalStore
+        // (old format had no tree/<id>/ prefix).
         let hasLegacyLayers = false;
         for await (const key of this.#internalStore.getKeys({ start: 'layer/', end: 'layer/\uffff' })) {
             hasLegacyLayers = true;
             break;
         }
-        const hasLegacyTreeStructure = !!this.#internalStore.doesExist?.('tree') || !!this.#internalStore.get('tree');
+        const legacyTreeData = this.#internalStore.get('tree');
 
-        if (!hasLegacyLayers && !hasLegacyTreeStructure) { return; }
+        if (!hasLegacyLayers && !legacyTreeData) {
+            // Fresh install — write the marker so we never check again.
+            await this.#internalStore.put(MARKER_KEY, { skippedAt: new Date().toISOString(), reason: 'no-legacy-data' });
+            return;
+        }
 
         debug('Detected legacy flat tree data — migrating to per-tree layout');
 
-        // Create metadata for the default context tree that will own the legacy data.
-        const treeId = ulid();
-        const now = new Date().toISOString();
-        const meta = {
-            id: treeId,
-            name: 'context',
-            type: 'context',
-            createdAt: now,
-            updatedAt: now,
-            isDefault: true,
-        };
+        // Find or create the target context tree.
+        // If empty context trees already exist (server ran once with new code before
+        // this migration was added) we reuse the default one so we don't create a duplicate.
+        let meta;
+        const existingContextTrees = await this.listTrees('context');
+        if (existingContextTrees.length > 0) {
+            const defaultId = this.#defaultTreeIds.context || existingContextTrees[0].id;
+            meta = this.#treeMetadata.get(defaultId) || existingContextTrees[0];
+            debug(`Reusing existing context tree ${meta.id} (${meta.name}) as migration target`);
+        } else {
+            const treeId = ulid();
+            const now = new Date().toISOString();
+            meta = { id: treeId, name: 'context', type: 'context', createdAt: now, updatedAt: now, isDefault: true };
+            await this.#internalStore.put(this.#treeMetaKey(meta.id), meta);
+            this.#treeMetadata.set(meta.id, meta);
+            this.#defaultTreeIds.context = meta.id;
+            debug(`Created new context tree ${meta.id} as migration target`);
+        }
 
-        await this.#internalStore.put(this.#treeMetaKey(treeId), meta);
-        this.#treeMetadata.set(treeId, meta);
-        this.#defaultTreeIds.context = treeId;
-
-        // Build the prefixed store that the new ContextTree will use.
-        const dataStore = new PrefixedStore(this.#internalStore, `tree/${treeId}`);
+        const dataStore = new PrefixedStore(this.#internalStore, `tree/${meta.id}`);
 
         // Copy layer records: layer/<ULID> → tree/<treeId>/layer/<ULID>
         const layerKeys = [];
@@ -2231,32 +2240,29 @@ class SynapsD extends EventEmitter {
             const value = this.#internalStore.get(key);
             if (value != null) { await dataStore.put(key, value); }
         }
-        debug(`Migrated ${layerKeys.length} layer record(s) to tree/${treeId}/`);
+        debug(`Copied ${layerKeys.length} layer record(s) to tree/${meta.id}/`);
 
         // Copy serialised tree structure: 'tree' → tree/<treeId>/tree
-        if (hasLegacyTreeStructure) {
-            const treeData = this.#internalStore.get('tree');
-            if (treeData != null) { await dataStore.put('tree', treeData); }
-            debug(`Migrated tree structure to tree/${treeId}/tree`);
+        if (legacyTreeData != null) {
+            await dataStore.put('tree', legacyTreeData);
+            debug(`Copied tree structure to tree/${meta.id}/tree`);
         }
 
-        // Instantiate and initialise the tree so we can resolve layer names → ULIDs.
+        // Force re-instantiation so the tree reads from the newly populated store.
+        this.#treeCache.delete(meta.id);
         const tree = this.#instantiateTree(meta);
         await tree.initialize();
 
-        // Migrate context bitmaps: context/<layerName> → context/<treeId>/<layerULID>
-        const collection = this.#contextBitmapCollectionForTree(treeId);
+        // Migrate context bitmaps: context/<layerName|layerULID> → context/<treeId>/<layerULID>
+        const collection = this.#contextBitmapCollectionForTree(meta.id);
         const layerKeyList = await tree.layers;
         let bitmapsMigrated = 0;
         for (const layerKey of layerKeyList) {
             const layer = tree.getLayerById(layerKey);
             if (!layer || layer.name === '/') { continue; }
 
-            const oldKeyByName = `context/${layer.name}`;
-            const oldKeyById   = `context/${layer.id}`;
-            const newKey       = collection.makeKey(layer.id); // context/<treeId>/<layerULID>
-
-            for (const oldKey of [oldKeyByName, oldKeyById]) {
+            const newKey = collection.makeKey(layer.id);
+            for (const oldKey of [`context/${layer.name}`, `context/${layer.id}`]) {
                 if (oldKey === newKey) { continue; }
                 if (this.bitmapIndex.hasBitmap(oldKey) && !this.bitmapIndex.hasBitmap(newKey)) {
                     await this.bitmapIndex.renameBitmap(oldKey, newKey);
@@ -2270,12 +2276,13 @@ class SynapsD extends EventEmitter {
                 }
             }
         }
-        debug(`Migrated ${bitmapsMigrated} context bitmap(s) to context/${treeId}/ prefix`);
+        debug(`Migrated ${bitmapsMigrated} context bitmap(s) to context/${meta.id}/ prefix`);
 
-        // Update contextBitmapCollection to point at the now-populated tree.
         this.contextBitmapCollection = collection;
 
-        debug(`Legacy tree structure migration complete — context tree id: ${treeId}`);
+        // Write marker — prevents re-runs on subsequent startups.
+        await this.#internalStore.put(MARKER_KEY, { migratedAt: new Date().toISOString(), treeId: meta.id, layers: layerKeys.length, bitmaps: bitmapsMigrated });
+        debug(`Legacy tree migration complete — tree ${meta.id}, ${layerKeys.length} layers, ${bitmapsMigrated} bitmaps`);
     }
 
     /**
