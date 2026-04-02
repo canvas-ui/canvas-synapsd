@@ -2,28 +2,34 @@
 'use strict';
 
 /**
- * scan.js — Recursively scan a directory into a SynapsD database.
+ * scan.js — Recursively scan a directory into a SynapsD database, or query that DB.
  *
  * Usage:
- *   node scripts/scan.js <path> [options]          # ingest files
- *   node scripts/scan.js <path> get <id>            # retrieve a document
- *   node scripts/scan.js <path> find [--tree T] [--features F] [--limit N]
- *   node scripts/scan.js <path> search <query> [--tree T] [--features F] [--limit N]
- *   node scripts/scan.js <path> tree [name]         # JSON tree dump
+ *   node scripts/scan.js <path> [options]              # ingest (path = directory to scan)
+ *   node scripts/scan.js scan <path> [options]         # same
+ *   node scripts/scan.js get <id> [--db DIR]
+ *   node scripts/scan.js find [--tree T] [--features F] [--limit N] [--db DIR]
+ *   node scripts/scan.js search <query> [...] [--db DIR]
+ *   node scripts/scan.js tree [name] [--db DIR]
+ *
+ * Only ingest uses a filesystem path; queries use --db (default ./.db).
  *
  * Options:
- *   --exclude <glob>       Exclude files matching glob (repeatable)
+ *   --exclude <glob>       Exclude files matching glob (repeatable; ingest only)
  *   --db <dir>             Database directory (default: ./.db)
- *   --tree <name>          Tree name for queries (default: default directory tree)
+ *   --tree <name>          Tree name for queries
  *   --features <f1,f2>     Comma-separated feature list
  *   --limit <n>            Max results
- *   --no-lance             Skip LanceDB indexing (much faster writes)
+ *   --no-lance             Skip LanceDB indexing (ingest only)
  *
  * Examples:
- *   node scripts/scan.js ./my-project --exclude "*.pdf" --exclude "node_modules/**"
- *   node scripts/scan.js ./my-project find --features data/abstraction/file --limit 50
- *   node scripts/scan.js ./my-project search "invoice" --limit 20
- *   node scripts/scan.js ./my-project tree filesystem
+ *   node scripts/scan.js ./my-project --exclude "*.pdf"
+ *   node scripts/scan.js find --features data/abstraction/file --limit 50
+ *   node scripts/scan.js search "invoice" --limit 20
+ *   node scripts/scan.js tree
+ *   node scripts/scan.js get 7
+ *
+ * Full CLI: scripts/scan.readme.md
  */
 
 import { resolve, relative, dirname, basename, extname, join } from 'path';
@@ -43,14 +49,17 @@ const AUTO_EXCLUDE_GLOBS = [
     '*.o', '*.a', '*.so', '*.dylib', '*.dll', '*.exe',
 ];
 
+/** Documents queued before flush; each flush runs putMany per directory path. */
+const SCAN_PUT_BATCH = 64;
+
 // ── Argument parsing ─────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
     const args = argv.slice(2);
     const opts = {
         scanPath: null,
-        command: 'scan',       // scan | get | find | search | tree
-        commandArg: null,      // id for get, query for search, name for tree
+        command: 'scan',
+        commandArg: null,
         excludes: [...AUTO_EXCLUDE_GLOBS],
         dbDir: null,
         treeName: null,
@@ -59,25 +68,48 @@ function parseArgs(argv) {
         noLance: false,
     };
 
-    let i = 0;
+    const subcommands = new Set(['get', 'find', 'search', 'tree']);
 
-    // First positional = path
-    if (args.length > 0 && !args[0].startsWith('-')) {
-        opts.scanPath = resolve(args[0]);
-        i = 1;
+    if (args.length === 0) {
+        console.error('Usage: node scripts/scan.js <path> | scan <path> | get | find | search | tree ...');
+        console.error('  Ingest needs a directory; queries use --db (default ./.db). See scripts/scan.readme.md');
+        process.exit(1);
     }
 
-    // Second positional = command
-    const commands = new Set(['get', 'find', 'search', 'tree']);
-    if (i < args.length && commands.has(args[i])) {
-        opts.command = args[i++];
-        // Command argument (id / query / tree name)
+    let i = 0;
+    const head = args[0];
+
+    if (head === 'scan') {
+        opts.command = 'scan';
+        if (args.length < 2 || args[1].startsWith('-')) {
+            console.error('Usage: node scripts/scan.js scan <path> [options]');
+            process.exit(1);
+        }
+        opts.scanPath = resolve(args[1]);
+        i = 2;
+    } else if (subcommands.has(head)) {
+        opts.command = head;
+        i = 1;
         if (i < args.length && !args[i].startsWith('-')) {
             opts.commandArg = args[i++];
         }
+    } else if (!head.startsWith('-')) {
+        opts.command = 'scan';
+        opts.scanPath = resolve(head);
+        i = 1;
+        if (i < args.length && subcommands.has(args[i])) {
+            console.error(
+                'Query commands do not take a scan directory. Use e.g.\n' +
+                `  node scripts/scan.js ${args[i]} ... [--db <dir>]\n` +
+                '(Only ingest uses a path; omit it for find/search/get/tree.)',
+            );
+            process.exit(1);
+        }
+    } else {
+        console.error('Usage: node scripts/scan.js <path> | scan <path> | get | find | search | tree ...');
+        process.exit(1);
     }
 
-    // Flags
     while (i < args.length) {
         const flag = args[i++];
         if (flag === '--exclude' && i < args.length) {
@@ -98,8 +130,8 @@ function parseArgs(argv) {
         }
     }
 
-    if (!opts.scanPath) {
-        console.error('Usage: node scripts/scan.js <path> [command] [options]');
+    if (opts.command === 'scan' && !opts.scanPath) {
+        console.error('Usage: node scripts/scan.js <path> [options]   or   node scripts/scan.js scan <path> [options]');
         process.exit(1);
     }
 
@@ -260,7 +292,12 @@ async function main() {
         LanceIndex.prototype.backfill = async function () { /* noop */ };
     }
 
-    const db = new SynapsD({ path: opts.dbDir });
+    const db = new SynapsD({
+        path: opts.dbDir,
+        backupOnOpen: false,
+        backupOnClose: false,
+        compression: true,
+     });
 
     const t0 = performance.now();
     await db.start();
@@ -292,6 +329,111 @@ async function main() {
 
 // ── Commands ─────────────────────────────────────────────────────────────────
 
+/**
+ * Flush queued file docs: one LMDB txn via putManyDirectoryPaths when possible; Lance once per flush.
+ */
+async function flushScanPutBatch(db, treeName, batch, counters, noLance) {
+    if (batch.length === 0) { return; }
+    const docCount = batch.length;
+    const tBatch = performance.now();
+    counters.batchNo = (counters.batchNo ?? 0) + 1;
+    const batchNo = counters.batchNo;
+
+    const items = batch.map(({ treePath, document }) => ({ path: treePath, document }));
+    batch.length = 0;
+    const pathCount = new Set(items.map((i) => i.path)).size;
+
+    const deferredLance = noLance ? null : [];
+
+    let pathMsMax = 0;
+    let pathMsSum = 0;
+    let fallbackPaths = 0;
+    let usedSingleTxn = false;
+
+    try {
+        await db.putManyDirectoryPaths(
+            items,
+            treeName,
+            ['data/abstraction/file'],
+            {
+                emitEvent: false,
+                skipLance: true,
+                deferredLanceBuffer: deferredLance,
+            },
+        );
+        counters.inserted += docCount;
+        usedSingleTxn = true;
+    } catch (err) {
+        console.error(`\n  putManyDirectoryPaths failed, fallback per-path: ${err.message}`);
+        const byPath = new Map();
+        for (const { path: p, document } of items) {
+            if (!byPath.has(p)) { byPath.set(p, []); }
+            byPath.get(p).push(document);
+        }
+        for (const [treePath, documents] of byPath) {
+            const tPath = performance.now();
+            try {
+                await db.putMany(
+                    documents,
+                    { tree: treeName, path: treePath },
+                    ['data/abstraction/file'],
+                    {
+                        emitEvent: false,
+                        skipLance: true,
+                        deferredLanceBuffer: deferredLance,
+                    },
+                );
+                counters.inserted += documents.length;
+            } catch {
+                fallbackPaths++;
+                for (const document of documents) {
+                    try {
+                        await db.put(
+                            document,
+                            { tree: treeName, path: treePath },
+                            ['data/abstraction/file'],
+                            { emitEvent: false },
+                        );
+                        counters.inserted++;
+                    } catch (e2) {
+                        counters.errors++;
+                        if (counters.errors <= 5) {
+                            console.error(`\n  error: ${document?.data?.filename ?? '?'}: ${e2.message}`);
+                        }
+                    }
+                }
+            }
+            const pathMs = performance.now() - tPath;
+            pathMsSum += pathMs;
+            if (pathMs > pathMsMax) { pathMsMax = pathMs; }
+        }
+    }
+
+    if (deferredLance?.length) {
+        const tL = performance.now();
+        await db.indexDocumentsInLance(deferredLance);
+        console.log(
+            `  lance batch #${batchNo}: ${deferredLance.length} rows (${elapsed(tL)})`,
+        );
+    }
+
+    const ms = performance.now() - tBatch;
+    const rate = docCount / (ms / 1000);
+    let detail;
+    if (usedSingleTxn) {
+        detail = `${docCount} docs, ${pathCount} path(s), single LMDB txn`;
+    } else {
+        const avgPath = pathCount ? (pathMsSum / pathCount).toFixed(1) : '0';
+        detail = `${docCount} docs, ${pathCount} path(s), max(path) ${pathMsMax.toFixed(0)}ms, avg(path) ${avgPath}ms`;
+        if (fallbackPaths) {
+            detail += `, putMany→put fallback: ${fallbackPaths} path(s)`;
+        }
+    }
+    console.log(
+        `  insert batch #${batchNo}: ${detail}; batch wall ${elapsed(tBatch)} (~${rate.toFixed(0)} docs/s)`,
+    );
+}
+
 async function cmdScan(db, opts) {
     const rootDir = opts.scanPath;
     if (!existsSync(rootDir)) {
@@ -312,6 +454,8 @@ async function cmdScan(db, opts) {
         tree = db.getTree(treeName);
     }
 
+    console.log(`  LanceDB: ${opts.noLance ? 'disabled (--no-lance)' : 'enabled'}`);
+
     // Walk
     console.log(`  scanning ${rootDir} ...`);
     const t1 = performance.now();
@@ -325,13 +469,23 @@ async function cmdScan(db, opts) {
     detectMimeBatch(files);
     console.log(`  mime detection done (${elapsed(t2)})`);
 
+    // Batch size
+    console.log(`  batch size: ${SCAN_PUT_BATCH}`);
+
     // Ingest
     const t3 = performance.now();
-    let inserted = 0;
-    let skipped = 0;
-    let errors = 0;
+    const counters = { inserted: 0, skipped: 0, errors: 0, batchNo: 0 };
+    const pending = [];
 
     const logInterval = Math.max(100, Math.min(5000, Math.floor(files.length / 20)));
+
+    const progress = () => {
+        const { inserted, skipped, errors } = counters;
+        const done = inserted + skipped + errors + pending.length;
+        if (done % logInterval === 0) {
+            process.stdout.write(`\r  processed ${done}/${files.length} (${inserted} new, ${skipped} skipped)`);
+        }
+    };
 
     for (const filePath of files) {
         try {
@@ -345,15 +499,14 @@ async function cmdScan(db, opts) {
             // Skip if already stored with same checksum
             const existing = await db.getByChecksumString(checksum).catch(() => null);
             if (existing) {
-                skipped++;
-                if ((inserted + skipped) % logInterval === 0) {
-                    process.stdout.write(`\r  processed ${inserted + skipped + errors}/${files.length} (${inserted} new, ${skipped} skipped)`);
-                }
+                counters.skipped++;
+                progress();
                 continue;
             }
 
-            await db.put(
-                {
+            pending.push({
+                treePath,
+                document: {
                     schema: 'data/abstraction/file',
                     data: {
                         filename: basename(filePath),
@@ -365,23 +518,23 @@ async function cmdScan(db, opts) {
                     },
                     checksumArray: [checksum],
                 },
-                { tree: treeName, path: treePath },
-                ['data/abstraction/file'],
-                { emitEvent: false },
-            );
-            inserted++;
+            });
+            if (pending.length >= SCAN_PUT_BATCH) {
+                await flushScanPutBatch(db, treeName, pending, counters, opts.noLance);
+            }
+            progress();
         } catch (err) {
-            errors++;
-            if (errors <= 5) {
+            counters.errors++;
+            if (counters.errors <= 5) {
                 console.error(`\n  error: ${basename(filePath)}: ${err.message}`);
             }
-        }
-
-        if ((inserted + skipped + errors) % logInterval === 0) {
-            process.stdout.write(`\r  processed ${inserted + skipped + errors}/${files.length} (${inserted} new, ${skipped} skipped)`);
+            progress();
         }
     }
 
+    await flushScanPutBatch(db, treeName, pending, counters, opts.noLance);
+
+    const { inserted, skipped, errors } = counters;
     const totalTime = elapsed(t3);
     const rate = ((inserted + skipped) / ((performance.now() - t3) / 1000)).toFixed(0);
     console.log(`\r  done: ${inserted} inserted, ${skipped} skipped, ${errors} errors (${totalTime}, ~${rate} docs/s)`);
@@ -391,7 +544,7 @@ async function cmdScan(db, opts) {
 async function cmdGet(db, opts) {
     const id = parseInt(opts.commandArg, 10);
     if (!id) {
-        console.error('Usage: scan.js <path> get <id>');
+        console.error('Usage: node scripts/scan.js get <id> [--db <dir>]');
         process.exit(1);
     }
     const doc = await db.get(id);
@@ -416,7 +569,7 @@ async function cmdFind(db, opts) {
 async function cmdSearch(db, opts) {
     const query = opts.commandArg;
     if (!query) {
-        console.error('Usage: scan.js <path> search <query> [--tree T] [--limit N]');
+        console.error('Usage: node scripts/scan.js search <query> [--tree T] [--limit N] [--db <dir>]');
         process.exit(1);
     }
     const spec = { query };

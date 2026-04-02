@@ -487,6 +487,9 @@ class SynapsD extends EventEmitter {
     }
 
     async putMany(documents, treeSelector = null, features = [], options = {}) {
+        const skipLance = options.skipLance === true;
+        const deferredLanceBuffer = options.deferredLanceBuffer;
+
         const spec = this.#normalizeDocumentOperationSpec(treeSelector, features, options);
         if (!Array.isArray(documents)) {
             throw new Error('Document array must be an array');
@@ -585,10 +588,19 @@ class SynapsD extends EventEmitter {
 
         // ── Phase 3: Lance (best-effort, single batch add) ───────────────
 
-        try {
-            const lanceDocs = prepared.map(({ parsed }) => parseInitializeDocument(parsed));
-            await this.#lanceIndex.addMany(lanceDocs);
-        } catch (_) { }
+        const needLanceRows = !skipLance || Array.isArray(deferredLanceBuffer);
+        const lanceDocs = needLanceRows
+            ? prepared.map(({ parsed }) => parseInitializeDocument(parsed))
+            : [];
+        if (skipLance) {
+            if (Array.isArray(deferredLanceBuffer)) {
+                deferredLanceBuffer.push(...lanceDocs);
+            }
+        } else {
+            try {
+                await this.#lanceIndex.addMany(lanceDocs);
+            } catch (_) { }
+        }
 
         // ── Phase 4: Events ──────────────────────────────────────────────
 
@@ -613,6 +625,124 @@ class SynapsD extends EventEmitter {
             count: storedIds.length,
             batch: true,
         }));
+
+        return storedIds;
+    }
+
+    /** Append parsed documents to the Lance FTS table (same payload as putMany phase 3). */
+    async indexDocumentsInLance(documents) {
+        if (!documents?.length) { return; }
+        try {
+            await this.#lanceIndex.addMany(documents);
+        } catch (_) { }
+    }
+
+    /**
+     * Same as repeated putMany(..., { tree, path }) per path, but one LMDB transaction + one bitmap flush.
+     * items: [{ document, path: directoryPath }]
+     */
+    async putManyDirectoryPaths(items, treeName, featureArray = [], options = {}) {
+        const skipLance = options.skipLance === true;
+        const deferredLanceBuffer = options.deferredLanceBuffer;
+        const emitEvent = options.emitEvent !== false;
+
+        if (!Array.isArray(items) || items.length === 0) {
+            return [];
+        }
+
+        const featureBitmaps = parseBitmapArray(featureArray);
+
+        const prepared = [];
+
+        for (let i = 0; i < items.length; i++) {
+            const { document, path: dirPath } = items[i];
+            try {
+                const parsed = isDocumentInstance(document) ? document : parseInitializeDocument(document);
+                parsed.validateData();
+
+                const primaryChecksum = parsed.getPrimaryChecksum();
+                const existing = await this.getByChecksumString(primaryChecksum).catch(() => null);
+                if (existing) {
+                    // Already stored — skip re-insertion entirely
+                    continue;
+                }
+
+                const docFeatures = [...featureBitmaps];
+                if (!docFeatures.includes(parsed.schema)) {
+                    docFeatures.push(parsed.schema);
+                }
+
+                const norm = this.#normalizeDocumentOperationSpec(
+                    { tree: treeName, path: dirPath },
+                    featureArray,
+                    { emitEvent: false },
+                );
+                const directorySpec = norm.directory;
+                if (!directorySpec) {
+                    throw new Error(`putManyDirectoryPaths: expected directory tree (${treeName})`);
+                }
+
+                prepared.push({ parsed, docFeatures, directorySpec });
+            } catch (error) {
+                const contextualError = new Error(`Failed to prepare document at index ${i}: ${error.message}`);
+                contextualError.cause = error;
+                throw contextualError;
+            }
+        }
+
+        if (prepared.length === 0) { return []; }
+
+        const ids = generateDocumentIDs(this.#internalStore, prepared.length, INTERNAL_BITMAP_ID_MAX);
+        for (let i = 0; i < prepared.length; i++) {
+            prepared[i].parsed.id = ids[i];
+        }
+
+        for (let i = 0; i < prepared.length; i++) {
+            prepared[i].parsed.validate();
+        }
+
+        this.bitmapIndex.startBatch();
+
+        try {
+            await this.#db.transaction(async () => {
+                for (const { parsed, docFeatures, directorySpec } of prepared) {
+                    await this.documents.put(parsed.id, parsed);
+                    await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
+                    await this.#timestampIndex.insert('created', parsed.createdAt || new Date().toISOString(), parsed.id);
+                    await this.#timestampIndex.insert('updated', parsed.updatedAt, parsed.id);
+                    await this.#indexDocument(parsed.id, null, directorySpec, docFeatures);
+                }
+            });
+
+            this.bitmapIndex.flushBatch();
+        } catch (error) {
+            this.bitmapIndex.flushBatch();
+            throw new Error(`putManyDirectoryPaths transaction failed: ${error.message}`);
+        }
+
+        const needLanceRows = !skipLance || Array.isArray(deferredLanceBuffer);
+        const lanceDocs = needLanceRows
+            ? prepared.map(({ parsed }) => parseInitializeDocument(parsed))
+            : [];
+        if (skipLance) {
+            if (Array.isArray(deferredLanceBuffer)) {
+                deferredLanceBuffer.push(...lanceDocs);
+            }
+        } else {
+            try {
+                await this.#lanceIndex.addMany(lanceDocs);
+            } catch (_) { }
+        }
+
+        const storedIds = prepared.map(p => p.parsed.id);
+
+        if (emitEvent) {
+            this.emit(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, {
+                ids: storedIds,
+                count: storedIds.length,
+                batch: true,
+            }));
+        }
 
         return storedIds;
     }

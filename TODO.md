@@ -5,6 +5,10 @@
 - Keep `synapsd` focused on store/index/query only.
 - Keep `contextTree` and `directoryTree` as separate view semantics over shared internals.
 
+## High priority
+
+- Ensure all batch methods are using the accompanied backend(LMDB/Lance) batch methods too!
+
 ## Generic
 
 - [] Add backup/restore or dump/import functionality internally
