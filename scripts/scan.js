@@ -5,31 +5,16 @@
  * scan.js — Recursively scan a directory into a SynapsD database, or query that DB.
  *
  * Usage:
- *   node scripts/scan.js <path> [options]              # ingest (path = directory to scan)
- *   node scripts/scan.js scan <path> [options]         # same
- *   node scripts/scan.js get <id> [--db DIR]
- *   node scripts/scan.js find [--tree T] [--features F] [--limit N] [--db DIR]
- *   node scripts/scan.js search <query> [...] [--db DIR]
- *   node scripts/scan.js tree [name] [--db DIR]
+ *   node scripts/scan.js scan   --path <dir>  [--db <dir>] [--exclude <glob>]... [--no-lance]
+ *   node scripts/scan.js get    --id <n>      [--db <dir>]
+ *   node scripts/scan.js find                 [--db <dir>] [--tree <name>] [--features <f1,f2>] [--limit <n>]
+ *   node scripts/scan.js search --query <txt> [--db <dir>] [--tree <name>] [--features <f1,f2>] [--limit <n>]
+ *   node scripts/scan.js tree                 [--db <dir>] [--name <name>]
  *
- * Only ingest uses a filesystem path; queries use --db (default ./.db).
+ * All flags are position-independent and can appear before or after the command.
+ * --db defaults to ./.db in the current working directory.
  *
- * Options:
- *   --exclude <glob>       Exclude files matching glob (repeatable; ingest only)
- *   --db <dir>             Database directory (default: ./.db)
- *   --tree <name>          Tree name for queries
- *   --features <f1,f2>     Comma-separated feature list
- *   --limit <n>            Max results
- *   --no-lance             Skip LanceDB indexing (ingest only)
- *
- * Examples:
- *   node scripts/scan.js ./my-project --exclude "*.pdf"
- *   node scripts/scan.js find --features data/abstraction/file --limit 50
- *   node scripts/scan.js search "invoice" --limit 20
- *   node scripts/scan.js tree
- *   node scripts/scan.js get 7
- *
- * Full CLI: scripts/scan.readme.md
+ * Full reference: scripts/scan.readme.md
  */
 
 import { resolve, relative, dirname, basename, extname, join } from 'path';
@@ -50,93 +35,120 @@ const AUTO_EXCLUDE_GLOBS = [
 ];
 
 /** Documents queued before flush; each flush runs putMany per directory path. */
-const SCAN_PUT_BATCH = 64;
+const SCAN_PUT_BATCH = 512;
 
 // ── Argument parsing ─────────────────────────────────────────────────────────
+
+function usage() {
+    console.error([
+        '',
+        'Usage:',
+        '  node scripts/scan.js scan   --path <dir>  [--db <dir>] [--exclude <glob>]... [--no-lance]',
+        '  node scripts/scan.js get    --id <n>      [--db <dir>]',
+        '  node scripts/scan.js find                 [--db <dir>] [--tree <name>] [--features <f1,f2>] [--limit <n>]',
+        '  node scripts/scan.js search --query <txt> [--db <dir>] [--tree <name>] [--features <f1,f2>] [--limit <n>]',
+        '  node scripts/scan.js tree                 [--db <dir>] [--name <name>]',
+        '',
+        'Flags can appear anywhere (before or after the command).',
+        'See scripts/scan.readme.md for details.',
+        '',
+    ].join('\n'));
+}
 
 function parseArgs(argv) {
     const args = argv.slice(2);
     const opts = {
+        command: null,
         scanPath: null,
-        command: 'scan',
-        commandArg: null,
-        excludes: [...AUTO_EXCLUDE_GLOBS],
-        dbDir: null,
+        id: null,
+        query: null,
         treeName: null,
+        dbDir: null,
         features: null,
         limit: null,
+        excludes: [...AUTO_EXCLUDE_GLOBS],
         noLance: false,
     };
 
-    const subcommands = new Set(['get', 'find', 'search', 'tree']);
-
-    if (args.length === 0) {
-        console.error('Usage: node scripts/scan.js <path> | scan <path> | get | find | search | tree ...');
-        console.error('  Ingest needs a directory; queries use --db (default ./.db). See scripts/scan.readme.md');
-        process.exit(1);
-    }
+    const commands = new Set(['scan', 'get', 'find', 'search', 'tree']);
 
     let i = 0;
-    const head = args[0];
-
-    if (head === 'scan') {
-        opts.command = 'scan';
-        if (args.length < 2 || args[1].startsWith('-')) {
-            console.error('Usage: node scripts/scan.js scan <path> [options]');
-            process.exit(1);
-        }
-        opts.scanPath = resolve(args[1]);
-        i = 2;
-    } else if (subcommands.has(head)) {
-        opts.command = head;
-        i = 1;
-        if (i < args.length && !args[i].startsWith('-')) {
-            opts.commandArg = args[i++];
-        }
-    } else if (!head.startsWith('-')) {
-        opts.command = 'scan';
-        opts.scanPath = resolve(head);
-        i = 1;
-        if (i < args.length && subcommands.has(args[i])) {
-            console.error(
-                'Query commands do not take a scan directory. Use e.g.\n' +
-                `  node scripts/scan.js ${args[i]} ... [--db <dir>]\n` +
-                '(Only ingest uses a path; omit it for find/search/get/tree.)',
-            );
-            process.exit(1);
-        }
-    } else {
-        console.error('Usage: node scripts/scan.js <path> | scan <path> | get | find | search | tree ...');
-        process.exit(1);
-    }
-
     while (i < args.length) {
-        const flag = args[i++];
-        if (flag === '--exclude' && i < args.length) {
-            opts.excludes.push(args[i++]);
-        } else if (flag === '--db' && i < args.length) {
-            opts.dbDir = resolve(args[i++]);
-        } else if (flag === '--tree' && i < args.length) {
-            opts.treeName = args[i++];
-        } else if (flag === '--features' && i < args.length) {
-            opts.features = args[i++].split(',').map(f => f.trim()).filter(Boolean);
-        } else if (flag === '--limit' && i < args.length) {
-            opts.limit = parseInt(args[i++], 10);
-        } else if (flag === '--no-lance') {
-            opts.noLance = true;
-        } else {
-            console.error(`Unknown flag: ${flag}`);
-            process.exit(1);
+        const arg = args[i++];
+
+        if (!arg.startsWith('-')) {
+            if (!commands.has(arg)) {
+                console.error(`Unknown command: ${arg}`);
+                usage();
+                process.exit(1);
+            }
+            if (opts.command) {
+                console.error(`Unexpected second command: ${arg}`);
+                usage();
+                process.exit(1);
+            }
+            opts.command = arg;
+            continue;
+        }
+
+        const needsValue = (flag) => {
+            if (i >= args.length || args[i].startsWith('-')) {
+                console.error(`${flag} requires a value`);
+                process.exit(1);
+            }
+        };
+
+        switch (arg) {
+            case '--path':    needsValue(arg); opts.scanPath = resolve(args[i++]); break;
+            case '--db':      needsValue(arg); opts.dbDir = resolve(args[i++]); break;
+            case '--id': {
+                needsValue(arg);
+                const n = parseInt(args[i++], 10);
+                if (isNaN(n)) { console.error('--id must be a number'); process.exit(1); }
+                opts.id = n;
+                break;
+            }
+            case '--query':   needsValue(arg); opts.query = args[i++]; break;
+            case '--tree':    needsValue(arg); opts.treeName = args[i++]; break;
+            case '--name':    needsValue(arg); opts.treeName = args[i++]; break;
+            case '--features': needsValue(arg); opts.features = args[i++].split(',').map(f => f.trim()).filter(Boolean); break;
+            case '--limit': {
+                needsValue(arg);
+                const n = parseInt(args[i++], 10);
+                if (isNaN(n)) { console.error('--limit must be a number'); process.exit(1); }
+                opts.limit = n;
+                break;
+            }
+            case '--exclude': needsValue(arg); opts.excludes.push(args[i++]); break;
+            case '--no-lance': opts.noLance = true; break;
+            default:
+                console.error(`Unknown flag: ${arg}`);
+                usage();
+                process.exit(1);
         }
     }
 
-    if (opts.command === 'scan' && !opts.scanPath) {
-        console.error('Usage: node scripts/scan.js <path> [options]   or   node scripts/scan.js scan <path> [options]');
+    if (!opts.command) {
+        usage();
         process.exit(1);
     }
 
     if (!opts.dbDir) {
         opts.dbDir = resolve('.db');
+    }
+
+    // Per-command validation
+    if (opts.command === 'scan' && !opts.scanPath) {
+        console.error('scan requires --path <directory>');
+        process.exit(1);
+    }
+    if (opts.command === 'get' && opts.id === null) {
+        console.error('get requires --id <n>');
+        process.exit(1);
+    }
+    if (opts.command === 'search' && !opts.query) {
+        console.error('search requires --query <text>');
+        process.exit(1);
     }
 
     return opts;
@@ -542,14 +554,9 @@ async function cmdScan(db, opts) {
 }
 
 async function cmdGet(db, opts) {
-    const id = parseInt(opts.commandArg, 10);
-    if (!id) {
-        console.error('Usage: node scripts/scan.js get <id> [--db <dir>]');
-        process.exit(1);
-    }
-    const doc = await db.get(id);
+    const doc = await db.get(opts.id);
     if (!doc) {
-        console.error(`Document ${id} not found`);
+        console.error(`Document ${opts.id} not found`);
         process.exit(1);
     }
     printDoc(doc);
@@ -567,12 +574,7 @@ async function cmdFind(db, opts) {
 }
 
 async function cmdSearch(db, opts) {
-    const query = opts.commandArg;
-    if (!query) {
-        console.error('Usage: node scripts/scan.js search <query> [--tree T] [--limit N] [--db <dir>]');
-        process.exit(1);
-    }
-    const spec = { query };
+    const spec = { query: opts.query };
     if (opts.treeName) { spec.tree = opts.treeName; }
     if (opts.features) { spec.features = opts.features; }
     if (opts.limit) { spec.limit = opts.limit; }
@@ -583,7 +585,7 @@ async function cmdSearch(db, opts) {
 }
 
 async function cmdTree(db, opts) {
-    const treeName = opts.commandArg || opts.treeName;
+    const treeName = opts.treeName;
     if (treeName) {
         const tree = db.getTree(treeName);
         if (!tree) {

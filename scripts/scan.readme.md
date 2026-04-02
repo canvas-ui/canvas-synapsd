@@ -1,51 +1,50 @@
 # `scan.js` CLI
 
-Ingest files into a SynapsD DB, or query that database. Run from the repo root (or adjust paths).
+Ingest files into a SynapsD DB, or query that database.
 
-**Only the ingest commands take a filesystem directory** (`<path>` or `scan <path>`). **Find, search, get, and tree** only need the database via **`--db`** (default: **`<cwd>/.db`**).
-
-```bash
-node scripts/scan.js <path> [ingest-options]
-node scripts/scan.js scan <path> [ingest-options]
-
-node scripts/scan.js get <id> [options]
-node scripts/scan.js find [options]
-node scripts/scan.js search <query> [options]
-node scripts/scan.js tree [tree-name] [options]
-```
-
-If you run `node scripts/scan.js <path> find ...` by mistake, the script errors and tells you to drop the path for query commands.
+The **command** is always the first positional argument. All flags are named and **position-independent** — they can appear before or after the command in any order.
 
 ## Commands
 
-| Command | Role | Example |
-|--------|------|--------|
-| *(path first)* | Ingest: scan directory `<path>` | `node scripts/scan.js ./my-project` |
-| `scan` | Same; path is the next argument | `node scripts/scan.js scan ./my-project` |
-| `get` | Load document by numeric id | `node scripts/scan.js get 42` |
-| `find` | List documents | `node scripts/scan.js find --limit 50` |
-| `search` | Full-text search; **query** is the next positional | `node scripts/scan.js search "invoice"` |
-| `tree` | Dump a tree as JSON, or list trees | `node scripts/scan.js tree` or `tree filesystem` |
+| Command  | What it does                              |
+|----------|-------------------------------------------|
+| `scan`   | Walk a directory and ingest files         |
+| `get`    | Retrieve a document by numeric ID         |
+| `find`   | List/filter documents                     |
+| `search` | Full-text search                          |
+| `tree`   | Dump a tree as JSON, or list all trees    |
 
-## Options
+## Flags
 
-| Flag | Applies to | Meaning |
-|------|------------|---------|
-| `--exclude <glob>` | ingest | Extra glob to skip (repeatable). Built-in excludes cover `node_modules`, VCS dirs, binaries, etc. |
-| `--db <dir>` | all | Database directory (default: `./.db`). |
-| `--tree <name>` | `find`, `search`, `tree` | Tree name for queries / which tree to dump. |
-| `--features f1,f2` | `find`, `search` | Comma-separated feature / schema filters. |
-| `--limit <n>` | `find`, `search` | Max results. |
-| `--no-lance` | ingest | Skip LanceDB indexing (faster writes; no vector search for those docs). |
+| Flag                 | Applies to          | Meaning                                                               |
+|----------------------|---------------------|-----------------------------------------------------------------------|
+| `--path <dir>`       | `scan`              | Directory to ingest *(required)*                                      |
+| `--id <n>`           | `get`               | Numeric document ID *(required)*                                      |
+| `--query <text>`     | `search`            | Search query *(required)*                                             |
+| `--name <name>`      | `tree`              | Tree to dump; omit to list all trees                                  |
+| `--db <dir>`         | all                 | Database directory (default: `./.db`)                                 |
+| `--tree <name>`      | `find`, `search`    | Filter by tree name                                                   |
+| `--features <f1,f2>` | `find`, `search`    | Comma-separated feature / schema filters                              |
+| `--limit <n>`        | `find`, `search`    | Max results                                                           |
+| `--exclude <glob>`   | `scan`              | Extra glob to skip (repeatable). Built-in excludes cover `node_modules`, VCS dirs, binaries, etc. |
+| `--no-lance`         | `scan`              | Skip LanceDB indexing (faster writes; no vector search for those docs) |
 
 ## Examples
 
 ```bash
-node scripts/scan.js ./my-project --exclude "*.pdf" --exclude "dist/**"
-node scripts/scan.js find --features data/abstraction/file --limit 50
-node scripts/scan.js search "invoice" --limit 20
-node scripts/scan.js tree
-node scripts/scan.js get 7
-```
+# Ingest
+node scripts/scan.js scan --path ./my-project
+node scripts/scan.js scan --path ./my-project --exclude "*.pdf" --exclude "dist/**"
+node scripts/scan.js scan --path ./my-project --no-lance --db /tmp/mydb
 
-Ingest uses tree name **`filesystem`** and schema **`data/abstraction/file`**.
+# Query
+node scripts/scan.js find --features data/abstraction/file --limit 50
+node scripts/scan.js search --query "invoice" --limit 20
+node scripts/scan.js search --query "invoice" --db /tmp/mydb --tree filesystem
+node scripts/scan.js tree
+node scripts/scan.js tree --name filesystem
+node scripts/scan.js get --id 7
+
+# Flags before the command work too
+node scripts/scan.js --db /tmp/mydb search --query "report"
+```
