@@ -221,6 +221,7 @@ class SynapsD extends EventEmitter {
             await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
 
             await this.#loadTreeRegistry();
+            await this.#migrateLegacyTreeStructure();
             await this.#ensureDefaultTrees();
 
             // Migrate bitmap keys from legacy format (one-time, idempotent)
@@ -2165,6 +2166,116 @@ class SynapsD extends EventEmitter {
             features: this.#normalizeWriteFeatures(features),
             emitEvent: options.emitEvent ?? true,
         };
+    }
+
+    /**
+     * One-time idempotent migration: lift legacy flat tree data into the new
+     * per-tree PrefixedStore layout.
+     *
+     * Old format (single global ContextTree, data in raw #internalStore):
+     *   layer/<ULID>          → layer records
+     *   tree                  → serialised tree structure
+     *   context/<layerName>   → context bitmaps (in bitmapIndex)
+     *
+     * New format (per-tree PrefixedStore keyed by treeId):
+     *   tree/<treeId>/meta              → tree metadata
+     *   tree/<treeId>/layer/<ULID>      → layer records
+     *   tree/<treeId>/tree              → serialised tree structure
+     *   context/<treeId>/<layerULID>    → context bitmaps
+     *
+     * The migration is skipped when the tree registry is already populated
+     * (i.e. at least one tree/*/meta key exists) so it is safe to run on
+     * every startup.
+     */
+    async #migrateLegacyTreeStructure() {
+        // Already migrated or fresh install — nothing to do.
+        if (this.#treeMetadata.size > 0) { return; }
+
+        // Detect legacy layer records sitting directly in #internalStore.
+        let hasLegacyLayers = false;
+        for await (const key of this.#internalStore.getKeys({ start: 'layer/', end: 'layer/\uffff' })) {
+            hasLegacyLayers = true;
+            break;
+        }
+        const hasLegacyTreeStructure = !!this.#internalStore.doesExist?.('tree') || !!this.#internalStore.get('tree');
+
+        if (!hasLegacyLayers && !hasLegacyTreeStructure) { return; }
+
+        debug('Detected legacy flat tree data — migrating to per-tree layout');
+
+        // Create metadata for the default context tree that will own the legacy data.
+        const treeId = ulid();
+        const now = new Date().toISOString();
+        const meta = {
+            id: treeId,
+            name: 'context',
+            type: 'context',
+            createdAt: now,
+            updatedAt: now,
+            isDefault: true,
+        };
+
+        await this.#internalStore.put(this.#treeMetaKey(treeId), meta);
+        this.#treeMetadata.set(treeId, meta);
+        this.#defaultTreeIds.context = treeId;
+
+        // Build the prefixed store that the new ContextTree will use.
+        const dataStore = new PrefixedStore(this.#internalStore, `tree/${treeId}`);
+
+        // Copy layer records: layer/<ULID> → tree/<treeId>/layer/<ULID>
+        const layerKeys = [];
+        for await (const key of this.#internalStore.getKeys({ start: 'layer/', end: 'layer/\uffff' })) {
+            layerKeys.push(String(key));
+        }
+        for (const key of layerKeys) {
+            const value = this.#internalStore.get(key);
+            if (value != null) { await dataStore.put(key, value); }
+        }
+        debug(`Migrated ${layerKeys.length} layer record(s) to tree/${treeId}/`);
+
+        // Copy serialised tree structure: 'tree' → tree/<treeId>/tree
+        if (hasLegacyTreeStructure) {
+            const treeData = this.#internalStore.get('tree');
+            if (treeData != null) { await dataStore.put('tree', treeData); }
+            debug(`Migrated tree structure to tree/${treeId}/tree`);
+        }
+
+        // Instantiate and initialise the tree so we can resolve layer names → ULIDs.
+        const tree = this.#instantiateTree(meta);
+        await tree.initialize();
+
+        // Migrate context bitmaps: context/<layerName> → context/<treeId>/<layerULID>
+        const collection = this.#contextBitmapCollectionForTree(treeId);
+        const layerKeyList = await tree.layers;
+        let bitmapsMigrated = 0;
+        for (const layerKey of layerKeyList) {
+            const layer = tree.getLayerById(layerKey);
+            if (!layer || layer.name === '/') { continue; }
+
+            const oldKeyByName = `context/${layer.name}`;
+            const oldKeyById   = `context/${layer.id}`;
+            const newKey       = collection.makeKey(layer.id); // context/<treeId>/<layerULID>
+
+            for (const oldKey of [oldKeyByName, oldKeyById]) {
+                if (oldKey === newKey) { continue; }
+                if (this.bitmapIndex.hasBitmap(oldKey) && !this.bitmapIndex.hasBitmap(newKey)) {
+                    await this.bitmapIndex.renameBitmap(oldKey, newKey);
+                    bitmapsMigrated++;
+                    break;
+                } else if (this.bitmapIndex.hasBitmap(oldKey)) {
+                    await this.bitmapIndex.mergeBitmap(oldKey, [newKey]);
+                    await this.bitmapIndex.deleteBitmap(oldKey);
+                    bitmapsMigrated++;
+                    break;
+                }
+            }
+        }
+        debug(`Migrated ${bitmapsMigrated} context bitmap(s) to context/${treeId}/ prefix`);
+
+        // Update contextBitmapCollection to point at the now-populated tree.
+        this.contextBitmapCollection = collection;
+
+        debug(`Legacy tree structure migration complete — context tree id: ${treeId}`);
     }
 
     /**
