@@ -2184,7 +2184,7 @@ class SynapsD extends EventEmitter {
      *   context/<treeId>/<layerULID>    → context bitmaps
      *
      * The migration is skipped when the tree registry is already populated
-     * (i.e. at least one tree/*/meta key exists) so it is safe to run on
+     * (i.e. at least one tree/<id>/meta key exists) so it is safe to run on
      * every startup.
      */
     async #migrateLegacyTreeStructure() {
