@@ -39,7 +39,7 @@ import DirectoryTree from './views/DirectoryTree.js';
 // Extracted utilities
 import { parseContextSpecForInsert, parseBitmapArray } from './utils/parsing.js';
 import { parseFilters, applyDatetimeFilter } from './utils/filters.js';
-import { parseDocumentData, initializeDocument, parseInitializeDocument, generateDocumentID } from './utils/document.js';
+import { parseDocumentData, initializeDocument, parseInitializeDocument, generateDocumentID, generateDocumentIDs } from './utils/document.js';
 import PrefixedStore from './utils/PrefixedStore.js';
 
 // Constants
@@ -491,30 +491,115 @@ class SynapsD extends EventEmitter {
         if (!Array.isArray(documents)) {
             throw new Error('Document array must be an array');
         }
+        if (documents.length === 0) { return []; }
 
         debug(`putMany: Attempting to store ${documents.length} documents`);
-        const storedIds = [];
-        const batchSpec = { ...spec, emitEvent: false };
+
+        // ── Phase 1: Parse, validate, dedup ──────────────────────────────
+
+        let contextSpec = null;
+        let directorySpec = null;
+        if (this.#isDocumentOperationOptions(spec)) {
+            contextSpec = spec.context ?? null;
+            directorySpec = spec.directory ?? null;
+        } else if (spec.path || spec.tree) {
+            // Came from #normalizeDocumentOperationSpec — detect type
+            contextSpec = spec;
+        }
+
+        const featureBitmaps = parseBitmapArray(spec.features || features);
+        const prepared = [];
+
         for (let i = 0; i < documents.length; i++) {
-            const document = documents[i];
             try {
-                const id = await this.put(document, batchSpec);
-                storedIds.push(id);
+                const doc = documents[i];
+                const parsed = isDocumentInstance(doc) ? doc : parseInitializeDocument(doc);
+                parsed.validateData();
+
+                const primaryChecksum = parsed.getPrimaryChecksum();
+                const existing = await this.getByChecksumString(primaryChecksum).catch(() => null);
+                if (existing) {
+                    parsed.id = existing.id;
+                    if (existing.createdAt) { parsed.createdAt = existing.createdAt; }
+                    if (existing.updatedAt) { parsed.updatedAt = existing.updatedAt; }
+                }
+
+                const docFeatures = [...featureBitmaps];
+                if (!docFeatures.includes(parsed.schema)) {
+                    docFeatures.push(parsed.schema);
+                }
+
+                prepared.push({ parsed, existing: !!existing, docFeatures });
             } catch (error) {
-                const contextualError = new Error(`Failed to store document at index ${i}: ${error.message}`);
+                const contextualError = new Error(`Failed to prepare document at index ${i}: ${error.message}`);
                 contextualError.cause = error;
-                contextualError.failedItem = document;
+                contextualError.failedItem = documents[i];
                 contextualError.failedIndex = i;
                 throw contextualError;
             }
         }
 
-        if (storedIds.length > 0 && spec.context) {
+        // Batch-generate IDs for new documents in one transaction
+        const newDocs = prepared.filter(p => !p.existing);
+        if (newDocs.length > 0) {
+            const ids = generateDocumentIDs(this.#internalStore, newDocs.length, INTERNAL_BITMAP_ID_MAX);
+            for (let i = 0; i < newDocs.length; i++) {
+                newDocs[i].parsed.id = ids[i];
+            }
+        }
+
+        // Validate all (now that IDs are assigned)
+        for (let i = 0; i < prepared.length; i++) {
             try {
-                const { tree: batchTree } = this.#resolveTreeSelection('context', spec.context, '/');
+                prepared[i].parsed.validate();
+            } catch (error) {
+                const contextualError = new Error(`Validation failed for document at index ${i}: ${error.message}`);
+                contextualError.cause = error;
+                contextualError.failedIndex = i;
+                throw contextualError;
+            }
+        }
+
+        // ── Phase 2: Batch write — bitmap ops deferred ───────────────────
+
+        this.bitmapIndex.startBatch();
+
+        try {
+            await this.#db.transaction(async () => {
+                for (const { parsed, docFeatures } of prepared) {
+                    await this.documents.put(parsed.id, parsed);
+                    await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
+                    await this.#timestampIndex.insert('created', parsed.createdAt || new Date().toISOString(), parsed.id);
+                    await this.#timestampIndex.insert('updated', parsed.updatedAt, parsed.id);
+                    await this.#indexDocument(parsed.id, contextSpec, directorySpec, docFeatures);
+                }
+            });
+
+            // Flush all deferred bitmap writes in one pass
+            this.bitmapIndex.flushBatch();
+        } catch (error) {
+            // Discard deferred writes on failure
+            this.bitmapIndex.flushBatch();
+            throw new Error(`putMany transaction failed: ${error.message}`);
+        }
+
+        // ── Phase 3: Lance (best-effort, single batch add) ───────────────
+
+        try {
+            const lanceDocs = prepared.map(({ parsed }) => parseInitializeDocument(parsed));
+            await this.#lanceIndex.addMany(lanceDocs);
+        } catch (_) { }
+
+        // ── Phase 4: Events ──────────────────────────────────────────────
+
+        const storedIds = prepared.map(p => p.parsed.id);
+
+        if (storedIds.length > 0 && contextSpec) {
+            try {
+                const { tree: batchTree } = this.#resolveTreeSelection('context', contextSpec, '/');
                 batchTree.emit(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, createEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, {
                     documentIds: storedIds,
-                    contextSpec: spec.context,
+                    contextSpec,
                     layerNames: [],
                     source: 'tree',
                 }));
@@ -522,6 +607,12 @@ class SynapsD extends EventEmitter {
                 debug(`putMany: Failed to emit tree batch event, error: ${treeError.message}`);
             }
         }
+
+        this.emit(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, {
+            ids: storedIds,
+            count: storedIds.length,
+            batch: true,
+        }));
 
         return storedIds;
     }

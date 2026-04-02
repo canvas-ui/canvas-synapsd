@@ -1,13 +1,24 @@
 # SynapsD
 
-SynapsD is the indexed store behind Canvas. It keeps documents, roaring bitmap memberships, timestamp/checksum indexes, and named tree views on top of LMDB.
+SynapsD is a small KV DB built on top of LMDB, primarily used as a in-process index and JSON document store for Canvas Workspaces.  
 
-It is not the app layer. Source adapters, device logic, workspace hooks, and other domain-specific mapping stay outside `synapsd`.
+Its meant to index all data from a configured data source of a workpace (files, emails, notes, browser tabs, github repos, dotfiles etc), and provide a unified tree abstraction on top that should ideally mimick whatever mental model you need to make work with your data more efficient.
 
-## Core pieces
+Context or Directory tree paths `/travel/2025/barcelona` and `/work/architecture/interior design/living room/` can return the same list of photos regardless whether they are stored at nas@home, beefy-pc, s3 or "corsair-usb"(client/consumer app can choose which indexed data path to use based on its contextual data).
 
-- `LMDB` is the storage backend.
-- `Roaring bitmaps` power feature and membership lookups.
+Search is powered by roaring bitmaps and its api could use a cleanup :)  
+Context tree - as one of the tree view abstractions - is built on top of bitmap-based "layers" directly and may take some time to get used-to.
+
+Within a Context Tree, a `reports` layer in `/work/customer-a/reports` and `/work/customer-b/reports` is stored under the same uuid linking to the same bitmap - renaming/removing/updating one will update all occurences in the context tree.
+
+Context layers filter different data based on `where they are placed`. Iow, 
+- Moving `reports` to `/reports` would show you all data linked to the `reports` layer within your Universe
+- Moving `reports` under `/work/customer-a/reports` would do a logical `AND` on the `work`, `customer-a` and `reports` layer bitmaps and result in a filtered view of data that are linked to `all of` the layers in your path(iow, return only data linked to customer-a).
+
+## Core components
+
+- `LMDB` as the storage backend(for now at least).
+- `Roaring bitmaps` context, feature and membership lookups.
 - `LanceDB` handles ranked/full-text search.
 - `ContextTree` provides layered/intersection semantics.
 - `DirectoryTree` provides exact folder semantics with unique node IDs.

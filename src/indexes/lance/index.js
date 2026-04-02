@@ -70,6 +70,35 @@ class LanceIndex {
         }
     }
 
+    async addMany(docs) {
+        if (!this.#table || !Array.isArray(docs) || docs.length === 0) { return; }
+
+        const rows = [];
+        const ids = [];
+        for (const doc of docs) {
+            if (!doc || !doc.id) { continue; }
+            const ftsArray = typeof doc.generateFtsData === 'function' ? doc.generateFtsData() : null;
+            rows.push({
+                id: doc.id,
+                schema: doc.schema,
+                updatedAt: doc.updatedAt,
+                fts_text: Array.isArray(ftsArray) ? ftsArray.join('\n') : '',
+            });
+            ids.push(doc.id);
+        }
+
+        if (rows.length === 0) { return; }
+
+        try { await this.#table.add(rows); } catch (e) {
+            debug(`LanceIndex addMany failed: ${e.message}`);
+            return;
+        }
+
+        if (this.#bitmapIndex) {
+            try { await this.#bitmapIndex.tickMany([this.#ftsBitmapKey], ids); } catch (_) { }
+        }
+    }
+
     async upsert(doc) {
         if (!this.#table || !doc || !doc.id) { return; }
 

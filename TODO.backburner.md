@@ -22,3 +22,9 @@ I'm thinking about implementing the following "session-like" feature and I'm not
     - refresh() - documents may change during a long-lived session
 
 
+The idea is to enable continual search by humans and agents - you may remember - hey that mail was on wednesday, yeah and it contained a document, .. let me think, yeah I think it had Susan in it
+Or doing bitmap-augmented deep memory recall before we hit lancedb (it was "vw", "road", "sun", "2015" - agent would be able to refine his query per-partes, db would keep all relevant bitmaps in memory)
+
+For now all bitmaps are kept in memory regardless but if we create bitmaps keyd with some bm25 variant we may need this.
+
+Question is if/when/whether its worth it

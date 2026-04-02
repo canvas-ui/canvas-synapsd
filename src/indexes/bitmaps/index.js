@@ -31,6 +31,9 @@ const ALLOWED_PREFIXES = [
 
 class BitmapIndex {
 
+    #batchMode = false;
+    #dirtyKeys = new Set();
+
     constructor(dataset, cache = new Map(), options = {}) {
         if (!dataset) { throw new Error('Backing store dataset required'); }
         this.dataset = dataset;
@@ -45,6 +48,28 @@ class BitmapIndex {
         this.collections = new Map();
 
         debug(`BitmapIndex initialized with range ${this.rangeMin} - ${this.rangeMax}`);
+    }
+
+    /**
+     * Batch mode — defers bitmap persistence to flush time.
+     * In-memory bitmaps are still updated immediately (cache stays current),
+     * but serialize+putSync is skipped until flushBatch() is called.
+     */
+    startBatch() {
+        this.#batchMode = true;
+        this.#dirtyKeys.clear();
+    }
+
+    flushBatch() {
+        for (const key of this.#dirtyKeys) {
+            const bitmap = this.cache.get(key);
+            if (bitmap && bitmap instanceof Bitmap) {
+                const serialized = bitmap.serialize(true);
+                this.dataset.putSync(key, serialized);
+            }
+        }
+        this.#dirtyKeys.clear();
+        this.#batchMode = false;
     }
 
     /**
@@ -755,9 +780,15 @@ class BitmapIndex {
                 throw new Error('Bitmap must be an instance of Bitmap');
             }
 
+            this.cache.set(key, bitmap);
+
+            if (this.#batchMode) {
+                this.#dirtyKeys.add(key);
+                return;
+            }
+
             const serializedBitmap = bitmap.serialize(true);
             this.dataset.putSync(key, serializedBitmap);
-            this.cache.set(key, bitmap);
             debug(`Bitmap "${key}" saved successfully with ${bitmap.size} elements`);
         } catch (error) {
             debug(`Error saving bitmap "${key}"`, error);

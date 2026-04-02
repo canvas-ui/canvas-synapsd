@@ -88,3 +88,24 @@ export function generateDocumentID(internalStore, minId = 100000) {
         return newId;
     });
 }
+
+/**
+ * Generate N sequential document IDs in a single transaction.
+ */
+export function generateDocumentIDs(internalStore, count, minId = 100000) {
+    const counterKey = 'internal/document-id-counter';
+
+    return internalStore.transactionSync(() => {
+        let currentCounter = internalStore.get(counterKey);
+        if (currentCounter === undefined || currentCounter === null) {
+            currentCounter = minId;
+        }
+        const firstId = currentCounter + 1;
+        internalStore.putSync(counterKey, currentCounter + count);
+        const ids = new Array(count);
+        for (let i = 0; i < count; i++) {
+            ids[i] = firstId + i;
+        }
+        return ids;
+    });
+}
