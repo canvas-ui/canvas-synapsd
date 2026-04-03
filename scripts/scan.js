@@ -35,7 +35,7 @@ const AUTO_EXCLUDE_GLOBS = [
 ];
 
 /** Documents queued before flush; each flush runs putMany per directory path. */
-const SCAN_PUT_BATCH = 1024;
+const SCAN_PUT_BATCH = 4096;
 
 // ── Argument parsing ─────────────────────────────────────────────────────────
 
