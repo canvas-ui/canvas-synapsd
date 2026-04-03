@@ -18,7 +18,7 @@
  */
 
 import { resolve, relative, dirname, basename, extname, join } from 'path';
-import { createReadStream, statSync, readdirSync, existsSync } from 'fs';
+import { createReadStream, statSync, readdirSync, existsSync, appendFileSync } from 'fs';
 import { createHash } from 'crypto';
 import { execSync } from 'child_process';
 import SynapsD from '../src/index.js';
@@ -35,7 +35,7 @@ const AUTO_EXCLUDE_GLOBS = [
 ];
 
 /** Documents queued before flush; each flush runs putMany per directory path. */
-const SCAN_PUT_BATCH = 512;
+const SCAN_PUT_BATCH = 1024;
 
 // ── Argument parsing ─────────────────────────────────────────────────────────
 
@@ -192,24 +192,23 @@ function isExcluded(relPath, excludePatterns) {
 
 // ── File walking ─────────────────────────────────────────────────────────────
 
-function walkSync(dir, rootDir, excludes) {
-    const entries = [];
-    let items;
-    try { items = readdirSync(dir, { withFileTypes: true }); } catch { return entries; }
-
-    for (const item of items) {
-        const fullPath = join(dir, item.name);
-        const rel = relative(rootDir, fullPath);
-
-        if (isExcluded(rel, excludes)) { continue; }
-
-        if (item.isDirectory()) {
-            entries.push(...walkSync(fullPath, rootDir, excludes));
-        } else if (item.isFile()) {
-            entries.push(fullPath);
+function* walkGen(dir, rootDir, excludes) {
+    const stack = [dir];
+    while (stack.length > 0) {
+        const current = stack.pop();
+        let items;
+        try { items = readdirSync(current, { withFileTypes: true }); } catch { continue; }
+        for (const item of items) {
+            const fullPath = join(current, item.name);
+            const rel = relative(rootDir, fullPath);
+            if (isExcluded(rel, excludes)) { continue; }
+            if (item.isDirectory()) {
+                stack.push(fullPath);
+            } else if (item.isFile()) {
+                yield fullPath;
+            }
         }
     }
-    return entries;
 }
 
 // ── Checksum ─────────────────────────────────────────────────────────────────
@@ -466,90 +465,109 @@ async function cmdScan(db, opts) {
         tree = db.getTree(treeName);
     }
 
+    const errorLogPath = join(opts.dbDir, 'errors.log');
+    const logError = (filePath, kind, err) => {
+        const line = `${new Date().toISOString()} [${kind}] ${filePath}: ${err.message}\n`;
+        try { appendFileSync(errorLogPath, line); } catch { /* best-effort */ }
+    };
+
     console.log(`  LanceDB: ${opts.noLance ? 'disabled (--no-lance)' : 'enabled'}`);
-
-    // Walk
     console.log(`  scanning ${rootDir} ...`);
-    const t1 = performance.now();
-    const files = walkSync(rootDir, rootDir, opts.excludes);
-    console.log(`  found ${files.length} files (${elapsed(t1)})`);
-
-    if (files.length === 0) { return; }
-
-    // Batch MIME detection
-    const t2 = performance.now();
-    detectMimeBatch(files);
-    console.log(`  mime detection done (${elapsed(t2)})`);
-
-    // Batch size
     console.log(`  batch size: ${SCAN_PUT_BATCH}`);
+    console.log(`  error log: ${errorLogPath}`);
 
-    // Ingest
+    const MIME_CHUNK = 500;
+    const LOG_EVERY = 1000;
+
     const t3 = performance.now();
-    const counters = { inserted: 0, skipped: 0, errors: 0, batchNo: 0 };
+    const counters = { inserted: 0, updated: 0, skipped: 0, errors: 0, batchNo: 0, total: 0 };
     const pending = [];
 
-    const logInterval = Math.max(100, Math.min(5000, Math.floor(files.length / 20)));
-
     const progress = () => {
-        const { inserted, skipped, errors } = counters;
-        const done = inserted + skipped + errors + pending.length;
-        if (done % logInterval === 0) {
-            process.stdout.write(`\r  processed ${done}/${files.length} (${inserted} new, ${skipped} skipped)`);
+        if (counters.total % LOG_EVERY === 0) {
+            const { inserted, updated, skipped, errors, total } = counters;
+            process.stdout.write(`\r  processed ${total} (${inserted} new, ${updated} updated, ${skipped} skipped, ${errors} errors)`);
         }
     };
 
-    for (const filePath of files) {
-        try {
-            const rel = relative(rootDir, filePath);
-            const dirPath = '/' + dirname(rel).replace(/\\/g, '/');
-            const treePath = dirPath === '/.' ? '/' : dirPath;
-            const stat = getFileStat(filePath);
-            const mime = getMime(filePath);
-            const checksum = await checksumFile(filePath);
+    const walker = walkGen(rootDir, rootDir, opts.excludes);
+    let done = false;
 
-            // Skip if already stored with same checksum
-            const existing = await db.getByChecksumString(checksum).catch(() => null);
-            if (existing) {
-                counters.skipped++;
+    while (!done) {
+        // Collect a chunk of files for MIME detection
+        const chunk = [];
+        while (chunk.length < MIME_CHUNK) {
+            const { value, done: iterDone } = walker.next();
+            if (iterDone) { done = true; break; }
+            chunk.push(value);
+        }
+        if (chunk.length === 0) { break; }
+
+        detectMimeBatch(chunk);
+
+        for (const filePath of chunk) {
+            counters.total++;
+            try {
+                const rel = relative(rootDir, filePath);
+                const dirPath = '/' + dirname(rel).replace(/\\/g, '/');
+                const treePath = dirPath === '/.' ? '/' : dirPath;
+                const stat = getFileStat(filePath);
+                const mime = getMime(filePath);
+                const checksum = await checksumFile(filePath);
+
+                // If already stored with same checksum, add this path to dataPaths if not present
+                const existing = await db.getByChecksumString(checksum).catch(() => null);
+                if (existing) {
+                    const uri = `file://${filePath}`;
+                    const existingPaths = existing.metadata?.dataPaths ?? [];
+                    if (existingPaths.includes(uri)) {
+                        counters.skipped++;
+                    } else {
+                        const doc = existing.toObject();
+                        doc.metadata = { ...doc.metadata, dataPaths: [...existingPaths, uri] };
+                        await db.put(doc, { tree: treeName, path: treePath }, ['data/abstraction/file'], { emitEvent: false }).catch((err) => {
+                            counters.errors++;
+                            logError(filePath, 'update', err);
+                        });
+                        counters.updated++;
+                    }
+                    progress();
+                    continue;
+                }
+
+                pending.push({
+                    treePath,
+                    document: {
+                        schema: 'data/abstraction/file',
+                        data: {
+                            filename: basename(filePath),
+                            size: stat.size,
+                            mime,
+                        },
+                        metadata: {
+                            dataPaths: [`file://${filePath}`],
+                        },
+                        checksumArray: [checksum],
+                    },
+                });
+                if (pending.length >= SCAN_PUT_BATCH) {
+                    await flushScanPutBatch(db, treeName, pending, counters, opts.noLance);
+                }
                 progress();
-                continue;
+            } catch (err) {
+                counters.errors++;
+                logError(filePath, 'scan', err);
+                progress();
             }
-
-            pending.push({
-                treePath,
-                document: {
-                    schema: 'data/abstraction/file',
-                    data: {
-                        filename: basename(filePath),
-                        size: stat.size,
-                        mime,
-                    },
-                    metadata: {
-                        dataPaths: [`file://${filePath}`],
-                    },
-                    checksumArray: [checksum],
-                },
-            });
-            if (pending.length >= SCAN_PUT_BATCH) {
-                await flushScanPutBatch(db, treeName, pending, counters, opts.noLance);
-            }
-            progress();
-        } catch (err) {
-            counters.errors++;
-            if (counters.errors <= 5) {
-                console.error(`\n  error: ${basename(filePath)}: ${err.message}`);
-            }
-            progress();
         }
     }
 
     await flushScanPutBatch(db, treeName, pending, counters, opts.noLance);
 
-    const { inserted, skipped, errors } = counters;
+    const { inserted, updated, skipped, errors, total } = counters;
     const totalTime = elapsed(t3);
-    const rate = ((inserted + skipped) / ((performance.now() - t3) / 1000)).toFixed(0);
-    console.log(`\r  done: ${inserted} inserted, ${skipped} skipped, ${errors} errors (${totalTime}, ~${rate} docs/s)`);
+    const rate = ((inserted + updated + skipped) / ((performance.now() - t3) / 1000)).toFixed(0);
+    console.log(`\r  done: ${total} files, ${inserted} inserted, ${updated} updated, ${skipped} skipped, ${errors} errors (${totalTime}, ~${rate} docs/s)`);
     console.log(`  db stats: ${JSON.stringify(db.stats)}`);
 }
 

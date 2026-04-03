@@ -221,7 +221,6 @@ class SynapsD extends EventEmitter {
             await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
 
             await this.#loadTreeRegistry();
-            await this.#migrateLegacyTreeStructure();
             await this.#ensureDefaultTrees();
 
             // Migrate bitmap keys from legacy format (one-time, idempotent)
@@ -229,9 +228,6 @@ class SynapsD extends EventEmitter {
 
             // Set status
             this.#status = 'running';
-
-            // TODO: Remove after all instances have been reindexed (added 2026-02-17)
-            await this.reindexFeatures();
 
             this.emit(EVENTS.STARTED, createEvent(EVENTS.STARTED));
             debug('SynapsD started');
@@ -2187,104 +2183,6 @@ class SynapsD extends EventEmitter {
      * (i.e. at least one tree/<id>/meta key exists) so it is safe to run on
      * every startup.
      */
-    async #migrateLegacyTreeStructure() {
-        const MARKER_KEY = 'migration/legacy-tree-v1';
-
-        // Already completed — idempotency marker present.
-        if (this.#internalStore.get(MARKER_KEY)) { return; }
-
-        // Detect legacy layer records sitting directly in #internalStore
-        // (old format had no tree/<id>/ prefix).
-        let hasLegacyLayers = false;
-        for await (const key of this.#internalStore.getKeys({ start: 'layer/', end: 'layer/\uffff' })) {
-            hasLegacyLayers = true;
-            break;
-        }
-        const legacyTreeData = this.#internalStore.get('tree');
-
-        if (!hasLegacyLayers && !legacyTreeData) {
-            // Fresh install — write the marker so we never check again.
-            await this.#internalStore.put(MARKER_KEY, { skippedAt: new Date().toISOString(), reason: 'no-legacy-data' });
-            return;
-        }
-
-        debug('Detected legacy flat tree data — migrating to per-tree layout');
-
-        // Find or create the target context tree.
-        // If empty context trees already exist (server ran once with new code before
-        // this migration was added) we reuse the default one so we don't create a duplicate.
-        let meta;
-        const existingContextTrees = await this.listTrees('context');
-        if (existingContextTrees.length > 0) {
-            const defaultId = this.#defaultTreeIds.context || existingContextTrees[0].id;
-            meta = this.#treeMetadata.get(defaultId) || existingContextTrees[0];
-            debug(`Reusing existing context tree ${meta.id} (${meta.name}) as migration target`);
-        } else {
-            const treeId = ulid();
-            const now = new Date().toISOString();
-            meta = { id: treeId, name: 'context', type: 'context', createdAt: now, updatedAt: now, isDefault: true };
-            await this.#internalStore.put(this.#treeMetaKey(meta.id), meta);
-            this.#treeMetadata.set(meta.id, meta);
-            this.#defaultTreeIds.context = meta.id;
-            debug(`Created new context tree ${meta.id} as migration target`);
-        }
-
-        const dataStore = new PrefixedStore(this.#internalStore, `tree/${meta.id}`);
-
-        // Copy layer records: layer/<ULID> → tree/<treeId>/layer/<ULID>
-        const layerKeys = [];
-        for await (const key of this.#internalStore.getKeys({ start: 'layer/', end: 'layer/\uffff' })) {
-            layerKeys.push(String(key));
-        }
-        for (const key of layerKeys) {
-            const value = this.#internalStore.get(key);
-            if (value != null) { await dataStore.put(key, value); }
-        }
-        debug(`Copied ${layerKeys.length} layer record(s) to tree/${meta.id}/`);
-
-        // Copy serialised tree structure: 'tree' → tree/<treeId>/tree
-        if (legacyTreeData != null) {
-            await dataStore.put('tree', legacyTreeData);
-            debug(`Copied tree structure to tree/${meta.id}/tree`);
-        }
-
-        // Force re-instantiation so the tree reads from the newly populated store.
-        this.#treeCache.delete(meta.id);
-        const tree = this.#instantiateTree(meta);
-        await tree.initialize();
-
-        // Migrate context bitmaps: context/<layerName|layerULID> → context/<treeId>/<layerULID>
-        const collection = this.#contextBitmapCollectionForTree(meta.id);
-        const layerKeyList = await tree.layers;
-        let bitmapsMigrated = 0;
-        for (const layerKey of layerKeyList) {
-            const layer = tree.getLayerById(layerKey);
-            if (!layer || layer.name === '/') { continue; }
-
-            const newKey = collection.makeKey(layer.id);
-            for (const oldKey of [`context/${layer.name}`, `context/${layer.id}`]) {
-                if (oldKey === newKey) { continue; }
-                if (this.bitmapIndex.hasBitmap(oldKey) && !this.bitmapIndex.hasBitmap(newKey)) {
-                    await this.bitmapIndex.renameBitmap(oldKey, newKey);
-                    bitmapsMigrated++;
-                    break;
-                } else if (this.bitmapIndex.hasBitmap(oldKey)) {
-                    await this.bitmapIndex.mergeBitmap(oldKey, [newKey]);
-                    await this.bitmapIndex.deleteBitmap(oldKey);
-                    bitmapsMigrated++;
-                    break;
-                }
-            }
-        }
-        debug(`Migrated ${bitmapsMigrated} context bitmap(s) to context/${meta.id}/ prefix`);
-
-        this.contextBitmapCollection = collection;
-
-        // Write marker — prevents re-runs on subsequent startups.
-        await this.#internalStore.put(MARKER_KEY, { migratedAt: new Date().toISOString(), treeId: meta.id, layers: layerKeys.length, bitmaps: bitmapsMigrated });
-        debug(`Legacy tree migration complete — tree ${meta.id}, ${layerKeys.length} layers, ${bitmapsMigrated} bitmaps`);
-    }
-
     /**
      * One-time idempotent migration: rename legacy bitmap keys to new format.
      *
@@ -2779,24 +2677,6 @@ class SynapsD extends EventEmitter {
      * Rebuild feature bitmaps from document data. Scans all documents and ensures
      * each document's schema is indexed in the feature bitmap collection.
      */
-    async reindexFeatures() {
-        if (!this.isRunning()) { throw new Error('Database is not running'); }
-        let indexed = 0;
-        for await (const { key, value } of this.documents.getRange()) {
-            try {
-                const doc = parseInitializeDocument(value);
-                if (doc.schema) {
-                    await this.bitmapIndex.tick(doc.schema, key);
-                    indexed++;
-                }
-            } catch (e) {
-                debug(`reindexFeatures: Skipping doc ${key}: ${e.message}`);
-            }
-        }
-        debug(`reindexFeatures: Indexed ${indexed} documents`);
-        return indexed;
-    }
-
     /**
      * Safely parse an array of raw documents, skipping corrupted entries instead of crashing.
      */
