@@ -1869,10 +1869,10 @@ class SynapsD extends EventEmitter {
 
     async #ensureDefaultTrees() {
         if ((await this.listTrees('context')).length === 0) {
-            await this.createTree('context', 'context', { isDefault: true });
+            await this.createTree('default', 'context', { isDefault: true });
         }
         if ((await this.listTrees('directory')).length === 0) {
-            await this.createTree('directory', 'directory', { isDefault: true });
+            await this.createTree('incoming', 'directory', { isDefault: true });
         }
 
         if (!this.#defaultTreeIds.context) {
