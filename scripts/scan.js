@@ -571,6 +571,15 @@ async function cmdScan(db, opts) {
     const totalTime = elapsed(t3);
     const rate = ((inserted + updated + skipped) / ((performance.now() - t3) / 1000)).toFixed(0);
     console.log(`\r  done: ${total} files, ${inserted} inserted, ${updated} updated, ${skipped} skipped, ${errors} errors (${totalTime}, ~${rate} docs/s)`);
+
+    if (!opts.noLance && (inserted + updated) > 0) {
+        const tOpt = performance.now();
+        process.stdout.write('  optimizing lance index ...');
+        const stats = await db.optimizeLance();
+        const compacted = stats?.compaction?.fragmentsRemoved ?? 0;
+        console.log(`\r  lance optimized: ${compacted} fragments compacted (${elapsed(tOpt)})`);
+    }
+
     console.log(`  db stats: ${JSON.stringify(db.stats)}`);
 }
 

@@ -215,11 +215,28 @@ class LanceIndex {
         }
     }
 
+    async optimize() {
+        if (!this.#table) { return null; }
+        try {
+            const stats = await this.#table.optimize();
+            debug(`optimize: compacted ${stats?.compaction?.fragmentsRemoved ?? '?'} fragments`);
+            return stats;
+        } catch (e) {
+            debug(`optimize: ${e.message}`);
+            return null;
+        }
+    }
+
     async #ensureFtsIndex() {
         if (!this.#table) { return; }
         try {
-            await this.#table.createIndex?.({ type: 'BM25', columns: ['fts_text'] });
-        } catch (_) { /* ignore if already exists */ }
+            await this.#table.createIndex('fts_text', { config: lancedb.Index.fts() });
+        } catch (e) {
+            // Ignore "already exists" errors; log anything unexpected
+            if (!e.message?.includes('already exists')) {
+                debug(`ensureFtsIndex: ${e.message}`);
+            }
+        }
     }
 }
 

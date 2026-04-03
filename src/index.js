@@ -634,6 +634,10 @@ class SynapsD extends EventEmitter {
         } catch (_) { }
     }
 
+    async optimizeLance() {
+        return await this.#lanceIndex.optimize();
+    }
+
     /**
      * Same as repeated putMany(..., { tree, path }) per path, but one LMDB transaction + one bitmap flush.
      * items: [{ document, path: directoryPath }]
