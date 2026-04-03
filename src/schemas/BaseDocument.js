@@ -493,7 +493,7 @@ class BaseDocument {
      * @returns {Object} Object representation of the document
      */
     toObject() {
-        return JSON.parse(this.toJSON());
+        return JSON.parse(JSON.stringify(this.toJSON()));
     }
 
     /**

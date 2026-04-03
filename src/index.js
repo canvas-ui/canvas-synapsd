@@ -1310,18 +1310,19 @@ class SynapsD extends EventEmitter {
             return empty;
         }
 
-        if (filtersApplied && candidateIds.length > 0) {
-            const docs = await this.documents.getMany(candidateIds);
-            const parsedDocs = this.#safeParseDocuments(docs);
-            return await this.#lanceIndex.ftsQuery(queryString, candidateIds, parsedDocs, { limit, offset });
-        }
+        // BM25 search — pass candidateIds for post-filtering (empty = search all)
+        const { pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(
+            queryString,
+            filtersApplied ? candidateIds : [],
+            { limit, offset },
+        );
 
-        const docs = [];
-        for await (const { value } of this.documents.getRange()) {
-            docs.push(value);
-        }
-        const parsedDocs = this.#safeParseDocuments(docs);
-        return await this.#lanceIndex.ftsQuery(queryString, [], parsedDocs, { limit, offset });
+        const docs = pageIds.length > 0 ? await this.documents.getMany(pageIds) : [];
+        const result = this.#safeParseDocuments(docs);
+        result.count = result.length;
+        result.totalCount = totalCount;
+        result.error = error;
+        return result;
     }
 
     async #updateOne(docIdentifier, updateData = null, contextSpec = null, featureBitmapArray = []) {

@@ -129,31 +129,44 @@ class LanceIndex {
     }
 
     /**
-     * Local FTS scoring over a pre-filtered candidate set.
-     * Simple token-AND matching with frequency scoring.
+     * BM25 full-text search via LanceDB index.
+     * Returns { pageIds, totalCount, error } — caller loads docs from LMDB.
+     * candidateIds: if non-empty, results are post-filtered to this set.
      */
-    async ftsQuery(queryString, candidateIds, docs, opts = { limit: 50, offset: 0 }) {
-        const limit = Math.max(0, Number(opts.limit ?? 50));
-        const offset = Math.max(0, Number(opts.offset ?? 0));
-
-        const tokens = String(queryString).toLowerCase().split(/\s+/).filter(Boolean);
-        const scored = [];
-
-        for (const doc of docs) {
-            const parts = (typeof doc.generateFtsData === 'function' ? doc.generateFtsData() : []) || [];
-            const text = parts.join('\n').toLowerCase();
-            let score = 0;
-            for (const token of tokens) { if (text.includes(token)) { score++; } }
-            if (score === tokens.length) { scored.push({ id: doc.id, score, doc }); }
+    async ftsQuery(queryString, candidateIds = [], opts = {}) {
+        if (!this.#table) {
+            return { pageIds: [], totalCount: 0, error: 'LanceDB not ready' };
         }
 
-        scored.sort((a, b) => b.score - a.score || a.id - b.id);
-        const sliced = limit === 0 ? scored : scored.slice(offset, offset + limit);
-        const result = sliced.map(s => s.doc);
-        result.count = result.length;
-        result.totalCount = scored.length;
-        result.error = null;
-        return result;
+        const limit = Math.max(1, Number(opts.limit ?? 50));
+        const offset = Math.max(0, Number(opts.offset ?? 0));
+        const candidateSet = candidateIds.length > 0 ? new Set(candidateIds) : null;
+
+        // Overfetch so post-filtering + pagination still yields enough results
+        const fetchLimit = candidateSet
+            ? Math.min(candidateSet.size, (limit + offset) * 10 + 1000)
+            : limit + offset;
+
+        let rows;
+        try {
+            rows = await this.#table
+                .search(queryString, 'fts')
+                .select(['id'])
+                .limit(fetchLimit)
+                .toArray();
+        } catch (e) {
+            debug(`ftsQuery: BM25 search failed: ${e.message}`);
+            return { pageIds: [], totalCount: 0, error: e.message };
+        }
+
+        let rankedIds = rows.map(r => Number(r.id));
+        if (candidateSet) {
+            rankedIds = rankedIds.filter(id => candidateSet.has(id));
+        }
+
+        const totalCount = rankedIds.length;
+        const pageIds = rankedIds.slice(offset, limit > 0 ? offset + limit : undefined);
+        return { pageIds, totalCount, error: null };
     }
 
     async backfill(bitmapIndex, documentsStore, parseDoc, limit = 2000) {

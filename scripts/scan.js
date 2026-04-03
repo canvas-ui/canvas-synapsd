@@ -7,7 +7,7 @@
  * Usage:
  *   node scripts/scan.js scan   --path <dir>  [--db <dir>] [--exclude <glob>]... [--no-lance]
  *   node scripts/scan.js get    --id <n>      [--db <dir>]
- *   node scripts/scan.js find                 [--db <dir>] [--tree <name>] [--features <f1,f2>] [--limit <n>]
+ *   node scripts/scan.js find                 [--db <dir>] [--tree <name>] [--path <tree-path>] [--features <f1,f2>] [--limit <n>]
  *   node scripts/scan.js search --query <txt> [--db <dir>] [--tree <name>] [--features <f1,f2>] [--limit <n>]
  *   node scripts/scan.js tree                 [--db <dir>] [--name <name>]
  *
@@ -37,6 +37,9 @@ const AUTO_EXCLUDE_GLOBS = [
 /** Documents queued before flush; each flush runs putMany per directory path. */
 const SCAN_PUT_BATCH = 4096;
 
+/** Default directory tree name used when --tree is not specified. */
+const SCAN_DEFAULT_TREE = 'filesystem';
+
 // ── Argument parsing ─────────────────────────────────────────────────────────
 
 function usage() {
@@ -45,8 +48,8 @@ function usage() {
         'Usage:',
         '  node scripts/scan.js scan   --path <dir>  [--db <dir>] [--exclude <glob>]... [--no-lance]',
         '  node scripts/scan.js get    --id <n>      [--db <dir>]',
-        '  node scripts/scan.js find                 [--db <dir>] [--tree <name>] [--features <f1,f2>] [--limit <n>]',
-        '  node scripts/scan.js search --query <txt> [--db <dir>] [--tree <name>] [--features <f1,f2>] [--limit <n>]',
+        '  node scripts/scan.js find                 [--db <dir>] [--tree <name>] [--path <tree-path>] [--features <f1,f2>] [--limit <n>]',
+        '  node scripts/scan.js search --query <txt> [--db <dir>] [--tree <name>] [--path <tree-path>] [--features <f1,f2>] [--limit <n>]',
         '  node scripts/scan.js tree                 [--db <dir>] [--name <name>]',
         '',
         'Flags can appear anywhere (before or after the command).',
@@ -453,7 +456,7 @@ async function cmdScan(db, opts) {
     }
 
     // Ensure a directory tree for the scanned path
-    const treeName = 'filesystem';
+    const treeName = opts.treeName ?? SCAN_DEFAULT_TREE;
     let tree;
     try {
         tree = db.getTree(treeName);
@@ -523,7 +526,7 @@ async function cmdScan(db, opts) {
                     if (existingPaths.includes(uri)) {
                         counters.skipped++;
                     } else {
-                        const doc = existing.toObject();
+                        const doc = existing.toJSON();
                         doc.metadata = { ...doc.metadata, dataPaths: [...existingPaths, uri] };
                         await db.put(doc, { tree: treeName, path: treePath }, ['data/abstraction/file'], { emitEvent: false }).catch((err) => {
                             counters.errors++;
@@ -582,7 +585,8 @@ async function cmdGet(db, opts) {
 
 async function cmdFind(db, opts) {
     const spec = {};
-    if (opts.treeName) { spec.tree = opts.treeName; }
+    if (opts.treeName) { spec.tree = opts.treeName ?? SCAN_DEFAULT_TREE; }
+    if (opts.scanPath) { spec.path = opts.scanPath; }
     if (opts.features) { spec.features = opts.features; }
     if (opts.limit) { spec.limit = opts.limit; }
     const t = performance.now();
@@ -593,7 +597,8 @@ async function cmdFind(db, opts) {
 
 async function cmdSearch(db, opts) {
     const spec = { query: opts.query };
-    if (opts.treeName) { spec.tree = opts.treeName; }
+    if (opts.treeName) { spec.tree = opts.treeName ?? SCAN_DEFAULT_TREE; }
+    if (opts.scanPath) { spec.path = opts.scanPath; }
     if (opts.features) { spec.features = opts.features; }
     if (opts.limit) { spec.limit = opts.limit; }
     const t = performance.now();
