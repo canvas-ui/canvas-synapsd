@@ -760,17 +760,84 @@ class SynapsD extends EventEmitter {
             count: ids.length,
         };
 
+        // Validate IDs upfront
+        const validEntries = [];
         for (let i = 0; i < ids.length; i++) {
             const id = ids[i];
             if (typeof id !== 'number') {
                 result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
+            } else {
+                validEntries.push({ index: i, id });
+            }
+        }
+
+        if (validEntries.length === 0) { return result; }
+
+        // Resolve spec fields once (same for all docs in this batch)
+        const contextSpec = spec.context ?? null;
+        const directorySpec = spec.directory ?? null;
+        const featureBitmaps = parseBitmapArray(spec.features || features);
+
+        // Batch-fetch all documents at once
+        const validIds = validEntries.map(e => e.id);
+        const rawDocs = await this.documents.getMany(validIds);
+
+        const toProcess = [];
+        for (let i = 0; i < validEntries.length; i++) {
+            const { index, id } = validEntries[i];
+            const docData = rawDocs[i];
+            if (!docData) {
+                result.failed.push({ index, id, error: `Document with ID "${id}" not found` });
                 continue;
             }
+            const doc = parseInitializeDocument(docData);
+            const docFeatures = [...featureBitmaps];
+            if (!docFeatures.includes(doc.schema)) {
+                docFeatures.push(doc.schema);
+            }
+            toProcess.push({ index, id, docFeatures });
+        }
+
+        if (toProcess.length === 0) { return result; }
+
+        // Single transaction + bitmap batch for all index operations
+        this.bitmapIndex.startBatch();
+        try {
+            await this.#db.transaction(async () => {
+                for (const { id, docFeatures } of toProcess) {
+                    await this.#indexDocument(id, contextSpec, directorySpec, docFeatures);
+                }
+            });
+            this.bitmapIndex.flushBatch();
+        } catch (error) {
+            this.bitmapIndex.flushBatch();
+            for (const { index, id } of toProcess) {
+                result.failed.push({ index, id, error: error.message || 'Transaction failed' });
+            }
+            return result;
+        }
+
+        // Emit events for all successfully linked docs
+        const treeType = contextSpec ? 'context' : (directorySpec ? 'directory' : null);
+        const treeSpec = contextSpec ?? directorySpec;
+        for (const { index, id, docFeatures } of toProcess) {
+            result.successful.push({ index, id });
             try {
-                const linkedId = await this.link(id, spec);
-                result.successful.push({ index: i, id: linkedId });
-            } catch (error) {
-                result.failed.push({ index: i, id, error: error.message || 'Unknown error' });
+                if (treeType && treeSpec) {
+                    const { tree } = this.#resolveTreeSelection(treeType, treeSpec, treeType === 'context' ? '/' : null);
+                    tree.emit(EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
+                        documentId: id,
+                        contextSpec,
+                        directorySpec,
+                        source: 'tree',
+                    }));
+                }
+                this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
+                    id,
+                    memberships: { context: contextSpec, directory: directorySpec, features: docFeatures },
+                }));
+            } catch (eventError) {
+                debug(`linkMany: Failed to emit events for doc ${id}: ${eventError.message}`);
             }
         }
 
@@ -789,17 +856,108 @@ class SynapsD extends EventEmitter {
             count: ids.length,
         };
 
+        // Validate IDs upfront
+        const validEntries = [];
         for (let i = 0; i < ids.length; i++) {
             const id = ids[i];
             if (typeof id !== 'number') {
                 result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
-                continue;
+            } else {
+                validEntries.push({ index: i, id });
             }
+        }
+
+        if (validEntries.length === 0) { return result; }
+
+        // Resolve layers to remove from spec once (same for all docs in this batch)
+        const contextSpec = spec.context ?? null;
+        const directorySpec = spec.directory ?? null;
+        const featureKeys = parseBitmapArray(spec.features || features).filter(Boolean);
+        const layersToRemove = [];
+        const removedContextPaths = [];
+        const removedDirectoryPaths = [];
+
+        if (contextSpec) {
             try {
-                const removedId = await this.unlink(id, spec, options);
-                result.successful.push({ index: i, id: removedId });
+                const { tree: contextTree, collection: contextCollection, path: normalizedContextSpec } = this.#resolveTreeSelection('context', contextSpec, '/');
+                const pathLayersArray = parseContextSpecForInsert(normalizedContextSpec);
+                for (const pathLayers of pathLayersArray) {
+                    if (pathLayers.length === 1 && pathLayers[0] === '/') {
+                        throw new Error('Cannot unlink from root context "/". Unlink a real path or delete the document.');
+                    }
+                    const filteredLayers = pathLayers.filter((context) => context !== '/');
+                    if (filteredLayers.length === 0) {
+                        throw new Error('Cannot unlink from root context "/". Unlink a real path or delete the document.');
+                    }
+                    const targetLayers = options.recursive
+                        ? filteredLayers
+                        : [filteredLayers[filteredLayers.length - 1]];
+                    const layerIds = contextTree.resolveLayerIds(targetLayers);
+                    layersToRemove.push(...layerIds.map((layerId) => contextCollection.makeKey(layerId)));
+                    removedContextPaths.push(...targetLayers);
+                }
             } catch (error) {
-                result.failed.push({ index: i, id, error: error.message || 'Unknown error' });
+                for (const { index, id } of validEntries) {
+                    result.failed.push({ index, id, error: error.message });
+                }
+                return result;
+            }
+        }
+
+        if (directorySpec) {
+            try {
+                const { tree: directoryTree, collection: directoryCollection, path: normalizedDirectoryPath } = this.#resolveTreeSelection('directory', directorySpec, '/');
+                const directoryPaths = Array.isArray(normalizedDirectoryPath) ? normalizedDirectoryPath : [normalizedDirectoryPath];
+                for (const directoryPath of directoryPaths) {
+                    const nodeIds = directoryTree.getNodeIdsForPath(directoryPath, { recursive: Boolean(options.recursive) });
+                    layersToRemove.push(...nodeIds.map((nodeId) => directoryCollection.makeKey(nodeId)));
+                    if (nodeIds.length > 0) {
+                        removedDirectoryPaths.push(directoryPath);
+                    }
+                }
+            } catch (error) {
+                for (const { index, id } of validEntries) {
+                    result.failed.push({ index, id, error: error.message });
+                }
+                return result;
+            }
+        }
+
+        layersToRemove.push(...featureKeys);
+        const uniqueLayers = Array.from(new Set(layersToRemove));
+
+        // Single transaction + bitmap batch for all removeSynapses calls
+        this.bitmapIndex.startBatch();
+        try {
+            await this.#db.transaction(async () => {
+                for (const { id } of validEntries) {
+                    if (uniqueLayers.length > 0) {
+                        await this.#synapses.removeSynapses(id, uniqueLayers);
+                    }
+                }
+            });
+            this.bitmapIndex.flushBatch();
+        } catch (error) {
+            this.bitmapIndex.flushBatch();
+            for (const { index, id } of validEntries) {
+                result.failed.push({ index, id, error: error.message || 'Transaction failed' });
+            }
+            return result;
+        }
+
+        // Emit events for all successfully unlinked docs
+        for (const { index, id } of validEntries) {
+            result.successful.push({ index, id });
+            try {
+                this.emit(EVENTS.DOCUMENT_REMOVED, createEvent(EVENTS.DOCUMENT_REMOVED, {
+                    id,
+                    contextArray: removedContextPaths,
+                    directoryArray: removedDirectoryPaths,
+                    featureArray: featureKeys,
+                    recursive: options.recursive,
+                }));
+            } catch (eventError) {
+                debug(`unlinkMany: Failed to emit events for doc ${id}: ${eventError.message}`);
             }
         }
 
@@ -817,21 +975,74 @@ class SynapsD extends EventEmitter {
             count: ids.length,
         };
 
+        // Validate IDs upfront
+        const validEntries = [];
         for (let i = 0; i < ids.length; i++) {
             const id = ids[i];
             if (typeof id !== 'number') {
                 result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
-                continue;
+            } else {
+                validEntries.push({ index: i, id });
             }
-            try {
-                const success = await this.delete(id, options);
-                if (success) {
-                    result.successful.push({ index: i, id });
-                } else {
-                    result.failed.push({ index: i, id, error: 'Document not found or already deleted' });
+        }
+
+        if (validEntries.length === 0) { return result; }
+
+        // Batch-fetch all documents at once
+        const validIds = validEntries.map(e => e.id);
+        const rawDocs = await this.documents.getMany(validIds);
+
+        const toDelete = [];
+        for (let i = 0; i < validEntries.length; i++) {
+            const { index, id } = validEntries[i];
+            const docData = rawDocs[i];
+            if (!docData) {
+                result.failed.push({ index, id, error: 'Document not found or already deleted' });
+            } else {
+                toDelete.push({ index, id, document: parseDocumentData(docData) });
+            }
+        }
+
+        if (toDelete.length === 0) { return result; }
+
+        const { emitEvent = true } = options;
+        const now = new Date().toISOString();
+
+        // Single transaction + bitmap batch for all deletes
+        this.bitmapIndex.startBatch();
+        try {
+            await this.#db.transaction(async () => {
+                for (const { id, document } of toDelete) {
+                    await this.documents.delete(id);
+                    await this.#synapses.clearSynapses(id);
+                    await this.#timestampIndex.remove(null, id);
+                    await this.#checksumIndex.deleteArray(document.checksumArray);
+                    this.deletedDocumentsBitmap.tick(id);
+                    await this.#timestampIndex.insert('deleted', document.updatedAt || now, id);
                 }
-            } catch (error) {
-                result.failed.push({ index: i, id, error: error.message || 'Unknown error' });
+            });
+            this.bitmapIndex.flushBatch();
+        } catch (error) {
+            this.bitmapIndex.flushBatch();
+            for (const { index, id } of toDelete) {
+                result.failed.push({ index, id, error: error.message || 'Transaction failed' });
+            }
+            return result;
+        }
+
+        // Best-effort Lance cleanup (outside transaction — separate system)
+        for (const { id } of toDelete) {
+            try {
+                await this.#lanceIndex.delete(id);
+            } catch (e) {
+                debug(`deleteMany: Lance delete failed for ${id}: ${e.message}`);
+            }
+        }
+
+        for (const { index, id } of toDelete) {
+            result.successful.push({ index, id });
+            if (emitEvent) {
+                this.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id }));
             }
         }
 
@@ -1666,17 +1877,9 @@ class SynapsD extends EventEmitter {
         debug(`getDocumentsByChecksumStringArray: Getting ${checksumStringArray.length} documents`);
 
         try {
-            const ids = [];
-            for (const checksum of checksumStringArray) {
-                try {
-                    const id = await this.#checksumIndex.checksumStringToId(checksum);
-                    if (id) {
-                        ids.push(id);
-                    }
-                } catch (error) {
-                    debug(`Error getting ID for checksum ${checksum}: ${error.message}`);
-                }
-            }
+            // Batch-resolve all checksums to IDs in parallel
+            const resolvedIds = await this.#checksumIndex.checksumStringArrayToIds(checksumStringArray);
+            const ids = resolvedIds.filter(Boolean);
 
             // Use getDocumentsByIdArray which now properly returns a result object
             return await this.getDocumentsByIdArray(ids, options);
@@ -1709,26 +1912,33 @@ class SynapsD extends EventEmitter {
             count: docIdArray.length,
         };
 
+        // Validate IDs upfront, separate valid from invalid
+        const validEntries = [];
         for (let i = 0; i < docIdArray.length; i++) {
             const id = docIdArray[i];
             if (typeof id !== 'number') {
-                result.failed.push({ index: i, id: id, error: 'Invalid document ID: Must be a number.' });
-                continue;
+                result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
+            } else {
+                validEntries.push({ index: i, id });
             }
+        }
+
+        // Single tickMany call with all valid IDs, deferred via batch mode
+        if (validEntries.length > 0) {
             try {
-                // tickMany doesn't explicitly return success/failure per ID easily,
-                // but it should throw if the operation fails for the ID (e.g., DB error).
-                // Assuming success if no error is thrown.
-                await this.bitmapIndex.tickMany(featureBitmapArray, id);
-                result.successful.push({ index: i, id: id });
-                debug(`setDocumentArrayFeatures: Successfully set features for document ID ${id} (index ${i}).`);
+                this.bitmapIndex.startBatch();
+                await this.bitmapIndex.tickMany(featureBitmapArray, validEntries.map(e => e.id));
+                this.bitmapIndex.flushBatch();
+                for (const { index, id } of validEntries) {
+                    result.successful.push({ index, id });
+                }
+                debug(`setDocumentArrayFeatures: Successfully set features for ${validEntries.length} documents.`);
             } catch (error) {
-                debug(`setDocumentArrayFeatures: Error setting features for document ID ${id} (index ${i}). Error: ${error.message}`);
-                result.failed.push({
-                    index: i,
-                    id: id,
-                    error: error.message || 'Unknown error',
-                });
+                this.bitmapIndex.flushBatch();
+                debug(`setDocumentArrayFeatures: Batch tick failed. Error: ${error.message}`);
+                for (const { index, id } of validEntries) {
+                    result.failed.push({ index, id, error: error.message || 'Unknown error' });
+                }
             }
         }
 
@@ -1755,24 +1965,33 @@ class SynapsD extends EventEmitter {
             count: docIdArray.length,
         };
 
+        // Validate IDs upfront, separate valid from invalid
+        const validEntries = [];
         for (let i = 0; i < docIdArray.length; i++) {
             const id = docIdArray[i];
             if (typeof id !== 'number') {
-                result.failed.push({ index: i, id: id, error: 'Invalid document ID: Must be a number.' });
-                continue;
+                result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
+            } else {
+                validEntries.push({ index: i, id });
             }
+        }
+
+        // Single untickMany call with all valid IDs, deferred via batch mode
+        if (validEntries.length > 0) {
             try {
-                // untickMany, like tickMany, is assumed to throw on operational failure.
-                await this.bitmapIndex.untickMany(featureBitmapArray, id);
-                result.successful.push({ index: i, id: id });
-                debug(`unsetDocumentArrayFeatures: Successfully unset features for document ID ${id} (index ${i}).`);
+                this.bitmapIndex.startBatch();
+                await this.bitmapIndex.untickMany(featureBitmapArray, validEntries.map(e => e.id));
+                this.bitmapIndex.flushBatch();
+                for (const { index, id } of validEntries) {
+                    result.successful.push({ index, id });
+                }
+                debug(`unsetDocumentArrayFeatures: Successfully unset features for ${validEntries.length} documents.`);
             } catch (error) {
-                debug(`unsetDocumentArrayFeatures: Error unsetting features for document ID ${id} (index ${i}). Error: ${error.message}`);
-                result.failed.push({
-                    index: i,
-                    id: id,
-                    error: error.message || 'Unknown error',
-                });
+                this.bitmapIndex.flushBatch();
+                debug(`unsetDocumentArrayFeatures: Batch untick failed. Error: ${error.message}`);
+                for (const { index, id } of validEntries) {
+                    result.failed.push({ index, id, error: error.message || 'Unknown error' });
+                }
             }
         }
 
