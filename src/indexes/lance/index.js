@@ -128,6 +128,21 @@ class LanceIndex {
         }
     }
 
+    async deleteMany(docIds) {
+        if (!this.#table || !Array.isArray(docIds) || docIds.length === 0) { return; }
+        const ids = docIds.filter(id => id != null);
+        if (ids.length === 0) { return; }
+        try {
+            await this.#table.delete(`id IN (${ids.join(',')})`);
+        } catch (e) {
+            debug(`LanceIndex deleteMany failed: ${e.message}`);
+            return;
+        }
+        if (this.#bitmapIndex) {
+            try { await this.#bitmapIndex.untickMany([this.#ftsBitmapKey], ids); } catch (_) { }
+        }
+    }
+
     /**
      * BM25 full-text search via LanceDB index.
      * Returns { pageIds, totalCount, error } — caller loads docs from LMDB.
@@ -195,20 +210,18 @@ class LanceIndex {
             if (idsToProcess.length === 0) { return; }
 
             debug(`backfill: skipped ${skipped} already indexed docs, processing ${idsToProcess.length}`);
-            let processed = 0;
+            const docs = [];
             for (const docId of idsToProcess) {
                 try {
                     const docData = await documentsStore.get(docId);
-                    if (docData) {
-                        const doc = parseDoc(docData);
-                        await this.upsert(doc);
-                        processed++;
-                    }
+                    if (docData) { docs.push(parseDoc(docData)); }
                 } catch (e) {
-                    debug(`backfill: failed to upsert doc ${docId}: ${e.message}`);
+                    debug(`backfill: failed to read doc ${docId}: ${e.message}`);
                 }
             }
 
+            await this.addMany(docs);
+            const processed = docs.length;
             debug(`backfill: processed ${processed} documents`);
         } catch (e) {
             debug(`backfill: error ${e.message}`);
