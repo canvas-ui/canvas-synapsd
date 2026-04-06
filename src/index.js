@@ -1031,12 +1031,10 @@ class SynapsD extends EventEmitter {
         }
 
         // Best-effort Lance cleanup (outside transaction — separate system)
-        for (const { id } of toDelete) {
-            try {
-                await this.#lanceIndex.delete(id);
-            } catch (e) {
-                debug(`deleteMany: Lance delete failed for ${id}: ${e.message}`);
-            }
+        try {
+            await this.#lanceIndex.deleteMany(toDelete.map(({ id }) => id));
+        } catch (e) {
+            debug(`deleteMany: Lance deleteMany failed: ${e.message}`);
         }
 
         for (const { index, id } of toDelete) {
