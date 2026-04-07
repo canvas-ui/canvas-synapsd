@@ -34,9 +34,9 @@ export default class File extends BaseDocument {
         // Inject File-specific index options BEFORE super()
         options.indexOptions = {
             ...(options.indexOptions || {}),
-            // Index filename and all dataPaths (which contain URIs)
-            ftsSearchFields: ['data.filename', 'metadata.dataPaths'],
-            vectorEmbeddingFields: ['data.filename', 'metadata.dataPaths'],
+            // Index filename and all location URLs (via computed getter on BaseDocument)
+            ftsSearchFields: ['data.filename', 'locationUrls'],
+            vectorEmbeddingFields: ['data.filename', 'locationUrls'],
             // File relies on external checksumArray, so we don't modify checksumFields here
         };
 
@@ -69,9 +69,7 @@ export default class File extends BaseDocument {
                 size: 'number',
                 mime: 'string',
             },
-            metadata: {
-                dataPaths: ['string'],
-            },
+            locations: [{ url: 'string', metadata: {} }],
             checksumArray: ['string'],
         };
     }

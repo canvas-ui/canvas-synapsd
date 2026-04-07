@@ -5,40 +5,30 @@
  * -----------------------
  * Tracks what applications are available across devices and how to (re)install them.
  *
- * Identity: `data.appId` (stable across devices)
- * Presence: `data.installs` map of deviceId -> install state (status/path/version/lastSeen/…)
+ * Identity: `data.appId` (stable across devices, e.g. "com.spotify.Client")
+ * Presence: `data.installs` — map of deviceId -> install state
  *
  * Types:
- * - appimage: installable via URL (optionally checksum)
- * - flatpak: installable via ref/remote
- * - snap: installable via name/channel
- * - portable: installable via URL or referenced repoPath (or device-local path)
- * - system: provided by OS / package manager (usually not portable across devices)
- * - local: arbitrary local app (generally not installable)
+ * - appimage  : portable single-file executable, installed via URL (± checksum)
+ * - flatpak   : installed via ref/remote
+ * - snap      : installed via name/channel
+ * - portable  : binary/script installed via URL, repoPath, or device-local path
+ * - system    : provided by the OS / package manager (not portable across devices)
+ * - local     : arbitrary local app, generally not reinstallable remotely
  */
 
 import Document, { documentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
+import { pathPattern, normalizeHomePlaceholder, deviceFileUrl } from '../../utils/path-helpers.js';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/application';
-const DOCUMENT_SCHEMA_VERSION = '1.0';
+const DOCUMENT_SCHEMA_VERSION = '1.1';
 
 const applicationTypeSchema = z.enum(['appimage', 'flatpak', 'snap', 'portable', 'system', 'local']);
 const installStatusSchema = z.enum(['available', 'missing', 'installing', 'error', 'unknown']);
 
-// Regex allows:  /abs/path, ~/path, $HOME/path, {{HOME}}/path etc. (nix-focused)
-const pathPattern = /^(\{\{\s*[A-Za-z0-9_]+\s*\}\}|\$[A-Za-z0-9_]+|~)?[/A-Za-z0-9_.-]+$/;
-
-function normalizeHomePlaceholder(input) {
-    if (typeof input !== 'string') { return input; }
-    let out = input;
-    out = out.replace(/^(\{\{\s*home\s*\}\})(?=\/|$)/i, '$HOME');
-    out = out.replace(/^~(?=\/|$)/, '$HOME');
-    return out;
-}
-
 /*******************
- * Data Schema     *
+ * Sub-schemas     *
  *******************/
 
 const installStateSchema = z.object({
@@ -56,67 +46,48 @@ const installStateSchema = z.object({
 
 const applicationPayloadSchema = Document.extendDataSchema(
     z.object({
-        // Stable identifier (primary identity) e.g. "com.spotify.Client" or "canvas:terminal"
+        // Stable identifier (primary identity)
         appId: z.string().min(1),
         name: z.string().min(1).optional(),
         type: applicationTypeSchema,
-
-        // Type-specific installation metadata (kept intentionally flexible)
-        // Common keys by convention:
-        // - appimage: { url, sha256?, filename? }
-        // - flatpak: { ref, remote? }
-        // - snap: { name, channel? }
-        // - portable: { url? , repoPath? , path? , sha256? }
-        // - system/local: optional
-        source: z.record(z.any()).optional(),
-
-        // Per-device presence / install state
-        installs: z.record(z.string(), installStateSchema).default({}),
-
         description: z.string().optional(),
         tags: z.array(z.string()).optional(),
+
+        // Type-specific installation metadata (kept intentionally flexible).
+        // Common keys by convention:
+        //   appimage  : { url, sha256?, filename? }
+        //   flatpak   : { ref, remote? }
+        //   snap      : { name, channel? }
+        //   portable  : { url?, repoPath?, path?, sha256? }
+        //   system / local : optional
+        source: z.record(z.any()).optional(),
+
+        // Per-device install state: deviceId -> installState
+        installs: z.record(z.string(), installStateSchema).default({}),
     }).passthrough(),
 ).superRefine((doc, ctx) => {
     const data = doc?.data || {};
     const source = data.source || {};
 
     const requireSourceKey = (key, message) => {
-        const ok = typeof source?.[key] === 'string' && source[key].trim().length > 0;
-        if (!ok) {
-            ctx.addIssue({
-                code: z.ZodIssueCode.custom,
-                path: ['data', 'source', key],
-                message,
-            });
+        if (typeof source?.[key] !== 'string' || !source[key].trim()) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['data', 'source', key], message });
         }
     };
 
-    if (data.type === 'appimage') {
-        requireSourceKey('url', 'appimage applications require data.source.url');
-    }
-    if (data.type === 'flatpak') {
-        requireSourceKey('ref', 'flatpak applications require data.source.ref');
-    }
-    if (data.type === 'snap') {
-        requireSourceKey('name', 'snap applications require data.source.name');
-    }
+    if (data.type === 'appimage') { requireSourceKey('url', 'appimage requires data.source.url'); }
+    if (data.type === 'flatpak')  { requireSourceKey('ref', 'flatpak requires data.source.ref'); }
+    if (data.type === 'snap')     { requireSourceKey('name', 'snap requires data.source.name'); }
     if (data.type === 'portable') {
-        const hasAny = Boolean(source?.repoPath || source?.url || source?.path);
-        if (!hasAny) {
+        if (!source?.repoPath && !source?.url && !source?.path) {
             ctx.addIssue({
                 code: z.ZodIssueCode.custom,
                 path: ['data', 'source'],
-                message: 'portable applications require one of data.source.repoPath, data.source.url, or data.source.path',
+                message: 'portable requires one of data.source.repoPath, data.source.url, or data.source.path',
             });
         }
     }
 });
-
-const defaultIndexOptions = {
-    ftsSearchFields: ['data.appId', 'data.name', 'data.type', 'allInstallPaths'],
-    vectorEmbeddingFields: ['data.name', 'data.appId', 'allInstallPaths'],
-    checksumFields: ['data.appId'],
-};
 
 /*******************
  * Application     *
@@ -127,7 +98,9 @@ export default class Application extends Document {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
         options.indexOptions = {
-            ...defaultIndexOptions,
+            ftsSearchFields: ['data.appId', 'data.name', 'data.type', 'data.description', 'locationUrls'],
+            vectorEmbeddingFields: ['data.name', 'data.appId', 'locationUrls'],
+            checksumFields: ['data.appId'],
             ...(options.indexOptions || {}),
         };
 
@@ -135,25 +108,23 @@ export default class Application extends Document {
 
         if (!this.data.installs) { this.data.installs = {}; }
         if (!Array.isArray(this.data.tags)) { this.data.tags = []; }
+
+        // Derive locations from available installs (and source URL if present).
+        // Always recomputed from data so toJSON() stays in sync.
+        this.locations = this.#buildLocations();
     }
 
     /* --------------------
-     * Getters / Setters
+     * Getters
      * ------------------*/
 
     get appId() { return this.data.appId; }
     get name() { return this.data.name; }
     get type() { return this.data.type; }
+    get description() { return this.data.description; }
+    get tags() { return this.data.tags; }
     get source() { return this.data.source; }
     get installs() { return this.data.installs; }
-
-    // Computed property for search indexing
-    get allInstallPaths() {
-        return Object.values(this.data.installs || {})
-            .map((s) => s?.path)
-            .filter(Boolean)
-            .join(' ');
-    }
 
     /* --------------------
      * Install State
@@ -161,8 +132,8 @@ export default class Application extends Document {
 
     setInstall(deviceId, installState = {}) {
         if (!deviceId) { return this; }
-        const parsed = installStateSchema.parse(installState);
-        this.data.installs[deviceId] = parsed;
+        this.data.installs[deviceId] = installStateSchema.parse(installState);
+        this.locations = this.#buildLocations();
         this.updatedAt = new Date().toISOString();
         return this;
     }
@@ -170,6 +141,7 @@ export default class Application extends Document {
     removeInstall(deviceId) {
         if (!deviceId) { return this; }
         delete this.data.installs[deviceId];
+        this.locations = this.#buildLocations();
         this.updatedAt = new Date().toISOString();
         return this;
     }
@@ -180,8 +152,14 @@ export default class Application extends Document {
     }
 
     isAvailableOn(deviceId) {
-        const state = this.getInstall(deviceId);
-        return state?.status === 'available';
+        return this.getInstall(deviceId)?.status === 'available';
+    }
+
+    /** Returns deviceIds where the app is available. */
+    listInstalledDevices() {
+        return Object.entries(this.data.installs)
+            .filter(([, state]) => state?.status === 'available')
+            .map(([deviceId]) => deviceId);
     }
 
     markAvailable(deviceId, { path, version, lastSeen } = {}) {
@@ -224,13 +202,40 @@ export default class Application extends Document {
                 appId: 'string',
                 name: 'string',
                 type: '"appimage"|"flatpak"|"snap"|"portable"|"system"|"local"',
+                description: 'string',
+                tags: 'string[]',
                 source: 'Record<string, any>',
-                installs: 'Record<string, { status: string, path?: string, version?: string }>',
+                installs: 'Record<deviceId, { status: string, path?: string, version?: string }>',
             },
         };
     }
 
     static validate(document) { return documentSchema.parse(document); }
     static validateData(documentData) { return applicationPayloadSchema.parse(documentData); }
-}
 
+    /* --------------------
+     * Private
+     * ------------------*/
+
+    #buildLocations() {
+        const locations = [];
+
+        // One location entry per device where the app is installed
+        for (const [deviceId, state] of Object.entries(this.data.installs || {})) {
+            if (state?.path) {
+                locations.push({
+                    url: deviceFileUrl(deviceId, state.path),
+                    metadata: { deviceId, status: state.status },
+                });
+            }
+        }
+
+        // Source URL as a location entry (for reinstall/discovery)
+        const sourceUrl = this.data.source?.url;
+        if (typeof sourceUrl === 'string' && sourceUrl.trim()) {
+            locations.push({ url: sourceUrl, metadata: { type: 'source' } });
+        }
+
+        return locations.filter((l) => l.url !== null);
+    }
+}

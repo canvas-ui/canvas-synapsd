@@ -16,7 +16,7 @@ import { generateChecksum } from '../utils/crypto.js';
 
 // Document constants
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/document';
-const DOCUMENT_SCHEMA_VERSION = '2.1';
+const DOCUMENT_SCHEMA_VERSION = '2.2';
 const DOCUMENT_DATA_CHECKSUM_ALGORITHMS = ['sha1', 'sha256'];
 const DOCUMENT_DATA_CHECKSUM_ALGORITHM_DEFAULT = DOCUMENT_DATA_CHECKSUM_ALGORITHMS[0];
 const DOCUMENT_DATA_CHECKSUM_FIELDS = ['data'];
@@ -30,6 +30,12 @@ const documentDataSchema = z.object({
     schema: z.string(),
     schemaVersion: z.string().optional(),
     data: z.record(z.any()),
+});
+
+// Location entry: a URL pointing to the actual data, with optional protocol-specific metadata
+const locationSchema = z.object({
+    url: z.string(),
+    metadata: z.record(z.any()).optional(),
 });
 
 // Full document schema definition (for internal storage)
@@ -64,11 +70,16 @@ const documentSchema = z.object({
     // Document data/payload
     data: z.record(z.any()),
 
-    // Metadata section – unified shape (v2.1)
+    // Locations: addressable URLs pointing to the actual data content (v2.2+)
+    // Each entry is { url: string, metadata?: {} } where metadata carries
+    // protocol-specific hints (e.g. auth refs for SMB, region for S3, deviceAlias for local files).
+    // Old documents may still carry metadata.dataPaths (string[]) — read during migration.
+    locations: z.array(locationSchema).optional(),
+
+    // Metadata section – unified shape (v2.2)
     metadata: z.object({
         contentType: z.string().optional(),
         contentEncoding: z.string().optional(),
-        dataPaths: z.array(z.string()).optional(),
         contextUUIDs: z.array(z.string()).optional(),
         contextPath: z.array(z.string()).optional(),
         features: z.array(z.string()).optional(),
@@ -132,15 +143,28 @@ class BaseDocument {
 
         // Document data/payload
         this.data = options.data ?? {};
-        // Build metadata with defaults & new redundancy fields
+
+        // Locations: canonical source-of-truth for where the data lives.
+        // Accept either new root-level locations array or migrate legacy metadata.dataPaths strings.
+        if (Array.isArray(options.locations) && options.locations.length > 0) {
+            this.locations = options.locations;
+        } else if (Array.isArray(options.metadata?.dataPaths) && options.metadata.dataPaths.length > 0) {
+            // Migrate: convert legacy string array to location objects
+            this.locations = options.metadata.dataPaths.map((url) => ({ url }));
+        } else {
+            this.locations = [];
+        }
+
+        // Build metadata — dataPaths is no longer stored here (moved to root locations).
+        // Legacy dataPaths from incoming options is consumed above; strip it from metadata.
+        const { dataPaths: _legacy, ...restMetadata } = options.metadata || {};
         this.metadata = {
-            contentType: options.metadata?.contentType || DEFAULT_DOCUMENT_DATA_TYPE,
-            contentEncoding: options.metadata?.contentEncoding || DEFAULT_DOCUMENT_DATA_ENCODING,
-            dataPaths: options.metadata?.dataPaths || [],
-            contextUUIDs: options.metadata?.contextUUIDs || [],
-            contextPath: options.metadata?.contextPath || [],
-            features: options.metadata?.features || [],
-            ...(options.metadata || {}),
+            contentType: restMetadata.contentType || DEFAULT_DOCUMENT_DATA_TYPE,
+            contentEncoding: restMetadata.contentEncoding || DEFAULT_DOCUMENT_DATA_ENCODING,
+            contextUUIDs: restMetadata.contextUUIDs || [],
+            contextPath: restMetadata.contextPath || [],
+            features: restMetadata.features || [],
+            ...restMetadata,
         };
 
         // Ensure the document's schema id is always present as a feature (deduplicated)
@@ -217,12 +241,22 @@ class BaseDocument {
             dataUpdated = true;
         }
 
+        // Update locations if provided
+        if (Array.isArray(data.locations)) {
+            this.locations = data.locations;
+        }
+
         // Update metadata if provided
         if (data.metadata) {
+            const { dataPaths: _legacy, ...restMetadata } = data.metadata;
             this.metadata = {
                 ...this.metadata,
-                ...data.metadata,
+                ...restMetadata,
             };
+            // Migrate legacy dataPaths into locations if no locations were supplied
+            if (_legacy?.length && !Array.isArray(data.locations)) {
+                this.locations = _legacy.map((url) => ({ url }));
+            }
         }
 
         // Update checksums and embeddings if explicitly provided
@@ -469,12 +503,21 @@ class BaseDocument {
      * Convert the document to JSON
      * @returns {string} JSON representation of the document
      */
+    /**
+     * Flat string of all location URLs — used by FTS/vector index field paths in subclasses.
+     * @returns {string}
+     */
+    get locationUrls() {
+        return this.locations.map((l) => l.url).join(' ');
+    }
+
     toJSON() {
         return {
             id: this.id,
             schema: this.schema,
             schemaVersion: this.schemaVersion,
             data: this.data,
+            locations: this.locations,
             metadata: this.metadata,
             indexOptions: this.indexOptions,
             createdAt: this.createdAt,
@@ -570,4 +613,4 @@ class BaseDocument {
 
 // Export document class and schemas
 export default BaseDocument;
-export { documentDataSchema, documentSchema };
+export { documentDataSchema, documentSchema, locationSchema };

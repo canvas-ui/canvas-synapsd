@@ -518,16 +518,16 @@ async function cmdScan(db, opts) {
                 const mime = getMime(filePath);
                 const checksum = await checksumFile(filePath);
 
-                // If already stored with same checksum, add this path to dataPaths if not present
+                // If already stored with same checksum, add this path to locations if not present
                 const existing = await db.getByChecksumString(checksum).catch(() => null);
                 if (existing) {
                     const uri = `file://${filePath}`;
-                    const existingPaths = existing.metadata?.dataPaths ?? [];
-                    if (existingPaths.includes(uri)) {
+                    const existingLocations = existing.locations ?? [];
+                    if (existingLocations.some((l) => l.url === uri)) {
                         counters.skipped++;
                     } else {
                         const doc = existing.toJSON();
-                        doc.metadata = { ...doc.metadata, dataPaths: [...existingPaths, uri] };
+                        doc.locations = [...existingLocations, { url: uri }];
                         await db.put(doc, { tree: treeName, path: treePath }, ['data/abstraction/file'], { emitEvent: false }).catch((err) => {
                             counters.errors++;
                             logError(filePath, 'update', err);
@@ -547,9 +547,7 @@ async function cmdScan(db, opts) {
                             size: stat.size,
                             mime,
                         },
-                        metadata: {
-                            dataPaths: [`file://${filePath}`],
-                        },
+                        locations: [{ url: `file://${filePath}` }],
                         checksumArray: [checksum],
                     },
                 });

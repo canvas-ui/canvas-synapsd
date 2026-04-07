@@ -35,9 +35,7 @@ function generateTabs(n) {
                 active: i === 0,
                 pinned: i < 3,
             },
-            metadata: {
-                dataPaths: [`browser://tab/${i}`],
-            },
+            locations: [{ url: `browser://tab/${i}` }],
         });
     }
     return tabs;

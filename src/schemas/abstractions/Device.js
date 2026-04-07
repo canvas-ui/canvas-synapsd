@@ -16,6 +16,11 @@ const documentDataSchema = z.object({
         platform: z.string().optional(),
         arch: z.string().optional(),
         type: z.string().optional(),
+        // Identity fields for human-friendly URL addressing
+        username: z.string().optional(),
+        hostname: z.string().optional(),
+        fqdn: z.string().optional(),      // fully-qualified domain name when available
+        alias: z.string().optional(),     // user@hostname — authority component for file:// URLs
         createdAt: z.string().optional(),
         lastSeen: z.string().optional(),
     }).passthrough(),
@@ -29,8 +34,8 @@ export default class Device extends Document {
 
         options.indexOptions = {
             ...(options.indexOptions || {}),
-            ftsSearchFields: ['data.name', 'data.deviceId', 'data.description'],
-            vectorEmbeddingFields: ['data.name'],
+            ftsSearchFields: ['data.name', 'data.deviceId', 'data.alias', 'data.hostname', 'data.description'],
+            vectorEmbeddingFields: ['data.name', 'data.alias'],
             checksumFields: ['data.deviceId'],
         };
 
@@ -60,6 +65,10 @@ export default class Device extends Document {
                 platform: 'string',
                 arch: 'string',
                 type: 'string',
+                username: 'string',
+                hostname: 'string',
+                fqdn: 'string',
+                alias: 'string',
                 createdAt: 'string',
                 lastSeen: 'string',
             },
