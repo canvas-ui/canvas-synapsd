@@ -1081,7 +1081,8 @@ class ContextTree extends EventEmitter {
                 label: payload.label,
                 description: payload.description,
                 color: payload.color,
-                locked: payload.locked,
+                locked: payload.isLocked ?? false,
+                lockedBy: payload.lockedBy ?? [],
                 children,
             };
         };
