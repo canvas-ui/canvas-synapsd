@@ -597,8 +597,8 @@ async function cmdFind(db, opts) {
     if (opts.features) { spec.features = opts.features; }
     if (opts.limit) { spec.limit = opts.limit; }
     const t = performance.now();
-    const results = await db.find(spec);
-    console.log(`  find completed (${elapsed(t)})`);
+    const results = await db.list(spec);
+    console.log(`  list completed (${elapsed(t)})`);
     printResults(results);
 }
 

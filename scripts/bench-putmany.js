@@ -77,8 +77,8 @@ async function main() {
 
     // Verify
     const t2 = performance.now();
-    const found = await db.find({ tree: 'browser', path: '/tabs/window-1', features: ['data/abstraction/tab'] });
-    console.log(`  find:           ${elapsed(t2)}  (${found.totalCount} docs found)`);
+    const found = await db.list({ tree: 'browser', path: '/tabs/window-1', features: ['data/abstraction/tab'] });
+    console.log(`  list:           ${elapsed(t2)}  (${found.totalCount} docs found)`);
 
     // Benchmark single put in a loop (for comparison)
     try { rmSync(dbPath + '-single', { recursive: true, force: true }); } catch {}

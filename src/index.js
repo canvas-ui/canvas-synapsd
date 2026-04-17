@@ -1291,7 +1291,7 @@ class SynapsD extends EventEmitter {
         return layerKeys.some((layerKey) => layerKey.startsWith(prefix));
     }
 
-    async find(spec = {}) {
+    async list(spec = {}) {
         let {
             treeSelector,
             features,
@@ -1299,7 +1299,7 @@ class SynapsD extends EventEmitter {
             excludeContextSpecs,
             excludeTreeSelectors,
             options,
-        } = this.#normalizeFindSpec(spec);
+        } = this.#normalizeQuerySpec(spec);
 
         // Normalize options and pagination defaults
         const effectiveOptions = typeof options === 'object' && options !== null ? { ...options } : { parse: true };
@@ -1425,7 +1425,7 @@ class SynapsD extends EventEmitter {
             return resultArray;
 
         } catch (error) {
-            debug(`Error in find: ${error.message}`);
+            debug(`Error in list: ${error.message}`);
             const errorArray = [];
             errorArray.count = 0;      // Number of documents returned (0)
             errorArray.totalCount = 0; // Total available (unknown due to error)
@@ -1451,7 +1451,7 @@ class SynapsD extends EventEmitter {
             excludeContextSpecs,
             excludeTreeSelectors,
             options,
-        } = this.#normalizeFindSpec(spec);
+        } = this.#normalizeQuerySpec(spec);
 
         if (!this.#lanceIndex || !this.#lanceIndex.isReady) {
             const empty = [];
@@ -2016,7 +2016,7 @@ class SynapsD extends EventEmitter {
         if (!fs.existsSync(dstDir)) { fs.mkdirSync(dstDir, { recursive: true }); }
 
         // Get all documents from the documents dataset
-        const documentArray = await this.find({
+        const documentArray = await this.list({
             context: contextSpec,
             features: { allOf: parseBitmapArray(featureBitmapArray).filter(Boolean) },
             filters: filterArray,
@@ -2271,7 +2271,7 @@ class SynapsD extends EventEmitter {
         }
 
         if (typeof features !== 'object') {
-            throw new Error('find(): features must be an array or object');
+            throw new Error('list(): features must be an array or object');
         }
 
         return {
@@ -2502,9 +2502,9 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    #normalizeFindSpec(spec = {}) {
+    #normalizeQuerySpec(spec = {}) {
         if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
-            throw new Error('find() expects a query spec object');
+            throw new Error('list() expects a query spec object');
         }
 
         const {
@@ -2587,7 +2587,7 @@ class SynapsD extends EventEmitter {
         }
 
         if (typeof filters !== 'object') {
-            throw new Error('find(): filters must be an array or object');
+            throw new Error('list(): filters must be an array or object');
         }
 
         const normalizedFilters = [];
@@ -2595,7 +2595,7 @@ class SynapsD extends EventEmitter {
 
         for (const key of Object.keys(filters)) {
             if (!supportedKeys.has(key)) {
-                throw new Error(`find(): unsupported filter "${key}"`);
+                throw new Error(`list(): unsupported filter "${key}"`);
             }
         }
 
@@ -2776,8 +2776,9 @@ class SynapsD extends EventEmitter {
     async #buildTreeMembershipBitmap(treeSelector) {
         const selection = this.#resolveGenericTreeSelection(treeSelector, '/', 'context');
         if (selection.type === 'directory') {
-            const rootBitmap = await selection.tree.find('/');
-            const recursiveBitmap = await selection.tree.findRecursive('/');
+            const dirPath = selection.path || '/';
+            const rootBitmap = await selection.tree.find(dirPath);
+            const recursiveBitmap = await selection.tree.findRecursive(dirPath);
             if (rootBitmap && recursiveBitmap) {
                 rootBitmap.orInPlace(recursiveBitmap);
                 return rootBitmap;

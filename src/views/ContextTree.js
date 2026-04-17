@@ -989,10 +989,10 @@ class ContextTree extends EventEmitter {
         });
     }
 
-    async find(spec = {}) {
+    async list(spec = {}) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
         const normalizedContextSpec = this.#normalizePath(spec.path ?? spec.context ?? '/');
-        return await this.#db.find({
+        return await this.#db.list({
             ...spec,
             tree: this.id,
             path: normalizedContextSpec,
