@@ -226,6 +226,9 @@ class SynapsD extends EventEmitter {
             // Migrate bitmap keys from legacy format (one-time, idempotent)
             await this.#migrateBitmapKeys();
 
+            // Backfill root layer bitmaps for existing documents (idempotent startup migration)
+            await this.#migrateRootBitmaps();
+
             // Set status
             this.#status = 'running';
 
@@ -2360,7 +2363,7 @@ class SynapsD extends EventEmitter {
                 ?? treeSelector.attributes
                 ?? [];
             return {
-                context: treeSelector.context ?? { path: '/' },
+                context: treeSelector.context !== undefined ? treeSelector.context : { path: '/' },
                 directory: treeSelector.directory ?? null,
                 features: this.#normalizeWriteFeatures(legacyFeatures),
                 emitEvent: treeSelector.emitEvent ?? options.emitEvent ?? true,
@@ -2457,6 +2460,22 @@ class SynapsD extends EventEmitter {
         }
     }
 
+    async #migrateRootBitmaps() {
+        for (const meta of await this.listTrees('context')) {
+            const tree = this.getTree(meta.id);
+            if (!tree?.rootLayer) continue;
+            const collection = this.#contextBitmapCollectionForTree(meta.id);
+            const existingRoot = await collection.OR([tree.rootLayer.id]);
+            if (existingRoot && !existingRoot.isEmpty) continue;
+            const allDocsBitmap = await this.#buildContextTreeMembershipBitmap(tree);
+            if (!allDocsBitmap || allDocsBitmap.isEmpty) continue;
+            const docIds = allDocsBitmap.toArray();
+            debug(`migrateRootBitmaps: backfilling ${docIds.length} docs into root of tree ${meta.id}`);
+            await collection.tickMany([tree.rootLayer.id], docIds);
+            this.bitmapIndex.flushBatch();
+        }
+    }
+
     /**
      * Shared bitmap indexing for both insert and update operations.
      * Handles: context tree bitmaps, directory tree bitmaps, feature bitmaps, synapses.
@@ -2473,6 +2492,10 @@ class SynapsD extends EventEmitter {
                 await contextTree.insertPath(pathString);
 
                 const layerIds = contextTree.resolveLayerIds(pathLayers);
+                // Always tick root layer for universal membership bitmap (O(1) path='/' queries)
+                if (contextTree.rootLayer && !layerIds.includes(contextTree.rootLayer.id)) {
+                    layerIds.unshift(contextTree.rootLayer.id);
+                }
                 await collection.tickMany(layerIds, docId);
 
                 const normalizedLayers = layerIds.map((layerId) => collection.makeKey(layerId));
@@ -2649,14 +2672,16 @@ class SynapsD extends EventEmitter {
         for (const pathLayers of pathLayersArray) {
             if (pathLayers.length === 1 && pathLayers[0] === '/') {
                 sawExplicitPath = true;
-                const treeBitmap = await this.#buildContextTreeMembershipBitmap(tree);
-                if (treeBitmap) {
-                    if (resultBitmap) {
-                        resultBitmap.orInPlace(treeBitmap);
-                    } else {
-                        resultBitmap = treeBitmap;
+                if (tree.rootLayer) {
+                    const rootBitmap = await collection.OR([tree.rootLayer.id]);
+                    if (rootBitmap && !rootBitmap.isEmpty) {
+                        if (resultBitmap) {
+                            resultBitmap.orInPlace(rootBitmap);
+                        } else {
+                            resultBitmap = rootBitmap;
+                        }
+                        sawExistingPath = true;
                     }
-                    sawExistingPath = true;
                 }
                 continue;
             }
