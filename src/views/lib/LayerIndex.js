@@ -226,7 +226,7 @@ class LayerIndex {
         const layer = this.getLayerByName(name); // Normalizes internally
 
         if (!layer) { throw new Error(`Layer not found: ${name}`); }
-        if (layer.locked) {
+        if (layer.isLocked) {
             throw new Error('Layer is locked');
         }
         // Unset the id from options to avoid overwriting existing layers by accident
@@ -253,7 +253,7 @@ class LayerIndex {
             throw new Error(`Layer not found: ${name}`);
         }
 
-        if (currentLayer.locked) {
+        if (currentLayer.isLocked) {
             throw new Error('Layer is locked');
         }
 
@@ -284,7 +284,7 @@ class LayerIndex {
 
     async removeLayer(layer) {
         if (!layer || layer.name === '/') { throw new Error('Root layer "/" cannot be removed'); }
-        if (layer.locked) { throw new Error('Layer is locked'); }
+        if (layer.isLocked) { throw new Error('Layer is locked'); }
         await this.#dbRemoveLayer(layer); // Normalizes internally
     }
 
@@ -298,7 +298,7 @@ class LayerIndex {
             throw new Error('Root layer "/" cannot be removed');
         }
 
-        if (layer.locked) {
+        if (layer.isLocked) {
             throw new Error('Layer is locked');
         }
 
@@ -317,7 +317,7 @@ class LayerIndex {
             throw new Error('Root layer "/" cannot be removed');
         }
 
-        if (layer.locked) {
+        if (layer.isLocked) {
             throw new Error('Layer is locked');
         }
 

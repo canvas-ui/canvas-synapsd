@@ -281,7 +281,11 @@ class ContextTree extends EventEmitter {
         if (!layer) { throw new Error(`Layer not found: ${nameOrId}`); }
         layer.unlock(lockBy);
         await this.#layerIndex.persistLayer(layer);
-        return true;
+        return {
+            unlockedBy: lockBy,
+            isStillLocked: layer.isLocked,
+            lockedBy: [...layer.lockedBy],
+        };
     }
 
     async mergeLayer(layerId, layerArray) {
@@ -1063,7 +1067,7 @@ class ContextTree extends EventEmitter {
         const buildTree = (currentNode) => {
             const children = currentNode.getSortedChildren()
                 .filter((child) => child instanceof TreeNode)
-                .map((child) => (child.hasChildren ? buildTree(child) : createLayerInfo(child.payload)));
+                .map((child) => buildTree(child));
 
             let layer = this.#layerIndex.getLayerByID(currentNode.id);
             if (!layer) { layer = this.rootLayer; }
