@@ -39,7 +39,7 @@ The current public API shape is:
 - `unlinkMany(ids, treeSelector?, features?, options?)`
 - `delete(id, options?)`
 - `deleteMany(ids, options?)`
-- `find(spec)`
+- `list(spec)`
 - `search(spec)`
 - `listDocumentTreePaths(id, treeNameOrId)`
 - `listDocumentTreeMemberships(id, treeNameOrId)`
@@ -128,7 +128,7 @@ const checksumExistsInProject = await db.hasByChecksumString(
 );
 ```
 
-Structural and ranked listing use `find(spec)` and `search(spec)`; see **Query shape** below.
+Structural and ranked listing use `list(spec)` and `search(spec)`; see **Query shape** below.
 
 ### Update
 
@@ -183,25 +183,25 @@ const deleteResult = await db.deleteMany([id1, id2]);
 
 `unlinkMany()` and `deleteMany()` return `{ successful, failed, count }`. Batch delete/unlink ids must be numbers; numeric strings are accepted by `get()` / `put()` but rejected by the batch helpers.
 
-## Querying: `find` vs `search`
+## Querying: `list` vs `search`
 
 SynapsD has two query methods. They accept the same filtering/scoping fields but serve different purposes.
 
-### `find(spec)` — bitmap-filtered listing
+### `list(spec)` — bitmap-filtered listing
 
 Returns documents that match structural criteria: tree membership, features, and datetime/bitmap filters. Results are returned in insertion order (by numeric ID). No ranking is performed.
 
-Use `find` when you know *where* or *what kind* of documents you want — "all notes in this project", "files updated today", "everything except staging".
+Use `list` when you know *where* or *what kind* of documents you want — "all notes in this project", "files updated today", "everything except staging".
 
-With no filters, `find` returns all documents in the store.
+With no filters, `list` returns all documents in the store.
 
 ### `search(spec)` — full-text ranked search
 
-Requires a `query` string. First applies the same bitmap filters as `find` to narrow the candidate set, then runs a full-text search (via LanceDB) over those candidates. Results are ranked by relevance.
+Requires a `query` string. First applies the same bitmap filters as `list` to narrow the candidate set, then runs a full-text search (via LanceDB) over those candidates. Results are ranked by relevance.
 
 Use `search` when you have a text query and want the best matches — "find invoices mentioning 'overdue' in the finance tree".
 
-Default limit is 50 (vs unlimited for `find`).
+Default limit is 50 (vs unlimited for `list`).
 
 ### Shared spec fields
 
@@ -215,7 +215,7 @@ Both methods accept:
 | `filters` | Array of filter strings — bitmap keys and `datetime:` expressions |
 | `excludeTree` | Tree name/ID to exclude from results |
 | `excludeTrees` | Array of tree names/IDs to exclude |
-| `limit` | Max documents to return (`find`: unlimited, `search`: 50) |
+| `limit` | Max documents to return (`list`: unlimited, `search`: 50) |
 | `offset` | Skip N documents before returning results |
 | `page` | Page number (alternative to offset, uses limit as page size) |
 | `parse` | Set `false` to return raw stored data instead of parsed document instances |
@@ -237,8 +237,8 @@ Both return an array with attached metadata:
 ### Examples
 
 ```js
-// find: all notes in a project, excluding deleted
-const docs = await db.find({
+// list: all notes in a project, excluding deleted
+const docs = await db.list({
     tree: 'projects',
     path: '/foo/bar',
     features: {
@@ -249,15 +249,15 @@ const docs = await db.find({
     limit: 100,
 });
 
-// find: directory tree, multiple paths
-const exactDirectoryMatches = await db.find({
+// list: directory tree, multiple paths
+const exactDirectoryMatches = await db.list({
     tree: 'filesystem',
     path: ['/docs/contracts', '/docs/invoices'],
     features: ['data/abstraction/file'],
 });
 
-// find: everything except a specific tree
-const withoutStaging = await db.find({
+// list: everything except a specific tree
+const withoutStaging = await db.list({
     excludeTree: 'incoming',
     features: ['data/abstraction/file'],
 });
@@ -328,7 +328,7 @@ await db.link(id, { tree: 'projects', path: '/finance/invoices' }, ['tag/triaged
 await db.unlink(id, { tree: 'incoming', path: '/email/imap/account-a/inbox' });
 
 // exclude staging from broad queries
-const docs = await db.find({ excludeTree: 'incoming' });
+const docs = await db.list({ excludeTree: 'incoming' });
 ```
 
 Tree metadata lives in the internal store, while tree memberships are mapped to typed bitmap namespaces.

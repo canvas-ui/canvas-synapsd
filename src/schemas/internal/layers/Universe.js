@@ -2,6 +2,7 @@
 
 import Layer from './BaseLayer.js';
 
+// "Root" layer for a workspace
 export default class Universe extends Layer {
 
     constructor(name = '/', options = {
