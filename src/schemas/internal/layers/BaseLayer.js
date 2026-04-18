@@ -33,11 +33,28 @@ class Layer {
         const providedLabel = options.label ?? String(name ?? normalizedName);
         this.label = this.#sanitizeLabel(providedLabel);
 
-        this.description = options.description ? this.#sanitizeDescription(options.description) : 'Canvas layer';
+        this.description = options.description ? this.#sanitizeDescription(options.description) : Layer.defaultDescriptionFor(this.type);
         this.color = options?.color;
         this.lockedBy = options?.lockedBy || [];
         this.metadata = options.metadata || {};
         this.acl = options.acl || {};
+    }
+
+    /**
+     * Default description rendered for a layer when none is provided.
+     * Kept on BaseLayer so both new-layer creation and legacy-data render-time
+     * fixups can share the same source of truth.
+     */
+    static defaultDescriptionFor(type) {
+        switch (type) {
+            case 'canvas':    return 'Canvas';
+            case 'context':   return 'Context layer';
+            case 'universe':  return 'Universe root';
+            case 'workspace': return 'Workspace mount';
+            case 'label':     return 'Label';
+            case 'system':    return 'System layer';
+            default:          return 'Layer';
+        }
     }
 
     /**

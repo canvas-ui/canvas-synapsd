@@ -8,8 +8,13 @@ const debug = debugInstance('canvas:synapsd:context-tree');
 // Modules
 import TreeNode from './lib/TreeNode.js';
 import LayerIndex from './lib/LayerIndex.js';
+import BaseLayer from '../schemas/internal/layers/BaseLayer.js';
 import { EVENTS } from '../utils/events.js';
 import { buildTreeEventPayload } from './lib/treeEvents.js';
+
+// Legacy default written by older BaseLayer; replaced at render time so
+// pre-existing context layers don't show "Canvas layer" in the UI.
+const LEGACY_DEFAULT_DESCRIPTION = 'Canvas layer';
 
 // ULID/UUID detection: starts with 'layer/' or looks like a raw ID (26-char ULID or UUID with dashes)
 const looksLikeId = (s) => typeof s === 'string' && (s.startsWith('layer/') || /^[0-9A-Z]{26}$/.test(s) || s.includes('-'));
@@ -188,14 +193,19 @@ class ContextTree extends EventEmitter {
      * ============================================================================
      */
 
-    async listLayers() {
+    async listLayers(filter = {}) {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
+        // Back-compat: listLayers() with no args still returns every layer.
+        // listLayers({ type: 'canvas' }) filters by layer type.
+        const typeFilter = typeof filter === 'string' ? filter : filter?.type;
         const keys = await this.#layerIndex.listLayers(); // ['layer/<uuid>', ...]
         const result = [];
         for (const key of keys) {
             try {
                 const layer = this.#layerIndex.getLayerByID(key);
-                if (layer) { result.push(layer); }
+                if (!layer) { continue; }
+                if (typeFilter && layer.type !== typeFilter) { continue; }
+                result.push(layer);
             } catch (e) {
                 debug(`listLayers: failed to reconstruct layer ${key}: ${e.message}`);
             }
@@ -410,14 +420,19 @@ class ContextTree extends EventEmitter {
 
             const layerNames = normalizedPath.split('/').filter(Boolean);
             for (const layerName of layerNames) {
+                const isLeaf = layerName === layerNames[layerNames.length - 1];
                 let layer = this.#layerIndex.getLayerByName(layerName);
                 if (!layer) {
                     debug(`Layer "${layerName}" not found in layerIndex`);
                     if (autoCreateLayers) {
-                        const isLeaf = layerName === layerNames[layerNames.length - 1];
                         const desiredType = isLeaf ? leafType : 'context';
+                        const createOpts = { type: desiredType };
+                        if (isLeaf && desiredType === 'canvas') {
+                            if (insertOptions.querySpec !== undefined) { createOpts.querySpec = insertOptions.querySpec; }
+                            if (insertOptions.metadata !== undefined) { createOpts.metadata = insertOptions.metadata; }
+                        }
                         debug(`Creating layer "${layerName}"`);
-                        layer = await this.#layerIndex.createLayer(layerName, { type: desiredType });
+                        layer = await this.#layerIndex.createLayer(layerName, createOpts);
                         createdLayers.push(layer);
                     } else {
                         return {
@@ -428,12 +443,15 @@ class ContextTree extends EventEmitter {
                     }
                 }
                 // If the leaf already exists but the caller requested a different leafType,
-                // we allow a safe "upgrade" from context->canvas (Canvas currently adds no behavior).
-                const isLeaf = layerName === layerNames[layerNames.length - 1];
+                // we allow a safe "upgrade" from context->canvas. The in-memory instance
+                // is currently a Context layer; flipping `type` and persisting causes
+                // future getLayerByID() calls to reconstruct it as a Canvas via SchemaRegistry.
                 if (isLeaf && leafType && layer.type !== leafType) {
                     if (layer.type === 'context' && leafType === 'canvas') {
                         debug(`Upgrading leaf layer "${layer.name}" from type "${layer.type}" to "${leafType}"`);
                         layer.type = leafType;
+                        if (insertOptions.querySpec !== undefined) { layer.querySpec = insertOptions.querySpec; }
+                        if (insertOptions.metadata !== undefined) { layer.metadata = insertOptions.metadata; }
                         await this.#layerIndex.persistLayer(layer);
                     } else {
                         return {
@@ -1078,17 +1096,36 @@ class ContextTree extends EventEmitter {
             // Normalize the name to avoid issues with paths
             const normalizedName = payload.name === '/' ? '/' : payload.name;
 
-            return {
+            // Render-time fallback: pre-existing layers persisted "Canvas layer"
+            // as their description regardless of type. Substitute the type-aware
+            // default so old context layers don't read "Canvas layer" in the UI.
+            const description = (!payload.description || payload.description === LEGACY_DEFAULT_DESCRIPTION)
+                ? BaseLayer.defaultDescriptionFor(payload.type)
+                : payload.description;
+
+            const info = {
                 id: payload.id,
                 type: payload.type,
                 name: normalizedName, // Use normalized name
                 label: payload.label,
-                description: payload.description,
+                description,
                 color: payload.color,
                 locked: payload.isLocked ?? false,
                 lockedBy: payload.lockedBy ?? [],
                 children,
             };
+
+            // Always emit metadata — UI may attach styling/applet hints to any
+            // layer type, not just canvases. Empty object when unset.
+            info.metadata = payload.metadata ?? {};
+
+            // querySpec is canvas-only: emitting it on context layers would
+            // imply they have one, which they don't.
+            if (payload.type === 'canvas' && payload.querySpec) {
+                info.querySpec = payload.querySpec;
+            }
+
+            return info;
         };
 
         return buildTree(node);

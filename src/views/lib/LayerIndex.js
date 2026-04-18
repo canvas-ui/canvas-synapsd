@@ -230,8 +230,16 @@ class LayerIndex {
         if (layer.isLocked) {
             throw new Error('Layer is locked');
         }
-        // Unset the id from options to avoid overwriting existing layers by accident
+        // Never let callers overwrite identity / discriminator via update
         delete options.id;
+        delete options.type;
+
+        // Route querySpec through the layer's own validator if it has one
+        // (canvas layers expose setQuerySpec; other layer types just ignore it).
+        if (options.querySpec !== undefined && typeof layer.setQuerySpec === 'function') {
+            layer.setQuerySpec(options.querySpec);
+            delete options.querySpec;
+        }
 
         Object.assign(layer, options);
         await this.#dbStoreLayer(layer);
