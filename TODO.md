@@ -27,11 +27,13 @@
 * Keeps compatibility with quick one-liners.
 
 ## Canonical V2 API leftovers
+
 - [] Finalize canonical query object shape:
   - [ ] `filters.glob`
   - [ ] `filters.regexp`
 
 ## Membership Engine Extraction
+
 - [ ] Extract shared document-target linking into one internal module/service.
 - [ ] Support linking targets for:
   - [ ] context paths
@@ -42,12 +44,14 @@
 - [ ] Keep document-to-document relations out of tree APIs.
 
 ## Schema and Adapter Cleanup
+
 - [ ] Reduce app-specific abstractions inside `synapsd`.
 - [ ] Move source-specific normalization/mapping to app/workspace layer.
 - [ ] Keep `synapsd` input shape generic and canonical.
 - [ ] Reassess which current schema classes belong in core vs app layer.
 
 ## Tests
+
 - [ ] Add a proper test suite for the current API
 - [ ] Add tests for `find(spec)`:
   - [ ] attributes `allOf`
