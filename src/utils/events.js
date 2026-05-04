@@ -36,6 +36,7 @@ const EVENTS = Object.freeze({
     // Tree layer operations
     TREE_LAYER_MERGED:     'tree.layer.merged',
     TREE_LAYER_SUBTRACTED: 'tree.layer.subtracted',
+    TREE_LAYER_CONVERTED:  'tree.layer.converted',
 
     // Tree document operations
     TREE_DOCUMENT_INSERTED:       'tree.document.inserted',

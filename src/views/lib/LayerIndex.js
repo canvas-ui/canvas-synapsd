@@ -333,6 +333,25 @@ class LayerIndex {
         await this.#dbRemoveLayer(layer);
     }
 
+    async convertLayer(layerId, targetType) {
+        const layer = this.getLayerByID(layerId);
+        if (!layer) { throw new Error(`Layer not found: ${layerId}`); }
+        if (!['context', 'canvas'].includes(targetType)) {
+            throw new Error(`Invalid conversion target type: ${targetType}`);
+        }
+        if (layer.type === targetType) { return layer; }
+        if (layer.isLocked) { throw new Error('Layer is locked'); }
+        if (layer.name === '/') { throw new Error('Root layer cannot be converted'); }
+
+        layer.type = targetType;
+        if (targetType !== 'canvas') {
+            delete layer.querySpec;
+        }
+        await this.#dbStoreLayer(layer);
+        // Reconstruct as the correct class now that the stored type has changed
+        return this.getLayerByID(layerId);
+    }
+
     /**
      * Persistence
      */

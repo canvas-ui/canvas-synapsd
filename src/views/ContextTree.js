@@ -372,6 +372,22 @@ class ContextTree extends EventEmitter {
         }
     }
 
+    async convertLayer(layerId, targetType) {
+        try {
+            const converted = await this.#layerIndex.convertLayer(layerId, targetType);
+            await this.recalculateTree();
+            this.#emitTreeEvent(EVENTS.TREE_LAYER_CONVERTED, {
+                layerId: converted.id,
+                layerName: converted.name,
+                layerType: converted.type,
+            });
+            return { data: converted, count: 1, error: null };
+        } catch (error) {
+            debug(`Error converting layer "${layerId}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
+    }
+
     /**
      * ============================================================================
      * Path methods
@@ -442,6 +458,15 @@ class ContextTree extends EventEmitter {
                         };
                     }
                 }
+                // Prevent circular paths: this segment case-insensitively resolves to a
+                // layer already used as an ancestor in the current path.
+                if (layerIds.includes(layer.id)) {
+                    return {
+                        data: [], count: 0,
+                        error: `Path "${normalizedPath}" creates a circular reference: segment "${layerName}" resolves to layer "${layer.name}" which already appears at an ancestor level`,
+                    };
+                }
+
                 // If the leaf already exists but the caller requested a different leafType,
                 // we allow a safe "upgrade" from context->canvas. The in-memory instance
                 // is currently a Context layer; flipping `type` and persisting causes
@@ -542,6 +567,26 @@ class ContextTree extends EventEmitter {
                     count: 0,
                     error: `Cannot move path "${normalizedPathFrom}": Layer "${layer.name}" (ID: ${layer.id}) is locked.`,
                 };
+            }
+
+            // Detect same-node (rename-in-place): source and destination resolve to the
+            // same layer. This happens when the path differs only in case, e.g. /bar → /Bar.
+            if (nodeToMove.id === destNode.id) {
+                const newName = normalizedPathTo.split('/').filter(Boolean).pop();
+                if (!newName) {
+                    return { data: null, count: 0, error: 'Invalid destination path for rename' };
+                }
+                if (newName === layer.name) {
+                    // True no-op — name already matches
+                    return { data: { pathFrom: normalizedPathFrom, pathTo: normalizedPathTo, layerId: layer.id, layerName: layer.name }, count: 1, error: null };
+                }
+                const renamed = await this.#layerIndex.renameLayer(layer.name, newName);
+                await this.recalculateTree();
+                this.#emitTreeEvent(EVENTS.TREE_PATH_MOVED, {
+                    pathFrom: normalizedPathFrom, pathTo: normalizedPathTo,
+                    recursive: false, layerId: renamed.id, layerName: renamed.name, layerType: renamed.type,
+                });
+                return { data: { pathFrom: normalizedPathFrom, pathTo: normalizedPathTo, layerId: renamed.id, layerName: renamed.name }, count: 1, error: null };
             }
 
             // Check if destination already contains the node. If so, skip adding, but still remove from source.
