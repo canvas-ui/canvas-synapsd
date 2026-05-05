@@ -2694,11 +2694,17 @@ class SynapsD extends EventEmitter {
 
             sawExistingPath = true;
             const layerIds = tree.resolveLayerIds(pathLayers);
+            // After resolveLayerIds drops canvas leaves and root, an empty result
+            // means the path effectively reduces to root (e.g. /<canvas-leaf>).
+            // Fall back to the root layer bitmap so canvases anchored directly
+            // under '/' return all docs at the root, not zero.
+            let pathBitmap;
             if (layerIds.length === 0) {
-                continue;
+                if (!tree.rootLayer) { continue; }
+                pathBitmap = await collection.OR([tree.rootLayer.id]);
+            } else {
+                pathBitmap = await collection.AND(layerIds);
             }
-
-            const pathBitmap = await collection.AND(layerIds);
             if (!pathBitmap || pathBitmap.isEmpty) {
                 continue;
             }
