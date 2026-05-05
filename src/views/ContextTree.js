@@ -1113,15 +1113,29 @@ class ContextTree extends EventEmitter {
     /**
      * Resolve an array of layer names to their ULID-based IDs.
      * Used by SynapsD to key bitmaps by ULID instead of name.
+     *
+     * Canvas-type layers are intentionally excluded: a canvas is a saved view
+     * (filter / querySpec) anchored at a tree node, not a path bitmap. Including
+     * the canvas layer in path-based AND/OR composition would (a) make INSERT
+     * into a path ending in a canvas tick a layer no read can find, and (b)
+     * make READ at that path require docs to be in the canvas bitmap, which
+     * defeats the point of "canvas is a view onto parent contents".
+     *
+     * Result: insert/read at /a/b/<canvas-leaf> behave identically to /a/b
+     * at the bitmap level. The canvas's own filter is applied separately by
+     * higher-level read paths.
+     *
      * @param {Array<string>} layerNames - Array of layer names
-     * @returns {Array<string>} Array of layer IDs (skips '/' root and unresolvable names)
+     * @returns {Array<string>} Array of non-canvas layer IDs (skips '/' root, unresolvable names, and canvas leaves)
      */
     resolveLayerIds(layerNames) {
         const ids = [];
         for (const name of layerNames) {
             if (name === '/') { continue; } // Skip root for bitmap operations
             const layer = this.#layerIndex.getLayerByName(name);
-            if (layer) { ids.push(layer.id); }
+            if (!layer) { continue; }
+            if (layer.type === 'canvas') { continue; }
+            ids.push(layer.id);
         }
         return ids;
     }
