@@ -467,24 +467,18 @@ class ContextTree extends EventEmitter {
                     };
                 }
 
-                // If the leaf already exists but the caller requested a different leafType,
-                // we allow a safe "upgrade" from context->canvas. The in-memory instance
-                // is currently a Context layer; flipping `type` and persisting causes
-                // future getLayerByID() calls to reconstruct it as a Canvas via SchemaRegistry.
+                // Refuse silent type upgrade on collision. LayerIndex currently uses
+                // global per-tree name uniqueness, so an existing layer with the same
+                // name as a desired canvas leaf is almost always a name collision —
+                // not the user trying to convert that exact layer to a canvas.
+                // Auto-upgrade hid this and caused unrelated layers to silently
+                // switch to canvas (see project_layerindex_naming memory).
                 if (isLeaf && leafType && layer.type !== leafType) {
-                    if (layer.type === 'context' && leafType === 'canvas') {
-                        debug(`Upgrading leaf layer "${layer.name}" from type "${layer.type}" to "${leafType}"`);
-                        layer.type = leafType;
-                        if (insertOptions.querySpec !== undefined) { layer.querySpec = insertOptions.querySpec; }
-                        if (insertOptions.metadata !== undefined) { layer.metadata = insertOptions.metadata; }
-                        await this.#layerIndex.persistLayer(layer);
-                    } else {
-                        return {
-                            data: [],
-                            count: 0,
-                            error: `Leaf layer "${layerName}" exists with type "${layer.type}", cannot use as type "${leafType}"`,
-                        };
-                    }
+                    return {
+                        data: [],
+                        count: 0,
+                        error: `A layer named "${layerName}" already exists as type "${layer.type}". Pick a different name for the new ${leafType}.`,
+                    };
                 }
 
                 layerIds.push(layer.id);
