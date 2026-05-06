@@ -59,7 +59,7 @@
 ## Tests
 
 - [ ] Add a proper test suite for the current API
-- [ ] Add tests for `find(spec)`:
+- [ ] Add tests for `list(spec)`:
   - [ ] attributes `allOf`
   - [ ] attributes `anyOf`
   - [ ] attributes `noneOf`

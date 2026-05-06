@@ -12,22 +12,7 @@ const Roaring = require('roaring'); // New
 const { RoaringBitmap32 } = Roaring; // New
 import Bitmap from './lib/Bitmap.js';
 import BitmapCollection from './lib/BitmapCollection.js';
-
-// Constants
-const ALLOWED_PREFIXES = [
-    'internal/',
-    'context/',
-    'vfs/',
-    'feature/',
-    'device/',
-    'client/',
-    'server/',
-    'user/',
-    'tag/',
-    'data/',
-    'nested/',
-    'custom/',
-];
+import { normalizeBitmapKey, validateBitmapKey } from './lib/keys.js';
 
 class BitmapIndex {
 
@@ -47,11 +32,7 @@ class BitmapIndex {
         debug(`BitmapIndex initialized with range ${this.rangeMin} - ${this.rangeMax}`);
     }
 
-    /**
-     * Batch mode — defers bitmap persistence to flush time.
-     * In-memory bitmaps are still updated immediately (cache stays current),
-     * but serialize+putSync is skipped until flushBatch() is called.
-     */
+    // Compatibility only. Bitmap writes are durable immediately; there is no deferred batch mode.
     startBatch() { }
 
     flushBatch() { }
@@ -340,7 +321,7 @@ class BitmapIndex {
 
     async tickMany(keyArray, ids) {
         debug('Ticking bitmap keyArray', keyArray, ids);
-        const keysArray = Array.isArray(keyArray) ? keyArray : [keyArray];
+        const keysArray = (Array.isArray(keyArray) ? keyArray : [keyArray]).map(BitmapIndex.normalizeKey);
         const idsArray = Array.isArray(ids) ? ids : [ids];
         const affectedKeys = [];
 
@@ -378,7 +359,7 @@ class BitmapIndex {
 
     async untickMany(keyArray, ids) {
         debug('Unticking bitmap keyArray', keyArray, ids);
-        const keysArray = Array.isArray(keyArray) ? keyArray : [keyArray];
+        const keysArray = (Array.isArray(keyArray) ? keyArray : [keyArray]).map(BitmapIndex.normalizeKey);
         const idsArray = Array.isArray(ids) ? ids : [ids];
         const affectedKeys = [];
 
@@ -684,48 +665,11 @@ class BitmapIndex {
      */
 
     static validateKey(key) {
-        if (!key) { throw new Error('Bitmap key cannot be null or undefined'); }
-        if (typeof key !== 'string') { throw new Error('Bitmap key must be a string'); }
-
-        const normalizedKey = key.startsWith('!') ? key.slice(1) : key;
-        const isValid = ALLOWED_PREFIXES.some(prefix => normalizedKey.startsWith(prefix));
-        if (!isValid) {
-            throw new Error(`Bitmap key "${key}" does not follow naming convention. Must start with one of: ${ALLOWED_PREFIXES.join(', ')}`);
-        }
-
-        return true;
+        return validateBitmapKey(key);
     }
 
     static normalizeKey(key) {
-        if (key === null || key === undefined) { return null; }
-        if (typeof key !== 'string') { throw new Error('Bitmap key must be a string'); }
-
-        // Replace backslashes with forward slashes
-        key = key.replace(/\\/g, '/');
-
-        // Handle leading exclamation mark for negation (store it, remove from key for now)
-        let isNegated = false;
-        if (key.startsWith('!')) {
-            isNegated = true;
-            key = key.slice(1);
-        }
-
-        // Normalize whitespace and case, then sanitize: allow [a-z0-9._-/]
-        key = String(key)
-            .replace(/\s+/g, '_')
-            .toLowerCase()
-            .replace(/[^a-z0-9_\-./]/g, '_')
-            .replace(/_+/g, '_');
-
-        // Collapse multiple slashes to single slashes
-        key = key.replace(/\/+/g, '/');
-
-        // Prepend '!' if it was originally negated
-        if (isNegated) {
-            key = '!' + key;
-        }
-
-        return key;
+        return normalizeBitmapKey(key);
     }
 
     /**

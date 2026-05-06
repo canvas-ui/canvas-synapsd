@@ -31,6 +31,7 @@ import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimestampIndex from './indexes/inverted/Timestamp.js';
 import Synapses from './indexes/inverted/Synapses.js';
 import LanceIndex from './indexes/lance/index.js';
+import { normalizeBitmapKeys } from './indexes/bitmaps/lib/keys.js';
 
 // Views / Abstractions
 import ContextTree from './views/ContextTree.js';
@@ -563,9 +564,7 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        // ── Phase 2: Batch write — bitmap ops deferred ───────────────────
-
-        this.bitmapIndex.startBatch();
+        // ── Phase 2: Batch write ─────────────────────────────────────────
 
         try {
             await this.#db.transaction(async () => {
@@ -578,11 +577,7 @@ class SynapsD extends EventEmitter {
                 }
             });
 
-            // Flush all deferred bitmap writes in one pass
-            this.bitmapIndex.flushBatch();
         } catch (error) {
-            // Discard deferred writes on failure
-            this.bitmapIndex.flushBatch();
             throw new Error(`putMany transaction failed: ${error.message}`);
         }
 
@@ -705,8 +700,6 @@ class SynapsD extends EventEmitter {
             prepared[i].parsed.validate();
         }
 
-        this.bitmapIndex.startBatch();
-
         try {
             await this.#db.transaction(async () => {
                 for (const { parsed, docFeatures, directorySpec } of prepared) {
@@ -717,10 +710,7 @@ class SynapsD extends EventEmitter {
                     await this.#indexDocument(parsed.id, null, directorySpec, docFeatures);
                 }
             });
-
-            this.bitmapIndex.flushBatch();
         } catch (error) {
-            this.bitmapIndex.flushBatch();
             throw new Error(`putManyDirectoryPaths transaction failed: ${error.message}`);
         }
 
@@ -803,17 +793,14 @@ class SynapsD extends EventEmitter {
 
         if (toProcess.length === 0) { return result; }
 
-        // Single transaction + bitmap batch for all index operations
-        this.bitmapIndex.startBatch();
+        // Single transaction for all index operations
         try {
             await this.#db.transaction(async () => {
                 for (const { id, docFeatures } of toProcess) {
                     await this.#indexDocument(id, contextSpec, directorySpec, docFeatures);
                 }
             });
-            this.bitmapIndex.flushBatch();
         } catch (error) {
-            this.bitmapIndex.flushBatch();
             for (const { index, id } of toProcess) {
                 result.failed.push({ index, id, error: error.message || 'Transaction failed' });
             }
@@ -926,22 +913,19 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        layersToRemove.push(...featureKeys);
+        layersToRemove.push(...normalizeBitmapKeys(featureKeys));
         const uniqueLayers = Array.from(new Set(layersToRemove));
 
-        // Single transaction + bitmap batch for all removeSynapses calls
-        this.bitmapIndex.startBatch();
+        // Single transaction for all membership removals
         try {
             await this.#db.transaction(async () => {
                 for (const { id } of validEntries) {
                     if (uniqueLayers.length > 0) {
-                        await this.#synapses.removeSynapses(id, uniqueLayers);
+                        await this.#removeDocumentMembership(id, uniqueLayers);
                     }
                 }
             });
-            this.bitmapIndex.flushBatch();
         } catch (error) {
-            this.bitmapIndex.flushBatch();
             for (const { index, id } of validEntries) {
                 result.failed.push({ index, id, error: error.message || 'Transaction failed' });
             }
@@ -1011,8 +995,7 @@ class SynapsD extends EventEmitter {
         const { emitEvent = true } = options;
         const now = new Date().toISOString();
 
-        // Single transaction + bitmap batch for all deletes
-        this.bitmapIndex.startBatch();
+        // Single transaction for all deletes
         try {
             await this.#db.transaction(async () => {
                 for (const { id, document } of toDelete) {
@@ -1020,13 +1003,11 @@ class SynapsD extends EventEmitter {
                     await this.#synapses.clearSynapses(id);
                     await this.#timestampIndex.remove(null, id);
                     await this.#checksumIndex.deleteArray(document.checksumArray);
-                    this.deletedDocumentsBitmap.tick(id);
+                    await this.deletedDocumentsBitmap.tick(id);
                     await this.#timestampIndex.insert('deleted', document.updatedAt || now, id);
                 }
             });
-            this.bitmapIndex.flushBatch();
         } catch (error) {
-            this.bitmapIndex.flushBatch();
             for (const { index, id } of toDelete) {
                 result.failed.push({ index, id, error: error.message || 'Transaction failed' });
             }
@@ -1142,7 +1123,9 @@ class SynapsD extends EventEmitter {
             featureBitmaps.push(storedDocument.schema);
         }
 
-        await this.#indexDocument(numericId, contextSpec, directorySpec, featureBitmaps);
+        await this.#db.transaction(async () => {
+            await this.#indexDocument(numericId, contextSpec, directorySpec, featureBitmaps);
+        });
 
         if (emitEvent) {
             const treeType = contextSpec ? 'context' : (directorySpec ? 'directory' : null);
@@ -1346,7 +1329,7 @@ class SynapsD extends EventEmitter {
 
                 // Apply bitmap filters
                 if (bitmapFilters.length > 0) {
-                    const filterBitmap = await this.bitmapIndex.AND(bitmapFilters);
+                    const filterBitmap = await this.bitmapIndex.AND(normalizeBitmapKeys(bitmapFilters));
                     if (filtersApplied) {
                         resultBitmap.andInPlace(filterBitmap);
                     } else {
@@ -1490,7 +1473,7 @@ class SynapsD extends EventEmitter {
         if (Array.isArray(filterArray) && filterArray.length > 0) {
             const { bitmapFilters, datetimeFilters } = parseFilters(filterArray);
             if (bitmapFilters.length > 0) {
-                const extraFilter = await this.bitmapIndex.AND(bitmapFilters);
+                const extraFilter = await this.bitmapIndex.AND(normalizeBitmapKeys(bitmapFilters));
                 if (filtersApplied && candidateBitmap) {
                     candidateBitmap.andInPlace(extraFilter);
                 } else {
@@ -1579,13 +1562,15 @@ class SynapsD extends EventEmitter {
         }
 
         try {
-            await this.documents.put(updatedDocument.id, updatedDocument);
-            await this.#checksumIndex.deleteArray(storedDocument.checksumArray);
-            await this.#checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
-            await this.#timestampIndex.insert('updated', updatedDocument.updatedAt, updatedDocument.id);
+            await this.#db.transaction(async () => {
+                await this.documents.put(updatedDocument.id, updatedDocument);
+                await this.#checksumIndex.deleteArray(storedDocument.checksumArray);
+                await this.#checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
+                await this.#timestampIndex.insert('updated', updatedDocument.updatedAt, updatedDocument.id);
 
-            // Index across all views using shared helper
-            await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
+                // Index across all views using shared helper
+                await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
+            });
 
             this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument }));
 
@@ -1616,7 +1601,7 @@ class SynapsD extends EventEmitter {
             featureBitmapArray = opts.features ?? featureBitmapArray;
         }
 
-        const featureKeys = parseBitmapArray(featureBitmapArray).filter(Boolean);
+        const featureKeys = normalizeBitmapKeys(featureBitmapArray);
         const layersToRemove = [];
         const removedContextPaths = [];
         const removedDirectoryPaths = [];
@@ -1661,7 +1646,9 @@ class SynapsD extends EventEmitter {
 
         try {
             if (layersToRemove.length > 0) {
-                await this.#synapses.removeSynapses(docId, Array.from(new Set(layersToRemove)));
+                await this.#db.transaction(async () => {
+                    await this.#removeDocumentMembership(docId, Array.from(new Set(layersToRemove)));
+                });
                 debug(`unlink: Removed doc ${docId} from ${layersToRemove.length} layers via Synapses`);
             }
 
@@ -1924,18 +1911,20 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        // Single tickMany call with all valid IDs, deferred via batch mode
+        // Single tickMany call with all valid IDs
         if (validEntries.length > 0) {
             try {
-                this.bitmapIndex.startBatch();
-                await this.bitmapIndex.tickMany(featureBitmapArray, validEntries.map(e => e.id));
-                this.bitmapIndex.flushBatch();
+                const featureKeys = normalizeBitmapKeys(featureBitmapArray);
+                await this.#db.transaction(async () => {
+                    for (const { id } of validEntries) {
+                        await this.#addDocumentMembership(id, featureKeys);
+                    }
+                });
                 for (const { index, id } of validEntries) {
                     result.successful.push({ index, id });
                 }
                 debug(`setDocumentArrayFeatures: Successfully set features for ${validEntries.length} documents.`);
             } catch (error) {
-                this.bitmapIndex.flushBatch();
                 debug(`setDocumentArrayFeatures: Batch tick failed. Error: ${error.message}`);
                 for (const { index, id } of validEntries) {
                     result.failed.push({ index, id, error: error.message || 'Unknown error' });
@@ -1977,18 +1966,20 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        // Single untickMany call with all valid IDs, deferred via batch mode
+        // Single untickMany call with all valid IDs
         if (validEntries.length > 0) {
             try {
-                this.bitmapIndex.startBatch();
-                await this.bitmapIndex.untickMany(featureBitmapArray, validEntries.map(e => e.id));
-                this.bitmapIndex.flushBatch();
+                const featureKeys = normalizeBitmapKeys(featureBitmapArray);
+                await this.#db.transaction(async () => {
+                    for (const { id } of validEntries) {
+                        await this.#removeDocumentMembership(id, featureKeys);
+                    }
+                });
                 for (const { index, id } of validEntries) {
                     result.successful.push({ index, id });
                 }
                 debug(`unsetDocumentArrayFeatures: Successfully unset features for ${validEntries.length} documents.`);
             } catch (error) {
-                this.bitmapIndex.flushBatch();
                 debug(`unsetDocumentArrayFeatures: Batch untick failed. Error: ${error.message}`);
                 for (const { index, id } of validEntries) {
                     result.failed.push({ index, id, error: error.message || 'Unknown error' });
@@ -2252,12 +2243,12 @@ class SynapsD extends EventEmitter {
             return [];
         }
         if (Array.isArray(features)) {
-            return features.filter(Boolean);
+            return normalizeBitmapKeys(features);
         }
         if (typeof features === 'object') {
-            return parseBitmapArray(features.allOf ?? features.features ?? []).filter(Boolean);
+            return normalizeBitmapKeys(features.allOf ?? features.features ?? []);
         }
-        return [features].filter(Boolean);
+        return normalizeBitmapKeys(features);
     }
 
     #normalizeQueryFeatures(features) {
@@ -2268,7 +2259,7 @@ class SynapsD extends EventEmitter {
         if (Array.isArray(features)) {
             return {
                 allOf: [],
-                anyOf: features.filter(Boolean),
+                anyOf: normalizeBitmapKeys(features),
                 noneOf: [],
             };
         }
@@ -2278,9 +2269,9 @@ class SynapsD extends EventEmitter {
         }
 
         return {
-            allOf: parseBitmapArray(features.allOf ?? []).filter(Boolean),
-            anyOf: parseBitmapArray(features.anyOf ?? []).filter(Boolean),
-            noneOf: parseBitmapArray(features.noneOf ?? []).filter(Boolean),
+            allOf: normalizeBitmapKeys(features.allOf ?? []),
+            anyOf: normalizeBitmapKeys(features.anyOf ?? []),
+            noneOf: normalizeBitmapKeys(features.noneOf ?? []),
         };
     }
 
@@ -2469,8 +2460,12 @@ class SynapsD extends EventEmitter {
             if (!allDocsBitmap || allDocsBitmap.isEmpty) continue;
             const docIds = allDocsBitmap.toArray();
             debug(`migrateRootBitmaps: ensuring ${docIds.length} docs are in root of tree ${meta.id}`);
-            await collection.tickMany([tree.rootLayer.id], docIds);
-            this.bitmapIndex.flushBatch();
+            const rootKey = collection.makeKey(tree.rootLayer.id);
+            await this.#db.transaction(async () => {
+                for (const docId of docIds) {
+                    await this.#addDocumentMembership(docId, [rootKey]);
+                }
+            });
         }
     }
 
@@ -2479,9 +2474,13 @@ class SynapsD extends EventEmitter {
      * Handles: context tree bitmaps, directory tree bitmaps, feature bitmaps, synapses.
      */
     async #indexDocument(docId, contextSpec, directorySpec, featureBitmaps) {
+        const allSynapseKeys = await this.#resolveDocumentMembershipKeys(contextSpec, directorySpec, featureBitmaps);
+        await this.#addDocumentMembership(docId, allSynapseKeys);
+    }
+
+    async #resolveDocumentMembershipKeys(contextSpec, directorySpec, featureBitmaps) {
         const allSynapseKeys = [];
 
-        // Context tree: resolve layer names to ULIDs and tick bitmaps
         if (contextSpec) {
             const { tree: contextTree, collection, path: contextPath } = this.#resolveTreeSelection('context', contextSpec, '/');
             const pathLayersArray = parseContextSpecForInsert(contextPath);
@@ -2494,41 +2493,49 @@ class SynapsD extends EventEmitter {
                 if (contextTree.rootLayer && !layerIds.includes(contextTree.rootLayer.id)) {
                     layerIds.unshift(contextTree.rootLayer.id);
                 }
-                await collection.tickMany(layerIds, docId);
-
-                const normalizedLayers = layerIds.map((layerId) => collection.makeKey(layerId));
-                allSynapseKeys.push(...normalizedLayers);
+                allSynapseKeys.push(...layerIds.map((layerId) => collection.makeKey(layerId)));
             }
         }
 
-        // Directory tree: index document at directory path(s)
         if (directorySpec) {
             const { tree: directoryTree, path: directoryPath } = this.#resolveTreeSelection('directory', directorySpec, null);
             const dirs = Array.isArray(directoryPath) ? directoryPath : [directoryPath];
-            const dirKeys = await directoryTree.putMany(docId, dirs);
-            if (dirKeys && dirKeys.length > 0) {
-                allSynapseKeys.push(...dirKeys);
-            }
+            const nodeIds = typeof directoryTree.ensurePaths === 'function'
+                ? await directoryTree.ensurePaths(dirs)
+                : [];
+            const collection = this.#directoryBitmapCollectionForTree(directoryTree.id);
+            allSynapseKeys.push(...nodeIds.map((nodeId) => collection.makeKey(nodeId)));
+
             if (!contextSpec && dirs.some((dirPath) => !this.#isIncomingDirectoryPath(dirPath))) {
                 const contextTree = this.getDefaultContextTree();
                 if (contextTree?.rootLayer) {
                     const collection = this.#contextBitmapCollectionForTree(contextTree.id);
-                    await collection.tickMany([contextTree.rootLayer.id], docId);
                     allSynapseKeys.push(collection.makeKey(contextTree.rootLayer.id));
                 }
             }
         }
 
-        // Feature bitmaps
-        if (featureBitmaps && featureBitmaps.length > 0) {
-            await this.bitmapIndex.tickMany(featureBitmaps, docId);
-            allSynapseKeys.push(...featureBitmaps);
-        }
+        allSynapseKeys.push(...normalizeBitmapKeys(featureBitmaps ?? []));
+        return Array.from(new Set(allSynapseKeys));
+    }
 
-        // Update Synapses reverse index
-        if (allSynapseKeys.length > 0) {
-            await this.#synapses.createSynapses(docId, allSynapseKeys, { syncBitmaps: false });
+    async #addDocumentMembership(docId, bitmapKeys) {
+        const keys = normalizeBitmapKeys(bitmapKeys);
+        if (keys.length === 0) {
+            return false;
         }
+        await this.bitmapIndex.tickMany(keys, docId);
+        await this.#synapses.createSynapses(docId, keys, { syncBitmaps: false });
+        return true;
+    }
+
+    async #removeDocumentMembership(docId, bitmapKeys) {
+        const keys = normalizeBitmapKeys(bitmapKeys);
+        if (keys.length === 0) {
+            return false;
+        }
+        await this.#synapses.removeSynapses(docId, keys);
+        return true;
     }
 
     #normalizeQuerySpec(spec = {}) {
@@ -2589,9 +2596,12 @@ class SynapsD extends EventEmitter {
         const selectorInput = tree !== undefined || path !== undefined
             ? { tree, path }
             : (directory ?? context ?? contextSpec ?? null);
+        const selectorType = directory != null && tree === undefined && path === undefined
+            ? 'directory'
+            : 'context';
 
         return {
-            treeSelector: selectorInput == null ? null : this.#resolveGenericTreeSelection(selectorInput, '/', 'context'),
+            treeSelector: selectorInput == null ? null : this.#resolveGenericTreeSelection(selectorInput, '/', selectorType),
             features: this.#normalizeQueryFeatures(features ?? attributes),
             filterArray: normalizedFilterArray,
             excludeContextSpecs: normalizedExcludeContextSpecs,

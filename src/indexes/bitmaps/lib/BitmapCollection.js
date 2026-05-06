@@ -2,6 +2,7 @@
 
 // Utils
 import debugInstance from 'debug';
+import { makeBitmapKey } from './keys.js';
 const debug = debugInstance('canvas:synapsd:bitmap-collection');
 
 export default class BitmapCollection {
@@ -30,27 +31,7 @@ export default class BitmapCollection {
      */
 
     makeKey(key) {
-        // Root of this collection
-        if (key === '/') { return this.keyPrefix; }
-
-        // Handle negation prefix
-        const isNegated = key.startsWith('!');
-        let segment = isNegated ? key.slice(1) : key;
-
-        // Normalize: lowercase, sanitize, collapse underscores
-        segment = String(segment)
-            .replace(/\\/g, '/')
-            .replace(/\s+/g, '_')
-            .toLowerCase()
-            .replace(/[^a-z0-9_\-./]/g, '_')
-            .replace(/_+/g, '_')
-            .replace(/\/+/g, '/');
-
-        if (segment === '') { return this.keyPrefix; }
-
-        // Construct final key - already normalized, no need for double normalization
-        const fullKey = `${this.keyPrefix}${segment}`;
-        return isNegated ? `!${fullKey}` : fullKey;
+        return makeBitmapKey(this.keyPrefix, key);
     }
 
     /**

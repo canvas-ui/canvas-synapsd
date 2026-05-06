@@ -60,15 +60,20 @@ class DirectoryTree extends EventEmitter {
     }
 
     async putMany(oid, pathArray) {
+        const nodeIds = await this.ensurePaths(pathArray);
+        if (nodeIds.length === 0) { return []; }
+        await this.#collection.tickMany(nodeIds, oid);
+        return nodeIds.map((id) => this.#collection.makeKey(id));
+    }
+
+    async ensurePaths(pathArray) {
         const paths = Array.isArray(pathArray) ? pathArray : [pathArray];
         const nodeIds = [];
         for (const path of paths) {
             const node = await this.#ensureNode(path);
             nodeIds.push(node.id);
         }
-        if (nodeIds.length === 0) { return []; }
-        await this.#collection.tickMany(nodeIds, oid);
-        return nodeIds.map((id) => this.#collection.makeKey(id));
+        return nodeIds;
     }
 
     async unlink(oid, path) {
