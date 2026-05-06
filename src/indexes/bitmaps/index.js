@@ -31,10 +31,6 @@ const ALLOWED_PREFIXES = [
 
 class BitmapIndex {
 
-    #batchMode = false;
-    #batchDepth = 0;
-    #dirtyKeys = new Set();
-
     constructor(dataset, cache = new Map(), options = {}) {
         if (!dataset) { throw new Error('Backing store dataset required'); }
         this.dataset = dataset;
@@ -56,31 +52,9 @@ class BitmapIndex {
      * In-memory bitmaps are still updated immediately (cache stays current),
      * but serialize+putSync is skipped until flushBatch() is called.
      */
-    startBatch() {
-        if (this.#batchDepth === 0) {
-            this.#dirtyKeys.clear();
-        }
-        this.#batchDepth++;
-        this.#batchMode = true;
-    }
+    startBatch() { }
 
-    flushBatch() {
-        if (this.#batchDepth > 1) {
-            this.#batchDepth--;
-            return;
-        }
-
-        for (const key of this.#dirtyKeys) {
-            const bitmap = this.cache.get(key);
-            if (bitmap && bitmap instanceof Bitmap) {
-                const serialized = bitmap.serialize(true);
-                this.dataset.putSync(key, serialized);
-            }
-        }
-        this.#dirtyKeys.clear();
-        this.#batchDepth = 0;
-        this.#batchMode = false;
-    }
+    flushBatch() { }
 
     /**
      * Collections
@@ -784,6 +758,7 @@ class BitmapIndex {
         debug('Storing bitmap to persistent store', key);
         if (!key) { throw new Error('Key is required'); }
         if (!bitmap) { throw new Error('Bitmap is required'); }
+        key = BitmapIndex.normalizeKey(key);
 
         try {
             if (!(bitmap instanceof Bitmap)) {
@@ -791,11 +766,6 @@ class BitmapIndex {
             }
 
             this.cache.set(key, bitmap);
-
-            if (this.#batchMode) {
-                this.#dirtyKeys.add(key);
-                return;
-            }
 
             const serializedBitmap = bitmap.serialize(true);
             this.dataset.putSync(key, serializedBitmap);

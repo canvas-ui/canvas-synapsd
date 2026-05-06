@@ -230,23 +230,57 @@ describe('canvas tree semantics', () => {
         }
     });
 
-    test('bitmap batching preserves dirty keys across overlapping batches', async () => {
+    test('bitmap writes are durable immediately inside batch compatibility calls', async () => {
         const store = new MemoryStore();
         const index = new BitmapIndex(store);
 
         index.startBatch();
         await index.tick('context/tree/layer-a', 1);
+        expect(store.doesExist('context/tree/layer-a')).toBe(true);
 
         index.startBatch();
         await index.tick('context/tree/layer-b', 2);
-
-        index.flushBatch();
-        expect(store.doesExist('context/tree/layer-a')).toBe(false);
-        expect(store.doesExist('context/tree/layer-b')).toBe(false);
+        expect(store.doesExist('context/tree/layer-b')).toBe(true);
 
         index.flushBatch();
         expect(store.doesExist('context/tree/layer-a')).toBe(true);
         expect(store.doesExist('context/tree/layer-b')).toBe(true);
+    });
+
+    test('re-importing existing documents persists deep context membership after restart', async () => {
+        const dbPath = await fs.mkdtemp(path.join(os.tmpdir(), 'synapsd-reimport-context-'));
+        let db = new SynapsD({ path: dbPath, backupOnOpen: false, backupOnClose: false });
+
+        try {
+            await db.start();
+            const tree = db.getDefaultContextTree();
+            const sourceDoc = {
+                schema: 'data/abstraction/note',
+                data: { content: 'malaga note' },
+                checksumArray: ['sha256/malaga-note'],
+            };
+
+            const [docId] = await db.putMany([sourceDoc], { context: { tree: tree.id, path: '/' } }, [], { skipLance: true });
+            const [reimportedId] = await db.putMany([sourceDoc], {
+                context: { tree: tree.id, path: '/home/Cestovanie/2026/Malaga' },
+            }, [], { skipLance: true });
+            expect(reimportedId).toBe(docId);
+            await db.shutdown();
+
+            db = new SynapsD({ path: dbPath, backupOnOpen: false, backupOnClose: false });
+            await db.start();
+            const reopenedTree = db.getDefaultContextTree();
+            const result = await db.list({
+                context: { tree: reopenedTree.id, path: '/home/Cestovanie/2026/Malaga' },
+            });
+
+            expect(result.error).toBeNull();
+            expect(result.count).toBe(1);
+            expect(result[0].id).toBe(docId);
+        } finally {
+            await db.shutdown().catch(() => null);
+            await fs.rm(dbPath, { recursive: true, force: true });
+        }
     });
 
 });

@@ -73,23 +73,26 @@ class LanceIndex {
     async addMany(docs) {
         if (!this.#table || !Array.isArray(docs) || docs.length === 0) { return; }
 
-        const rows = [];
-        const ids = [];
+        const rowsById = new Map();
         for (const doc of docs) {
             if (!doc || !doc.id) { continue; }
             const ftsArray = typeof doc.generateFtsData === 'function' ? doc.generateFtsData() : null;
-            rows.push({
+            rowsById.set(Number(doc.id), {
                 id: doc.id,
                 schema: doc.schema,
                 updatedAt: doc.updatedAt,
                 fts_text: Array.isArray(ftsArray) ? ftsArray.join('\n') : '',
             });
-            ids.push(doc.id);
         }
 
+        const rows = Array.from(rowsById.values());
+        const ids = Array.from(rowsById.keys());
         if (rows.length === 0) { return; }
 
-        try { await this.#table.add(rows); } catch (e) {
+        try {
+            await this.#table.delete?.(`id IN (${ids.join(',')})`);
+            await this.#table.add(rows);
+        } catch (e) {
             debug(`LanceIndex addMany failed: ${e.message}`);
             return;
         }
@@ -174,7 +177,7 @@ class LanceIndex {
             return { pageIds: [], totalCount: 0, error: e.message };
         }
 
-        let rankedIds = rows.map(r => Number(r.id));
+        let rankedIds = Array.from(new Set(rows.map(r => Number(r.id))));
         if (candidateSet) {
             rankedIds = rankedIds.filter(id => candidateSet.has(id));
         }
