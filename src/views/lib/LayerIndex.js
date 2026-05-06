@@ -7,7 +7,6 @@ const debug = debugInstance('canvas:synapsd:context-tree:layer-index');
 // Modules
 import SchemaRegistry from '../../schemas/SchemaRegistry.js';
 const RootLayer = SchemaRegistry.getSchema('internal/layers/universe');
-const CanvasLayer = SchemaRegistry.getSchema('internal/layers/canvas');
 
 /**
  * Layer Index
@@ -121,13 +120,21 @@ class LayerIndex {
         }
     }
 
-    getLayerByName(name) {
+    getLayerByName(name, options = {}) {
         if (!name) { throw new Error('Layer name is required'); }
         if (!this.#initialized) {
             throw new Error('Layer index not initialized');
         }
         const normalizedName = this.normalizeLayerName(name);
-        return this.#nameToLayerMap.get(normalizedName);
+        const type = typeof options === 'string' ? options : options?.type;
+        if (type) {
+            return this.#nameToLayerMap.get(this.#nameKey(type, normalizedName));
+        }
+
+        // Default to context lookups, but keep root resolution working: the root
+        // layer is type "universe", not "context".
+        return this.#nameToLayerMap.get(this.#nameKey('context', normalizedName))
+            || this.#nameToLayerMap.get(this.#nameKey('universe', normalizedName));
     }
 
     hasLayer(id) { return this.hasLayerID(id); }
@@ -138,12 +145,17 @@ class LayerIndex {
         return this.#store.doesExist(normalizedId);
     }
 
-    hasLayerName(name) {
+    hasLayerName(name, options = {}) {
         if (!this.#initialized) {
             throw new Error('Layer index not initialized');
         }
         const normalizedName = this.normalizeLayerName(name);
-        return this.#nameToLayerMap.has(normalizedName);
+        const type = typeof options === 'string' ? options : options?.type;
+        if (type) {
+            return this.#nameToLayerMap.has(this.#nameKey(type, normalizedName));
+        }
+        return this.#nameToLayerMap.has(this.#nameKey('context', normalizedName))
+            || this.#nameToLayerMap.has(this.#nameKey('universe', normalizedName));
     }
 
     nameToID(name) {
@@ -192,10 +204,9 @@ class LayerIndex {
         return results;
     }
 
-    async createLayer(name, options = {
-        type: 'context',
-    }) {
+    async createLayer(name, options = { type: 'context' }) {
         if (!this.#initialized) { throw new Error('Layer index not initialized'); }
+        options = { type: 'context', ...options };
 
         // Sanitize the name but keep original case
         const sanitizedName = this.sanitizeLayerName(name);
@@ -207,10 +218,12 @@ class LayerIndex {
             throw new Error(`Invalid layer type: ${options.type}`);
         }
 
-        // Check if layer already exists (case-insensitive check)
-        if (this.hasLayerName(sanitizedName)) {
-            debug(`Layer "${sanitizedName}" already exists (case-insensitive), returning existing layer`);
-            return this.getLayerByName(sanitizedName);
+        // Check if same-type layer already exists (case-insensitive check).
+        // Cross-type name reuse is allowed: context "files" and canvas "Files"
+        // are different things. Shocking, I know.
+        if (this.hasLayerName(sanitizedName, { type: options.type })) {
+            debug(`Layer "${sanitizedName}" already exists as ${options.type} (case-insensitive), returning existing layer`);
+            return this.getLayerByName(sanitizedName, { type: options.type });
         }
 
         const LayerSchema = SchemaRegistry.getSchema(`internal/layers/${options.type}`);
@@ -222,11 +235,10 @@ class LayerIndex {
         return layer;
     }
 
-    async updateLayer(name, options) {
-        // Use normalized lookup
-        const layer = this.getLayerByName(name); // Normalizes internally
+    async updateLayer(nameOrId, options = {}, lookupOptions = {}) {
+        const layer = this.#resolveLayer(nameOrId, lookupOptions);
 
-        if (!layer) { throw new Error(`Layer not found: ${name}`); }
+        if (!layer) { throw new Error(`Layer not found: ${nameOrId}`); }
         if (layer.isLocked) {
             throw new Error('Layer is locked');
         }
@@ -246,28 +258,27 @@ class LayerIndex {
         return layer;
     }
 
-    async renameLayer(name, newName) {
+    async renameLayer(nameOrId, newName, lookupOptions = {}) {
         const sanitizedNewName = this.sanitizeLayerName(newName);
-        const normalizedForComparison = this.normalizeLayerName(sanitizedNewName);
 
-        if (name === '/') {
+        if (nameOrId === '/') {
             throw new Error('Root layer "/" cannot be renamed');
         }
         if (sanitizedNewName === '/') {
             throw new Error('Invalid target name "/" for rename');
         }
 
-        const currentLayer = this.getLayerByName(name);
+        const currentLayer = this.#resolveLayer(nameOrId, lookupOptions);
         if (!currentLayer) {
-            throw new Error(`Layer not found: ${name}`);
+            throw new Error(`Layer not found: ${nameOrId}`);
         }
 
         if (currentLayer.isLocked) {
             throw new Error('Layer is locked');
         }
 
-        // Check if new name already exists (case-insensitive)
-        const existingLayer = this.getLayerByName(sanitizedNewName);
+        // Check if new name already exists within the same layer type.
+        const existingLayer = this.getLayerByName(sanitizedNewName, { type: currentLayer.type });
         if (existingLayer && existingLayer.id !== currentLayer.id) {
             throw new Error(`Unable to rename layer, name already exists: ${sanitizedNewName}`);
         }
@@ -285,7 +296,7 @@ class LayerIndex {
         // Clean up the old name mapping if different (case-insensitive comparison)
         const newNormalizedName = this.normalizeLayerName(sanitizedNewName);
         if (oldNormalizedName !== newNormalizedName) {
-            this.#nameToLayerMap.delete(oldNormalizedName);
+            this.#nameToLayerMap.delete(this.#nameKey(currentLayer.type, oldNormalizedName));
         }
 
         return currentLayer;
@@ -343,10 +354,12 @@ class LayerIndex {
         if (layer.isLocked) { throw new Error('Layer is locked'); }
         if (layer.name === '/') { throw new Error('Root layer cannot be converted'); }
 
+        const oldKey = this.#nameKey(layer.type, this.normalizeLayerName(layer.name));
         layer.type = targetType;
         if (targetType !== 'canvas') {
             delete layer.querySpec;
         }
+        this.#nameToLayerMap.delete(oldKey);
         await this.#dbStoreLayer(layer);
         // Reconstruct as the correct class now that the stored type has changed
         return this.getLayerByID(layerId);
@@ -385,8 +398,8 @@ class LayerIndex {
             await this.#store.put(this.#constructLayerKey(layer.id), layer);
         }
         const normalizedName = this.normalizeLayerName(layer.name);
-        this.#nameToLayerMap.set(normalizedName, layer);
-        debug(`Stored layer ${layer.id} in DB and map with normalized name: ${normalizedName}`);
+        this.#nameToLayerMap.set(this.#nameKey(layer.type, normalizedName), layer);
+        debug(`Stored layer ${layer.id} in DB and map with normalized name: ${normalizedName} and type: ${layer.type}`);
         return true;
     }
 
@@ -397,8 +410,8 @@ class LayerIndex {
         }
         await this.#store.remove(this.#constructLayerKey(layer.id));
         const normalizedName = this.normalizeLayerName(layer.name);
-        this.#nameToLayerMap.delete(normalizedName);
-        debug(`Removed layer ${layer.id} from DB and map using normalized name: ${normalizedName}`);
+        this.#nameToLayerMap.delete(this.#nameKey(layer.type, normalizedName));
+        debug(`Removed layer ${layer.id} from DB and map using normalized name: ${normalizedName} and type: ${layer.type}`);
         return true;
     }
 
@@ -432,8 +445,8 @@ class LayerIndex {
                 const layer = await this.getLayerByID(layerId); // Make sure this returns a promise if async
                 if (layer && layer.name) {
                     const normalizedName = this.normalizeLayerName(layer.name);
-                    this.#nameToLayerMap.set(normalizedName, layer);
-                    debug(`Added layer ${layerId} to map with normalized name: ${normalizedName}`);
+                    this.#nameToLayerMap.set(this.#nameKey(layer.type, normalizedName), layer);
+                    debug(`Added layer ${layerId} to map with normalized name: ${normalizedName} and type: ${layer.type}`);
                 } else {
                     debug(`Skipping layer ${layerId} during map init: Invalid layer object retrieved.`);
                     console.warn(`Layer data for ID ${layerId} seems invalid or lacks a name.`);
@@ -443,6 +456,24 @@ class LayerIndex {
                 // Decide if we should continue or stop initialization
             }
         }
+    }
+
+    #nameKey(type, normalizedName) {
+        return `${type || 'context'}:${normalizedName}`;
+    }
+
+    #resolveLayer(nameOrId, options = {}) {
+        if (!nameOrId) { return null; }
+        if (this.#looksLikeId(nameOrId)) {
+            const byId = this.getLayerByID(nameOrId);
+            if (byId) { return byId; }
+        }
+        return this.getLayerByName(String(nameOrId), options);
+    }
+
+    #looksLikeId(value) {
+        return typeof value === 'string'
+            && (value.startsWith('layer/') || /^[0-9A-Z]{26}$/.test(value) || value.includes('-'));
     }
 }
 

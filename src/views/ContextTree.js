@@ -131,10 +131,10 @@ class ContextTree extends EventEmitter {
         return this.#buildPathArray();
     }
 
-    getLayer(name) {
+    getLayer(name, options = {}) {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
         if (!name) { return undefined; }
-        return this.#layerIndex.getLayerByName(name);
+        return this.#layerIndex.getLayerByName(name, options);
     }
 
     getLayerById(id) {
@@ -216,16 +216,9 @@ class ContextTree extends EventEmitter {
     async renameLayer(nameOrId, newName) {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
         if (!newName) { throw new Error('New name required'); }
-        // Accept both ID and name. Prefer ID if it looks like one.
-        let currentName = nameOrId;
-        if (looksLikeId(nameOrId)) {
-            const layer = this.getLayerById(nameOrId);
-            if (!layer) { throw new Error(`Layer not found with ID: ${nameOrId}`); }
-            currentName = layer.name;
-        }
 
         // Bitmaps are keyed by ULID, not by name. No bitmap rename needed - O(1) rename!
-        const layer = await this.#layerIndex.renameLayer(String(currentName), String(newName));
+        const layer = await this.#layerIndex.renameLayer(String(nameOrId), String(newName));
         // Persist updated tree JSON to reflect renamed layer names
         await this.recalculateTree();
         return layer;
@@ -233,13 +226,7 @@ class ContextTree extends EventEmitter {
 
     async updateLayer(nameOrId, updates = {}) {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
-        let targetName = nameOrId;
-        if (looksLikeId(nameOrId)) {
-            const layer = this.getLayerById(nameOrId);
-            if (!layer) { throw new Error(`Layer not found with ID: ${nameOrId}`); }
-            targetName = layer.name;
-        }
-        const layer = await this.#layerIndex.updateLayer(String(targetName), { ...updates });
+        const layer = await this.#layerIndex.updateLayer(String(nameOrId), { ...updates });
         return layer;
     }
 
@@ -421,6 +408,14 @@ class ContextTree extends EventEmitter {
             }
 
             if (this.pathExists(normalizedPath)) {
+                const existingLeaf = this.getLayerForPath(normalizedPath);
+                if (existingLeaf && leafType && existingLeaf.type !== leafType) {
+                    return {
+                        data: [],
+                        count: 0,
+                        error: `Path "${normalizedPath}" already exists as type "${existingLeaf.type}". Pick a different path for the new ${leafType}.`,
+                    };
+                }
                 debug(`Normalized path "${normalizedPath}" already exists, skipping`);
                 return {
                     data: this.pathToLayerIds(normalizedPath),
@@ -435,13 +430,23 @@ class ContextTree extends EventEmitter {
             const createdLayers = [];
 
             const layerNames = normalizedPath.split('/').filter(Boolean);
-            for (const layerName of layerNames) {
-                const isLeaf = layerName === layerNames[layerNames.length - 1];
-                let layer = this.#layerIndex.getLayerByName(layerName);
+            for (let index = 0; index < layerNames.length; index++) {
+                const layerName = layerNames[index];
+                const isLeaf = index === layerNames.length - 1;
+                const desiredType = isLeaf ? leafType : 'context';
+                const existingChild = this.#findChildByName(currentNode, layerName);
+                if (existingChild && existingChild.payload.type !== desiredType) {
+                    return {
+                        data: [],
+                        count: 0,
+                        error: `Path segment "${layerName}" already exists at this location as type "${existingChild.payload.type}". Pick a different name for the new ${desiredType}.`,
+                    };
+                }
+
+                let layer = this.#layerIndex.getLayerByName(layerName, { type: desiredType });
                 if (!layer) {
                     debug(`Layer "${layerName}" not found in layerIndex`);
                     if (autoCreateLayers) {
-                        const desiredType = isLeaf ? leafType : 'context';
                         const createOpts = { type: desiredType };
                         if (isLeaf && desiredType === 'canvas') {
                             if (insertOptions.querySpec !== undefined) { createOpts.querySpec = insertOptions.querySpec; }
@@ -467,24 +472,17 @@ class ContextTree extends EventEmitter {
                     };
                 }
 
-                // Refuse silent type upgrade on collision. LayerIndex currently uses
-                // global per-tree name uniqueness, so an existing layer with the same
-                // name as a desired canvas leaf is almost always a name collision —
-                // not the user trying to convert that exact layer to a canvas.
-                // Auto-upgrade hid this and caused unrelated layers to silently
-                // switch to canvas (see project_layerindex_naming memory).
-                if (isLeaf && leafType && layer.type !== leafType) {
-                    return {
-                        data: [],
-                        count: 0,
-                        error: `A layer named "${layerName}" already exists as type "${layer.type}". Pick a different name for the new ${leafType}.`,
-                    };
-                }
-
                 layerIds.push(layer.id);
                 child = currentNode.getChild(layer.id);
 
                 if (!child) {
+                    if (existingChild) {
+                        return {
+                            data: [],
+                            count: 0,
+                            error: `Path segment "${layerName}" resolves ambiguously at "${normalizedPath}".`,
+                        };
+                    }
                     child = new TreeNode(layer.id, layer);
                     currentNode.addChild(child);
                 }
@@ -583,15 +581,26 @@ class ContextTree extends EventEmitter {
                 return { data: { pathFrom: normalizedPathFrom, pathTo: normalizedPathTo, layerId: renamed.id, layerName: renamed.name }, count: 1, error: null };
             }
 
-            // Check if destination already contains the node. If so, skip adding, but still remove from source.
             const alreadyExistsAtDest = destNode.hasChild(nodeToMove.id);
             if (alreadyExistsAtDest) {
-                debug(`Node ${nodeToMove.id} (${layer.name}) already exists under destination ${destNode.id}. Skipping add step.`);
-            } else {
-                // Perform the attachment
-                debug(`Attaching node ${nodeToMove.id} to ${destNode.id}`);
-                destNode.addChild(nodeToMove);
+                return {
+                    data: null,
+                    count: 0,
+                    error: `Destination "${normalizedPathTo}" already contains "${layer.name}".`,
+                };
             }
+
+            const nameCollision = this.#findChildByName(destNode, layer.name);
+            if (nameCollision && nameCollision.id !== nodeToMove.id) {
+                return {
+                    data: null,
+                    count: 0,
+                    error: `Destination "${normalizedPathTo}" already contains a layer named "${layer.name}".`,
+                };
+            }
+
+            debug(`Attaching node ${nodeToMove.id} to ${destNode.id}`);
+            destNode.addChild(nodeToMove);
 
             // Always remove from the original parent
             debug(`Removing node ${nodeToMove.id} from ${sourceParentNode.id}`);
@@ -665,15 +674,16 @@ class ContextTree extends EventEmitter {
         // It shares the layer payload but is a distinct node in the tree structure
         const targetNode = new TreeNode(layer.id, layer);
 
-        // Add the new node under the destination parent
-        if (!destParentNode.hasChild(targetNode.id)) {
-            destParentNode.addChild(targetNode);
-            debug(`Added node ${targetNode.id} (${layer.name}) under ${destParentNode.id} (${destParentNode.payload?.name || 'root'})`);
-        } else {
-            debug(`Node ${targetNode.id} (${layer.name}) already exists under destination ${destParentNode.id}. Skipping add.`);
-            // If needed for recursion, update targetNode to the existing instance
-            // targetNode = destParentNode.getChild(targetNode.id);
+        if (destParentNode.hasChild(targetNode.id)) {
+            throw new Error(`Destination "${normalizedPathTo}" already contains "${layer.name}".`);
         }
+        const nameCollision = this.#findChildByName(destParentNode, layer.name);
+        if (nameCollision) {
+            throw new Error(`Destination "${normalizedPathTo}" already contains a layer named "${layer.name}".`);
+        }
+
+        destParentNode.addChild(targetNode);
+        debug(`Added node ${targetNode.id} (${layer.name}) under ${destParentNode.id} (${destParentNode.payload?.name || 'root'})`);
 
         // --- Recursive Call Logic ---
         if (recursive && sourceNode.hasChildren) {
@@ -1123,12 +1133,24 @@ class ContextTree extends EventEmitter {
      * @returns {Array<string>} Array of non-canvas layer IDs (skips '/' root, unresolvable names, and canvas leaves)
      */
     resolveLayerIds(layerNames) {
+        const path = Array.isArray(layerNames)
+            ? layerNames.join('/')
+            : String(layerNames ?? '/');
+        try {
+            return this.#getNodesForPath(path)
+                .slice(1)
+                .filter((node) => node.payload?.type !== 'canvas')
+                .map((node) => node.id);
+        } catch (error) {
+            debug(`Failed to resolve layer IDs from path nodes for "${path}": ${error.message}`);
+        }
+
+        const names = Array.isArray(layerNames) ? layerNames : String(layerNames ?? '/').split('/').filter(Boolean);
         const ids = [];
-        for (const name of layerNames) {
+        for (const name of names) {
             if (name === '/') { continue; } // Skip root for bitmap operations
-            const layer = this.#layerIndex.getLayerByName(name);
+            const layer = this.#layerIndex.getLayerByName(name, { type: 'context' });
             if (!layer) { continue; }
-            if (layer.type === 'canvas') { continue; }
             ids.push(layer.id);
         }
         return ids;
@@ -1259,17 +1281,16 @@ class ContextTree extends EventEmitter {
                 return null;
             }
 
-            // Stored JSON uses display names; compare using normalized form.
             const storedName = nodeData.name;
-            let layer = this.#layerIndex.getLayerByName(storedName);
+            let layer = this.#layerIndex.getLayerByID(nodeData.id);
 
             if (!layer) {
                 // This case implies inconsistency between stored tree and LayerIndex init
-                console.warn(`Layer '${normalizedName}' (ID: ${nodeData.id}) not found in LayerIndex map during tree build. Attempting direct fetch/reconstruction.`);
-                layer = this.#layerIndex.getLayerByID(nodeData.id); // Fetches and reconstructs
+                console.warn(`Layer '${storedName}' (ID: ${nodeData.id}) not found by ID during tree build. Attempting name lookup.`);
+                layer = this.#layerIndex.getLayerByName(storedName, { type: nodeData.type || 'context' });
                 if (!layer) {
                     // If still not found, something is wrong. Skip this node.
-                    console.error(`Failed to find or reconstruct layer '${normalizedName}' (ID: ${nodeData.id}) during tree build. Skipping node.`);
+                    console.error(`Failed to find or reconstruct layer '${storedName}' (ID: ${nodeData.id}) during tree build. Skipping node.`);
                     return null;
                     // Alternatively, throw new Error(`...`);
                 }
@@ -1277,13 +1298,6 @@ class ContextTree extends EventEmitter {
                 if (this.#layerIndex.normalizeLayerName(layer.name) !== this.#layerIndex.normalizeLayerName(storedName)) {
                     console.error(`Name mismatch after direct fetch for layer ID ${layer.id}: Expected '${storedName}', got '${layer.name}'. Skipping node.`);
                     return null;
-                }
-
-            } else {
-                // Verify the ID from the map instance matches the stored tree data
-                if (layer.id !== nodeData.id) {
-                    console.error(`ID mismatch for layer '${storedName}': Map has ${layer.id}, JSON has ${nodeData.id}. Using instance from map.`);
-                    // Continue, trusting the instance from the map
                 }
             }
 
@@ -1379,15 +1393,9 @@ class ContextTree extends EventEmitter {
         nodes.push(currentNode); // Include root node
 
         for (const layerName of layerNames) {
-            const layer = this.#layerIndex.getLayerByName(layerName); // LayerIndex normalizes name
-            if (!layer) {
-                throw new Error(`Layer "${layerName}" not found in index for path "${path}"`);
-            }
-
-            const child = currentNode.getChild(layer.id);
+            const child = this.#findChildByName(currentNode, layerName);
             if (!child) {
-                // This case means the layer exists in the index but is not present at this specific path in the tree structure.
-                throw new Error(`Path segment "${layerName}" (Layer ID: ${layer.id}) does not exist at this location in the tree: "${path}"`);
+                throw new Error(`Path segment "${layerName}" does not exist at this location in the tree: "${path}"`);
             }
 
             nodes.push(child);
@@ -1395,6 +1403,13 @@ class ContextTree extends EventEmitter {
         }
 
         return nodes;
+    }
+
+    #findChildByName(parentNode, name) {
+        if (!parentNode) { return null; }
+        const normalized = this.#layerIndex.normalizeLayerName(name);
+        return Array.from(parentNode.children.values())
+            .find((child) => this.#layerIndex.normalizeLayerName(child.payload?.name) === normalized) || null;
     }
 
     #pathToLayerNames(path) {
