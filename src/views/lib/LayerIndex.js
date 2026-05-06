@@ -239,7 +239,10 @@ class LayerIndex {
         const layer = this.#resolveLayer(nameOrId, lookupOptions);
 
         if (!layer) { throw new Error(`Layer not found: ${nameOrId}`); }
-        if (layer.isLocked) {
+        const updateKeys = Object.keys(options || {});
+        const isLockedMetadataUpdate = updateKeys.length > 0
+            && updateKeys.every(key => ['querySpec', 'metadata'].includes(key));
+        if (layer.isLocked && !isLockedMetadataUpdate) {
             throw new Error('Layer is locked');
         }
         // Never let callers overwrite identity / discriminator via update
