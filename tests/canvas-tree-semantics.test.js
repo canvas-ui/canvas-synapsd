@@ -145,4 +145,39 @@ describe('canvas tree semantics', () => {
             await fs.rm(dbPath, { recursive: true, force: true });
         }
     });
+
+    test('canvas directly under root composes saved feature filters with root data', async () => {
+        const dbPath = await fs.mkdtemp(path.join(os.tmpdir(), 'synapsd-root-canvas-filter-'));
+        const db = new SynapsD({ path: dbPath, backupOnOpen: false, backupOnClose: false });
+
+        try {
+            await db.start();
+            const tree = db.getDefaultContextTree();
+
+            await db.put({
+                schema: 'data/abstraction/file',
+                data: { filename: 'invoice.pdf', mime: 'application/pdf' },
+                checksumArray: ['sha256:file'],
+            }, { context: { tree: tree.id, path: '/dev' } });
+            await db.put({
+                schema: 'data/abstraction/note',
+                data: { content: 'note' },
+            }, { context: { tree: tree.id, path: '/dev' } });
+            await tree.insertPath('/Files', {
+                leafType: 'canvas',
+            });
+
+            const result = await db.list({
+                context: { tree: tree.id, path: '/Files' },
+                features: { allOf: ['data/abstraction/file'] },
+            });
+
+            expect(result.error).toBeNull();
+            expect(result.count).toBe(1);
+            expect(result[0].schema).toBe('data/abstraction/file');
+        } finally {
+            await db.shutdown().catch(() => null);
+            await fs.rm(dbPath, { recursive: true, force: true });
+        }
+    });
 });
