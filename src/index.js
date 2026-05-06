@@ -2672,16 +2672,14 @@ class SynapsD extends EventEmitter {
         for (const pathLayers of pathLayersArray) {
             if (pathLayers.length === 1 && pathLayers[0] === '/') {
                 sawExplicitPath = true;
-                if (tree.rootLayer) {
-                    const rootBitmap = await collection.OR([tree.rootLayer.id]);
-                    if (rootBitmap && !rootBitmap.isEmpty) {
-                        if (resultBitmap) {
-                            resultBitmap.orInPlace(rootBitmap);
-                        } else {
-                            resultBitmap = rootBitmap;
-                        }
-                        sawExistingPath = true;
+                const rootBitmap = await this.#getContextRootBitmap(tree, collection);
+                if (rootBitmap && !rootBitmap.isEmpty) {
+                    if (resultBitmap) {
+                        resultBitmap.orInPlace(rootBitmap);
+                    } else {
+                        resultBitmap = rootBitmap;
                     }
+                    sawExistingPath = true;
                 }
                 continue;
             }
@@ -2700,8 +2698,7 @@ class SynapsD extends EventEmitter {
             // under '/' return all docs at the root, not zero.
             let pathBitmap;
             if (layerIds.length === 0) {
-                if (!tree.rootLayer) { continue; }
-                pathBitmap = await collection.OR([tree.rootLayer.id]);
+                pathBitmap = await this.#getContextRootBitmap(tree, collection);
             } else {
                 pathBitmap = await collection.AND(layerIds);
             }
@@ -2721,6 +2718,17 @@ class SynapsD extends EventEmitter {
         }
 
         return sawExistingPath ? (resultBitmap || new RoaringBitmap32()) : new RoaringBitmap32();
+    }
+
+    async #getContextRootBitmap(tree, collection) {
+        if (!tree?.rootLayer) {
+            return new RoaringBitmap32();
+        }
+        const rootBitmap = await collection.OR([tree.rootLayer.id]);
+        if (rootBitmap && !rootBitmap.isEmpty) {
+            return rootBitmap;
+        }
+        return await this.#buildContextTreeMembershipBitmap(tree);
     }
 
     async #buildDirectorySelectorBitmap(directorySpec) {
@@ -2797,7 +2805,14 @@ class SynapsD extends EventEmitter {
 
     async #buildContextTreeMembershipBitmap(tree) {
         const collection = this.#contextBitmapCollectionForTree(tree.id);
-        const layerIds = (await tree.layers).filter((layerId) => layerId && layerId !== tree.rootLayer?.id);
+        const layerIds = [];
+        for (const layerKey of await tree.layers) {
+            const layer = tree.getLayerById(layerKey);
+            if (!layer || layer.id === tree.rootLayer?.id || layer.type === 'canvas') {
+                continue;
+            }
+            layerIds.push(layer.id);
+        }
         if (layerIds.length === 0) {
             return new RoaringBitmap32();
         }

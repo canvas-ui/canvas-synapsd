@@ -1,5 +1,9 @@
 import { describe, expect, test } from '@jest/globals';
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 
+import SynapsD from '../src/index.js';
 import ContextTree from '../src/views/ContextTree.js';
 import DirectoryTree from '../src/views/DirectoryTree.js';
 
@@ -112,5 +116,33 @@ describe('canvas tree semantics', () => {
 
         await expect(tree.movePath('/a/foo', '/b/foo')).rejects.toThrow('already exists');
         await expect(tree.copyPath('/a/foo', '/b/foo')).rejects.toThrow('already exists');
+    });
+
+    test('canvas directly under root reads parent root data when root bitmap is missing', async () => {
+        const dbPath = await fs.mkdtemp(path.join(os.tmpdir(), 'synapsd-root-canvas-'));
+        const db = new SynapsD({ path: dbPath, backupOnOpen: false, backupOnClose: false });
+
+        try {
+            await db.start();
+            const tree = db.getDefaultContextTree();
+
+            await db.put({
+                schema: 'data/abstraction/note',
+                data: { content: 'dev note' },
+            }, { context: { tree: tree.id, path: '/dev' } });
+            await tree.insertPath('/Files', { leafType: 'canvas' });
+
+            // Simulate older datasets where root membership was not backfilled.
+            await tree.collection.deleteBitmap(tree.rootLayer.id);
+
+            const result = await db.list({ context: { tree: tree.id, path: '/Files' } });
+
+            expect(result.error).toBeNull();
+            expect(result.count).toBe(1);
+            expect(result[0].data.content).toBe('dev note');
+        } finally {
+            await db.shutdown().catch(() => null);
+            await fs.rm(dbPath, { recursive: true, force: true });
+        }
     });
 });
