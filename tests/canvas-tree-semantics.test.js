@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 
 import SynapsD from '../src/index.js';
+import BitmapIndex from '../src/indexes/bitmaps/index.js';
 import ContextTree from '../src/views/ContextTree.js';
 import DirectoryTree from '../src/views/DirectoryTree.js';
 
@@ -13,6 +14,7 @@ class MemoryStore {
     get(key) { return this.#data.get(key); }
     doesExist(key) { return this.#data.has(key); }
     async put(key, value) { this.#data.set(key, value); }
+    putSync(key, value) { this.#data.set(key, value); }
     async remove(key) { this.#data.delete(key); }
 
     async *getKeys({ start = '', end = '\uffff' } = {}) {
@@ -227,4 +229,24 @@ describe('canvas tree semantics', () => {
             await fs.rm(dbPath, { recursive: true, force: true });
         }
     });
+
+    test('bitmap batching preserves dirty keys across overlapping batches', async () => {
+        const store = new MemoryStore();
+        const index = new BitmapIndex(store);
+
+        index.startBatch();
+        await index.tick('context/tree/layer-a', 1);
+
+        index.startBatch();
+        await index.tick('context/tree/layer-b', 2);
+
+        index.flushBatch();
+        expect(store.doesExist('context/tree/layer-a')).toBe(false);
+        expect(store.doesExist('context/tree/layer-b')).toBe(false);
+
+        index.flushBatch();
+        expect(store.doesExist('context/tree/layer-a')).toBe(true);
+        expect(store.doesExist('context/tree/layer-b')).toBe(true);
+    });
+
 });

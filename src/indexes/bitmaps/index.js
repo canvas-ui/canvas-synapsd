@@ -32,6 +32,7 @@ const ALLOWED_PREFIXES = [
 class BitmapIndex {
 
     #batchMode = false;
+    #batchDepth = 0;
     #dirtyKeys = new Set();
 
     constructor(dataset, cache = new Map(), options = {}) {
@@ -56,11 +57,19 @@ class BitmapIndex {
      * but serialize+putSync is skipped until flushBatch() is called.
      */
     startBatch() {
+        if (this.#batchDepth === 0) {
+            this.#dirtyKeys.clear();
+        }
+        this.#batchDepth++;
         this.#batchMode = true;
-        this.#dirtyKeys.clear();
     }
 
     flushBatch() {
+        if (this.#batchDepth > 1) {
+            this.#batchDepth--;
+            return;
+        }
+
         for (const key of this.#dirtyKeys) {
             const bitmap = this.cache.get(key);
             if (bitmap && bitmap instanceof Bitmap) {
@@ -69,6 +78,7 @@ class BitmapIndex {
             }
         }
         this.#dirtyKeys.clear();
+        this.#batchDepth = 0;
         this.#batchMode = false;
     }
 
