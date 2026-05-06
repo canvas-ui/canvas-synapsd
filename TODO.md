@@ -8,6 +8,12 @@
 ## High priority
 
 - Ensure all batch methods are using the accompanied backend(LMDB/Lance) batch methods too!
+- One canonical key normalizer for every index. No more casing roulette.
+- One write path for document membership. documents, bitmaps, synapses, lance should not all cosplay as source of truth.
+- Proper transaction boundary semantics. Either LMDB owns durability or we stop pretending.
+- Lance as a rebuildable projection only. Never part of correctness.
+- Invariant tests for: insert, link, unlink, import existing doc, restart, search.
+
 
 ## Generic
 
