@@ -118,9 +118,9 @@ describe('canvas tree semantics', () => {
         await expect(tree.copyPath('/a/foo', '/b/foo')).rejects.toThrow('already exists');
     });
 
-    test('canvas directly under root reads parent root data when root bitmap is missing', async () => {
+    test('startup repairs missing context root bitmap from documents source', async () => {
         const dbPath = await fs.mkdtemp(path.join(os.tmpdir(), 'synapsd-root-canvas-'));
-        const db = new SynapsD({ path: dbPath, backupOnOpen: false, backupOnClose: false });
+        let db = new SynapsD({ path: dbPath, backupOnOpen: false, backupOnClose: false });
 
         try {
             await db.start();
@@ -134,8 +134,13 @@ describe('canvas tree semantics', () => {
 
             // Simulate older datasets where root membership was not backfilled.
             await tree.collection.deleteBitmap(tree.rootLayer.id);
+            await db.shutdown();
 
-            const result = await db.list({ context: { tree: tree.id, path: '/Files' } });
+            db = new SynapsD({ path: dbPath, backupOnOpen: false, backupOnClose: false });
+            await db.start();
+            const repairedTree = db.getDefaultContextTree();
+
+            const result = await db.list({ context: { tree: repairedTree.id, path: '/Files' } });
 
             expect(result.error).toBeNull();
             expect(result.count).toBe(1);
@@ -175,6 +180,48 @@ describe('canvas tree semantics', () => {
             expect(result.error).toBeNull();
             expect(result.count).toBe(1);
             expect(result[0].schema).toBe('data/abstraction/file');
+        } finally {
+            await db.shutdown().catch(() => null);
+            await fs.rm(dbPath, { recursive: true, force: true });
+        }
+    });
+
+    test('startup repairs stale context root bitmap from documents source', async () => {
+        const dbPath = await fs.mkdtemp(path.join(os.tmpdir(), 'synapsd-root-canvas-stale-root-'));
+        let db = new SynapsD({ path: dbPath, backupOnOpen: false, backupOnClose: false });
+
+        try {
+            await db.start();
+            const tree = db.getDefaultContextTree();
+
+            const fileId = await db.put({
+                schema: 'data/abstraction/file',
+                data: { filename: 'invoice.pdf', mime: 'application/pdf' },
+                checksumArray: ['sha256:file'],
+            }, { context: { tree: tree.id, path: '/dev' } });
+            const noteId = await db.put({
+                schema: 'data/abstraction/note',
+                data: { content: 'note' },
+            }, { context: { tree: tree.id, path: '/dev' } });
+            await tree.insertPath('/Files', { leafType: 'canvas' });
+
+            // Simulate old/bad root membership: non-empty, but missing the file.
+            await tree.collection.deleteBitmap(tree.rootLayer.id);
+            await tree.collection.tick(tree.rootLayer.id, noteId);
+            await db.shutdown();
+
+            db = new SynapsD({ path: dbPath, backupOnOpen: false, backupOnClose: false });
+            await db.start();
+            const repairedTree = db.getDefaultContextTree();
+
+            const result = await db.list({
+                context: { tree: repairedTree.id, path: '/Files' },
+                features: { allOf: ['data/abstraction/file'] },
+            });
+
+            expect(result.error).toBeNull();
+            expect(result.count).toBe(1);
+            expect(result[0].id).toBe(fileId);
         } finally {
             await db.shutdown().catch(() => null);
             await fs.rm(dbPath, { recursive: true, force: true });

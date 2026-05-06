@@ -2465,12 +2465,10 @@ class SynapsD extends EventEmitter {
             const tree = this.getTree(meta.id);
             if (!tree?.rootLayer) continue;
             const collection = this.#contextBitmapCollectionForTree(meta.id);
-            const existingRoot = await collection.OR([tree.rootLayer.id]);
-            if (existingRoot && !existingRoot.isEmpty) continue;
-            const allDocsBitmap = await this.#buildContextTreeMembershipBitmap(tree);
+            const allDocsBitmap = await this.#buildContextRootSourceBitmap();
             if (!allDocsBitmap || allDocsBitmap.isEmpty) continue;
             const docIds = allDocsBitmap.toArray();
-            debug(`migrateRootBitmaps: backfilling ${docIds.length} docs into root of tree ${meta.id}`);
+            debug(`migrateRootBitmaps: ensuring ${docIds.length} docs are in root of tree ${meta.id}`);
             await collection.tickMany([tree.rootLayer.id], docIds);
             this.bitmapIndex.flushBatch();
         }
@@ -2510,6 +2508,14 @@ class SynapsD extends EventEmitter {
             const dirKeys = await directoryTree.putMany(docId, dirs);
             if (dirKeys && dirKeys.length > 0) {
                 allSynapseKeys.push(...dirKeys);
+            }
+            if (!contextSpec && dirs.some((dirPath) => !this.#isIncomingDirectoryPath(dirPath))) {
+                const contextTree = this.getDefaultContextTree();
+                if (contextTree?.rootLayer) {
+                    const collection = this.#contextBitmapCollectionForTree(contextTree.id);
+                    await collection.tickMany([contextTree.rootLayer.id], docId);
+                    allSynapseKeys.push(collection.makeKey(contextTree.rootLayer.id));
+                }
             }
         }
 
@@ -2724,11 +2730,7 @@ class SynapsD extends EventEmitter {
         if (!tree?.rootLayer) {
             return new RoaringBitmap32();
         }
-        const rootBitmap = await collection.OR([tree.rootLayer.id]);
-        if (rootBitmap && !rootBitmap.isEmpty) {
-            return rootBitmap;
-        }
-        return await this.#buildContextTreeMembershipBitmap(tree);
+        return await collection.OR([tree.rootLayer.id]);
     }
 
     async #buildDirectorySelectorBitmap(directorySpec) {
@@ -2817,6 +2819,32 @@ class SynapsD extends EventEmitter {
             return new RoaringBitmap32();
         }
         return await collection.OR(layerIds);
+    }
+
+    async #buildContextRootSourceBitmap() {
+        const rootBitmap = await this.#buildAllDocumentsBitmap();
+        if (!rootBitmap || rootBitmap.isEmpty) {
+            return rootBitmap;
+        }
+
+        const incomingTree = this.getTree('directory') || this.getDefaultDirectoryTree();
+        if (!incomingTree || incomingTree.type !== 'directory' || !incomingTree.pathExists('/.incoming')) {
+            return rootBitmap;
+        }
+
+        const incomingBitmap = await this.#buildTreeMembershipBitmap({
+            tree: incomingTree.id,
+            path: '/.incoming',
+        });
+        if (incomingBitmap && !incomingBitmap.isEmpty) {
+            rootBitmap.andNotInPlace(incomingBitmap);
+        }
+        return rootBitmap;
+    }
+
+    #isIncomingDirectoryPath(path) {
+        const normalized = String(path || '/').trim().replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+        return normalized === '/.incoming' || normalized.startsWith('/.incoming/');
     }
 
     async #buildTreeMembershipBitmap(treeSelector) {
