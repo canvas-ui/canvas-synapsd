@@ -7,7 +7,8 @@ import Layer from './BaseLayer.js';
  *
  * A tree-addressable "stored db view" layer. It carries a `querySpec`
  * (features + filters) that the application AND-composes with the host
- * tree path at query time, plus an opaque `metadata` blob owned entirely
+ * tree path at query time. `querySpec.query` is an optional FTS string for
+ * saved searches. `metadata` is an opaque blob owned entirely
  * by the consumer (UI layout, share info, applet config, etc.).
  *
  * SynapsD itself never introspects `metadata`.
@@ -41,6 +42,7 @@ export default class Canvas extends Layer {
         const out = {
             features: null,
             filters: [],
+            query: null,
         };
         if (!spec || typeof spec !== 'object') { return out; }
 
@@ -61,6 +63,11 @@ export default class Canvas extends Layer {
 
         if (Array.isArray(spec.filters)) {
             out.filters = spec.filters.filter((x) => typeof x === 'string');
+        }
+
+        const query = spec.query ?? spec.search ?? spec.q;
+        if (typeof query === 'string' && query.trim()) {
+            out.query = query.trim();
         }
 
         return out;

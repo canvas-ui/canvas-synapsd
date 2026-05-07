@@ -6,6 +6,7 @@ import { ulid } from 'ulid';
 import TreeNode from './lib/TreeNode.js';
 import { EVENTS } from '../utils/events.js';
 import { buildTreeEventPayload } from './lib/treeEvents.js';
+import Canvas from '../schemas/internal/layers/Canvas.js';
 
 const debug = debugInstance('canvas:synapsd:directory-tree');
 
@@ -137,9 +138,33 @@ class DirectoryTree extends EventEmitter {
         return parent.getSortedChildren().map((child) => child.payload.name);
     }
 
-    async insertPath(path = '/') {
+    async insertPath(path = '/', options = {}) {
         const normalizedPath = this.#normalizePath(path);
-        const node = await this.#ensureNode(normalizedPath);
+        const leafType = options.leafType || options.type || 'directory';
+        const existing = this.#getNodeForPath(normalizedPath);
+        if (existing && existing.payload.type !== leafType) {
+            if (leafType === 'canvas' && existing.payload.type === 'directory' && !existing.hasChildren) {
+                existing.payload.type = 'canvas';
+                this.#applyNodeUpdates(existing, options);
+                await this.#persistNode(existing);
+                return {
+                    data: [existing.id],
+                    count: 1,
+                    error: null,
+                };
+            }
+            return {
+                data: [],
+                count: 0,
+                error: `Path "${normalizedPath}" already exists as type "${existing.payload.type}". Pick a different path for the new ${leafType}.`,
+            };
+        }
+
+        const node = existing || await this.#ensureNode(normalizedPath, { leafType });
+        if (leafType === 'canvas') {
+            this.#applyNodeUpdates(node, options);
+            await this.#persistNode(node);
+        }
         this.#emitTreeEvent(EVENTS.TREE_PATH_INSERTED, {
             path: normalizedPath,
             nodeId: node.id,
@@ -149,6 +174,19 @@ class DirectoryTree extends EventEmitter {
             count: 1,
             error: null,
         };
+    }
+
+    getLayerForPath(path = '/') {
+        const node = this.#getNodeForPath(this.#normalizePath(path));
+        return node ? this.#nodeToLayer(node) : null;
+    }
+
+    async updateLayer(nameOrId, updates = {}) {
+        const node = this.#findNodeById(String(nameOrId));
+        if (!node) { throw new Error(`Layer not found: ${nameOrId}`); }
+        this.#applyNodeUpdates(node, updates);
+        await this.#persistNode(node);
+        return this.#nodeToLayer(node);
     }
 
     async movePath(pathFrom, pathTo) {
@@ -252,29 +290,40 @@ class DirectoryTree extends EventEmitter {
     }
 
     buildJsonTree(node = this.root) {
-        return {
+        const view = {
             id: node.id,
             name: node.payload.name,
-            type: 'directory',
+            type: node.payload.type || 'directory',
+            label: node.payload.label || node.payload.name,
+            description: node.payload.description || '',
+            color: node.payload.color ?? null,
+            metadata: node.payload.metadata || {},
             children: node.getSortedChildren().map((child) => this.buildJsonTree(child)),
         };
+        if (view.type === 'canvas') {
+            view.querySpec = Canvas.normalizeQuerySpec(node.payload.querySpec);
+        }
+        return view;
     }
 
-    async #ensureNode(path) {
+    async #ensureNode(path, options = {}) {
         const normalizedPath = this.#normalizePath(path);
         if (normalizedPath === '/') { return this.root; }
 
         let current = this.root;
+        const segments = normalizedPath.split('/').filter(Boolean);
         const touched = new Set();
-        for (const rawName of normalizedPath.split('/').filter(Boolean)) {
+        for (let index = 0; index < segments.length; index++) {
+            const rawName = segments[index];
             const name = this.#sanitizeSegment(rawName);
             let child = this.#findChildByName(current, name);
             if (!child) {
+                const isLeaf = index === segments.length - 1;
                 child = new TreeNode(ulid(), {
                     id: ulid(),
                     name,
                     parentId: current.id,
-                    type: 'directory',
+                    type: isLeaf ? (options.leafType || 'directory') : 'directory',
                 });
                 child.payload.id = child.id;
                 current.addChild(child);
@@ -296,7 +345,12 @@ class DirectoryTree extends EventEmitter {
             id: null,
             name: sourceNode.payload.name,
             parentId: null,
-            type: 'directory',
+            type: sourceNode.payload.type || 'directory',
+            label: sourceNode.payload.label,
+            description: sourceNode.payload.description,
+            color: sourceNode.payload.color,
+            metadata: sourceNode.payload.metadata,
+            querySpec: sourceNode.payload.querySpec,
         });
         clone.payload.id = clone.id;
 
@@ -357,13 +411,17 @@ class DirectoryTree extends EventEmitter {
     }
 
     async #persistNode(node) {
-        await this.#dataStore.put(this.#nodeKey(node.id), {
+        const data = {
             id: node.id,
             name: node.payload.name,
             parentId: node.payload.parentId ?? null,
-            type: 'directory',
+            type: node.payload.type || 'directory',
             childIds: Array.from(node.children.keys()),
-        });
+        };
+        for (const key of ['label', 'description', 'color', 'metadata', 'querySpec']) {
+            if (node.payload[key] !== undefined) { data[key] = node.payload[key]; }
+        }
+        await this.#dataStore.put(this.#nodeKey(node.id), data);
     }
 
     #nodeKey(nodeId) {
@@ -404,6 +462,52 @@ class DirectoryTree extends EventEmitter {
             ids.push(...this.#collectNodeIds(child));
         }
         return ids;
+    }
+
+    #findNodeById(nodeId, current = this.root) {
+        if (!current) { return null; }
+        if (current.id === nodeId || current.payload.id === nodeId) { return current; }
+        for (const child of current.children.values()) {
+            const found = this.#findNodeById(nodeId, child);
+            if (found) { return found; }
+        }
+        return null;
+    }
+
+    #applyNodeUpdates(node, updates = {}) {
+        if (updates.querySpec !== undefined) {
+            node.payload.querySpec = Canvas.normalizeQuerySpec(updates.querySpec);
+        }
+        if (updates.metadata !== undefined && typeof updates.metadata === 'object' && updates.metadata !== null) {
+            node.payload.metadata = updates.metadata;
+        }
+        for (const key of ['label', 'description', 'color']) {
+            if (updates[key] !== undefined) { node.payload[key] = updates[key]; }
+        }
+    }
+
+    #nodeToLayer(node) {
+        const payload = node.payload;
+        const layer = {
+            id: node.id,
+            type: payload.type || 'directory',
+            name: payload.name,
+            label: payload.label || payload.name,
+            description: payload.description || '',
+            color: payload.color ?? null,
+            metadata: payload.metadata || {},
+            locked: false,
+            lockedBy: [],
+            toJSON() {
+                const json = { ...this };
+                delete json.toJSON;
+                return json;
+            },
+        };
+        if (layer.type === 'canvas') {
+            layer.querySpec = Canvas.normalizeQuerySpec(payload.querySpec);
+        }
+        return layer;
     }
 
     #findChildByName(parent, name) {
