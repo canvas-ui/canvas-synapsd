@@ -143,6 +143,18 @@ function normalizeEmailAddressList(list) {
     return list?.value?.map(normalizeEmailAddress).filter(Boolean);
 }
 
+function normalizeReferences(value) {
+    if (Array.isArray(value)) {
+        return value.map((entry) => String(entry || '').trim()).filter(Boolean);
+    }
+    if (typeof value === 'string') {
+        const matches = value.match(/<[^>]+>/g);
+        const refs = matches?.length ? matches : value.split(/\s+/);
+        return refs.map((entry) => entry.trim()).filter(Boolean);
+    }
+    return undefined;
+}
+
 function formatEmailAddress(address) {
     const email = String(address?.address || '').trim();
     const name = String(address?.name || '').trim();
@@ -301,7 +313,7 @@ export default class Email extends Document {
                 receivedAt: new Date().toISOString(),
                 messageId: parsed.messageId || `imap-${imapMetadata.uid || Date.now()}`,
                 inReplyTo: parsed.inReplyTo,
-                references: parsed.references,
+                references: normalizeReferences(parsed.references),
                 attachments: parsed.attachments?.map(att => ({
                     filename: att.filename,
                     contentType: att.contentType,
