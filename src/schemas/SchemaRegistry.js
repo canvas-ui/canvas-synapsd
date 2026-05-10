@@ -5,6 +5,9 @@ import BaseDocument from './BaseDocument.js';
 
 // Document Schemas
 import Document from './abstractions/Document.js';
+// The below abstractions should move back to the app level, not the db level
+// We will need a proper schema registry API so that consumers can define,
+// register and validate schemas on runtime
 import Contact from './abstractions/Contact.js';
 import Email from './abstractions/Email.js';
 import File from './abstractions/File.js';
