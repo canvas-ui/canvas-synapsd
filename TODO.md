@@ -42,7 +42,7 @@
 - [] Add a new "root" (universe) layer type, prevent all ops on the root layer, root "/" layer should always be locked
 - [] Support the following format option
   - Ids
-  - meta data portion only- 
+  - metadata portion only 
   - full document
 
 ### "!tag" shorthand (optional sugar)
