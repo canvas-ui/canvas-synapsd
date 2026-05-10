@@ -32,11 +32,7 @@
 
 ## TODO
 
-## Timeline v2
-
-[TODO.timeline.md](TODO.timeline.md) — goals, notes, and implementation sketch for Timeline(v2).
-
-## Generic
+### Generic
 
 - [] Ensure all batch methods are using the accompanied backend(LMDB/Lance) batch methods too whereever it makes sense
 - [] Add backup/restore or dump/import functionality internally
