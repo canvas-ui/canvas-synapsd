@@ -6,280 +6,229 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const Roaring = require('roaring');
 const { RoaringBitmap32 } = Roaring;
-import {
-    parseISO,
-    getUnixTime,
-    isToday,
-    isYesterday,
-    isThisWeek,
-    isThisMonth,
-    isThisYear,
-    startOfDay,
-    endOfDay,
-    startOfYesterday,
-    endOfYesterday,
-    startOfWeek,
-    endOfWeek,
-    startOfMonth,
-    endOfMonth,
-    startOfYear,
-    endOfYear
-} from 'date-fns';
 
 import BitSlicedIndex from '../bitmaps/lib/BitSlicedIndex.js';
 
-const VALID_ACTIONS = ['created', 'updated', 'deleted'];
+// We use a 64-bit address space in seconds.
+// This safely covers ~292 billion years into the past or future at second precision.
+// 2^63 is the offset we add to all second values to allow negative timestamps (e.g. before 1970).
+const BIT_DEPTH = 64;
+const EPOCH_OFFSET = 1n << 63n;
 
 /**
- * TimestampIndex - Maps normalized timestamps (seconds) to bitmaps of document IDs using BSI.
- *
- * Replaces the legacy YYYY-MM-DD Key-Value approach with Bit-Sliced Indexing
- * for efficient range queries.
+ * TimestampIndex - Maps arbitrary timelines to bitmaps of document IDs using Dual-BSI.
+ * Replaces the legacy action-based Key-Value approach with dynamic Interval Range capability.
  */
 export default class TimestampIndex {
-
-    constructor(bitmapIndex, actionBitmaps) {
+    constructor(bitmapIndex) {
         if (!bitmapIndex) { throw new Error('BitmapIndex required for TimestampIndex'); }
-        if (!actionBitmaps || !VALID_ACTIONS.every(act => actionBitmaps[act] && typeof actionBitmaps[act].has === 'function')) {
-            throw new Error('Valid actionBitmaps (created, updated, deleted), which are Bitmap instances, are required');
-        }
-
         this.bitmapIndex = bitmapIndex;
-        this.actionBitmaps = actionBitmaps; // { created: Bitmap, updated: Bitmap, deleted: Bitmap }
-
-        // Initialize BSI instances for each action
-        this.bsi = {
-            created: new BitSlicedIndex('internal/ts/c', bitmapIndex),
-            updated: new BitSlicedIndex('internal/ts/u', bitmapIndex),
-            deleted: new BitSlicedIndex('internal/ts/d', bitmapIndex),
-        };
-
-        debug('TimestampIndex initialized with BSI');
+        this.timelines = {}; // Lazy instantiation registry
+        debug(`TimestampIndex initialized with Dual-BSI approach (${BIT_DEPTH}-bit)`);
     }
 
     /**
-     * Get the count of items in the index.
-     * For BSI, this is ambiguous (count of bits? count of unique IDs?).
-     * We'll return the size of the 'created' action bitmap as a proxy for "indexed documents",
-     * or we can return 0 as "keys" concept is deprecated.
+     * Lazily instantiate and retrieve a timeline's Dual-BSI.
+     * @param {string} name - Timeline name
+     * @returns {{start: BitSlicedIndex, end: BitSlicedIndex}}
      */
-    async getCount() {
-        // Proxy to global created bitmap size
-        return this.actionBitmaps.created.size;
+    getTimeline(name) {
+        if (!this.timelines[name]) {
+            this.timelines[name] = {
+                start: new BitSlicedIndex(`internal/ts/${name}/start`, this.bitmapIndex, BIT_DEPTH),
+                end: new BitSlicedIndex(`internal/ts/${name}/end`, this.bitmapIndex, BIT_DEPTH)
+            };
+        }
+        return this.timelines[name];
     }
 
     /**
-     * Insert a document ID with its timestamp and action.
-     * @param {string} action - The action type (created, updated, deleted).
-     * @param {string|Date|number} timestamp - The timestamp of the action.
+     * Get the count of unique documents in a specific timeline.
+     * @param {string} timelineName - Timeline name
+     * @returns {Promise<number>}
+     */
+    async getCount(timelineName) {
+        const timeline = this.getTimeline(timelineName);
+        const ebm = await this.bitmapIndex.getBitmap(timeline.start.ebmKey, false);
+        return ebm ? ebm.size : 0;
+    }
+
+    /**
+     * Insert a document ID with its start and optional end times into a timeline.
+     * @param {string} timelineName - The name of the timeline (e.g., 'crud:created', 'wikipedia').
      * @param {number} id - Document ID.
+     * @param {number|bigint|string|Date} startVal - The start timestamp.
+     * @param {number|bigint|string|Date} [endVal] - The end timestamp. Defaults to startVal.
      * @returns {Promise<boolean>} True on success.
      */
-    async insert(action, timestamp, id) {
-        if (!this.#isValidAction(action)) {
-            throw new Error(`Invalid action: ${action}. Must be one of ${VALID_ACTIONS.join(', ')}`);
-        }
-        const ts = this.#normalizeTimestamp(timestamp);
-        if (ts === null) { throw new Error('Invalid timestamp provided for insert'); }
+    async insert(timelineName, id, startVal, endVal = null) {
         if (id === undefined || id === null) { throw new Error('ID required for insert'); }
+        if (startVal === undefined || startVal === null) { throw new Error('startVal required for insert'); }
 
-        // Update BSI
-        await this.bsi[action].setValue(id, ts);
-        debug(`Set ID ${id} timestamp to ${ts} in BSI '${action}'`);
+        const startInt = this.#toBigIntSec(startVal);
+        const endInt = endVal !== null && endVal !== undefined ? this.#toBigIntSec(endVal) : startInt;
 
-        // Update action bitmap
-        const actionBitmap = this.actionBitmaps[action];
-        if (actionBitmap) {
-            actionBitmap.add(id);
-            // Note: We don't strictly need to save actionBitmap here if BSI is the source of truth,
-            // but actionBitmaps are likely used elsewhere for quick "isCreated" checks.
-            // Also, BitmapIndex usually requires explicit save, but here we are operating on the instance passed in.
-            // We assume the caller or a periodic process handles persistence of actionBitmaps if they are not auto-saved.
-            // However, looking at src/index.js, they are created via bitmapIndex.createBitmap,
-            // so they are managed by BitmapIndex. We should probably save them.
-            await this.bitmapIndex.tick(actionBitmap.key, id);
-        }
+        const timeline = this.getTimeline(timelineName);
 
+        await Promise.all([
+            timeline.start.setValue(id, startInt),
+            timeline.end.setValue(id, endInt)
+        ]);
+
+        debug(`Set ID ${id} in timeline '${timelineName}' [${startInt}, ${endInt}]`);
         return true;
     }
 
     /**
-     * Get document IDs for a specific timestamp (Exact Match).
-     * @param {string|Date|number} timestamp - The timestamp to query.
-     * @returns {Promise<Array<number>>} Array of document IDs.
+     * Find document IDs overlapping with a given range in one or more timelines.
+     * Condition for overlap: (timeline.start <= queryEnd) AND (timeline.end >= queryStart)
+     * 
+     * @param {string|Array<string>} timelineNames - Timeline name(s).
+     * @param {number|bigint|string|Date} queryStart - Query range start.
+     * @param {number|bigint|string|Date} queryEnd - Query range end.
+     * @returns {Promise<Array<number>>} Array of unique document IDs across requested timelines.
      */
-    async get(timestamp) {
-        const ts = this.#normalizeTimestamp(timestamp);
-        if (ts === null) { return []; }
+    async findOverlapping(timelineNames, queryStart, queryEnd) {
+        const startInt = this.#toBigIntSec(queryStart);
+        const endInt = this.#toBigIntSec(queryEnd);
 
-        // "Get" implies "any action happened at this timestamp"?
-        // Or specific action? Legacy implies union.
-        const results = await Promise.all([
-            this.bsi.created.query('=', ts),
-            this.bsi.updated.query('=', ts),
-            this.bsi.deleted.query('=', ts)
-        ]);
-
+        const names = Array.isArray(timelineNames) ? timelineNames : [timelineNames];
         const union = new RoaringBitmap32();
+
+        const promises = names.map(async (name) => {
+            const timeline = this.getTimeline(name);
+            const [startMatches, endMatches] = await Promise.all([
+                timeline.start.query('<=', endInt),
+                timeline.end.query('>=', startInt)
+            ]);
+            return RoaringBitmap32.and(startMatches, endMatches);
+        });
+
+        const results = await Promise.all(promises);
         for (const res of results) {
             union.orInPlace(res);
         }
+
         return union.toArray();
     }
 
     /**
-     * Find document IDs by timestamp range.
-     * Returns union of all actions in the range.
-     * @param {string|Date|number} startDate - Starting timestamp (inclusive).
-     * @param {string|Date|number} endDate - Ending timestamp (inclusive).
-     * @returns {Promise<Array<number>>} Array of unique document IDs.
-     */
-    async findByRange(startDate, endDate) {
-        const start = this.#normalizeTimestamp(startDate);
-        const end = this.#normalizeTimestamp(endDate);
-
-        if (start === null || end === null) {
-            throw new Error('Valid start and end dates required for findByRange');
-        }
-        if (start > end) {
-            throw new Error('Start date must be before or equal to end date');
-        }
-
-        const results = await Promise.all([
-            this.bsi.created.query('BETWEEN', [start, end]),
-            this.bsi.updated.query('BETWEEN', [start, end]),
-            this.bsi.deleted.query('BETWEEN', [start, end])
-        ]);
-
-        const union = new RoaringBitmap32();
-        for (const res of results) {
-            union.orInPlace(res);
-        }
-        return union.toArray();
-    }
-
-    /**
-     * Find document IDs by timestamp range and action.
-     * @param {string} action - The action type (created, updated, deleted).
-     * @param {string|Date|number} startDate - Starting timestamp.
-     * @param {string|Date|number} endDate - Ending timestamp.
-     * @returns {Promise<Array<number>>} Array of document IDs.
-     */
-    async findByRangeAndAction(action, startDate, endDate) {
-        if (!this.#isValidAction(action)) {
-            throw new Error(`Invalid action: ${action}. Must be one of: ${VALID_ACTIONS.join(', ')}`);
-        }
-
-        const start = this.#normalizeTimestamp(startDate);
-        const end = this.#normalizeTimestamp(endDate);
-
-        if (start === null || end === null) {
-            throw new Error('Valid start and end dates required');
-        }
-
-        const result = await this.bsi[action].query('BETWEEN', [start, end]);
-        return result.toArray();
-    }
-
-    /**
-     * Remove a document ID from a timestamp entry.
-     * NOTE: In BSI, we typically just "unset" the value for the ID.
-     * But we need to know the action.
-     * If action is not provided (legacy signature), we attempt to remove from ALL.
-     * @param {string|Date|number} timestamp - Ignored in BSI (value matches ID).
+     * Remove a document ID from a specific timeline.
+     * @param {string} timelineName - The timeline name.
      * @param {number} id - Document ID to remove.
      * @returns {Promise<boolean>} True.
      */
-    async remove(timestamp, id) {
+    async remove(timelineName, id) {
         if (id === undefined || id === null) { return false; }
 
-        // We remove from all actions as we don't know which one is intended
+        const timeline = this.getTimeline(timelineName);
         await Promise.all([
-            this.bsi.created.removeValue(id),
-            this.bsi.updated.removeValue(id),
-            this.bsi.deleted.removeValue(id)
+            timeline.start.removeValue(id),
+            timeline.end.removeValue(id)
         ]);
 
-        debug(`Removed ID ${id} from all BSI indices`);
+        debug(`Removed ID ${id} from timeline '${timelineName}'`);
         return true;
     }
 
-    /**
-     * Delete an entire timestamp entry (removes all IDs).
-     * Not supported/applicable in BSI (would require finding all IDs with value X and clearing them).
-     * @deprecated
-     */
-    async delete(timestamp) {
-        debug('delete() is deprecated/not supported in BSI TimestampIndex');
-        return false;
-    }
+    // ========================================
+    // Timeframe Utilities
+    // ========================================
 
     /**
-     * Check if a timestamp key exists.
-     * @deprecated
+     * Get a date boundary pair { start, end } for common timeframes.
+     * Returned as ISO strings suitable for insert() and findOverlapping().
+     * @param {string} timeframe - 'today', 'yesterday', 'thisWeek', 'thisMonth', 'thisYear', 'thisCentury', 'thisMillennium'
+     * @returns {{start: string, end: string}}
      */
-    async has(timestamp) {
-        const ids = await this.get(timestamp);
-        return ids.length > 0;
-    }
-
-    /**
-     * List timestamp keys.
-     * @deprecated
-     */
-    async list(prefix) {
-        debug('list() is deprecated in BSI TimestampIndex');
-        return [];
-    }
-
-    /**
-     * List all stored timestamp keys.
-     * @deprecated
-     */
-    async listAll() {
-        debug('listAll() is deprecated in BSI TimestampIndex');
-        return [];
-    }
-
-    /**
-     * Find document IDs by predefined timeframe and optionally filter by action.
-     * @param {string} timeframe - Timeframe: 'today', 'yesterday', 'thisWeek', 'thisMonth', 'thisYear'.
-     * @param {string} [action] - Optional action filter (created, updated, deleted).
-     * @returns {Promise<Array<number>>} Array of document IDs.
-     */
-    async findByTimeframe(timeframe, action = null) {
+    static getTimeframeBounds(timeframe) {
         const now = new Date();
-        let start, end;
+        const year = now.getFullYear();
+        const month = now.getMonth();
+        const date = now.getDate();
 
+        let start, end;
+        
         switch (timeframe) {
             case 'today':
-                start = startOfDay(now);
-                end = endOfDay(now);
+                start = new Date(year, month, date);
+                end = new Date(start.getTime() + 86400000 - 1);
                 break;
             case 'yesterday':
-                start = startOfYesterday();
-                end = endOfYesterday();
+                start = new Date(year, month, date - 1);
+                end = new Date(start.getTime() + 86400000 - 1);
                 break;
             case 'thisWeek':
-                start = startOfWeek(now);
-                end = endOfWeek(now); // or end = now
+                const day = now.getDay() || 7; 
+                start = new Date(year, month, date - day + 1);
+                end = new Date(start.getTime() + 7 * 86400000 - 1);
                 break;
             case 'thisMonth':
-                start = startOfMonth(now);
-                end = endOfMonth(now); // or end = now
+                start = new Date(year, month, 1);
+                end = new Date(year, month + 1, 0, 23, 59, 59, 999);
                 break;
             case 'thisYear':
-                start = startOfYear(now);
-                end = endOfYear(now); // or end = now
+                start = new Date(year, 0, 1);
+                end = new Date(year, 11, 31, 23, 59, 59, 999);
+                break;
+            case 'thisCentury':
+                const centuryStart = Math.floor(year / 100) * 100;
+                start = new Date(centuryStart, 0, 1);
+                end = new Date(centuryStart + 99, 11, 31, 23, 59, 59, 999);
+                break;
+            case 'thisMillennium':
+                const millStart = Math.floor(year / 1000) * 1000;
+                start = new Date(millStart, 0, 1);
+                end = new Date(millStart + 999, 11, 31, 23, 59, 59, 999);
                 break;
             default:
-                throw new Error(`Invalid timeframe: ${timeframe}. Must be one of: today, yesterday, thisWeek, thisMonth, thisYear`);
+                throw new Error(`Invalid timeframe: ${timeframe}`);
+        }
+        
+        return { start: start.toISOString(), end: end.toISOString() };
+    }
+
+    // ========================================
+    // Timeline Management API
+    // ========================================
+
+    /**
+     * List all persistent timeline names in the database.
+     * @returns {Promise<Array<string>>}
+     */
+    async listTimelines() {
+        const keys = await this.bitmapIndex.listBitmaps('internal/ts');
+        // Extract the timeline name from keys like 'internal/ts/wikipedia/start/ebm'
+        const names = keys.map(k => k.split('/')[2]).filter(Boolean);
+        return [...new Set(names)];
+    }
+
+    /**
+     * Check if a timeline exists.
+     * @param {string} name - Timeline name
+     * @returns {boolean}
+     */
+    hasTimeline(name) {
+        // EBM for 'start' slice indicates existence of data
+        return this.bitmapIndex.hasBitmap(`internal/ts/${name}/start/ebm`);
+    }
+
+    /**
+     * Delete an entire timeline and free its bitmaps.
+     * @param {string} name - Timeline name
+     * @returns {Promise<boolean>}
+     */
+    async deleteTimeline(name) {
+        const keys = await this.bitmapIndex.listBitmaps(`internal/ts/${name}`);
+        if (keys.length === 0) return false;
+
+        for (const key of keys) {
+            await this.bitmapIndex.deleteBitmap(key);
         }
 
-        if (action) {
-            return await this.findByRangeAndAction(action, start, end);
-        }
-        return await this.findByRange(start, end);
+        delete this.timelines[name];
+        debug(`Deleted timeline '${name}' (removed ${keys.length} bit slices)`);
+        return true;
     }
 
     // ========================================
@@ -287,45 +236,28 @@ export default class TimestampIndex {
     // ========================================
 
     /**
-     * Normalize timestamp to Unix Timestamp (Seconds).
-     * @param {string|Date|number} timestamp - Input timestamp.
-     * @returns {number|null} Unix timestamp (integer seconds) or null if invalid.
+     * Convert arbitrary value to seconds-precision BigInt with offset.
+     * @param {number|bigint|string|Date} val
+     * @returns {bigint}
      */
-    #normalizeTimestamp(timestamp) {
-        if (timestamp === null || timestamp === undefined) { return null; }
-
-        try {
-            let date;
-            if (timestamp instanceof Date) {
-                date = timestamp;
-            } else if (typeof timestamp === 'number') {
-                // Assuming milliseconds if > 2^32? Or seconds?
-                // JS Date uses ms.
-                // If it's a small number, it might be seconds.
-                // But let's assume input is either Date object or Date-compatible (ms).
-                // But getUnixTime expects Date or number (ms).
-                date = new Date(timestamp);
-            } else if (typeof timestamp === 'string') {
-                date = parseISO(timestamp);
-                if (isNaN(date.getTime())) {
-                    date = new Date(timestamp); // Fallback
-                }
-            } else {
-                return null;
-            }
-
-            if (isNaN(date.getTime())) {
-                throw new Error('Invalid date value');
-            }
-
-            return getUnixTime(date);
-        } catch (e) {
-            debug(`Error normalizing timestamp '${String(timestamp)}': ${e.message}`);
-            return null;
+    #toBigIntSec(val) {
+        if (typeof val === 'bigint') return val + EPOCH_OFFSET;
+        
+        let ms;
+        if (val instanceof Date) {
+            ms = val.getTime();
+        } else if (typeof val === 'number') {
+            // Assume input numbers are milliseconds (JS standard)
+            ms = val;
+        } else if (typeof val === 'string') {
+            ms = new Date(val).getTime();
+        } else {
+            return EPOCH_OFFSET;
         }
-    }
 
-    #isValidAction(action) {
-        return VALID_ACTIONS.includes(action);
+        if (isNaN(ms)) return EPOCH_OFFSET;
+        
+        // Convert to seconds, then apply the offset to avoid negative numbers in BSI
+        return BigInt(Math.floor(ms / 1000)) + EPOCH_OFFSET;
     }
 }

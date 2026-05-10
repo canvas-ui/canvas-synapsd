@@ -164,18 +164,9 @@ class SynapsD extends EventEmitter {
             bitmapCacheSize: this.#bitmapCache.size,
             bitmapStoreSize: this.#bitmapStore.getCount(),
             checksumIndexSize: this.#checksumIndex.getCount(),
-            timestampIndexSize: this.#timestampIndex ? this.#timestampIndex.getCount() : 0,
+            timestampIndexSize: 'async',
             // TODO: Refactor this away
             deletedDocumentsCount: this.deletedDocumentsBitmap ? this.deletedDocumentsBitmap.size : 0,
-            actionBitmaps: this.actionBitmaps ? {
-                created: this.actionBitmaps.created.size,
-                updated: this.actionBitmaps.updated.size,
-                deleted: this.actionBitmaps.deleted.size,
-            } : {
-                created: 0,
-                updated: 0,
-                deleted: 0,
-            },
         };
     }
 
@@ -193,19 +184,10 @@ class SynapsD extends EventEmitter {
     async start() {
         debug('Starting SynapsD');
         try {
-            // Initialize action bitmaps
-            this.actionBitmaps = {
-                created: await this.bitmapIndex.createBitmap('internal/action/created'),
-                updated: await this.bitmapIndex.createBitmap('internal/action/updated'),
-                deleted: await this.bitmapIndex.createBitmap('internal/action/deleted'),
-            };
             // Initialize deletedDocumentsBitmap here
             this.deletedDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/gc/deleted');
 
-            this.#timestampIndex = new TimestampIndex(
-                this.bitmapIndex,
-                this.actionBitmaps,
-            );
+            this.#timestampIndex = new TimestampIndex(this.bitmapIndex);
 
             // Initialize Synapses inverted index
             this.#synapses = new Synapses(
@@ -571,8 +553,8 @@ class SynapsD extends EventEmitter {
                 for (const { parsed, docFeatures } of prepared) {
                     await this.documents.put(parsed.id, parsed);
                     await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
-                    await this.#timestampIndex.insert('created', parsed.createdAt || new Date().toISOString(), parsed.id);
-                    await this.#timestampIndex.insert('updated', parsed.updatedAt, parsed.id);
+                    await this.#timestampIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
+                    if (parsed.updatedAt) await this.#timestampIndex.insert('crud:updated', parsed.id, parsed.updatedAt);
                     await this.#indexDocument(parsed.id, contextSpec, directorySpec, docFeatures);
                 }
             });
@@ -705,8 +687,8 @@ class SynapsD extends EventEmitter {
                 for (const { parsed, docFeatures, directorySpec } of prepared) {
                     await this.documents.put(parsed.id, parsed);
                     await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
-                    await this.#timestampIndex.insert('created', parsed.createdAt || new Date().toISOString(), parsed.id);
-                    await this.#timestampIndex.insert('updated', parsed.updatedAt, parsed.id);
+                    await this.#timestampIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
+                    if (parsed.updatedAt) await this.#timestampIndex.insert('crud:updated', parsed.id, parsed.updatedAt);
                     await this.#indexDocument(parsed.id, null, directorySpec, docFeatures);
                 }
             });
@@ -1001,10 +983,12 @@ class SynapsD extends EventEmitter {
                 for (const { id, document } of toDelete) {
                     await this.documents.delete(id);
                     await this.#synapses.clearSynapses(id);
-                    await this.#timestampIndex.remove(null, id);
+                    await this.#timestampIndex.remove('crud:created', id);
+                    await this.#timestampIndex.remove('crud:updated', id);
+                    await this.#timestampIndex.remove('crud:deleted', id);
                     await this.#checksumIndex.deleteArray(document.checksumArray);
                     await this.deletedDocumentsBitmap.tick(id);
-                    await this.#timestampIndex.insert('deleted', document.updatedAt || now, id);
+                    await this.#timestampIndex.insert('crud:deleted', id, document.updatedAt || now);
                 }
             });
         } catch (error) {
@@ -1071,8 +1055,8 @@ class SynapsD extends EventEmitter {
             await this.#db.transaction(async () => {
                 await this.documents.put(parsedDocument.id, parsedDocument);
                 await this.#checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
-                await this.#timestampIndex.insert('created', parsedDocument.createdAt || new Date().toISOString(), parsedDocument.id);
-                await this.#timestampIndex.insert('updated', parsedDocument.updatedAt, parsedDocument.id);
+                await this.#timestampIndex.insert('crud:created', parsedDocument.id, parsedDocument.createdAt || new Date());
+                if (parsedDocument.updatedAt) await this.#timestampIndex.insert('crud:updated', parsedDocument.id, parsedDocument.updatedAt);
                 await this.#indexDocument(parsedDocument.id, contextSpec, directorySpec, featureBitmaps);
             });
         } catch (error) {
@@ -1566,7 +1550,7 @@ class SynapsD extends EventEmitter {
                 await this.documents.put(updatedDocument.id, updatedDocument);
                 await this.#checksumIndex.deleteArray(storedDocument.checksumArray);
                 await this.#checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
-                await this.#timestampIndex.insert('updated', updatedDocument.updatedAt, updatedDocument.id);
+                if (updatedDocument.updatedAt) await this.#timestampIndex.insert('crud:updated', updatedDocument.id, updatedDocument.updatedAt);
 
                 // Index across all views using shared helper
                 await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
@@ -1697,7 +1681,9 @@ class SynapsD extends EventEmitter {
                 debug(`delete: Document ${docId} removed from all bitmaps and Synapses index`);
 
                 // Remove document from timestamp indices (created, updated)
-                await this.#timestampIndex.remove(null, docId);
+                await this.#timestampIndex.remove('crud:created', docId);
+                await this.#timestampIndex.remove('crud:updated', docId);
+                await this.#timestampIndex.remove('crud:deleted', docId);
                 debug(`delete: Document ${docId} removed from timestamp indices`);
 
                 // Delete document checksums from inverted index
@@ -1709,7 +1695,7 @@ class SynapsD extends EventEmitter {
                 debug(`delete: Document ${docId} added to deleted documents bitmap`);
 
                 // Update timestamp index
-                await this.#timestampIndex.insert('deleted', document.updatedAt || new Date().toISOString(), docId);
+                await this.#timestampIndex.insert('crud:deleted', docId, document.updatedAt || new Date());
                 debug(`delete: Timestamp for document ${docId} updated in index`);
             });
 

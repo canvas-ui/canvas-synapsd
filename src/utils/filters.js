@@ -45,7 +45,7 @@ export function parseDatetimeFilterString(filterString) {
         return { type: 'datetime', action, range: { start: rest[0], end: rest[1] } };
     }
 
-    const validTimeframes = ['today', 'yesterday', 'thisWeek', 'thisMonth', 'thisYear'];
+    const validTimeframes = ['today', 'yesterday', 'thisWeek', 'thisMonth', 'thisYear', 'thisCentury', 'thisMillennium'];
     if (validTimeframes.includes(specType)) {
         return { type: 'datetime', action, timeframe: specType };
     }
@@ -64,15 +64,23 @@ export async function applyDatetimeFilter(filter, timestampIndex) {
 
     try {
         const action = filter.action;
-        let ids = [];
+        let start, end;
 
         if (filter.timeframe) {
-            ids = await timestampIndex.findByTimeframe(filter.timeframe, action);
+            const bounds = timestampIndex.constructor.getTimeframeBounds(filter.timeframe);
+            start = bounds.start;
+            end = bounds.end;
         } else if (filter.range) {
-            ids = await timestampIndex.findByRangeAndAction(action, filter.range.start, filter.range.end);
+            start = filter.range.start;
+            end = filter.range.end;
+        } else {
+            return null;
         }
 
-        if (ids.length > 0) {
+        const timelineName = `crud:${action}`;
+        const ids = await timestampIndex.findOverlapping(timelineName, start, end);
+
+        if (ids && ids.length > 0) {
             const roaring = await import('roaring');
             const { RoaringBitmap32 } = roaring.default || roaring;
             return new RoaringBitmap32(ids);

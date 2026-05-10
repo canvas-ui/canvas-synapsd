@@ -272,6 +272,55 @@ const ranked = await db.search({
 });
 ```
 
+## Timelines & Intervals
+
+SynapsD natively supports indexing documents into dynamic timelines using a 64-bit Dual-BSI (Bit-Sliced Index). This allows both point-in-time and range/interval queries (e.g., "communism", "middle-ages") with no extra dependencies.
+
+### System CRUD Timelines
+
+Document lifecycle events are automatically indexed into `crud:created`, `crud:updated`, and `crud:deleted` timelines. You can filter queries using `datetime:` strings in the `filters` array.
+
+Formats:
+- `datetime:ACTION:TIMEFRAME` (e.g., `datetime:updated:thisWeek`)
+- `datetime:ACTION:range:START:END` (e.g., `datetime:created:range:2026-01-01:2026-05-10`)
+
+```js
+const recentDocs = await db.list({
+    tree: 'projects',
+    filters: ['datetime:created:thisWeek', 'datetime:updated:today']
+});
+```
+
+### Custom Timelines
+
+You can lazily instantiate custom timelines and index your documents into them with explicit start and end times.
+
+```js
+// Imagine we extracted historical events and want to index them
+const wikiEventId = await db.put({ schema: 'event', data: { title: 'Fall of Rome' } });
+const britEventId = await db.put({ schema: 'event', data: { title: 'Roman Empire collapses' } });
+
+// Insert interval: [start, end]. If end is omitted, it defaults to start (point-in-time)
+await db.timestampIndex.insert('wikipedia', wikiEventId, '0476-01-01T00:00:00Z', '0476-12-31T23:59:59Z');
+await db.timestampIndex.insert('britannica', britEventId, '0476-09-04T00:00:00Z', '0476-09-04T23:59:59Z');
+
+// 1. Query an interval (e.g., "What happened in the year 476?")
+const year476Start = '0476-01-01T00:00:00Z';
+const year476End   = '0476-12-31T23:59:59Z';
+
+const wikiMatches = await db.timestampIndex.findOverlapping('wikipedia', year476Start, year476End);
+
+// 2. Query a single point in time across multiple composed timelines (the "zeitgeist" query)
+const specificDay = '0476-09-04T12:00:00Z';
+
+const [wikiPoint, britPoint] = await Promise.all([
+    db.timestampIndex.findOverlapping('wikipedia', specificDay, specificDay),
+    db.timestampIndex.findOverlapping('britannica', specificDay, specificDay)
+]);
+
+// You can now union, intersect, or render multiple layers of data simultaneously
+```
+
 ## Trees
 
 SynapsD supports multiple named trees per workspace database. Trees are views on top of your documents — they organise membership and structure, not data. A single document can live in many trees at once.

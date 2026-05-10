@@ -6,7 +6,7 @@
 - Range theoretically (-∞, ∞), realistically ~age of the universe, we'd probably get way with a 128 or even 64bit address space even if some users would want to index thousand events/s from different sources(that one guy who'll pipe his rsyslog/fluentd collected events into our app)
 - Timeline should support intervals, <close,close>/<close,open)/(open,close> - think "communism", "middle-ages", "paleozoic era", "trip to Spain"
 
-- Timelines should be composable, meaning, we should be able to use multiple timelines but internally keep them separate and selectable on-demand (lets say a internal family timeline overlayed on top of the wikipedia timeline and a timeline extracted from some memoirs of person foo:
+- Timelines should be composable, meaning, we should be able to use multiple timelines but internally keep them separate and selectable on-demand (lets say db internal CRUD opts, a private family timeline overlayed on top of the wikipedia timeline and a timeline extracted from some memoirs of person foo:
   - wikipedia.timeline
   - family.timeline
   - historian_x.timeline
