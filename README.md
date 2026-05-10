@@ -161,7 +161,7 @@ await db.link(id, { tree: 'filesystem', path: ['/notes', '/archive/notes'] }, ['
 
 `unlink()` removes memberships only. The document stays in LMDB.
 
-`delete()` removes the document row, checksum index entries, timestamp index entries, and synapse memberships. It returns `true` when a document was deleted and `false` when the id was not found.
+`delete()` removes the document row, checksum index entries, timeline index entries, and synapse memberships. It returns `true` when a document was deleted and `false` when the id was not found.
 
 Context-tree root `/` is a selector for "anything in this tree", not a real removable membership. Directory-tree root `/` is just the literal root folder.
 
@@ -274,7 +274,16 @@ const ranked = await db.search({
 
 ## Timelines & Intervals
 
-SynapsD natively supports indexing documents into dynamic timelines using a 64-bit Dual-BSI (Bit-Sliced Index). This allows both point-in-time and range/interval queries (e.g., "communism", "middle-ages") with no extra dependencies.
+SynapsD supports source/domain timelines (`wikipedia`, `britannica`, `historian-x`, `crud:updated`) backed by internal scale tiers. The developer-facing name stays simple; internally each timeline owns lazy Dual-BSI tiers for `Gyr`, `Myr`, `Kyr`, `year`, `month`, `day`, `second`, `ms`, and `ns`.
+
+Each stored interval is normalized to `{ scale, start, end }`. If you omit `scale`, SynapsD infers it from the input and errors when it cannot do that safely. Inference is a convenience at the API edge; the index core always stores an explicit scale. No fake precision. Dinosaurs did not have millisecond timestamps, despite what software would like to believe.
+
+Canonical calendar/time semantics:
+- Calendar dates use the proleptic Gregorian calendar internally.
+- Year numbering is astronomical internally (`0` = `1 BCE`, `-1` = `2 BCE`). Importers/UI can translate BCE/CE for humans.
+- Modern instants are treated as UTC-ish civil time.
+- Leap seconds are ignored. This is a personal/workspace event database, not a spacecraft.
+- Deep-time values should use scaled coordinates (`Gyr`, `Myr`, `Kyr`) instead of calendar dates.
 
 ### System CRUD Timelines
 
@@ -291,35 +300,146 @@ const recentDocs = await db.list({
 });
 ```
 
+CRUD timestamps are stored with their natural Date precision, but timeframe queries fan out across the internal tiers so `today`, `thisWeek`, and explicit ranges still find matching CRUD events.
+
 ### Custom Timelines
 
-You can lazily instantiate custom timelines and index your documents into them with explicit start and end times.
+Use `db.timeline` for custom source/domain timelines.
 
 ```js
-// Imagine we extracted historical events and want to index them
+await db.timeline.createTimeline('wikipedia');
+await db.timeline.createTimeline('britannica');
+
 const wikiEventId = await db.put({ schema: 'event', data: { title: 'Fall of Rome' } });
 const britEventId = await db.put({ schema: 'event', data: { title: 'Roman Empire collapses' } });
 
-// Insert interval: [start, end]. If end is omitted, it defaults to start (point-in-time)
-await db.timestampIndex.insert('wikipedia', wikiEventId, '0476-01-01T00:00:00Z', '0476-12-31T23:59:59Z');
-await db.timestampIndex.insert('britannica', britEventId, '0476-09-04T00:00:00Z', '0476-09-04T23:59:59Z');
+// Scale inferred as day.
+await db.timeline.insert('wikipedia', wikiEventId, {
+    start: '0476-01-01',
+    end: '0476-12-31',
+});
 
-// 1. Query an interval (e.g., "What happened in the year 476?")
-const year476Start = '0476-01-01T00:00:00Z';
-const year476End   = '0476-12-31T23:59:59Z';
-
-const wikiMatches = await db.timestampIndex.findOverlapping('wikipedia', year476Start, year476End);
-
-// 2. Query a single point in time across multiple composed timelines (the "zeitgeist" query)
-const specificDay = '0476-09-04T12:00:00Z';
-
-const [wikiPoint, britPoint] = await Promise.all([
-    db.timestampIndex.findOverlapping('wikipedia', specificDay, specificDay),
-    db.timestampIndex.findOverlapping('britannica', specificDay, specificDay)
-]);
-
-// You can now union, intersect, or render multiple layers of data simultaneously
+// Scale inferred as second.
+await db.timeline.insert('britannica', britEventId, {
+    start: '0476-09-04T00:00:00Z',
+    end: '0476-09-04T23:59:59Z',
+});
 ```
+
+Supported inference examples:
+
+```js
+await db.timeline.insert('wikipedia', id, { start: '1720', end: '1720' });         // year
+await db.timeline.insert('wikipedia', id, { start: '17200101', end: '17201231' }); // day
+await db.timeline.insert('wikipedia', id, { start: '1720-01', end: '1720-12' });   // month
+await db.timeline.insert('wikipedia', id, { start: '1720-01-01', end: '1720-12-31' }); // day
+await db.timeline.insert('wikipedia', id, { start: '1720-01-01T00:00:00Z' });      // second
+await db.timeline.insert('wikipedia', id, { start: '1720-01-01T00:00:00.123Z' });  // ms
+await db.timeline.insert('wikipedia', id, { start: '541 MYA', end: '252 MYA' });   // Myr
+```
+
+Use explicit scale when the input is ambiguous or already normalized:
+
+```js
+await db.timeline.insert('wikipedia', paleozoicId, {
+    start: { scale: 'Myr', value: -541n },
+    end: { scale: 'Myr', value: -252n },
+});
+```
+
+Documents can also carry app-extracted timeline entries at the root. SynapsD indexes these on `put()` / `putMany()` and refreshes them on update. The database does not extract dates from content; ingestion/app code owns that.
+
+```js
+const articleId = await db.put({
+    schema: 'data/abstraction/document',
+    data: {
+        title: 'Magna Carta',
+        text: 'Magna Carta was agreed at Runnymede in 1215.',
+    },
+    timelines: [
+        {
+            name: 'wikipedia',
+            start: '1215',
+            end: '1215',
+        },
+    ],
+});
+```
+
+For a precise event, use one entry at the appropriate scale:
+
+```js
+const signingEventId = await db.put({
+    schema: 'data/abstraction/document',
+    data: {
+        title: 'Magna Carta sealed',
+        text: 'King John sealed Magna Carta on 1215-06-15.',
+    },
+    timelines: [
+        {
+            name: 'wikipedia',
+            start: '1215-06-15',
+        },
+    ],
+});
+```
+
+`name` is the source/domain timeline. `timeline` is accepted as an alias for `name`. `scale` is optional at the API edge and inferred when safe. Internally every entry is stored with explicit scale. On document update, SynapsD removes the document from timelines declared on the old or new document, then indexes the new entries. Manually-added timeline entries that are not declared on the document are left alone.
+
+Queries fan out across the relevant internal tiers by default:
+
+```js
+// "What overlaps the year 476?"
+const wikiMatches = await db.timeline.queryInterval('wikipedia', {
+    start: '0476',
+    end: '0476',
+});
+
+// Same query across multiple source timelines, deduped as one ID array.
+const ids = await db.timeline.queryInterval(['wikipedia', 'britannica'], {
+    start: '0476-09-04',
+    end: '0476-09-04',
+});
+
+// Search every known timeline. `all` is also accepted.
+const happenedIn1215 = await db.timeline.queryInterval('*', {
+    start: '1215',
+    end: '1215',
+});
+
+// Preserve layer/tier structure for UI overlays.
+const layers = await db.timeline.queryInterval(['wikipedia', 'britannica'], {
+    start: '0476',
+    end: '0476',
+}, {
+    mode: 'layers',
+});
+```
+
+Layer mode returns IDs grouped by source timeline and internal scale tier:
+
+```js
+{
+    wikipedia: {
+        day: [12, 18],
+        second: [44]
+    },
+    britannica: {
+        day: [21]
+    }
+}
+```
+
+Timeline management:
+
+```js
+await db.timeline.createTimeline('wikipedia');
+const timelines = await db.timeline.listTimelines();
+const exists = db.timeline.hasTimeline('wikipedia');
+await db.timeline.deleteTimeline('wikipedia');
+```
+
+Current interval semantics are closed intervals: `[start, end]`. Open interval support belongs in the next pass.
 
 ## Trees
 

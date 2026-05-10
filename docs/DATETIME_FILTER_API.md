@@ -2,7 +2,7 @@
 
 ## Overview
 
-The TimestampIndex is now integrated with the main SynapsD filter API. You can filter documents by timestamp using either **string-based** or **object-based** filters in the `filterArray` parameter of `findDocuments()`, `listDocuments()`, and `ftsQuery()`.
+The TimelineIndex is integrated with the main SynapsD filter API. You can filter documents by CRUD timeline events using either **string-based** or **object-based** filters.
 
 ## Filter Formats
 
@@ -177,7 +177,7 @@ Examples:
 - ✅ **Efficient**: Uses bitmap operations for fast filtering
 - ✅ **Scalable**: Works with millions of documents
 - ✅ **Combined filters**: Context + Features + Datetime filters are all optimized
-- ⚠️ **Index required**: TimestampIndex must be initialized (happens on `db.start()`)
+- ⚠️ **Index required**: TimelineIndex must be initialized (happens on `db.start()`)
 
 ## API Methods Supporting Datetime Filters
 
@@ -202,16 +202,16 @@ Invalid datetime filters are logged and skipped gracefully:
 'datetime:updated:range:2023/10/01:2023/10/31'  // ❌ Use YYYY-MM-DD format
 ```
 
-## Migration from Direct TimestampIndex Usage
+## Migration from Direct Timeline Usage
 
-If you were using `db.timestampIndex` directly:
+If you were using the old direct timestamp index API:
 
 ```javascript
-// OLD (direct access)
-const ids = await db.timestampIndex.findByTimeframe('today', 'updated');
+// OLD (direct access, removed)
+const ids = await oldLifecycleIndex.findByTimeframe('today', 'updated');
 const docs = await db.getDocumentsByIdArray(ids);
 
-// NEW (integrated API)
+// NEW (integrated filter API)
 const docs = await db.findDocuments(
   null,
   [],
@@ -241,6 +241,6 @@ const docs = await db.findDocuments(
 ---
 
 **Integrated in:** SynapsD v2.0.0-alpha.2+  
-**Index:** TimestampIndex (bitmap-based)  
+**Index:** TimelineIndex (tiered bitmap-based)  
 **Format:** ISO 8601 dates (YYYY-MM-DD)
 

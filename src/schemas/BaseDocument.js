@@ -38,6 +38,16 @@ const locationSchema = z.object({
     metadata: z.record(z.any()).optional(),
 });
 
+const timelineEntrySchema = z.object({
+    name: z.string().optional(),
+    timeline: z.string().optional(),
+    scale: z.string().optional(),
+    start: z.any(),
+    end: z.any().optional(),
+}).passthrough().refine(entry => entry.name || entry.timeline, {
+    message: 'Timeline entry requires name or timeline',
+});
+
 // Full document schema definition (for internal storage)
 const documentSchema = z.object({
     // Base
@@ -75,6 +85,10 @@ const documentSchema = z.object({
     // protocol-specific hints (e.g. auth refs for SMB, region for S3, deviceAlias for local files).
     // Old documents may still carry metadata.dataPaths (string[]) — read during migration.
     locations: z.array(locationSchema).optional(),
+
+    // Optional content-derived timeline intervals. The DB indexes these as-is;
+    // extraction belongs to the app/ingestion layer.
+    timelines: z.array(timelineEntrySchema).optional(),
 
     // Metadata section – unified shape (v2.2)
     metadata: z.object({
@@ -154,6 +168,8 @@ class BaseDocument {
         } else {
             this.locations = [];
         }
+
+        this.timelines = Array.isArray(options.timelines) ? options.timelines : [];
 
         // Build metadata — dataPaths is no longer stored here (moved to root locations).
         // Legacy dataPaths from incoming options is consumed above; strip it from metadata.
@@ -244,6 +260,10 @@ class BaseDocument {
         // Update locations if provided
         if (Array.isArray(data.locations)) {
             this.locations = data.locations;
+        }
+
+        if (Array.isArray(data.timelines)) {
+            this.timelines = data.timelines;
         }
 
         // Update metadata if provided
@@ -518,6 +538,7 @@ class BaseDocument {
             schemaVersion: this.schemaVersion,
             data: this.data,
             locations: this.locations,
+            timelines: this.timelines,
             metadata: this.metadata,
             indexOptions: this.indexOptions,
             createdAt: this.createdAt,
@@ -613,4 +634,4 @@ class BaseDocument {
 
 // Export document class and schemas
 export default BaseDocument;
-export { documentDataSchema, documentSchema, locationSchema };
+export { documentDataSchema, documentSchema, locationSchema, timelineEntrySchema };

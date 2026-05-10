@@ -28,7 +28,7 @@ import BaseDocument from './schemas/BaseDocument.js';
 // Indexes
 import BitmapIndex from './indexes/bitmaps/index.js';
 import ChecksumIndex from './indexes/inverted/Checksum.js';
-import TimestampIndex from './indexes/inverted/Timestamp.js';
+import TimelineIndex from './indexes/inverted/Timeline.js';
 import Synapses from './indexes/inverted/Synapses.js';
 import LanceIndex from './indexes/lance/index.js';
 import { normalizeBitmapKeys } from './indexes/bitmaps/lib/keys.js';
@@ -77,7 +77,7 @@ class SynapsD extends EventEmitter {
 
     // Inverted Indexes
     #checksumIndex;
-    #timestampIndex;
+    #timelineIndex;
     #synapses;
 
     // LanceDB
@@ -142,7 +142,7 @@ class SynapsD extends EventEmitter {
          */
 
         this.#checksumIndex = new ChecksumIndex(this.#db.createDataset('checksums'));
-        this.#timestampIndex = null;
+        this.#timelineIndex = null;
 
         this.contextBitmapCollection = null;
 
@@ -164,7 +164,7 @@ class SynapsD extends EventEmitter {
             bitmapCacheSize: this.#bitmapCache.size,
             bitmapStoreSize: this.#bitmapStore.getCount(),
             checksumIndexSize: this.#checksumIndex.getCount(),
-            timestampIndexSize: 'async',
+            timelineIndexSize: 'async',
             // TODO: Refactor this away
             deletedDocumentsCount: this.deletedDocumentsBitmap ? this.deletedDocumentsBitmap.size : 0,
         };
@@ -174,7 +174,7 @@ class SynapsD extends EventEmitter {
 
     // Inverted indexes
     get checksumIndex() { return this.#checksumIndex; }
-    get timestampIndex() { return this.#timestampIndex; }
+    get timeline() { return this.#timelineIndex; }
     get synapses() { return this.#synapses; }
 
     /**
@@ -187,7 +187,7 @@ class SynapsD extends EventEmitter {
             // Initialize deletedDocumentsBitmap here
             this.deletedDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/gc/deleted');
 
-            this.#timestampIndex = new TimestampIndex(this.bitmapIndex);
+            this.#timelineIndex = new TimelineIndex(this.bitmapIndex);
 
             // Initialize Synapses inverted index
             this.#synapses = new Synapses(
@@ -515,7 +515,7 @@ class SynapsD extends EventEmitter {
                     docFeatures.push(parsed.schema);
                 }
 
-                prepared.push({ parsed, existing: !!existing, docFeatures });
+                prepared.push({ parsed, existing: !!existing, existingDocument: existing, docFeatures });
             } catch (error) {
                 const contextualError = new Error(`Failed to prepare document at index ${i}: ${error.message}`);
                 contextualError.cause = error;
@@ -550,11 +550,13 @@ class SynapsD extends EventEmitter {
 
         try {
             await this.#db.transaction(async () => {
-                for (const { parsed, docFeatures } of prepared) {
+                for (const { parsed, existingDocument, docFeatures } of prepared) {
                     await this.documents.put(parsed.id, parsed);
                     await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
-                    await this.#timestampIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
-                    if (parsed.updatedAt) await this.#timestampIndex.insert('crud:updated', parsed.id, parsed.updatedAt);
+                    await this.#timelineIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
+                    if (parsed.updatedAt) await this.#timelineIndex.insert('crud:updated', parsed.id, parsed.updatedAt);
+                    if (existingDocument) await this.#removeDocumentTimelines(parsed.id, existingDocument, parsed);
+                    await this.#indexDocumentTimelines(parsed.id, parsed);
                     await this.#indexDocument(parsed.id, contextSpec, directorySpec, docFeatures);
                 }
             });
@@ -687,8 +689,9 @@ class SynapsD extends EventEmitter {
                 for (const { parsed, docFeatures, directorySpec } of prepared) {
                     await this.documents.put(parsed.id, parsed);
                     await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
-                    await this.#timestampIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
-                    if (parsed.updatedAt) await this.#timestampIndex.insert('crud:updated', parsed.id, parsed.updatedAt);
+                    await this.#timelineIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
+                    if (parsed.updatedAt) await this.#timelineIndex.insert('crud:updated', parsed.id, parsed.updatedAt);
+                    await this.#indexDocumentTimelines(parsed.id, parsed);
                     await this.#indexDocument(parsed.id, null, directorySpec, docFeatures);
                 }
             });
@@ -983,12 +986,10 @@ class SynapsD extends EventEmitter {
                 for (const { id, document } of toDelete) {
                     await this.documents.delete(id);
                     await this.#synapses.clearSynapses(id);
-                    await this.#timestampIndex.remove('crud:created', id);
-                    await this.#timestampIndex.remove('crud:updated', id);
-                    await this.#timestampIndex.remove('crud:deleted', id);
+                    await this.#timelineIndex.removeFromAll(id);
                     await this.#checksumIndex.deleteArray(document.checksumArray);
                     await this.deletedDocumentsBitmap.tick(id);
-                    await this.#timestampIndex.insert('crud:deleted', id, document.updatedAt || now);
+                    await this.#timelineIndex.insert('crud:deleted', id, document.updatedAt || now);
                 }
             });
         } catch (error) {
@@ -1055,8 +1056,10 @@ class SynapsD extends EventEmitter {
             await this.#db.transaction(async () => {
                 await this.documents.put(parsedDocument.id, parsedDocument);
                 await this.#checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
-                await this.#timestampIndex.insert('crud:created', parsedDocument.id, parsedDocument.createdAt || new Date());
-                if (parsedDocument.updatedAt) await this.#timestampIndex.insert('crud:updated', parsedDocument.id, parsedDocument.updatedAt);
+                await this.#timelineIndex.insert('crud:created', parsedDocument.id, parsedDocument.createdAt || new Date());
+                if (parsedDocument.updatedAt) await this.#timelineIndex.insert('crud:updated', parsedDocument.id, parsedDocument.updatedAt);
+                if (storedDocument) await this.#removeDocumentTimelines(parsedDocument.id, storedDocument, parsedDocument);
+                await this.#indexDocumentTimelines(parsedDocument.id, parsedDocument);
                 await this.#indexDocument(parsedDocument.id, contextSpec, directorySpec, featureBitmaps);
             });
         } catch (error) {
@@ -1324,7 +1327,7 @@ class SynapsD extends EventEmitter {
 
                 // Apply datetime filters
                 for (const datetimeFilter of datetimeFilters) {
-                    const datetimeBitmap = await applyDatetimeFilter(datetimeFilter, this.#timestampIndex);
+                    const datetimeBitmap = await applyDatetimeFilter(datetimeFilter, this.#timelineIndex);
                     if (datetimeBitmap) {
                         if (filtersApplied) {
                             resultBitmap.andInPlace(datetimeBitmap);
@@ -1467,7 +1470,7 @@ class SynapsD extends EventEmitter {
             }
 
             for (const datetimeFilter of datetimeFilters) {
-                const datetimeBitmap = await applyDatetimeFilter(datetimeFilter, this.#timestampIndex);
+                const datetimeBitmap = await applyDatetimeFilter(datetimeFilter, this.#timelineIndex);
                 if (!datetimeBitmap) { continue; }
                 if (filtersApplied && candidateBitmap) {
                     candidateBitmap.andInPlace(datetimeBitmap);
@@ -1527,6 +1530,11 @@ class SynapsD extends EventEmitter {
 
         const storedDocument = await this.#getById(docId);
         if (!storedDocument) { throw new Error(`Document with ID "${docId}" not found`); }
+        const previousTimelineState = {
+            timelines: Array.isArray(storedDocument.timelines)
+                ? storedDocument.timelines.map(entry => ({ ...entry }))
+                : [],
+        };
 
         // If no update data provided, we're only updating memberships
         if (updateData === null) {
@@ -1550,7 +1558,9 @@ class SynapsD extends EventEmitter {
                 await this.documents.put(updatedDocument.id, updatedDocument);
                 await this.#checksumIndex.deleteArray(storedDocument.checksumArray);
                 await this.#checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
-                if (updatedDocument.updatedAt) await this.#timestampIndex.insert('crud:updated', updatedDocument.id, updatedDocument.updatedAt);
+                if (updatedDocument.updatedAt) await this.#timelineIndex.insert('crud:updated', updatedDocument.id, updatedDocument.updatedAt);
+                await this.#removeDocumentTimelines(updatedDocument.id, previousTimelineState, updatedDocument);
+                await this.#indexDocumentTimelines(updatedDocument.id, updatedDocument);
 
                 // Index across all views using shared helper
                 await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
@@ -1680,11 +1690,9 @@ class SynapsD extends EventEmitter {
                 await this.#synapses.clearSynapses(docId);
                 debug(`delete: Document ${docId} removed from all bitmaps and Synapses index`);
 
-                // Remove document from timestamp indices (created, updated)
-                await this.#timestampIndex.remove('crud:created', docId);
-                await this.#timestampIndex.remove('crud:updated', docId);
-                await this.#timestampIndex.remove('crud:deleted', docId);
-                debug(`delete: Document ${docId} removed from timestamp indices`);
+                // Remove document from all custom and CRUD timelines before recording deletion.
+                await this.#timelineIndex.removeFromAll(docId);
+                debug(`delete: Document ${docId} removed from timeline indices`);
 
                 // Delete document checksums from inverted index
                 await this.#checksumIndex.deleteArray(document.checksumArray);
@@ -1695,7 +1703,7 @@ class SynapsD extends EventEmitter {
                 debug(`delete: Document ${docId} added to deleted documents bitmap`);
 
                 // Update timestamp index
-                await this.#timestampIndex.insert('crud:deleted', docId, document.updatedAt || new Date());
+                await this.#timelineIndex.insert('crud:deleted', docId, document.updatedAt || new Date());
                 debug(`delete: Timestamp for document ${docId} updated in index`);
             });
 
@@ -2462,6 +2470,41 @@ class SynapsD extends EventEmitter {
     async #indexDocument(docId, contextSpec, directorySpec, featureBitmaps) {
         const allSynapseKeys = await this.#resolveDocumentMembershipKeys(contextSpec, directorySpec, featureBitmaps);
         await this.#addDocumentMembership(docId, allSynapseKeys);
+    }
+
+    async #indexDocumentTimelines(docId, document) {
+        const entries = this.#normalizeDocumentTimelineEntries(document);
+        for (const entry of entries) {
+            await this.#timelineIndex.insert(entry.name, docId, entry.interval);
+        }
+    }
+
+    async #removeDocumentTimelines(docId, ...documents) {
+        const names = new Set();
+        for (const document of documents) {
+            for (const entry of this.#normalizeDocumentTimelineEntries(document)) {
+                names.add(entry.name);
+            }
+        }
+
+        for (const name of names) {
+            await this.#timelineIndex.remove(name, docId);
+        }
+    }
+
+    #normalizeDocumentTimelineEntries(document) {
+        const timelines = Array.isArray(document?.timelines) ? document.timelines : [];
+        return timelines.map((entry) => {
+            const name = entry.name ?? entry.timeline;
+            if (!name) { throw new Error('Document timeline entry requires name or timeline'); }
+            if (!('start' in entry)) { throw new Error(`Document timeline entry "${name}" requires start`); }
+
+            const start = entry.scale ? { scale: entry.scale, value: entry.start } : entry.start;
+            const rawEnd = entry.end ?? entry.start;
+            const end = entry.scale ? { scale: entry.scale, value: rawEnd } : rawEnd;
+
+            return { name, interval: { start, end } };
+        });
     }
 
     async #resolveDocumentMembershipKeys(contextSpec, directorySpec, featureBitmaps) {

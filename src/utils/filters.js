@@ -56,18 +56,18 @@ export function parseDatetimeFilterString(filterString) {
 /**
  * Apply datetime filter and return bitmap of matching document IDs
  * @param {Object} filter - Parsed datetime filter
- * @param {Object} timestampIndex - TimestampIndex instance
+ * @param {Object} timelineIndex - TimelineIndex instance
  * @returns {RoaringBitmap32|null}
  */
-export async function applyDatetimeFilter(filter, timestampIndex) {
-    if (!timestampIndex) { return null; }
+export async function applyDatetimeFilter(filter, timelineIndex) {
+    if (!timelineIndex) { return null; }
 
     try {
         const action = filter.action;
         let start, end;
 
         if (filter.timeframe) {
-            const bounds = timestampIndex.constructor.getTimeframeBounds(filter.timeframe);
+            const bounds = timelineIndex.constructor.getTimeframeBounds(filter.timeframe);
             start = bounds.start;
             end = bounds.end;
         } else if (filter.range) {
@@ -78,7 +78,7 @@ export async function applyDatetimeFilter(filter, timestampIndex) {
         }
 
         const timelineName = `crud:${action}`;
-        const ids = await timestampIndex.findOverlapping(timelineName, start, end);
+        const ids = await timelineIndex.queryInterval(timelineName, start, end);
 
         if (ids && ids.length > 0) {
             const roaring = await import('roaring');
