@@ -217,42 +217,122 @@ export default class TimelineIndex {
         const year = now.getFullYear();
         const month = now.getMonth();
         const date = now.getDate();
+        const dayMs = 86400000;
+        const startOfToday = new Date(year, month, date);
+        const startOfWeek = (() => {
+            const day = now.getDay() || 7;
+            return new Date(year, month, date - day + 1);
+        })();
 
         let start, end;
 
         switch (timeframe) {
+            case 'now':
+                start = new Date(year, month, date, now.getHours());
+                end = new Date(start.getTime() + 3600000 - 1);
+                break;
             case 'today':
-                start = new Date(year, month, date);
-                end = new Date(start.getTime() + 86400000 - 1);
+                start = startOfToday;
+                end = new Date(start.getTime() + dayMs - 1);
                 break;
             case 'yesterday':
                 start = new Date(year, month, date - 1);
-                end = new Date(start.getTime() + 86400000 - 1);
+                end = new Date(start.getTime() + dayMs - 1);
+                break;
+            case 'tomorrow':
+                start = new Date(year, month, date + 1);
+                end = new Date(start.getTime() + dayMs - 1);
+                break;
+            case 'lastWeek':
+                start = new Date(startOfWeek.getTime() - (7 * dayMs));
+                end = new Date(startOfWeek.getTime() - 1);
                 break;
             case 'thisWeek': {
-                const day = now.getDay() || 7;
-                start = new Date(year, month, date - day + 1);
-                end = new Date(start.getTime() + 7 * 86400000 - 1);
+                start = startOfWeek;
+                end = new Date(start.getTime() + 7 * dayMs - 1);
                 break;
             }
+            case 'nextWeek': {
+                start = new Date(startOfWeek.getTime() + (7 * dayMs));
+                end = new Date(start.getTime() + 7 * dayMs - 1);
+                break;
+            }
+            case 'lastMonth':
+                start = new Date(year, month - 1, 1);
+                end = new Date(year, month, 0, 23, 59, 59, 999);
+                break;
             case 'thisMonth':
                 start = new Date(year, month, 1);
                 end = new Date(year, month + 1, 0, 23, 59, 59, 999);
+                break;
+            case 'nextMonth':
+                start = new Date(year, month + 1, 1);
+                end = new Date(year, month + 2, 0, 23, 59, 59, 999);
+                break;
+            case 'lastYear':
+                start = new Date(year - 1, 0, 1);
+                end = new Date(year - 1, 11, 31, 23, 59, 59, 999);
                 break;
             case 'thisYear':
                 start = new Date(year, 0, 1);
                 end = new Date(year, 11, 31, 23, 59, 59, 999);
                 break;
+            case 'nextYear':
+                start = new Date(year + 1, 0, 1);
+                end = new Date(year + 1, 11, 31, 23, 59, 59, 999);
+                break;
+            case 'lastDecade': {
+                const decadeStart = Math.floor(year / 10) * 10;
+                start = new Date(decadeStart - 10, 0, 1);
+                end = new Date(decadeStart - 1, 11, 31, 23, 59, 59, 999);
+                break;
+            }
+            case 'thisDecade': {
+                const decadeStart = Math.floor(year / 10) * 10;
+                start = new Date(decadeStart, 0, 1);
+                end = new Date(decadeStart + 9, 11, 31, 23, 59, 59, 999);
+                break;
+            }
+            case 'nextDecade': {
+                const decadeStart = Math.floor(year / 10) * 10;
+                start = new Date(decadeStart + 10, 0, 1);
+                end = new Date(decadeStart + 19, 11, 31, 23, 59, 59, 999);
+                break;
+            }
+            case 'lastCentury': {
+                const centuryStart = Math.floor(year / 100) * 100;
+                start = new Date(centuryStart - 100, 0, 1);
+                end = new Date(centuryStart - 1, 11, 31, 23, 59, 59, 999);
+                break;
+            }
             case 'thisCentury': {
                 const centuryStart = Math.floor(year / 100) * 100;
                 start = new Date(centuryStart, 0, 1);
                 end = new Date(centuryStart + 99, 11, 31, 23, 59, 59, 999);
                 break;
             }
+            case 'nextCentury': {
+                const centuryStart = Math.floor(year / 100) * 100;
+                start = new Date(centuryStart + 100, 0, 1);
+                end = new Date(centuryStart + 199, 11, 31, 23, 59, 59, 999);
+                break;
+            }
+            case 'lastMillennium': {
+                const millStart = Math.floor(year / 1000) * 1000;
+                start = new Date(millStart - 1000, 0, 1);
+                end = new Date(millStart - 1, 11, 31, 23, 59, 59, 999);
+                break;
+            }
             case 'thisMillennium': {
                 const millStart = Math.floor(year / 1000) * 1000;
                 start = new Date(millStart, 0, 1);
                 end = new Date(millStart + 999, 11, 31, 23, 59, 59, 999);
+                break;
+            }
+            case 'nextMillennium': {
+                const millStart = Math.floor(year / 1000) * 1000;
+                start = new Date(millStart + 1000, 0, 1);
+                end = new Date(millStart + 1999, 11, 31, 23, 59, 59, 999);
                 break;
             }
             default:
