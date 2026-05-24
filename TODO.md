@@ -32,6 +32,49 @@
 
 ## TODO
 
+### Support context and directory tree mountpoints
+
+This feature stems from a requirement of Canvas to enable `Project` and `Task` abstractions on top of existing tree structures without the need to replicate whole subtrees "the standard way".
+
+A project path `/projects/dc-migration` should not need to recreate exiting paths
+
+```
+/infra/dc/frankfurt
+/infra/dc/sindelfingen
+/devops/jira-1234
+/reports/projects/2026/dc-migration
+```
+
+as its subtrees, we should just be able to mount those paths directly, creating
+
+```
+/projects/dc-migration/dc/frankfurt # whole /dc subtree mounted 
+/projects/dc-migration/dc/sindelfingen # whole /dc subtree mounted 
+/projects/dc-migration/tasks/jira-1234 # Standard context path, mount not necessary
+/projects/dc-migration/reports # standard context path
+```
+
+While still allowing normal sub-tree paths to be created.
+In general, we should support 2 types of mounts:
+
+- Intra-workspace/tree
+- External workspace or a subtree of an external workspace (descoped for now, this would be a mere link for the app to take care of)
+
+We are leaking app abstractions into the db layer but having a layer type `project` and type `task` means, we get this "for free" from our JSON tree structures in one go, much easier to work with, esp given that we already support several layer types defined in `src/schemas/internal/layers`
+
+Functional requirements:
+
+- Mounts can not cross the tree-type boundary, context trees can only mount context trees, directory trees directory subtrees
+- Tree mounts lock mounted tree paths, mounting `/infra/dc` into `/projects/dc-migration/dc` will lock `/infra/dc`, unmounting releases the lock; deleting a Project releases all locks its mounts held
+- Mounted children resolve in origin context (no bitmap contribution) while its native children resolve normally
+  - `/projects/dc-migration/foo` where foo is a standard context layer/canvas etc, does a logical AND of all 3 layers
+  - `/projects/dc-migration/dc/frankfurt` where `dc` is a mountpoint to `/infra/dc` does a AND on `/infra/dc`, inserting(linking) data to `/projects/dc-migration/dc/frankfurt` ticks `/infra/dc/frankfurt`
+- Creating a subtree `/projects/dc-migration/dc/frankfurt/foo` in a mounted path creates it in the source path `/infra/dc/frankfurt/foo` to keep things simple(tm) but not secure(tm), easy to forget that your agent bound to /infra/dc now also sees foo, in phase II we should definitely implement mount permissions
+- Cycle prevention - Reachability check: cycle prevention is a reachability check at mount-creation time — reject a mount O→D if D is reachable from O in the mount graph; this guarantees the mount graph is a DAG - iow - when creating a mount from origin O into destination D, walk O's transitive mount-graph and confirm D (and D's mount-ancestors) are not reachable from O. If D is reachable from O, mounting O into D closes a loop — reject.
+- Nested mounts: Allow with configurable depth cap (lets say 2 as the default)
+- Synapsd must expose the origin path of any resolved node
+- All project and task metadata(timelines, milestones, deadlines, dates) live as the app concern in the layers `metadata` object, db does not care here
+
 ### Generic
 
 - [] Ensure all batch methods are using the accompanied backend(LMDB/Lance) batch methods too whereever it makes sense
