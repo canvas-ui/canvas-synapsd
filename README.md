@@ -41,6 +41,7 @@ The current public API shape is:
 - `deleteMany(ids, options?)`
 - `list(spec)`
 - `search(spec)`
+- `recall(query, spec?)`
 - `listDocumentTreePaths(id, treeNameOrId)`
 - `listDocumentTreeMemberships(id, treeNameOrId)`
 - `hasDocumentTreeMembership(id, treeNameOrId)`
@@ -185,7 +186,7 @@ const deleteResult = await db.deleteMany([id1, id2]);
 
 ## Querying: `list` vs `search`
 
-SynapsD has two query methods. They accept the same filtering/scoping fields but serve different purposes.
+SynapsD has three query methods. They share the same grounding spec shape where relevant, but serve different purposes.
 
 ### `list(spec)` — bitmap-filtered listing
 
@@ -203,9 +204,20 @@ Use `search` when you have a text query and want the best matches — "find invo
 
 Default limit is 50 (vs unlimited for `list`).
 
+### `recall(query, spec?)` — semantic cue retrieval
+
+Planned semantic entry point. It accepts a human query string or semantic anchor array, plus an optional deterministic grounding spec. The semantic layer will translate lossy cues into exact timeline/context/filter/search operations. This API is wired but not implemented yet.
+
+```js
+const docs = await db.recall('show me emails from this week', {
+    tree: 'work',
+    features: ['data/abstraction/email'],
+});
+```
+
 ### Shared spec fields
 
-Both methods accept:
+`list`, `search`, and `recall` grounding specs accept:
 
 | Field | Description |
 |-------|-------------|
@@ -292,6 +304,8 @@ Document lifecycle events are automatically indexed into `crud:created`, `crud:u
 Formats:
 - `datetime:ACTION:TIMEFRAME` (e.g., `datetime:updated:thisWeek`)
 - `datetime:ACTION:range:START:END` (e.g., `datetime:created:range:2026-01-01:2026-05-10`)
+
+Supported timeframe tokens: `now` (current hour), `today`, `yesterday`, `tomorrow`, `lastWeek`, `thisWeek`, `nextWeek`, `lastMonth`, `thisMonth`, `nextMonth`, `lastYear`, `thisYear`, `nextYear`, `lastDecade`, `thisDecade`, `nextDecade`, `lastCentury`, `thisCentury`, `nextCentury`, `lastMillennium`, `thisMillennium`, `nextMillennium`.
 
 ```js
 const recentDocs = await db.list({

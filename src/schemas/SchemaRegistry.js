@@ -27,6 +27,8 @@ import Label from './internal/layers/Label.js';
 import System from './internal/layers/System.js';
 import Universe from './internal/layers/Universe.js';
 import Workspace from './internal/layers/Workspace.js';
+import Project from './internal/layers/Project.js';
+import Task from './internal/layers/Task.js';
 
 // Default schema registry (for now hard-coded)
 const SCHEMA_REGISTRY = {
@@ -53,6 +55,8 @@ const SCHEMA_REGISTRY = {
     'internal/layers/system': System,           // System layers
     'internal/layers/universe': Universe,       // Root layer for a workspace
     'internal/layers/workspace': Workspace,     // "Mountpoint" to a workspace
+    'internal/layers/project': Project,         // Project layer
+    'internal/layers/task': Task,               // Task layer
 };
 
 export function isDocumentInstance(obj) {

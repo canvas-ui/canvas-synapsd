@@ -28,7 +28,7 @@ The TimelineIndex is integrated with the main SynapsD filter API. You can filter
 {
   type: 'datetime',
   action: 'updated',      // 'created' | 'updated' | 'deleted'
-  timeframe: 'today'      // 'today' | 'yesterday' | 'thisWeek' | 'thisMonth' | 'thisYear'
+  timeframe: 'today'      // e.g. 'today' | 'thisWeek' | 'nextMonth' | 'thisYear'
 }
 
 // Range filter
@@ -150,11 +150,22 @@ const recent = await db.findDocuments(
 
 ## Supported Timeframes
 
+- **`now`** - Documents matching the current hour
 - **`today`** - Documents from today
 - **`yesterday`** - Documents from yesterday
-- **`thisWeek`** - Documents from this week (Sunday to today)
+- **`tomorrow`** - Documents from tomorrow
+- **`lastWeek`** - Documents from last week
+- **`thisWeek`** - Documents from this week
+- **`nextWeek`** - Documents from next week
+- **`lastMonth`** - Documents from last month
 - **`thisMonth`** - Documents from this month
+- **`nextMonth`** - Documents from next month
+- **`lastYear`** - Documents from last year
 - **`thisYear`** - Documents from this year
+- **`nextYear`** - Documents from next year
+- **`lastDecade`**, **`thisDecade`**, **`nextDecade`**
+- **`lastCentury`**, **`thisCentury`**, **`nextCentury`**
+- **`lastMillennium`**, **`thisMillennium`**, **`nextMillennium`**
 
 ## Date Format
 
@@ -196,7 +207,7 @@ Invalid datetime filters are logged and skipped gracefully:
 'datetime:viewed:today'  // ❌ 'viewed' is not a valid action
 
 // Invalid timeframe - skipped
-'datetime:updated:lastWeek'  // ❌ 'lastWeek' not supported (use 'thisWeek')
+'datetime:updated:someday'  // ❌ unknown timeframe
 
 // Invalid date format - may throw
 'datetime:updated:range:2023/10/01:2023/10/31'  // ❌ Use YYYY-MM-DD format

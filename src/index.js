@@ -32,6 +32,7 @@ import TimelineIndex from './indexes/inverted/Timeline.js';
 import Synapses from './indexes/inverted/Synapses.js';
 import LanceIndex from './indexes/lance/index.js';
 import { normalizeBitmapKeys } from './indexes/bitmaps/lib/keys.js';
+import SemanticEngine from './semantic/index.js';
 
 // Views / Abstractions
 import ContextTree from './views/ContextTree.js';
@@ -82,6 +83,9 @@ class SynapsD extends EventEmitter {
 
     // LanceDB
     #lanceIndex;
+
+    // Semantic recall
+    #semantic;
 
     constructor(options = {
         backupOnOpen: false,
@@ -143,6 +147,7 @@ class SynapsD extends EventEmitter {
 
         this.#checksumIndex = new ChecksumIndex(this.#db.createDataset('checksums'));
         this.#timelineIndex = null;
+        this.#semantic = new SemanticEngine({ db: this });
 
         this.contextBitmapCollection = null;
 
@@ -176,6 +181,7 @@ class SynapsD extends EventEmitter {
     get checksumIndex() { return this.#checksumIndex; }
     get timeline() { return this.#timelineIndex; }
     get synapses() { return this.#synapses; }
+    get semantic() { return this.#semantic; }
 
     /**
      * Service methods
@@ -202,6 +208,7 @@ class SynapsD extends EventEmitter {
             });
             await this.#lanceIndex.initialize();
             await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
+            await this.#semantic.initialize();
 
             await this.#loadTreeRegistry();
             await this.#ensureDefaultTrees();
@@ -438,6 +445,10 @@ class SynapsD extends EventEmitter {
         }
 
         return await this.#putOne(document, spec);
+    }
+
+    async recall(query, spec = {}) {
+        return await this.#semantic.recall(query, spec);
     }
 
     async link(idOrIds, treeSelector = null, features = [], options = {}) {

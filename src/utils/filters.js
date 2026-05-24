@@ -45,7 +45,30 @@ export function parseDatetimeFilterString(filterString) {
         return { type: 'datetime', action, range: { start: rest[0], end: rest[1] } };
     }
 
-    const validTimeframes = ['today', 'yesterday', 'thisWeek', 'thisMonth', 'thisYear', 'thisCentury', 'thisMillennium'];
+    const validTimeframes = [
+        'now',
+        'today',
+        'yesterday',
+        'tomorrow',
+        'lastWeek',
+        'thisWeek',
+        'nextWeek',
+        'lastMonth',
+        'thisMonth',
+        'nextMonth',
+        'lastYear',
+        'thisYear',
+        'nextYear',
+        'lastDecade',
+        'thisDecade',
+        'nextDecade',
+        'lastCentury',
+        'thisCentury',
+        'nextCentury',
+        'lastMillennium',
+        'thisMillennium',
+        'nextMillennium',
+    ];
     if (validTimeframes.includes(specType)) {
         return { type: 'datetime', action, timeframe: specType };
     }

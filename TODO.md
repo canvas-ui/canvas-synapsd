@@ -19,6 +19,30 @@
 
 ### Layer 3: Semantic projection
 
+There are couple of (experimental, not production/battle-tested) premises this engine is built on 
+- That we won't go into right now :) 
+
+Easiest implementation for "semantic" recall is our timeline module `src/indexes/inverted/Timeline.js` which is fairly easy to use in agentic scenarios without much needed on the db level.
+
+We already map:
+
+- **`now`** - Documents matching the current hour
+- **`today`** - Documents from today
+- **`yesterday`** - Documents from yesterday
+- **`tomorrow`** - Documents from tomorrow
+- **`lastWeek`** - Documents from last week
+- **`thisWeek`** - Documents from this week
+- **`nextWeek`** - Documents from next week
+- **`lastMonth`** - Documents from last month
+- **`thisMonth`** - Documents from this month
+- **`nextMonth`** - Documents from next month
+- **`lastYear`** - Documents from last year
+- **`thisYear`** - Documents from this year
+- **`nextYear`** - Documents from next year
+- **`lastDecade`**, **`thisDecade`**, **`nextDecade`**
+- **`lastCentury`**, **`thisCentury`**, **`nextCentury`**
+- **`lastMillennium`**, **`thisMillennium`**, **`nextMillennium`**
+
 ## Views
 
 ### Trees
