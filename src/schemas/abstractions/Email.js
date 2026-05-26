@@ -253,12 +253,17 @@ export default class Email extends Document {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
 
-        // Inject Email-specific index options BEFORE super() so checksum uses correct fields
+        // Inject Email-specific index options BEFORE super().
+        // checksumFields: [] keeps email content-addressable like every other
+        // abstraction — the primary checksum is the raw .eml blob (set by the
+        // ingest layer, e.g. imap service). Header-based identity (messageId,
+        // from, …) is handled separately by the contacts/identity index, not the
+        // content checksum.
         options.indexOptions = {
             ...(options.indexOptions || {}),
             ftsSearchFields: ['data.subject', 'data.body', 'data.from.address', 'data.from', 'data.to'],
             vectorEmbeddingFields: ['data.subject', 'data.body'],
-            checksumFields: ['data.messageId', 'data.from', 'data.subject', 'data.date'],
+            checksumFields: [],
         };
 
         super(options);
