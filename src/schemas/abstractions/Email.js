@@ -4,7 +4,8 @@ import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/email';
-const DOCUMENT_SCHEMA_VERSION = '3.0';
+// 3.1: attachments use `url` (stored://) + `checksum`; ad-hoc `storageRef` removed.
+const DOCUMENT_SCHEMA_VERSION = '3.1';
 const EMAIL_FEATURE_BITMAPS = {
     sent: 'data/abstraction/email/sent',
     received: 'data/abstraction/email/received',
@@ -77,12 +78,10 @@ const documentDataSchema = z.object({
             size: z.number().optional(),
             contentId: z.string().optional(),
             isInline: z.boolean().optional(),
+            // Canonical fetchable location (stored://<backend>/<key>) + content hash.
+            // Replaces the former ad-hoc `storageRef` blob.
             url: z.string().optional(),
             checksum: z.string().optional(),
-            storageRef: z.object({
-                backend: z.string(),
-                key: z.string(),
-            }).optional(),
         })).optional(),
 
         // Headers
