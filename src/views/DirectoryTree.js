@@ -11,6 +11,7 @@ import Canvas from '../schemas/internal/layers/Canvas.js';
 const debug = debugInstance('canvas:synapsd:directory-tree');
 
 const ROOT_NODE_ID = 'root';
+const INHERITED_LOCK_METADATA_KEY = 'inheritedLocks';
 
 class DirectoryTree extends EventEmitter {
     #dataStore;
@@ -141,6 +142,9 @@ class DirectoryTree extends EventEmitter {
     async insertPath(path = '/', options = {}) {
         const normalizedPath = this.#normalizePath(path);
         const leafType = options.leafType || options.type || 'directory';
+        if (!options.ignoreLocks) {
+            this.#assertPathMutableForInsert(normalizedPath);
+        }
         const existing = this.#getNodeForPath(normalizedPath);
         if (existing && existing.payload.type !== leafType) {
             if (leafType === 'canvas' && existing.payload.type === 'directory' && !existing.hasChildren) {
@@ -184,9 +188,43 @@ class DirectoryTree extends EventEmitter {
     async updateLayer(nameOrId, updates = {}) {
         const node = this.#findNodeById(String(nameOrId));
         if (!node) { throw new Error(`Layer not found: ${nameOrId}`); }
+        this.#assertNodeMutable(node);
         this.#applyNodeUpdates(node, updates);
         await this.#persistNode(node);
         return this.#nodeToLayer(node);
+    }
+
+    async lockLayer(nameOrId, lockBy) {
+        return this.lockPath(nameOrId, lockBy);
+    }
+
+    async unlockLayer(nameOrId, lockBy) {
+        return this.unlockPath(nameOrId, lockBy);
+    }
+
+    async lockPath(pathOrNodeId, lockBy, options = {}) {
+        if (!lockBy) { throw new Error('Locking layer requires a lockBy parameter'); }
+        const node = this.#resolveNode(pathOrNodeId);
+        if (!node) { throw new Error(`Layer not found: ${pathOrNodeId}`); }
+        this.#lockNode(node, lockBy, options.recursive === true);
+        await this.#persistSubtree(node);
+        return true;
+    }
+
+    async unlockPath(pathOrNodeId, lockBy, options = {}) {
+        if (!lockBy) { throw new Error('Unlocking layer requires a lockBy parameter'); }
+        if (String(lockBy).startsWith('system:') && options.system !== true) {
+            throw new Error('System locks cannot be removed through the tree API');
+        }
+        const node = this.#resolveNode(pathOrNodeId);
+        if (!node) { throw new Error(`Layer not found: ${pathOrNodeId}`); }
+        this.#unlockNode(node, lockBy, options.recursive === true);
+        await this.#persistSubtree(node);
+        return {
+            unlockedBy: lockBy,
+            isStillLocked: this.#isNodeLocked(node),
+            lockedBy: [...(node.payload.lockedBy || [])],
+        };
     }
 
     async movePath(pathFrom, pathTo) {
@@ -198,10 +236,13 @@ class DirectoryTree extends EventEmitter {
 
         const node = this.#getNodeForPath(sourcePath);
         if (!node) { throw new Error(`Path not found: ${sourcePath}`); }
+        this.#assertNodeMutable(node);
+        this.#assertPathMutableForInsert(targetPath);
 
         const currentParent = this.#getParentNode(sourcePath);
         const { parentNode: targetParent, targetName } = await this.#resolveTargetParent(targetPath);
         if (!currentParent || !targetParent) { throw new Error('Unable to resolve move target'); }
+        this.#assertNodeMutable(targetParent);
         if (this.#hasChildWithName(targetParent, targetName, node.id)) {
             throw new Error(`Target path already exists: ${targetPath}`);
         }
@@ -234,8 +275,10 @@ class DirectoryTree extends EventEmitter {
         const targetPath = this.#normalizePath(pathTo);
         const sourceNode = this.#getNodeForPath(sourcePath);
         if (!sourceNode) { throw new Error(`Path not found: ${sourcePath}`); }
+        this.#assertPathMutableForInsert(targetPath);
 
         const { parentNode: targetParent, targetName } = await this.#resolveTargetParent(targetPath);
+        this.#assertNodeMutable(targetParent);
         if (this.#hasChildWithName(targetParent, targetName)) {
             throw new Error(`Target path already exists: ${targetPath}`);
         }
@@ -267,6 +310,7 @@ class DirectoryTree extends EventEmitter {
         if (!node) {
             return { data: null, count: 0, error: `Path not found: ${normalizedPath}` };
         }
+        this.#assertNodeMutable(node);
         if (!recursive && node.hasChildren) {
             return { data: null, count: 0, error: 'Directory is not empty' };
         }
@@ -297,6 +341,8 @@ class DirectoryTree extends EventEmitter {
             label: node.payload.label || node.payload.name,
             description: node.payload.description || '',
             color: node.payload.color ?? null,
+            locked: this.#isNodeLocked(node),
+            lockedBy: node.payload.lockedBy || [],
             metadata: node.payload.metadata || {},
             children: node.getSortedChildren().map((child) => this.buildJsonTree(child)),
         };
@@ -324,6 +370,7 @@ class DirectoryTree extends EventEmitter {
                     name,
                     parentId: current.id,
                     type: isLeaf ? (options.leafType || 'directory') : 'directory',
+                    lockedBy: this.#locksForChild(current),
                 });
                 child.payload.id = child.id;
                 current.addChild(child);
@@ -350,6 +397,7 @@ class DirectoryTree extends EventEmitter {
             description: sourceNode.payload.description,
             color: sourceNode.payload.color,
             metadata: sourceNode.payload.metadata,
+            lockedBy: sourceNode.payload.lockedBy || [],
             querySpec: sourceNode.payload.querySpec,
         });
         clone.payload.id = clone.id;
@@ -418,7 +466,7 @@ class DirectoryTree extends EventEmitter {
             type: node.payload.type || 'directory',
             childIds: Array.from(node.children.keys()),
         };
-        for (const key of ['label', 'description', 'color', 'metadata', 'querySpec']) {
+        for (const key of ['label', 'description', 'color', 'metadata', 'querySpec', 'lockedBy']) {
             if (node.payload[key] !== undefined) { data[key] = node.payload[key]; }
         }
         await this.#dataStore.put(this.#nodeKey(node.id), data);
@@ -496,8 +544,8 @@ class DirectoryTree extends EventEmitter {
             description: payload.description || '',
             color: payload.color ?? null,
             metadata: payload.metadata || {},
-            locked: false,
-            lockedBy: [],
+            locked: this.#isNodeLocked(node),
+            lockedBy: payload.lockedBy || [],
             toJSON() {
                 const json = { ...this };
                 delete json.toJSON;
@@ -538,6 +586,82 @@ class DirectoryTree extends EventEmitter {
             normalized = normalized.slice(0, -1);
         }
         return normalized;
+    }
+
+    #resolveNode(pathOrNodeId) {
+        const value = String(pathOrNodeId || '');
+        return value.startsWith('/') ? this.#getNodeForPath(this.#normalizePath(value)) : this.#findNodeById(value);
+    }
+
+    #isNodeLocked(node) {
+        return Array.isArray(node?.payload?.lockedBy) && node.payload.lockedBy.length > 0;
+    }
+
+    #assertNodeMutable(node) {
+        if (this.#isNodeLocked(node)) {
+            throw new Error('Layer is locked');
+        }
+    }
+
+    #assertPathMutableForInsert(path) {
+        const existing = this.#getNodeForPath(path);
+        if (existing) {
+            this.#assertNodeMutable(existing);
+            return;
+        }
+
+        const parts = path.split('/').filter(Boolean);
+        while (parts.length > 0) {
+            parts.pop();
+            const parentPath = parts.length > 0 ? `/${parts.join('/')}` : '/';
+            const parent = this.#getNodeForPath(parentPath);
+            if (parent) {
+                this.#assertNodeMutable(parent);
+                return;
+            }
+        }
+    }
+
+    #locksForChild(parent) {
+        const inheritedLocks = parent?.payload?.metadata?.[INHERITED_LOCK_METADATA_KEY];
+        return Array.from(new Set([
+            ...(parent?.payload?.lockedBy || []),
+            ...(Array.isArray(inheritedLocks) ? inheritedLocks : []),
+        ]));
+    }
+
+    #lockNode(node, lockBy, recursive = false) {
+        node.payload.lockedBy = Array.from(new Set([...(node.payload.lockedBy || []), lockBy]));
+        const metadata = node.payload.metadata || {};
+        const inheritedLocks = Array.isArray(metadata[INHERITED_LOCK_METADATA_KEY])
+            ? metadata[INHERITED_LOCK_METADATA_KEY]
+            : [];
+        node.payload.metadata = {
+            ...metadata,
+            [INHERITED_LOCK_METADATA_KEY]: Array.from(new Set([...inheritedLocks, lockBy])),
+        };
+        if (recursive) {
+            for (const child of node.children.values()) {
+                this.#lockNode(child, lockBy, true);
+            }
+        }
+    }
+
+    #unlockNode(node, lockBy, recursive = false) {
+        node.payload.lockedBy = (node.payload.lockedBy || []).filter((value) => value !== lockBy);
+        const metadata = { ...(node.payload.metadata || {}) };
+        if (Array.isArray(metadata[INHERITED_LOCK_METADATA_KEY])) {
+            metadata[INHERITED_LOCK_METADATA_KEY] = metadata[INHERITED_LOCK_METADATA_KEY].filter((value) => value !== lockBy);
+            if (metadata[INHERITED_LOCK_METADATA_KEY].length === 0) {
+                delete metadata[INHERITED_LOCK_METADATA_KEY];
+            }
+        }
+        node.payload.metadata = metadata;
+        if (recursive) {
+            for (const child of node.children.values()) {
+                this.#unlockNode(child, lockBy, true);
+            }
+        }
     }
 
     #sanitizeSegment(value) {
