@@ -1,5 +1,11 @@
 # SynapsD
 
+We may have a strange problem/bug in our db backend related to how we process / compute documents for the directory tree abstraction.
+
+Querying documents from a context tree - even if the result is 1000+ documents - takes ms, when I try to open a "folder" in our directory tree, it takes seconds to load even if the resulting document set is only 20 documents. 
+Can you review the implementation of the directory tree view, there must be something fishy we do when computing bitmaps or membership or talk to the LMDB backend when interfacing through that abstraction
+
+
 ## High level architecture
 
 ### Layer 1: JSON Store

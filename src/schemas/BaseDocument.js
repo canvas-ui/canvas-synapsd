@@ -317,8 +317,12 @@ class BaseDocument {
                 throw new Error('Document data is required');
             }
 
-            if (!this.indexOptions?.checksumFields?.length) {
-                throw new Error('At least one checksum field must be specified');
+            // A document is valid if it already carries a content checksum
+            // (e.g. a raw-blob hash set by the ingest layer) OR declares fields
+            // to derive one from. Content-addressable abstractions (file, email)
+            // set checksumArray directly and need no checksumFields.
+            if (!this.checksumArray?.length && !this.indexOptions?.checksumFields?.length) {
+                throw new Error('A checksum is required: set checksumArray or declare checksumFields');
             }
 
             return true;
