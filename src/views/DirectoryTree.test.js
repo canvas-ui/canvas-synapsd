@@ -14,7 +14,7 @@ function createStore() {
 function createTree() {
     return new DirectoryTree({
         dataStore: createStore(),
-        bitmapIndex: { createCollection: () => ({ deleteBitmap: async () => null }) },
+        bitmapIndex: { createCollection: () => ({ tick: async () => null, makeKey: (id) => id, deleteBitmap: async () => null }) },
         treeId: 'directory-test',
         treeName: 'directory',
     });
@@ -61,5 +61,35 @@ describe('DirectoryTree', () => {
         assert.equal(result.error, null);
         assert.equal(tree.getLayerForPath('/inbox/test-mbox').type, 'canvas');
         assert.equal(tree.getLayerForPath('/inbox/test-mbox').querySpec.query, 'Project FOO');
+    });
+
+    test('locks directory subtrees and inherits locks for new children', async () => {
+        const tree = createTree();
+        await tree.initialize();
+        await tree.insertPath('/.incoming', { ignoreLocks: true });
+        await tree.lockPath('/.incoming', 'system:incoming', { recursive: true });
+
+        await assert.rejects(
+            () => tree.insertPath('/.incoming/fs/home'),
+            /Layer is locked/
+        );
+
+        await tree.put(1, '/.incoming/fs/home');
+
+        const incoming = tree.getLayerForPath('/.incoming');
+        const child = tree.getLayerForPath('/.incoming/fs/home');
+        assert.equal(incoming.locked, true);
+        assert.deepEqual(incoming.lockedBy, ['system:incoming']);
+        assert.equal(child.locked, true);
+        assert.deepEqual(child.lockedBy, ['system:incoming']);
+
+        await assert.rejects(
+            () => tree.removePath('/.incoming/fs/home'),
+            /Layer is locked/
+        );
+        await assert.rejects(
+            () => tree.unlockPath('/.incoming', 'system:incoming'),
+            /System locks cannot be removed/
+        );
     });
 });
