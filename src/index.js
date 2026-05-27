@@ -2901,8 +2901,11 @@ class SynapsD extends EventEmitter {
         const selection = this.#resolveGenericTreeSelection(treeSelector, '/', 'context');
         if (selection.type === 'directory') {
             const dirPath = selection.path || '/';
-            const rootBitmap = await selection.tree.find(dirPath);
             const recursiveBitmap = await selection.tree.findRecursive(dirPath);
+            if (dirPath !== '/') {
+                return recursiveBitmap ?? new RoaringBitmap32();
+            }
+            const rootBitmap = await selection.tree.find(dirPath);
             if (rootBitmap && recursiveBitmap) {
                 rootBitmap.orInPlace(recursiveBitmap);
                 return rootBitmap;
