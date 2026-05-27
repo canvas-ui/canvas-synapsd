@@ -93,7 +93,8 @@ class DirectoryTree extends EventEmitter {
     async find(path) {
         const node = this.#getNodeForPath(this.#normalizePath(path));
         if (!node) { return null; }
-        return await this.#collection.getBitmap(node.id, false);
+        const bitmap = await this.#collection.getBitmap(node.id, false);
+        return bitmap ? bitmap.clone() : null;
     }
 
     async findRecursive(path) {

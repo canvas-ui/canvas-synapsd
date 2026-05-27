@@ -92,4 +92,36 @@ describe('DirectoryTree', () => {
             /System locks cannot be removed/
         );
     });
+
+    test('returns bitmap snapshots from find', async () => {
+        const cachedBitmap = {
+            values: new Set([1]),
+            clone() {
+                return {
+                    values: new Set(this.values),
+                    clone: this.clone,
+                    orInPlace(other) {
+                        for (const value of other.values) {
+                            this.values.add(value);
+                        }
+                    },
+                };
+            },
+        };
+        const tree = new DirectoryTree({
+            dataStore: createStore(),
+            bitmapIndex: { createCollection: () => ({ tick: async () => null, getBitmap: async () => cachedBitmap }) },
+            treeId: 'directory-test',
+            treeName: 'directory',
+        });
+        await tree.initialize();
+        await tree.insertPath('/inbox');
+
+        const firstRead = await tree.find('/inbox');
+        firstRead.orInPlace({ values: new Set([2]) });
+        const secondRead = await tree.find('/inbox');
+
+        assert.deepEqual([...cachedBitmap.values], [1]);
+        assert.deepEqual([...secondRead.values], [1]);
+    });
 });
