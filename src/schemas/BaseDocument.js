@@ -80,10 +80,9 @@ const documentSchema = z.object({
     // Document data/payload
     data: z.record(z.any()),
 
-    // Locations: addressable URLs pointing to the actual data content (v2.2+)
+    // Locations: addressable URLs pointing to the actual data content.
     // Each entry is { url: string, metadata?: {} } where metadata carries
-    // protocol-specific hints (e.g. auth refs for SMB, region for S3, deviceAlias for local files).
-    // Old documents may still carry metadata.dataPaths (string[]) — read during migration.
+    // protocol-specific hints (e.g. auth refs for SMB, region for S3).
     locations: z.array(locationSchema).optional(),
 
     // Optional content-derived timeline intervals. The DB indexes these as-is;
@@ -158,29 +157,19 @@ class BaseDocument {
         // Document data/payload
         this.data = options.data ?? {};
 
-        // Locations: canonical source-of-truth for where the data lives.
-        // Accept either new root-level locations array or migrate legacy metadata.dataPaths strings.
-        if (Array.isArray(options.locations) && options.locations.length > 0) {
-            this.locations = options.locations;
-        } else if (Array.isArray(options.metadata?.dataPaths) && options.metadata.dataPaths.length > 0) {
-            // Migrate: convert legacy string array to location objects
-            this.locations = options.metadata.dataPaths.map((url) => ({ url }));
-        } else {
-            this.locations = [];
-        }
+        // Locations: canonical source-of-truth for where the data lives ({ url, metadata? }).
+        this.locations = Array.isArray(options.locations) ? options.locations : [];
 
         this.timelines = Array.isArray(options.timelines) ? options.timelines : [];
 
-        // Build metadata — dataPaths is no longer stored here (moved to root locations).
-        // Legacy dataPaths from incoming options is consumed above; strip it from metadata.
-        const { dataPaths: _legacy, ...restMetadata } = options.metadata || {};
+        const meta = options.metadata || {};
         this.metadata = {
-            contentType: restMetadata.contentType || DEFAULT_DOCUMENT_DATA_TYPE,
-            contentEncoding: restMetadata.contentEncoding || DEFAULT_DOCUMENT_DATA_ENCODING,
-            contextUUIDs: restMetadata.contextUUIDs || [],
-            contextPath: restMetadata.contextPath || [],
-            features: restMetadata.features || [],
-            ...restMetadata,
+            contentType: meta.contentType || DEFAULT_DOCUMENT_DATA_TYPE,
+            contentEncoding: meta.contentEncoding || DEFAULT_DOCUMENT_DATA_ENCODING,
+            contextUUIDs: meta.contextUUIDs || [],
+            contextPath: meta.contextPath || [],
+            features: meta.features || [],
+            ...meta,
         };
 
         // Ensure the document's schema id is always present as a feature (deduplicated)
@@ -268,15 +257,7 @@ class BaseDocument {
 
         // Update metadata if provided
         if (data.metadata) {
-            const { dataPaths: _legacy, ...restMetadata } = data.metadata;
-            this.metadata = {
-                ...this.metadata,
-                ...restMetadata,
-            };
-            // Migrate legacy dataPaths into locations if no locations were supplied
-            if (_legacy?.length && !Array.isArray(data.locations)) {
-                this.locations = _legacy.map((url) => ({ url }));
-            }
+            this.metadata = { ...this.metadata, ...data.metadata };
         }
 
         // Update checksums and embeddings if explicitly provided
