@@ -15,6 +15,7 @@ const INHERITED_LOCK_METADATA_KEY = 'inheritedLocks';
 
 class DirectoryTree extends EventEmitter {
     #dataStore;
+    #db;
     #collection;
     #treeId;
     #treeName;
@@ -34,6 +35,7 @@ class DirectoryTree extends EventEmitter {
         if (!options.treeId) { throw new Error('DirectoryTree requires a treeId'); }
 
         this.#dataStore = options.dataStore;
+        this.#db = options.db || null;
         this.#treeId = options.treeId;
         this.#treeName = options.treeName || options.name || options.treeId;
         this.#collection = options.bitmapCollection || options.bitmapIndex.createCollection(`vfs/${this.#treeId}`);
@@ -105,6 +107,17 @@ class DirectoryTree extends EventEmitter {
             return await this.find(path);
         }
         return await this.#collection.OR(nodeIds);
+    }
+
+    // Resolve the documents ticked into the folder bitmap at `path`.
+    // Mirrors ContextTree.list() so consumers can treat both tree types uniformly.
+    async list({ path = '/', limit = 1000, parse = true } = {}) {
+        if (!this.#db) { throw new Error('DirectoryTree requires a db reference for list()'); }
+        const bitmap = await this.find(path);
+        if (!bitmap || bitmap.size === 0) { return []; }
+        const oids = bitmap.toArray().slice(0, limit);
+        const docs = await this.#db.getDocumentsByIdArray(oids, { parse });
+        return Array.isArray(docs) ? docs.filter(Boolean) : [];
     }
 
     async getPathByNodeId(nodeId) {

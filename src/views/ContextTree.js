@@ -1090,6 +1090,18 @@ class ContextTree extends EventEmitter {
      */
 
 
+    // List child layer names at `path`. Mirrors DirectoryTree.listDirectories()
+    // so both tree types present children identically to FS-like consumers.
+    async listDirectories(path = '/') {
+        try {
+            const nodes = this.#getNodesForPath(this.#normalizePath(path));
+            return nodes[nodes.length - 1].getSortedChildren().map((child) => child.payload.name);
+        } catch (error) {
+            debug(`listDirectories failed for "${path}": ${error.message}`);
+            return [];
+        }
+    }
+
     pathExists(path) {
         const normalizedPath = this.#normalizePath(path);
         try {
