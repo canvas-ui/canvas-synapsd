@@ -17,7 +17,7 @@ export default class Document extends BaseDocument {
     constructor(options = {}) {
         // Set schema before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
-        options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
+        options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
 
         // Inject Document-specific index options BEFORE super() so checksum fields are correct
         options.indexOptions = {
