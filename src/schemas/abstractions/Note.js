@@ -20,7 +20,7 @@ export default class Note extends Document {
     constructor(options = {}) {
         // Set schema before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
-        options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
+        options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
 
         // Inject Note-specific index options BEFORE super()
         options.indexOptions = {

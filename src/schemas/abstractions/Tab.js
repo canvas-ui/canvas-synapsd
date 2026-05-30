@@ -20,7 +20,7 @@ export default class Tab extends Document {
     constructor(options = {}) {
         // Set schema defaults before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
-        options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
+        options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
 
         // Inject Tab-specific index options BEFORE super() so that BaseDocument
         // computes checksums and other derived values using the correct fields.

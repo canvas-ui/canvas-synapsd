@@ -64,7 +64,7 @@ const documentDataSchema = z
 export default class Dotfile extends Document {
     constructor(options = {}) {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
-        options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
+        options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
 
         options.indexOptions = {
             ...(options.indexOptions || {}),

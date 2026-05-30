@@ -30,11 +30,17 @@ export default class File extends BaseDocument {
 
         // Set schema before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
-        options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
+        // schemaVersion is a class invariant, not persisted state — always
+        // stamp the current version so re-parsed/updated docs self-heal.
+        options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
 
         // Inject File-specific index options BEFORE super()
         options.indexOptions = {
             ...(options.indexOptions || {}),
+            // Checksums are computed upstream by `stored` (content-addressed blob);
+            // declare the real algorithms so the doc doesn't report Base's sha1 default.
+            checksumAlgorithms: ['sha256', 'md5'],
+            primaryChecksumAlgorithm: 'sha256',
             // Names live in the location URLs (one blob, many aliases) — index those.
             ftsSearchFields: ['locationUrls'],
             vectorEmbeddingFields: ['locationUrls'],

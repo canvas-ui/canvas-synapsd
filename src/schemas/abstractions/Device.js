@@ -30,7 +30,7 @@ const documentDataSchema = z.object({
 export default class Device extends Document {
     constructor(options = {}) {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
-        options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
+        options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
 
         options.indexOptions = {
             ...(options.indexOptions || {}),

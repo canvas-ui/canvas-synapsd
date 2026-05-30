@@ -96,7 +96,7 @@ const applicationPayloadSchema = Document.extendDataSchema(
 export default class Application extends Document {
     constructor(options = {}) {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
-        options.schemaVersion = options.schemaVersion || DOCUMENT_SCHEMA_VERSION;
+        options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
         options.indexOptions = {
             ftsSearchFields: ['data.appId', 'data.name', 'data.type', 'data.description', 'locationUrls'],
             vectorEmbeddingFields: ['data.name', 'data.appId', 'locationUrls'],
