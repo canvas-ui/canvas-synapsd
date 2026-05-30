@@ -4,14 +4,15 @@ import BaseDocument, { documentSchema as baseDocumentSchema } from '../BaseDocum
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/file';
-const DOCUMENT_SCHEMA_VERSION = '2.3';
+const DOCUMENT_SCHEMA_VERSION = '3.0';
 
-// File-specific data schema
-const fileDataSchema = z.object({
-    filename: z.string(),
-    size: z.number().int().nonnegative().optional(),
-    mime: z.string().optional(),
-}).passthrough();
+// A File is a pure blob: its identity is the checksum, its bytes live in
+// `stored` (referenced via `locations`), and its facts (size/mime) are
+// doc-level invariants in `metadata`. Inline `data` is reserved for JSON
+// docs, so a File carries none — the same bytes may be named differently at
+// each location, and names are searched via `locationUrls`, not treated as
+// identity.
+const fileDataSchema = z.object({}).passthrough();
 
 // Schema for the full File document, making checksumArray mandatory
 const fileDocumentSchema = baseDocumentSchema.extend({
@@ -34,9 +35,9 @@ export default class File extends BaseDocument {
         // Inject File-specific index options BEFORE super()
         options.indexOptions = {
             ...(options.indexOptions || {}),
-            // Index filename and all location URLs (via computed getter on BaseDocument)
-            ftsSearchFields: ['data.filename', 'locationUrls'],
-            vectorEmbeddingFields: ['data.filename', 'locationUrls'],
+            // Names live in the location URLs (one blob, many aliases) — index those.
+            ftsSearchFields: ['locationUrls'],
+            vectorEmbeddingFields: ['locationUrls'],
             // File relies on external checksumArray, so we don't modify checksumFields here
         };
 
@@ -64,12 +65,9 @@ export default class File extends BaseDocument {
     static get jsonSchema() {
         return {
             schema: DOCUMENT_SCHEMA_NAME,
-            data: {
-                filename: 'string',
-                size: 'number',
-                mime: 'string',
-            },
+            data: {},
             locations: [{ url: 'string', metadata: {} }],
+            metadata: { contentType: 'string', size: 'number' },
             checksumArray: ['string'],
         };
     }
