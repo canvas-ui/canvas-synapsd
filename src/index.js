@@ -2134,6 +2134,7 @@ class SynapsD extends EventEmitter {
         const tree = meta.type === 'directory'
             ? new DirectoryTree({
                 dataStore,
+                db: this,
                 bitmapIndex: this.bitmapIndex,
                 treeId: meta.id,
                 treeName: meta.name,
