@@ -146,6 +146,50 @@ Functional requirements:
 - [ ] Move source-specific normalization/mapping to app/workspace layer.
 - [ ] Keep `synapsd` input shape generic and canonical.
 
+### Schema registration facility (v2)
+
+**Motivation.** `synapsd` was extracted from `canvas-server` (the split was justified), but the
+hard-coded `SchemaRegistry` still carries app-specific abstractions (contact, email, tab, note,
+todo, dotfile, application, message, device). The db only ever needs three things per schema:
+
+- `dataSchema` — zod schema for `data`, used for validate-on-write
+- `indexOptions` — which fields to checksum / FTS / vector-embed
+- `(de)serialization` — `toJSON` shape (round-trip)
+
+Everything else (e.g. `Email.fromIMAP`, `Email.fromGraph`, `Message.fromSlack/fromTeams/fromIRC`)
+is ingest/integration logic that does **not** belong in the storage layer.
+
+**Target shape.** Replace the hard-coded map with a registration API the app calls at boot:
+
+```js
+db.registerSchema('data/abstraction/email', {
+    dataSchema,            // zod
+    indexOptions,          // { checksumFields, ftsSearchFields, vectorEmbeddingFields }
+    toJSON, fromJSON,      // optional; default to BaseDocument behaviour
+});
+```
+
+- **Builtin core** stays in `synapsd` (schema-agnostic primitives only):
+  `document` (generic JSON), `blob`/`file`, `bucket`, `link`.
+- **App-registered**: contact, email, tab, note, todo, dotfile, application, message, device —
+  definitions move to `canvas-server`, registered on startup.
+- The `device/id/<id>` presence-bitmap derivation reads `locations` only and is fully
+  schema-agnostic — it stays in the db and is untouched by this refactor (validates the seam).
+
+**Cutover is migration-free.** Schema id strings (`data/abstraction/email`) are persisted in each
+doc's `schema` field and in the `metadata.features` bitmap. Moving a class app-side changes only
+*where the definition lives*, not the stored id strings or bitmaps — so no data migration, and old
+and new can coexist during the move. Do it incrementally: register one abstraction app-side, delete
+it from the builtin map, repeat.
+
+**Cheap pre-work (independent, low-risk):** lift the provider factories
+(`Email.fromIMAP`/`fromGraph`, `Message.fromSlack`/`fromTeams`/`fromIRC`) out of the schema classes
+into the app ingest layer now — no registry change, no data change, removes the worst of the leak.
+
+**Sequencing:** post-deployment. Not on the critical path for the current customer deploy
+(roaming profiles / browser sync / dotfiles / imap+o365) — those use the existing abstractions
+as-is, and the clutter has no runtime/security/perf cost, only maintainability.
+
 ## Tests
 
 - [ ] Add a proper test suite for the current API

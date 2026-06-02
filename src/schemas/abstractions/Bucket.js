@@ -3,10 +3,10 @@
 import BaseDocument, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
-const DOCUMENT_SCHEMA_NAME = 'data/abstraction/folder';
+const DOCUMENT_SCHEMA_NAME = 'data/abstraction/bucket';
 const DOCUMENT_SCHEMA_VERSION = '1.0';
 
-const folderDataSchema = BaseDocument.extendDataSchema(
+const bucketDataSchema = BaseDocument.extendDataSchema(
     z.object({
         name: z.string().min(1),
         path: z.string().optional(),
@@ -21,7 +21,7 @@ const defaultIndexOptions = {
     checksumFields: ['data.name', 'data.path'],
 };
 
-export default class Folder extends BaseDocument {
+export default class Bucket extends BaseDocument {
 
     constructor(options = {}) {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
@@ -35,10 +35,10 @@ export default class Folder extends BaseDocument {
 
     static fromData(data) {
         data.schema = DOCUMENT_SCHEMA_NAME;
-        return new Folder(data);
+        return new Bucket(data);
     }
 
-    static get dataSchema() { return folderDataSchema; }
+    static get dataSchema() { return bucketDataSchema; }
     static get schema() { return baseDocumentSchema; }
 
     static get jsonSchema() {
@@ -54,7 +54,7 @@ export default class Folder extends BaseDocument {
     }
 
     static validate(document) { return baseDocumentSchema.parse(document); }
-    static validateData(documentData) { return folderDataSchema.parse(documentData); }
+    static validateData(documentData) { return bucketDataSchema.parse(documentData); }
 
-    validateData() { return folderDataSchema.parse(this.data); }
+    validateData() { return bucketDataSchema.parse(this.data); }
 }

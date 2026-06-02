@@ -55,7 +55,7 @@ const documentDataSchema = z
             })
             .passthrough(),
 
-        metadata: z.object().optional(),
+        metadata: z.object({}).passthrough().optional(),
     });
 
 /*******************
@@ -148,8 +148,12 @@ export default class Dotfile extends Document {
 
     static fromData(data) {
         data.schema = DOCUMENT_SCHEMA_NAME;
+        // validateData throws on invalid input and normalizes `data` (link paths →
+        // $HOME). Construct from the full object so top-level fields (id, locations,
+        // checksumArray, timestamps) survive a reparse — only `data` is replaced with
+        // the normalized version.
         const transformed = this.validateData(data);
-        return new Dotfile(transformed);
+        return new Dotfile({ ...data, data: transformed.data });
     }
 
     static get dataSchema() { return documentDataSchema; }
@@ -176,9 +180,9 @@ export default class Dotfile extends Document {
      * ------------------*/
 
     #buildLocations() {
+        // deviceId is encoded in the URL authority (file://<deviceId>/<localPath>).
         return Object.entries(this.data.links || {}).map(([deviceId, localPath]) => ({
             url: deviceFileUrl(deviceId, localPath),
-            metadata: { deviceId },
         })).filter((l) => l.url !== null);
     }
 }

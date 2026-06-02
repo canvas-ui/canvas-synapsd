@@ -24,7 +24,7 @@ const documentDataSchema = z.object({
         createdAt: z.string().optional(),
         lastSeen: z.string().optional(),
     }).passthrough(),
-    metadata: z.object().optional(),
+    metadata: z.object({}).passthrough().optional(),
 });
 
 export default class Device extends Document {

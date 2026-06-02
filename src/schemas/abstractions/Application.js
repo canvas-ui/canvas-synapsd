@@ -188,8 +188,11 @@ export default class Application extends Document {
 
     static fromData(data) {
         data.schema = DOCUMENT_SCHEMA_NAME;
+        // validateData throws on invalid input and normalizes `data` (install paths).
+        // Construct from the full object so top-level fields (id, locations,
+        // checksumArray, timestamps) survive a reparse — only `data` is replaced.
         const transformed = this.validateData(data);
-        return new Application(transformed);
+        return new Application({ ...data, data: transformed.data });
     }
 
     static get dataSchema() { return applicationPayloadSchema; }
@@ -220,17 +223,19 @@ export default class Application extends Document {
     #buildLocations() {
         const locations = [];
 
-        // One location entry per device where the app is installed
+        // One location entry per device where the app is installed.
+        // deviceId is encoded in the URL authority (file://<deviceId>/…); status is
+        // install-specific so it stays in metadata.
         for (const [deviceId, state] of Object.entries(this.data.installs || {})) {
             if (state?.path) {
                 locations.push({
                     url: deviceFileUrl(deviceId, state.path),
-                    metadata: { deviceId, status: state.status },
+                    metadata: { status: state.status },
                 });
             }
         }
 
-        // Source URL as a location entry (for reinstall/discovery)
+        // Source URL as a location entry (for reinstall/discovery); not device-local.
         const sourceUrl = this.data.source?.url;
         if (typeof sourceUrl === 'string' && sourceUrl.trim()) {
             locations.push({ url: sourceUrl, metadata: { type: 'source' } });

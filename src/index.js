@@ -16,6 +16,7 @@ import { ArgumentError } from './utils/errors.js';
 
 // Events
 import { EVENTS, createEvent } from './utils/events.js';
+import { parseLocationUrl } from './utils/path-helpers.js';
 
 // DB Backend
 import LmdbBackend from './backends/lmdb/index.js';
@@ -31,7 +32,7 @@ import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimelineIndex from './indexes/inverted/Timeline.js';
 import Synapses from './indexes/inverted/Synapses.js';
 import LanceIndex from './indexes/lance/index.js';
-import { normalizeBitmapKeys } from './indexes/bitmaps/lib/keys.js';
+import { normalizeBitmapKeys, normalizeBitmapKey } from './indexes/bitmaps/lib/keys.js';
 import SemanticEngine from './semantic/index.js';
 
 // Views / Abstractions
@@ -569,6 +570,9 @@ class SynapsD extends EventEmitter {
                     if (existingDocument) await this.#removeDocumentTimelines(parsed.id, existingDocument, parsed);
                     await this.#indexDocumentTimelines(parsed.id, parsed);
                     await this.#indexDocument(parsed.id, contextSpec, directorySpec, docFeatures);
+                    if (existingDocument) {
+                        await this.#removeStaleDeviceMembership(parsed.id, existingDocument.locations, parsed.locations, docFeatures);
+                    }
                 }
             });
 
@@ -1072,6 +1076,9 @@ class SynapsD extends EventEmitter {
                 if (storedDocument) await this.#removeDocumentTimelines(parsedDocument.id, storedDocument, parsedDocument);
                 await this.#indexDocumentTimelines(parsedDocument.id, parsedDocument);
                 await this.#indexDocument(parsedDocument.id, contextSpec, directorySpec, featureBitmaps);
+                if (storedDocument) {
+                    await this.#removeStaleDeviceMembership(parsedDocument.id, storedDocument.locations, parsedDocument.locations, featureBitmaps);
+                }
             });
         } catch (error) {
             throw new Error('Error inserting document atomically: ' + error.message);
@@ -1556,6 +1563,10 @@ class SynapsD extends EventEmitter {
             }
         }
 
+        // Capture locations before update() mutates storedDocument in place, so we can
+        // untick device tags for any copy this write dropped.
+        const previousLocations = Array.isArray(storedDocument.locations) ? [...storedDocument.locations] : [];
+
         const updatedDocument = storedDocument.update(updateData);
         updatedDocument.validate();
 
@@ -1575,6 +1586,7 @@ class SynapsD extends EventEmitter {
 
                 // Index across all views using shared helper
                 await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
+                await this.#removeStaleDeviceMembership(updatedDocument.id, previousLocations, updatedDocument.locations, featureBitmaps);
             });
 
             this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument }));
@@ -2480,8 +2492,65 @@ class SynapsD extends EventEmitter {
      * Handles: context tree bitmaps, directory tree bitmaps, feature bitmaps, synapses.
      */
     async #indexDocument(docId, contextSpec, directorySpec, featureBitmaps) {
-        const allSynapseKeys = await this.#resolveDocumentMembershipKeys(contextSpec, directorySpec, featureBitmaps);
+        // Union device-presence tags derived from the document's locations so that
+        // "what's on device X" is a single bitmap intersection. Conservative: only
+        // file://<deviceId>/… locations tick device/id/<deviceId>; non-device URLs
+        // (stored://, s3://, http://, imap://) and {WORKSPACE_ROOT}-style placeholders
+        // are skipped — their authority is a backend/bucket/host, not a device.
+        // Additive (matches existing feature-bitmap semantics); the document is
+        // already persisted before this runs in every write path, so we read it back
+        // for the canonical location set.
+        const features = Array.isArray(featureBitmaps) ? [...featureBitmaps] : [];
+        try {
+            const stored = await this.documents.get(docId);
+            for (const tag of this.#deviceFeaturesFromLocations(stored?.locations)) {
+                if (!features.includes(tag)) { features.push(tag); }
+            }
+        } catch (_) { /* best-effort: presence tags must never block indexing */ }
+
+        const allSynapseKeys = await this.#resolveDocumentMembershipKeys(contextSpec, directorySpec, features);
         await this.#addDocumentMembership(docId, allSynapseKeys);
+    }
+
+    /**
+     * Derive device-presence feature tags from a document's locations.
+     * Returns ['device/id/<deviceId>', …] for each distinct device-local copy.
+     * @param {Array<{url:string}>} locations
+     * @returns {string[]}
+     */
+    #deviceFeaturesFromLocations(locations) {
+        const tags = new Set();
+        for (const loc of Array.isArray(locations) ? locations : []) {
+            const parsed = parseLocationUrl(loc?.url);
+            if (!parsed || parsed.scheme !== 'file') { continue; }
+            const authority = parsed.backend;
+            // Skip {WORKSPACE_ROOT}/{VAR} placeholders — workspace-relative, not a device.
+            if (!authority || /^\{.*\}$/.test(authority)) { continue; }
+            // Normalize to the bitmap-key form the index actually stores (lowercased,
+            // sanitized) so derivation, add, and untick all compare apples-to-apples.
+            tags.add(normalizeBitmapKey(`device/id/${authority}`));
+        }
+        return [...tags];
+    }
+
+    /**
+     * Untick device-presence tags a write dropped from the document's locations.
+     * Powers dedup/cleanup: when a copy disappears from locations (an agent prunes a
+     * stale path, a device loses the file), its device/id/<id> bitmap is removed so
+     * "what's on device X" stays accurate. A tag the caller explicitly re-asserts in
+     * this write (assertedFeatures, e.g. the writing-client tag) is never unticked.
+     * @param {number} docId
+     * @param {Array<{url:string}>} previousLocations  locations before the write
+     * @param {Array<{url:string}>} currentLocations   locations after the write
+     * @param {string[]} assertedFeatures              tags explicitly set this write
+     */
+    async #removeStaleDeviceMembership(docId, previousLocations, currentLocations, assertedFeatures = []) {
+        const previous = this.#deviceFeaturesFromLocations(previousLocations);
+        if (previous.length === 0) { return; }
+        const current = new Set(this.#deviceFeaturesFromLocations(currentLocations));
+        const asserted = new Set((Array.isArray(assertedFeatures) ? assertedFeatures : []).map(normalizeBitmapKey));
+        const stale = previous.filter((tag) => !current.has(tag) && !asserted.has(tag));
+        if (stale.length > 0) { await this.#removeDocumentMembership(docId, stale); }
     }
 
     async #indexDocumentTimelines(docId, document) {

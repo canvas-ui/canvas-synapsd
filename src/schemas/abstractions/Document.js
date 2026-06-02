@@ -9,8 +9,8 @@ const DOCUMENT_SCHEMA_VERSION = '2.0';
 const documentDataSchema = z.object({
     schema: z.string(),
     schemaVersion: z.string().optional(),
-    data: z.object().passthrough(),
-    metadata: z.object().optional(),
+    data: z.object({}).passthrough(),
+    metadata: z.object({}).passthrough().optional(),
 });
 
 export default class Document extends BaseDocument {

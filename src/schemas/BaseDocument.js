@@ -32,7 +32,13 @@ const documentDataSchema = z.object({
     data: z.record(z.any()),
 });
 
-// Location entry: a URL pointing to the actual data, with optional protocol-specific metadata
+// Location entry: a URL pointing to a copy of the data, with optional
+// protocol-specific metadata. The URL is the single source of truth for "where":
+//   file://<deviceId>/<path>   – device-local copy; deviceId is the URL authority,
+//                                clients compare it against their own id to prefer
+//                                a local copy. (No separate deviceId field — flat.)
+//   stored://<backend>/<key>, s3://<bucket>/…, http(s)://…, imap://… – remote copies.
+// metadata carries protocol-specific hints (auth refs for SMB, region for S3, status).
 const locationSchema = z.object({
     url: z.string(),
     metadata: z.record(z.any()).optional(),
@@ -80,9 +86,9 @@ const documentSchema = z.object({
     // Document data/payload
     data: z.record(z.any()),
 
-    // Locations: addressable URLs pointing to the actual data content.
-    // Each entry is { url: string, metadata?: {} } where metadata carries
-    // protocol-specific hints (e.g. auth refs for SMB, region for S3).
+    // Locations: addressable copies of the data content. Each entry is
+    // { url, metadata? }; the URL authority encodes the device (file://<deviceId>/…)
+    // for device-local detection/preference.
     locations: z.array(locationSchema).optional(),
 
     // Optional content-derived timeline intervals. The DB indexes these as-is;

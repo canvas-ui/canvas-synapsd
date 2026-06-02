@@ -13,7 +13,7 @@ const documentDataSchema = z.object({
         title: z.string().optional(),
         content: z.string(),
     }).passthrough(),
-    metadata: z.object().optional(),
+    metadata: z.object({}).passthrough().optional(),
 });
 
 export default class Note extends Document {

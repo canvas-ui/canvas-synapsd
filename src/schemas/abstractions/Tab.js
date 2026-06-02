@@ -13,7 +13,7 @@ const documentDataSchema = z.object({
         url: z.string().url(),
         title: z.string().optional(),
     }).passthrough(),
-    metadata: z.object().optional(),
+    metadata: z.object({}).passthrough().optional(),
 });
 
 export default class Tab extends Document {
