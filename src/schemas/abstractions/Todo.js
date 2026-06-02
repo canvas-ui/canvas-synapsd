@@ -15,7 +15,7 @@ const documentDataSchema = z.object({
         completed: z.boolean().optional(),
         dueDate: z.string().datetime().optional(),
     }).passthrough(),
-    metadata: z.object().optional(),
+    metadata: z.object({}).passthrough().optional(),
 });
 
 export default class Todo extends Document {
