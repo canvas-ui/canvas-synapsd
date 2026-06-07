@@ -239,10 +239,12 @@ class LayerIndex {
         const layer = this.#resolveLayer(nameOrId, lookupOptions);
 
         if (!layer) { throw new Error(`Layer not found: ${nameOrId}`); }
+        // A locked layer still allows presentation-only edits (icon lives in
+        // metadata.ui, plus color/querySpec) — just not structural ones.
         const updateKeys = Object.keys(options || {});
-        const isLockedMetadataUpdate = updateKeys.length > 0
-            && updateKeys.every(key => ['querySpec', 'metadata'].includes(key));
-        if (layer.isLocked && !isLockedMetadataUpdate) {
+        const isLockedPresentationUpdate = updateKeys.length > 0
+            && updateKeys.every(key => ['querySpec', 'metadata', 'color'].includes(key));
+        if (layer.isLocked && !isLockedPresentationUpdate) {
             throw new Error('Layer is locked');
         }
         // Never let callers overwrite identity / discriminator via update
