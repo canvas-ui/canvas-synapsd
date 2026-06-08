@@ -104,6 +104,8 @@ Functional requirements:
 - [] Ensure all batch methods are using the accompanied backend(LMDB/Lance) batch methods too whereever it makes sense
 - [] Add backup/restore or dump/import functionality internally
 - [] Add DB snapshot/restore option(on top of versioning? fetaures) to enable undo/redo ops || db op logs + traversal
+LMDB copy/snapshot — mdb_copy (or the env .copy() API) gives a consistent point-in-time snapshot of the whole store without stopping writers. Wire it to a workspace.snapshot() that copies the data dir to a timestamped folder. Simplest possible "undo" net.
+
 - [] Add proper support for Layer of type "label", this type of layer is not bound to a bitmap, hence not processed when supplied via contextSpec/contextArray
 - [] Ensure locked layers can not be moved/removed/deleted/renamed
 - [] Add a new "root" (universe) layer type, prevent all ops on the root layer, root "/" layer should always be locked
@@ -202,4 +204,5 @@ as-is, and the clutter has no runtime/security/perf cost, only maintainability.
   - [ ] attribute-filtered search
   - [ ] timeline-filtered search
 - [ ] Add workspace integration tests against new API translation layer.
+- [ ] Regression: `subtractFromMany`/`applyToMany` when the source key is also in the targets (self-aliasing must not zero the shared cached source mid-loop)
 
