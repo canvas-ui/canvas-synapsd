@@ -44,6 +44,8 @@ class DirectoryTree extends EventEmitter {
 
     get id() { return this.#treeId; }
     get name() { return this.#treeName; }
+    // See ContextTree: keep cached instance name in sync on rename.
+    set name(value) { if (value) this.#treeName = String(value); }
     get type() { return 'directory'; }
     get collection() { return this.#collection; }
 
@@ -202,7 +204,15 @@ class DirectoryTree extends EventEmitter {
     async updateLayer(nameOrId, updates = {}) {
         const node = this.#findNodeById(String(nameOrId));
         if (!node) { throw new Error(`Layer not found: ${nameOrId}`); }
-        this.#assertNodeMutable(node);
+        // Shared canvases stay locked in the tree but remain widget-editable via metadata.
+        if (this.#isNodeLocked(node)) {
+            const updateKeys = Object.keys(updates || {});
+            const presentationOnly = updateKeys.length > 0
+                && updateKeys.every((key) => ['querySpec', 'metadata', 'color'].includes(key));
+            if (!presentationOnly) { throw new Error('Layer is locked'); }
+        } else {
+            this.#assertNodeMutable(node);
+        }
         this.#applyNodeUpdates(node, updates);
         await this.#persistNode(node);
         const layer = this.#nodeToLayer(node);
