@@ -419,6 +419,7 @@ class BitmapIndex {
 
     async applyToMany(sourceKey, targetKeys) {
         BitmapIndex.validateKey(sourceKey);
+        const normalizedSourceKey = BitmapIndex.normalizeKey(sourceKey);
         debug(`applyToMany(): Applying source "${sourceKey}" to targets: "${targetKeys}"`);
 
         const sourceBitmap = await this.getBitmap(sourceKey, false);
@@ -432,6 +433,9 @@ class BitmapIndex {
 
         for (const targetKey of targetKeys) {
             BitmapIndex.validateKey(targetKey);
+            // Merging the source into itself is a no-op; skip to stay symmetric
+            // with subtractFromMany and avoid pointless work.
+            if (BitmapIndex.normalizeKey(targetKey) === normalizedSourceKey) { continue; }
             // Auto-create target if it doesn't exist when applying
             const targetBitmap = await this.getBitmap(targetKey, true);
             const originalSize = targetBitmap.size;
@@ -460,6 +464,7 @@ class BitmapIndex {
 
     async subtractFromMany(sourceKey, targetKeys) {
         BitmapIndex.validateKey(sourceKey);
+        const normalizedSourceKey = BitmapIndex.normalizeKey(sourceKey);
         debug(`subtractFromMany(): Subtracting source "${sourceKey}" from targets: "${targetKeys}"`);
 
         const sourceBitmap = await this.getBitmap(sourceKey, false);
@@ -472,6 +477,13 @@ class BitmapIndex {
 
         for (const targetKey of targetKeys) {
             BitmapIndex.validateKey(targetKey);
+            // getBitmap returns the shared cached instance, so source === target
+            // would andNot the source against itself, zeroing it mid-loop and
+            // silently no-op'ing every remaining target. Skip it.
+            if (BitmapIndex.normalizeKey(targetKey) === normalizedSourceKey) {
+                debug(`subtractFromMany(): Skipping target "${targetKey}" identical to source.`);
+                continue;
+            }
             const targetBitmap = await this.getBitmap(targetKey, false);
             if (!targetBitmap) {
                 debug(`Target bitmap "${targetKey}" not found, skipping subtraction.`);
