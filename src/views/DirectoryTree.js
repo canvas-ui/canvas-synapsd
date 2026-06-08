@@ -205,7 +205,15 @@ class DirectoryTree extends EventEmitter {
         this.#assertNodeMutable(node);
         this.#applyNodeUpdates(node, updates);
         await this.#persistNode(node);
-        return this.#nodeToLayer(node);
+        const layer = this.#nodeToLayer(node);
+        this.#emitTreeEvent(EVENTS.TREE_LAYER_UPDATED, {
+            layerId: layer.id,
+            layerName: layer.name,
+            layerType: layer.type,
+            path: await this.getPathByNodeId(node.id),
+            updates: Object.keys(updates || {}),
+        });
+        return layer;
     }
 
     async lockLayer(nameOrId, lockBy) {

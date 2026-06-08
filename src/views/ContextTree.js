@@ -227,6 +227,13 @@ class ContextTree extends EventEmitter {
     async updateLayer(nameOrId, updates = {}) {
         if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
         const layer = await this.#layerIndex.updateLayer(String(nameOrId), { ...updates });
+        this.#emitTreeEvent(EVENTS.TREE_LAYER_UPDATED, {
+            layerId: layer.id,
+            layerName: layer.name,
+            layerType: layer.type,
+            path: this.getPathByLayerId(layer.id),
+            updates: Object.keys(updates || {}),
+        });
         return layer;
     }
 
