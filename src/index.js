@@ -321,6 +321,10 @@ class SynapsD extends EventEmitter {
         meta.name = String(newName).trim();
         meta.updatedAt = new Date().toISOString();
         await this.#internalStore.put(this.#treeMetaKey(meta.id), meta);
+        // Update the cached instance so `tree.name` reflects the rename instead
+        // of the stale construction-time value.
+        const cached = this.#treeCache.get(meta.id);
+        if (cached) { cached.name = meta.name; }
         this.emit(EVENTS.TREE_RENAMED, createEvent(EVENTS.TREE_RENAMED, { treeId: meta.id, treeName: meta.name, treeType: meta.type }));
         return meta;
     }

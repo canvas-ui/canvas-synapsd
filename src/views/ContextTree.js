@@ -124,6 +124,10 @@ class ContextTree extends EventEmitter {
 
     get id() { return this.#treeId; }
     get name() { return this.#treeName; }
+    // Keep the cached instance name in sync when the tree is renamed in the
+    // registry, otherwise callers that read `tree.name` (e.g. persisting a
+    // share's treeName) capture the stale construction-time name.
+    set name(value) { if (value) this.#treeName = String(value); }
     get type() { return 'context'; }
     get collection() { return this.#bitmapCollection; }
 
@@ -180,7 +184,14 @@ class ContextTree extends EventEmitter {
             }
             // The last node in the array corresponds to the final segment of the path
             const finalNode = nodes[nodes.length - 1];
-            return finalNode.payload; // Return the Layer object
+            // finalNode.payload is the Layer instance captured when the tree was
+            // built. Layer mutations (updateLayer / lock / unlock) round-trip
+            // through the LayerIndex store and reconstruct fresh instances, so
+            // the node payload goes stale. Resolve the live layer by id so path
+            // reads reflect edits and lock state; fall back to the payload only
+            // if the layer is no longer in the index (e.g. root).
+            const live = finalNode?.id ? this.#layerIndex.getLayerByID(finalNode.id) : null;
+            return live || finalNode.payload; // Return the Layer object
         } catch (error) {
             debug(`Failed to get layer for path "${normalizedPath}": ${error.message}`);
             return null; // Return null if path resolution failed
