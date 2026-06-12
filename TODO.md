@@ -2,6 +2,19 @@
 
 ## High level architecture
 
+Retrieval
+- bitmaps
+  - context
+  - filter
+    - timelines
+  - feature
+- glob/regex
+- primitive vector based sim-search
+- bm25?
+
+- Hierarchical vector index
+
+
 ### Layer 1: JSON Store
 
 - LMDB KV backend levaraging LMDB datasets for documents, all indexes(inverted, roaring), high level abstractions(layers/tree nodes and internal structures)
