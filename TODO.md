@@ -1,5 +1,9 @@
 # SynapsD
 
+## Rand
+
+- multi-model support for vec_text but with the new arch this is not on the table
+
 ## High level architecture
 
 Retrieval

@@ -32,8 +32,11 @@ import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimelineIndex from './indexes/inverted/Timeline.js';
 import Synapses from './indexes/inverted/Synapses.js';
 import LanceIndex from './indexes/lance/index.js';
+import VectorIndex from './indexes/lance/VectorIndex.js';
 import { normalizeBitmapKeys, normalizeBitmapKey } from './indexes/bitmaps/lib/keys.js';
 import SemanticEngine from './semantic/index.js';
+import Embedder from './semantic/Embedder.js';
+import EmbeddingQueue from './semantic/EmbeddingQueue.js';
 
 // Views / Abstractions
 import ContextTree from './views/ContextTree.js';
@@ -85,8 +88,12 @@ class SynapsD extends EventEmitter {
     // LanceDB
     #lanceIndex;
 
-    // Semantic recall
+    // Semantic recall (dense + hybrid vector search)
     #semantic;
+    #vectorIndex;
+    #embedder;
+    #embeddingQueue;
+    #semanticConfig;
 
     constructor(options = {
         backupOnOpen: false,
@@ -150,6 +157,22 @@ class SynapsD extends EventEmitter {
         this.#timelineIndex = null;
         this.#semantic = new SemanticEngine({ db: this });
 
+        // Semantic / dense-vector config. Disabled => fts-only (vector + hybrid
+        // search degrade gracefully to lexical). cacheDir is fastembed's model
+        // store; defaults under the workspace lance dir, but a shared
+        // canvas-server store can be passed to avoid an N×model footprint.
+        const sem = options.semantic || {};
+        this.#semanticConfig = {
+            enabled: sem.enabled !== false,
+            model: sem.model || 'bge-small-en-v1.5',
+            dim: sem.dim || 384,
+            maxLength: sem.maxLength || 512,
+            cacheDir: sem.cacheDir || path.join(this.#rootPath, 'lance', 'models'),
+            // JSON abstractions the server can read + embed itself. Everything
+            // else (blobs/media) relies on app-provided vectors.
+            embeddableSchemas: new Set(sem.embeddableSchemas || ['data/abstraction/note']),
+        };
+
         this.contextBitmapCollection = null;
 
     }
@@ -174,6 +197,39 @@ class SynapsD extends EventEmitter {
             // TODO: Refactor this away
             deletedDocumentsCount: this.deletedDocumentsBitmap ? this.deletedDocumentsBitmap.size : 0,
         };
+    }
+
+    /**
+     * Async stats including LanceDB FTS + dense-vector internals. Surfaced to
+     * the Workspace Settings UI (the sync `stats` getter can't await Lance row
+     * counts). Safe to call any time; degrades gracefully when sub-systems are
+     * absent or not yet initialized.
+     */
+    async getStats() {
+        const out = { ...this.stats };
+
+        if (this.#lanceIndex) {
+            try { out.fts = await this.#lanceIndex.stats(); } catch (e) { out.fts = { ready: false, error: e.message }; }
+        }
+
+        if (!this.#semanticConfig?.enabled) {
+            out.semantic = { enabled: false };
+            return out;
+        }
+
+        out.semantic = {
+            enabled: true,
+            model: this.#semanticConfig.model,
+            dim: this.#semanticConfig.dim,
+            cacheDir: this.#semanticConfig.cacheDir,
+            embeddableSchemas: [...this.#semanticConfig.embeddableSchemas],
+            vector: this.#vectorIndex ? await this.#vectorIndex.stats().catch(e => ({ ready: false, error: e.message })) : { ready: false },
+            embedder: this.#embedder ? this.#embedder.status() : { workerSpawned: false },
+            queue: this.#embeddingQueue
+                ? { pending: this.#embeddingQueue.size, draining: this.#embeddingQueue.isDraining }
+                : null,
+        };
+        return out;
     }
 
     get db() { return this.#db; } // For testing only
@@ -209,6 +265,41 @@ class SynapsD extends EventEmitter {
             });
             await this.#lanceIndex.initialize();
             await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
+
+            // Dense-vector stack (best-effort: failure leaves fts-only search intact)
+            if (this.#semanticConfig.enabled) {
+                try {
+                    this.#vectorIndex = new VectorIndex({
+                        rootPath: path.join(this.#rootPath, 'lance'),
+                        dim: this.#semanticConfig.dim,
+                        bitmapIndex: this.bitmapIndex,
+                    });
+                    await this.#vectorIndex.initialize();
+
+                    this.#embedder = new Embedder({
+                        model: this.#semanticConfig.model,
+                        dim: this.#semanticConfig.dim,
+                        maxLength: this.#semanticConfig.maxLength,
+                        cacheDir: this.#semanticConfig.cacheDir,
+                    });
+
+                    this.#embeddingQueue = new EmbeddingQueue({
+                        embedder: this.#embedder,
+                        vectorIndex: this.#vectorIndex,
+                        documentsStore: this.documents,
+                        parseDoc: parseInitializeDocument,
+                    });
+                    this.#embeddingQueue.on('error', ({ docId, error }) => debug(`embed queue: doc ${docId}: ${error}`));
+
+                    // Resume: enqueue embeddable docs missing from the vectors bitmap.
+                    await this.#backfillVectors();
+                } catch (e) {
+                    debug(`Semantic vector stack init failed (continuing fts-only): ${e.message}`);
+                    this.#vectorIndex = null;
+                    this.#embeddingQueue = null;
+                }
+            }
+
             await this.#semantic.initialize();
 
             await this.#loadTreeRegistry();
@@ -350,6 +441,9 @@ class SynapsD extends EventEmitter {
             this.emit(EVENTS.BEFORE_SHUTDOWN, createEvent(EVENTS.BEFORE_SHUTDOWN));
             // Close index backends
             // LanceDB uses filesystem-based storage; no explicit close needed.
+            // Tear down the embedding worker thread (and stop the queue).
+            if (this.#embeddingQueue) { this.#embeddingQueue.stop(); }
+            if (this.#embedder) { try { await this.#embedder.stop(); } catch (_) { } }
             // Close database backend
             await this.#db.close();
 
@@ -661,6 +755,13 @@ class SynapsD extends EventEmitter {
             } catch (_) { }
         }
 
+        // ── Phase 3.5: Dense vectors (async, server-embeddable docs) ─────
+        // Skipped under skipLance so bulk importers control timing; they
+        // re-drive via indexDocumentsInLance (which also enqueues).
+        if (!skipLance) {
+            this.#enqueueEmbeddable(prepared.map(p => p.parsed));
+        }
+
         // ── Phase 4: Events ──────────────────────────────────────────────
 
         const storedIds = prepared.map(p => p.parsed.id);
@@ -708,10 +809,69 @@ class SynapsD extends EventEmitter {
         try {
             await this.#lanceIndex.addMany(documents);
         } catch (_) { }
+        // Deferred-lance importers route embedding here too.
+        this.#enqueueEmbeddable(documents);
     }
 
     async optimizeLance() {
         return await this.#lanceIndex.optimize();
+    }
+
+    /**
+     * Optimize + (re)build the dense-vector index. Best-effort; safe to call
+     * after a bulk import to compact fragments and build the ANN index.
+     */
+    async optimizeVectors() {
+        if (!this.#vectorIndex) { return null; }
+        await this.#vectorIndex.optimize();
+        return await this.#vectorIndex.ensureVectorIndex();
+    }
+
+    /** Wait for the async embedding queue to drain (test/import helper). */
+    async drainEmbeddingQueue() {
+        if (this.#embeddingQueue) { await this.#embeddingQueue.drained(); }
+    }
+
+    /** A JSON abstraction the server can read and embed itself (vs app-provided vectors). */
+    #isServerEmbeddable(doc) {
+        return !!doc && this.#semanticConfig.embeddableSchemas.has(doc.schema);
+    }
+
+    /** Enqueue server-embeddable docs for async vector indexing. No-op when disabled. */
+    #enqueueEmbeddable(parsedDocs) {
+        if (!this.#embeddingQueue) { return; }
+        for (const doc of parsedDocs) {
+            if (this.#isServerEmbeddable(doc)) { this.#embeddingQueue.enqueue(doc.id); }
+        }
+    }
+
+    /**
+     * Store app-provided chunk vectors for a document (the non-JSON / media path —
+     * server doesn't decode blobs, the client computes and ships vectors).
+     * @param {number} docId
+     * @param {string} schema
+     * @param {string} updatedAt
+     * @param {{chunkId:number, text?:string, vector:number[]}[]} chunks
+     */
+    async storeDocumentEmbeddings(docId, schema, updatedAt, chunks) {
+        if (!this.#vectorIndex) { return false; }
+        await this.#vectorIndex.upsertChunks(docId, schema, updatedAt, chunks);
+        return true;
+    }
+
+    /** Enqueue embeddable docs absent from the vectors bitmap (startup resume). */
+    async #backfillVectors() {
+        const schemas = Array.from(this.#semanticConfig.embeddableSchemas);
+        if (schemas.length === 0) { return; }
+        const embeddable = await this.bitmapIndex.OR(normalizeBitmapKeys(schemas));
+        if (!embeddable || embeddable.isEmpty) { return; }
+        const done = await this.bitmapIndex.getBitmap('internal/lance/vectors', false);
+        if (done) { embeddable.andNotInPlace(done); }
+        const ids = embeddable.toArray();
+        if (ids.length > 0) {
+            debug(`vector backfill: enqueuing ${ids.length} unembedded docs`);
+            this.#embeddingQueue.enqueueMany(ids);
+        }
     }
 
     /**
@@ -1099,6 +1259,11 @@ class SynapsD extends EventEmitter {
         } catch (e) {
             debug(`deleteMany: Lance deleteMany failed: ${e.message}`);
         }
+        if (this.#vectorIndex) {
+            try { await this.#vectorIndex.deleteMany(toDelete.map(({ id }) => id)); } catch (e) {
+                debug(`deleteMany: Vector deleteMany failed: ${e.message}`);
+            }
+        }
 
         for (const { index, id } of toDelete) {
             result.successful.push({ index, id });
@@ -1165,6 +1330,7 @@ class SynapsD extends EventEmitter {
 
         // Best-effort Lance upsert
         try { await this.#lanceIndex.upsert(parseInitializeDocument(parsedDocument)); } catch (_) { }
+        this.#enqueueEmbeddable([parsedDocument]);
 
         if (emitEvent) {
             const { tree: contextTree } = this.#resolveTreeSelection('context', contextSpec, '/');
@@ -1523,7 +1689,16 @@ class SynapsD extends EventEmitter {
             options,
         } = this.#normalizeQuerySpec(spec);
 
-        if (!this.#lanceIndex || !this.#lanceIndex.isReady) {
+        // Retrieval mode: 'fts' (lexical BM25, default), 'vector' (dense kNN),
+        // 'hybrid' (dense + lexical fused via RRF). vector/hybrid fall back to
+        // fts when the dense stack is unavailable (disabled / init failed).
+        let mode = (spec.mode || 'fts').toLowerCase();
+        if ((mode === 'vector' || mode === 'hybrid') && (!this.#vectorIndex || !this.#vectorIndex.isReady)) {
+            debug(`search: mode '${mode}' requested but vector index not ready; falling back to fts`);
+            mode = 'fts';
+        }
+
+        if (mode === 'fts' && (!this.#lanceIndex || !this.#lanceIndex.isReady)) {
             const empty = [];
             empty.count = 0;
             empty.totalCount = 0;
@@ -1593,12 +1768,29 @@ class SynapsD extends EventEmitter {
             return empty;
         }
 
-        // BM25 search — pass candidateIds for post-filtering (empty = search all)
-        const { pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(
-            queryString,
-            filtersApplied ? candidateIds : [],
-            { limit, offset },
-        );
+        const scopedIds = filtersApplied ? candidateIds : [];
+
+        // Dispatch by mode. vector/hybrid embed the query first; if embedding
+        // fails (worker/model issue) degrade to lexical rather than erroring.
+        let pageIds, totalCount, error;
+        if (mode === 'vector' || mode === 'hybrid') {
+            let queryVector = null;
+            try {
+                queryVector = await this.#embedder.embedQuery(queryString);
+            } catch (e) {
+                debug(`search: query embedding failed (${e.message}); falling back to fts`);
+            }
+            if (!queryVector) {
+                ({ pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit, offset }));
+            } else if (mode === 'hybrid') {
+                ({ pageIds, totalCount, error } = await this.#vectorIndex.hybridSearch(queryVector, queryString, scopedIds, { limit, offset }));
+            } else {
+                ({ pageIds, totalCount, error } = await this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit, offset }));
+            }
+        } else {
+            // BM25 search — pass candidateIds for post-filtering (empty = search all)
+            ({ pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit, offset }));
+        }
 
         const docs = pageIds.length > 0 ? await this.documents.getMany(pageIds) : [];
         const result = this.#safeParseDocuments(docs);
@@ -1676,6 +1868,8 @@ class SynapsD extends EventEmitter {
             } catch (e) {
                 debug(`put/update: Lance upsert failed for ${updatedDocument.id}: ${e.message}`);
             }
+            // Content changed → re-embed (queue is idempotent; replaces chunks).
+            this.#enqueueEmbeddable([updatedDocument]);
 
             return updatedDocument.id;
         } catch (error) {
@@ -1827,6 +2021,11 @@ class SynapsD extends EventEmitter {
             } catch (e) {
                 debug(`delete: Lance delete failed for ${docId}: ${e.message}`);
                 // Don't fail the entire operation if Lance cleanup fails
+            }
+            if (this.#vectorIndex) {
+                try { await this.#vectorIndex.deleteDoc(docId); } catch (e) {
+                    debug(`delete: Vector delete failed for ${docId}: ${e.message}`);
+                }
             }
 
             if (emitEvent) {
