@@ -13,8 +13,8 @@ function note(title, content = title) {
 
 // The bitmap-churn guard: an edit (same id, changed content/checksum) must
 // keep the document id stable, so every layer/context/timeline reference that
-// keys off the id survives the edit. This is the invariant the canvas-fuse
-// write path and the web/cli editors depend on.
+// keys off the id survives the edit. This is the invariant any editing client
+// depends on.
 describe('SynapsD putMany id-preserving updates', () => {
     let rootPath;
     let db;
@@ -76,16 +76,16 @@ describe('SynapsD putMany id-preserving updates', () => {
         expect(byOld == null || byOld.id !== id).toBe(true);
     });
 
-    test('id-less content-addressed dedup still works (home indexer re-scan path)', async () => {
+    test('id-less content-addressed dedup still works (re-import path)', async () => {
         const [first] = await db.putMany([note('Same', 'identical body')]);
         // No id supplied, identical content -> dedup to the same doc, no new id
         const [second] = await db.putMany([note('Same', 'identical body')]);
         expect(second).toBe(first);
     });
 
-    test('a string id (transport coercion) still resolves to the numeric doc and updates in place', async () => {
+    test('a string id still resolves to the numeric doc and updates in place', async () => {
         const [id] = await db.putMany([note('Coerced', 'first')]);
-        // fastify coerceTypes can hand us the id as a string
+        // A caller may supply the id as a string; it must still resolve
         const result = await db.putMany([{ id: String(id), schema: NOTE_SCHEMA, data: { title: 'Coerced', content: 'second' } }]);
         expect(result).toEqual([id]); // numeric id, not the string, not a fork
 

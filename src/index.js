@@ -526,11 +526,10 @@ class SynapsD extends EventEmitter {
                 // Dedup priority: a supplied id that exists is an UPDATE — the id
                 // is the stable key every bitmap/timeline/checksum reference hangs
                 // off, so it must be preserved (no new id minted). Only when no id
-                // matches do we fall back to content-addressed (checksum) dedup,
-                // which the home indexer relies on for id-less re-scans.
-                // Document ids are integers; transports (fastify coerceTypes)
-                // may hand us a string — normalize before lookup so the update
-                // path resolves and the canonical numeric id is preserved.
+                // matches do we fall back to content-addressed (checksum) dedup
+                // (id-less re-imports of the same content resolve to one doc).
+                // Ids are integers; a numeric-string id is normalized before
+                // lookup so the update path resolves and the id is preserved.
                 const suppliedId = (doc && doc.id !== undefined && doc.id !== null)
                     ? (typeof doc.id === 'string' ? parseInt(doc.id, 10) : doc.id)
                     : null;
