@@ -5,6 +5,29 @@ import path from 'path';
 import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd:lance-index');
 import * as lancedb from '@lancedb/lancedb';
+const { MatchQuery, BooleanQuery, Operator, Occur } = lancedb;
+
+/**
+ * Tokenizer config for the BM25 index. Kept in one place so the on-disk
+ * signature (see #ensureFtsIndex) can detect changes and rebuild the index
+ * on existing data without the operator having to nuke the lance dir.
+ *
+ * - simple base tokenizer splits on punctuation, so URLs like
+ *   `https://example.com/foo-bar` index as [https, example, com, foo, bar].
+ * - asciiFolding + lowercase fold "Café" → "cafe"; stem folds "running" → "run".
+ * - stop words kept: titles/URLs are short, dropping "the"/"a" loses recall.
+ * - withPosition enables future phrase queries.
+ */
+const FTS_INDEX_CONFIG = {
+    withPosition: true,
+    baseTokenizer: 'simple',
+    lowercase: true,
+    stem: true,
+    removeStopWords: false,
+    asciiFolding: true,
+    maxTokenLength: 60,
+};
+const FTS_CONFIG_SIGNATURE = JSON.stringify(FTS_INDEX_CONFIG);
 
 /**
  * LanceIndex - FTS and vector search via LanceDB
@@ -20,6 +43,7 @@ class LanceIndex {
     #tableName;
     #ftsBitmapKey;
     #bitmapIndex;
+    #ftsColumn = 'fts_text';
 
     constructor(options = {}) {
         this.#rootPath = options.rootPath;
@@ -160,6 +184,12 @@ class LanceIndex {
         const offset = Math.max(0, Number(opts.offset ?? 0));
         const candidateSet = candidateIds.length > 0 ? new Set(candidateIds) : null;
 
+        const ftsQueryObj = this.#buildFtsQuery(queryString);
+        if (!ftsQueryObj) {
+            // Query had no usable tokens (e.g. all punctuation) — empty, not error.
+            return { pageIds: [], totalCount: 0, error: null };
+        }
+
         // Overfetch so post-filtering + pagination still yields enough results
         const fetchLimit = candidateSet
             ? Math.min(candidateSet.size, (limit + offset) * 10 + 1000)
@@ -168,8 +198,10 @@ class LanceIndex {
         let rows;
         try {
             rows = await this.#table
-                .search(queryString, 'fts')
-                .select(['id'])
+                .search(ftsQueryObj)
+                // _score is BM25-ordered; selecting it explicitly silences Lance's
+                // scoring-autoprojection deprecation warning. Rows come back ranked.
+                .select(['id', '_score'])
                 .limit(fetchLimit)
                 .toArray();
         } catch (e) {
@@ -243,15 +275,105 @@ class LanceIndex {
         }
     }
 
+    /**
+     * Split a free-text query into normalized alphanumeric tokens, matching how
+     * the `simple` tokenizer indexes content (splits on punctuation). This means
+     * a pasted URL/path query like `file:///docs/report.pdf` becomes
+     * [file, docs, report, pdf] and matches the indexed location URLs.
+     */
+    #tokenizeQuery(queryString) {
+        if (typeof queryString !== 'string') { return []; }
+        return queryString
+            .toLowerCase()
+            .split(/[^\p{L}\p{N}]+/u)
+            .filter(t => t.length > 0 && t.length <= FTS_INDEX_CONFIG.maxTokenLength);
+    }
+
+    /**
+     * Build a fuzzy, high-recall FTS query from a raw user string.
+     *
+     * Naive BM25 (`table.search(rawString, 'fts')`) routed the string through
+     * Lance's query parser, so `:` `/` `"` in URLs broke parsing and a single
+     * typo returned nothing. Instead we tokenize ourselves and OR together one
+     * fuzzy MatchQuery per token (Should), so any term contributes to the score
+     * — close to fuse.js fuzzy matching, with BM25 doing the ranking.
+     *
+     * Fuzziness scales with token length (short tokens tolerate no edits to
+     * avoid noise; longer ones tolerate up to 2), mirroring Elasticsearch AUTO.
+     *
+     * @returns {FullTextQuery|null} null when the string has no usable tokens
+     */
+    #buildFtsQuery(queryString) {
+        const tokens = this.#tokenizeQuery(queryString);
+        if (tokens.length === 0) { return null; }
+
+        const toMatch = (token) => {
+            const fuzziness = token.length <= 3 ? 0 : token.length <= 6 ? 1 : 2;
+            return new MatchQuery(token, this.#ftsColumn, {
+                fuzziness,
+                prefixLength: 1,
+                maxExpansions: 50,
+                operator: Operator.Or,
+            });
+        };
+
+        if (tokens.length === 1) { return toMatch(tokens[0]); }
+        return new BooleanQuery(tokens.map(t => [Occur.Should, toMatch(t)]));
+    }
+
     async #ensureFtsIndex() {
         if (!this.#table) { return; }
+
+        // Rebuild only when the tokenizer config changed since last build — a
+        // signature column on the (single-purpose) table records what built the
+        // current index, so existing data picks up new tokenizer settings
+        // without forcing a costly rebuild on every startup.
+        let needsRebuild = true;
         try {
-            await this.#table.createIndex('fts_text', { config: lancedb.Index.fts() });
+            const indices = await this.#table.listIndices();
+            const hasFts = indices.some(idx => Array.isArray(idx.columns)
+                ? idx.columns.includes(this.#ftsColumn)
+                : idx.column === this.#ftsColumn);
+            if (hasFts) {
+                needsRebuild = (await this.#readFtsSignature()) !== FTS_CONFIG_SIGNATURE;
+            }
         } catch (e) {
-            // Ignore "already exists" errors; log anything unexpected
+            debug(`ensureFtsIndex: listIndices failed, will (re)build: ${e.message}`);
+        }
+
+        if (!needsRebuild) { return; }
+
+        try {
+            await this.#table.createIndex(this.#ftsColumn, {
+                config: lancedb.Index.fts(FTS_INDEX_CONFIG),
+                replace: true,
+            });
+            await this.#writeFtsSignature();
+            debug('ensureFtsIndex: (re)built FTS index with current tokenizer config');
+        } catch (e) {
             if (!e.message?.includes('already exists')) {
                 debug(`ensureFtsIndex: ${e.message}`);
             }
+        }
+    }
+
+    #signaturePath() {
+        return path.join(this.#rootPath, '.fts-config-signature');
+    }
+
+    async #readFtsSignature() {
+        try {
+            return await fs.promises.readFile(this.#signaturePath(), 'utf8');
+        } catch (_) {
+            return null;
+        }
+    }
+
+    async #writeFtsSignature() {
+        try {
+            await fs.promises.writeFile(this.#signaturePath(), FTS_CONFIG_SIGNATURE, 'utf8');
+        } catch (e) {
+            debug(`writeFtsSignature: ${e.message}`);
         }
     }
 }
