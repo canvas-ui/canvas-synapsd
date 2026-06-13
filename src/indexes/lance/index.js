@@ -263,6 +263,18 @@ class LanceIndex {
         }
     }
 
+    /** Index health/size snapshot for diagnostics UIs. */
+    async stats() {
+        if (!this.#table) { return { ready: false }; }
+        let ftsRows = 0;
+        try { ftsRows = await this.#table.countRows(); } catch (_) { }
+        let indexedDocs = 0;
+        if (this.#bitmapIndex) {
+            try { const bm = await this.#bitmapIndex.getBitmap(this.#ftsBitmapKey, false); indexedDocs = bm ? bm.size : 0; } catch (_) { }
+        }
+        return { ready: true, ftsRows, indexedDocs };
+    }
+
     async optimize() {
         if (!this.#table) { return null; }
         try {

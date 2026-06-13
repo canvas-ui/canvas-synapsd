@@ -163,9 +163,12 @@ class BaseDocument {
             ...(options.indexOptions || {}),
             embeddingOptions: {
                 ...(options.indexOptions?.embeddingOptions || {}),
-                embeddingModel: options.indexOptions?.embeddingOptions?.embeddingModel || 'text-embedding-3-small',
-                embeddingDimensions: options.indexOptions?.embeddingOptions?.embeddingDimensions || 1536,
-                embeddingProvider: options.indexOptions?.embeddingOptions?.embeddingProvider || 'openai',
+                // Local in-process ONNX (fastembed) is the MVP default; the
+                // server computes vectors for readable JSON docs (notes). Apps
+                // may override per-document for blob/media (app-provided vectors).
+                embeddingModel: options.indexOptions?.embeddingOptions?.embeddingModel || 'bge-small-en-v1.5',
+                embeddingDimensions: options.indexOptions?.embeddingOptions?.embeddingDimensions || 384,
+                embeddingProvider: options.indexOptions?.embeddingOptions?.embeddingProvider || 'local',
                 embeddingProviderOptions: options.indexOptions?.embeddingOptions?.embeddingProviderOptions || {},
                 chunking: options.indexOptions?.embeddingOptions?.chunking || {
                     type: 'sentence',
