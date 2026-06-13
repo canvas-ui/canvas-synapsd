@@ -97,10 +97,10 @@ class BitmapIndex {
         }
     }
 
-    async listBitmaps(prefix = '') {
+    async listBitmaps(prefix = '', { includeInternal = false } = {}) {
         prefix = BitmapIndex.normalizeKey(prefix);
         if (prefix) {
-            // If prefix provided, use range query
+            // If prefix provided, use range query (internal/* reachable this way)
             const keys = [];
             for await (const key of this.dataset.getKeys({
                 start: prefix + '/',
@@ -109,10 +109,10 @@ class BitmapIndex {
             return keys;
         }
 
-        // If no prefix, get all keys except internal ones
+        // No prefix: all keys, excluding internal/* unless explicitly requested.
         const keys = [];
         for await (const key of this.dataset.getKeys()) {
-            if (!key.startsWith('internal/')) { keys.push(key); }
+            if (includeInternal || !key.startsWith('internal/')) { keys.push(key); }
         }
         return keys;
     }
