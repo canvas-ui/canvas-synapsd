@@ -455,6 +455,46 @@ await db.timeline.deleteTimeline('wikipedia');
 
 Current interval semantics are closed intervals: `[start, end]`. Open interval support belongs in the next pass.
 
+## Bitmap index
+
+Roaring bitmaps back every membership lookup. Keys use typed prefixes — validated in `indexes/bitmaps/lib/keys.js`:
+
+| Prefix | Role |
+|--------|------|
+| `context/<treeId>/<layerUlid>` | Context-tree layer membership |
+| `vfs/<treeId>/...` | Directory-tree folder membership |
+| `tag/`, `data/`, `device/`, `custom/`, … | Feature/schema filters (also usable in query `filters`) |
+| `internal/...` | Engine-managed indexes — hidden from default listings |
+
+Notable `internal/*` keys:
+
+- `internal/ts/<timeline>/<scale>/start|end` — timeline Dual-BSI tiers
+- `internal/lance/fts`, `internal/lance/vectors` — Lance search index coverage
+- `internal/gc/deleted` — soft-deleted document set
+
+### Introspection (`db.bitmapIndex`)
+
+```js
+// User-facing bitmaps only (default — omits internal/*)
+const keys = await db.bitmapIndex.listBitmaps();
+
+// All keys, including engine-managed internal/*
+const allKeys = await db.bitmapIndex.listBitmaps('', { includeInternal: true });
+
+// Prefix scan — always returns keys under that prefix (internal/* included when prefix matches)
+const timelineKeys = await db.bitmapIndex.listBitmaps('internal/ts');
+const treeLayers = await db.bitmapIndex.listBitmaps(`context/${treeId}`);
+```
+
+`listBitmaps(prefix, { includeInternal })` behavior:
+
+- **No prefix:** all keys except `internal/*`, unless `includeInternal: true`.
+- **With prefix:** range scan under that prefix; no extra `internal/*` filtering.
+
+Load a bitmap with `getBitmap(key)` (returns a `Bitmap` instance with `size`, `has(id)`, `toArray()`, etc.). Find which bitmaps contain a document via `getBitmapsForDocument(id, prefix?)` on the main `db` object (also omits `internal/*` when `prefix` is empty).
+
+REST equivalent: `GET /rest/v2/workspaces/:id/bitmaps?includeInternal=true` (workspace must be started). See project `docs/API.md` for `includeData`, prefix paths, raw `.roar` download, and delete protections.
+
 ## Trees
 
 SynapsD supports multiple named trees per workspace database. Trees are views on top of your documents — they organise membership and structure, not data. A single document can live in many trees at once.
