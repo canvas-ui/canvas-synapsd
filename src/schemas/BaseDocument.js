@@ -54,9 +54,24 @@ const timelineEntrySchema = z.object({
     message: 'Timeline entry requires name or timeline',
 });
 
+// Document ids are integers. Transports (e.g. fastify coerceTypes) can hand us
+// a numeric string; coerce it back so it never forks the storage key or trips
+// the numeric-id schema. Non-numeric/garbage is passed through to surface as a
+// validation error rather than being silently swallowed.
+function normalizeDocumentId(id) {
+    if (id === undefined || id === null) { return null; }
+    if (typeof id === 'string' && /^\d+$/.test(id.trim())) { return parseInt(id, 10); }
+    return id;
+}
+
 // Full document schema definition (for internal storage)
 const documentSchema = z.object({
     // Base
+    // Document id is an integer assigned by the DB (generateDocumentIDs). It is
+    // the stable key every bitmap/timeline/checksum reference hangs off, so it
+    // MUST be numeric — a string id (e.g. from a transport coercing the field)
+    // would fork the storage key. null/undefined = not yet assigned (new doc).
+    id: z.number().int().positive().nullable().optional(),
     schema: z.string(),
     schemaVersion: z.string(),
 
@@ -108,9 +123,9 @@ const documentSchema = z.object({
     checksumArray: z.array(z.string()).optional(),
     embeddingsArray: z.array(z.string()).optional(),
 
-    // Versioning
-    parentId: z.string().nullable().optional(),
-    versions: z.array(z.string()).optional(),
+    // Versioning — parentId/versions reference document ids, which are numeric
+    parentId: z.number().int().positive().nullable().optional(),
+    versions: z.array(z.number().int().positive()).optional(),
     versionNumber: z.number().int().positive().optional(),
     latestVersion: z.number().int().positive().optional(),
 });
@@ -133,7 +148,7 @@ class BaseDocument {
      */
     constructor(options = {}) {
         // Base
-        this.id = options.id ?? null;
+        this.id = normalizeDocumentId(options.id);
         this.schema = options.schema ?? DOCUMENT_SCHEMA_NAME;
         this.schemaVersion = options.schemaVersion ?? DOCUMENT_SCHEMA_VERSION;
 
@@ -197,7 +212,7 @@ class BaseDocument {
         this.updatedAt = options.updatedAt ?? new Date().toISOString();
 
         // Versioning
-        this.parentId = options.parentId || null;
+        this.parentId = normalizeDocumentId(options.parentId);
         this.versions = options.versions || [];
         this.versionNumber = options.versionNumber || 1;
         this.latestVersion = options.latestVersion || 1;
@@ -243,8 +258,8 @@ class BaseDocument {
         // Track if data was updated to know if we need to regenerate checksums
         let dataUpdated = false;
 
-        // Update ID if provided
-        if (data.id) { this.id = data.id; }
+        // Update ID if provided (coerce numeric strings; ids are integers)
+        if (data.id !== undefined && data.id !== null) { this.id = normalizeDocumentId(data.id); }
 
         // Update data if provided
         if (data.data) {
@@ -282,7 +297,7 @@ class BaseDocument {
         this.updatedAt = data.updatedAt ?? new Date().toISOString();
 
         // Update versioning information if provided
-        if (data.parentId) { this.parentId = data.parentId; }
+        if (data.parentId) { this.parentId = normalizeDocumentId(data.parentId); }
         if (data.versions) { this.versions = data.versions; }
         if (data.versionNumber) { this.versionNumber = data.versionNumber; }
         if (data.latestVersion) { this.latestVersion = data.latestVersion; }
