@@ -54,10 +54,10 @@ const timelineEntrySchema = z.object({
     message: 'Timeline entry requires name or timeline',
 });
 
-// Document ids are integers. Transports (e.g. fastify coerceTypes) can hand us
-// a numeric string; coerce it back so it never forks the storage key or trips
-// the numeric-id schema. Non-numeric/garbage is passed through to surface as a
-// validation error rather than being silently swallowed.
+// Document ids are integers. A caller may hand us a numeric string; coerce it
+// back so it never forks the storage key or trips the numeric-id schema.
+// Non-numeric input is passed through to surface as a validation error rather
+// than being silently swallowed.
 function normalizeDocumentId(id) {
     if (id === undefined || id === null) { return null; }
     if (typeof id === 'string' && /^\d+$/.test(id.trim())) { return parseInt(id, 10); }

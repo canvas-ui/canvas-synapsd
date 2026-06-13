@@ -32,8 +32,10 @@ export default class Note extends Document {
 
         super(options);
 
+        // DB-level invariant only: guarantee a title exists. Any smarter
+        // derivation (e.g. from a markdown heading) is application policy and
+        // lives in the consuming client, not here.
         if (!this.data.title) {
-            // If Note has no title, we'll use YYYYMMDD, subject to change
             const now = new Date();
             const year = now.getFullYear();
             const month = (now.getMonth() + 1).toString().padStart(2, '0');
