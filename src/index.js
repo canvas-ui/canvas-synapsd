@@ -790,6 +790,8 @@ class SynapsD extends EventEmitter {
                 ids: insertedIds,
                 count: insertedIds.length,
                 batch: true,
+                context: contextSpec,
+                directory: directorySpec,
             }));
         }
         if (updatedIds.length > 0) {
@@ -970,10 +972,12 @@ class SynapsD extends EventEmitter {
         const storedIds = prepared.map(p => p.parsed.id);
 
         if (emitEvent) {
+            const directoryPaths = [...new Set(prepared.map(p => p.directorySpec?.path).filter(Boolean))];
             this.emit(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, {
                 ids: storedIds,
                 count: storedIds.length,
                 batch: true,
+                directory: { tree: prepared[0]?.directorySpec?.tree, paths: directoryPaths },
             }));
         }
 
@@ -1340,7 +1344,12 @@ class SynapsD extends EventEmitter {
                 directorySpec,
                 source: 'tree',
             }));
-            this.emit(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, { id: parsedDocument.id, document: parsedDocument }));
+            this.emit(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, {
+                id: parsedDocument.id,
+                document: parsedDocument,
+                context: contextSpec,
+                directory: directorySpec,
+            }));
         }
 
         return parsedDocument.id;
