@@ -515,15 +515,66 @@ class SynapsD extends EventEmitter {
         for (let i = 0; i < documents.length; i++) {
             try {
                 const doc = documents[i];
-                const parsed = isDocumentInstance(doc) ? doc : parseInitializeDocument(doc);
-                parsed.validateData();
 
-                const primaryChecksum = parsed.getPrimaryChecksum();
-                const existing = await this.getByChecksumString(primaryChecksum).catch(() => null);
-                if (existing) {
-                    parsed.id = existing.id;
-                    if (existing.createdAt) { parsed.createdAt = existing.createdAt; }
-                    if (existing.updatedAt) { parsed.updatedAt = existing.updatedAt; }
+                let parsed;
+                let existing = null;
+                let isUpdate = false;
+                let prevChecksums = null;
+                let prevLocations = null;
+                let prevTimelineState = null;
+
+                // Dedup priority: a supplied id that exists is an UPDATE — the id
+                // is the stable key every bitmap/timeline/checksum reference hangs
+                // off, so it must be preserved (no new id minted). Only when no id
+                // matches do we fall back to content-addressed (checksum) dedup,
+                // which the home indexer relies on for id-less re-scans.
+                // Document ids are integers; transports (fastify coerceTypes)
+                // may hand us a string — normalize before lookup so the update
+                // path resolves and the canonical numeric id is preserved.
+                const suppliedId = (doc && doc.id !== undefined && doc.id !== null)
+                    ? (typeof doc.id === 'string' ? parseInt(doc.id, 10) : doc.id)
+                    : null;
+                if (suppliedId !== null && !Number.isNaN(suppliedId)) {
+                    existing = await this.#getById(suppliedId).catch(() => null);
+                    if (existing) {
+                        isUpdate = true;
+                        // Snapshot previous state BEFORE update() mutates in place,
+                        // so stale checksums/timelines/device tags can be cleaned.
+                        prevChecksums = Array.isArray(existing.checksumArray) ? [...existing.checksumArray] : [];
+                        prevLocations = Array.isArray(existing.locations) ? [...existing.locations] : [];
+                        prevTimelineState = {
+                            timelines: Array.isArray(existing.timelines)
+                                ? existing.timelines.map(entry => ({ ...entry }))
+                                : [],
+                        };
+                        // Merge input onto existing (preserves locations, metadata,
+                        // parentId chain; regenerates checksums when data changed).
+                        parsed = existing.update(doc);
+                        // update() trusts data.id verbatim (and returns the same
+                        // mutated instance) — re-assert the canonical numeric id
+                        // so a string-coerced input can't fork the storage key.
+                        parsed.id = suppliedId;
+                    }
+                }
+
+                if (!parsed) {
+                    parsed = isDocumentInstance(doc) ? doc : parseInitializeDocument(doc);
+                    parsed.validateData();
+
+                    const primaryChecksum = parsed.getPrimaryChecksum();
+                    existing = await this.getByChecksumString(primaryChecksum).catch(() => null);
+                    if (existing) {
+                        parsed.id = existing.id;
+                        if (existing.createdAt) { parsed.createdAt = existing.createdAt; }
+                        if (existing.updatedAt) { parsed.updatedAt = existing.updatedAt; }
+                        prevChecksums = Array.isArray(existing.checksumArray) ? [...existing.checksumArray] : [];
+                        prevLocations = Array.isArray(existing.locations) ? [...existing.locations] : [];
+                        prevTimelineState = {
+                            timelines: Array.isArray(existing.timelines)
+                                ? existing.timelines.map(entry => ({ ...entry }))
+                                : [],
+                        };
+                    }
                 }
 
                 const docFeatures = [...featureBitmaps];
@@ -531,7 +582,7 @@ class SynapsD extends EventEmitter {
                     docFeatures.push(parsed.schema);
                 }
 
-                prepared.push({ parsed, existing: !!existing, existingDocument: existing, docFeatures });
+                prepared.push({ parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, docFeatures });
             } catch (error) {
                 const contextualError = new Error(`Failed to prepare document at index ${i}: ${error.message}`);
                 contextualError.cause = error;
@@ -566,16 +617,27 @@ class SynapsD extends EventEmitter {
 
         try {
             await this.#db.transaction(async () => {
-                for (const { parsed, existingDocument, docFeatures } of prepared) {
+                for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, docFeatures } of prepared) {
                     await this.documents.put(parsed.id, parsed);
+
+                    // Re-point the checksum index: drop checksums the edit dropped
+                    // (empty diff for checksum-matched re-indexes), insert current.
+                    if (existing && prevChecksums) {
+                        const staleChecksums = prevChecksums.filter(c => !parsed.checksumArray.includes(c));
+                        if (staleChecksums.length) await this.#checksumIndex.deleteArray(staleChecksums);
+                    }
                     await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
-                    await this.#timelineIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
+
+                    // crud:created only for genuinely new docs; updates keep their createdAt
+                    if (!isUpdate) {
+                        await this.#timelineIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
+                    }
                     if (parsed.updatedAt) await this.#timelineIndex.insert('crud:updated', parsed.id, parsed.updatedAt);
-                    if (existingDocument) await this.#removeDocumentTimelines(parsed.id, existingDocument, parsed);
+                    if (existing && prevTimelineState) await this.#removeDocumentTimelines(parsed.id, prevTimelineState, parsed);
                     await this.#indexDocumentTimelines(parsed.id, parsed);
                     await this.#indexDocument(parsed.id, contextSpec, directorySpec, docFeatures);
-                    if (existingDocument) {
-                        await this.#removeStaleDeviceMembership(parsed.id, existingDocument.locations, parsed.locations, docFeatures);
+                    if (existing) {
+                        await this.#removeStaleDeviceMembership(parsed.id, prevLocations || [], parsed.locations, docFeatures);
                     }
                 }
             });
@@ -618,11 +680,25 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        this.emit(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, {
-            ids: storedIds,
-            count: storedIds.length,
-            batch: true,
-        }));
+        // Split inserts from updates so consumers (ws bridge, UIs) can tell an
+        // edit from a new document — an in-place update keeps the same id.
+        const insertedIds = prepared.filter(p => !p.isUpdate).map(p => p.parsed.id);
+        const updatedIds = prepared.filter(p => p.isUpdate).map(p => p.parsed.id);
+
+        if (insertedIds.length > 0) {
+            this.emit(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, {
+                ids: insertedIds,
+                count: insertedIds.length,
+                batch: true,
+            }));
+        }
+        if (updatedIds.length > 0) {
+            this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
+                ids: updatedIds,
+                count: updatedIds.length,
+                batch: true,
+            }));
+        }
 
         return storedIds;
     }
