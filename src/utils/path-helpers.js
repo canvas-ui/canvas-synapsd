@@ -46,7 +46,7 @@ export function deviceFileUrl(deviceId, localPath) {
 
 /**
  * Parse a `locations[].url` into its parts. Covers the canvas URL grammar:
- *   stored://<backend>/<key>            backend may contain ':' (e.g. fs:data:email)
+ *   stored://<backend>/<key>            backend may contain ':' (e.g. workspace:data)
  *   file://{WORKSPACE_ROOT}/<path>      authority is the literal {WORKSPACE_ROOT} token
  *   file://<deviceId>/<path>            authority is a device id or user@host alias
  *   imap://<account>/<folder>;UID=<n>   RFC 5092; the ;UID= param stays in `key`
