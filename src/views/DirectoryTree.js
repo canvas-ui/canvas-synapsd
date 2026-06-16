@@ -12,6 +12,12 @@ const debug = debugInstance('canvas:synapsd:directory-tree');
 
 const ROOT_NODE_ID = 'root';
 const INHERITED_LOCK_METADATA_KEY = 'inheritedLocks';
+// `system:*` locks (e.g. system:incoming) protect a SINGLE node from structural
+// ops (remove/rename/move) — they are NOT subtree locks and must not cascade to
+// children. Without this, every backend-ingested subfolder under /.incoming
+// inherited the root lock and could never be deleted.
+const SYSTEM_LOCK_PREFIX = 'system:';
+const isSystemLock = (lock) => String(lock).startsWith(SYSTEM_LOCK_PREFIX);
 
 class DirectoryTree extends EventEmitter {
     #dataStore;
@@ -659,7 +665,7 @@ class DirectoryTree extends EventEmitter {
         return Array.from(new Set([
             ...(parent?.payload?.lockedBy || []),
             ...(Array.isArray(inheritedLocks) ? inheritedLocks : []),
-        ]));
+        ])).filter((lock) => !isSystemLock(lock));
     }
 
     #lockNode(node, lockBy, recursive = false) {
