@@ -13,6 +13,7 @@ export const ALLOWED_BITMAP_PREFIXES = [
     'data/',
     'nested/',
     'custom/',
+    'rel/', // Typed directed document<->document relations (see indexes/inverted/Relations.js)
 ];
 
 export function normalizeBitmapKey(key) {

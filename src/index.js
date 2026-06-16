@@ -31,6 +31,7 @@ import BitmapIndex from './indexes/bitmaps/index.js';
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimelineIndex from './indexes/inverted/Timeline.js';
 import Synapses from './indexes/inverted/Synapses.js';
+import Relations from './indexes/inverted/Relations.js';
 import LanceIndex from './indexes/lance/index.js';
 import VectorIndex from './indexes/lance/VectorIndex.js';
 import { normalizeBitmapKeys, normalizeBitmapKey } from './indexes/bitmaps/lib/keys.js';
@@ -84,6 +85,7 @@ class SynapsD extends EventEmitter {
     #checksumIndex;
     #timelineIndex;
     #synapses;
+    #relations;
 
     // LanceDB
     #lanceIndex;
@@ -238,6 +240,7 @@ class SynapsD extends EventEmitter {
     get checksumIndex() { return this.#checksumIndex; }
     get timeline() { return this.#timelineIndex; }
     get synapses() { return this.#synapses; }
+    get relations() { return this.#relations; }
     get semantic() { return this.#semantic; }
 
     /**
@@ -257,6 +260,10 @@ class SynapsD extends EventEmitter {
                 this.#db.createDataset('synapses'),
                 this.bitmapIndex
             );
+
+            // Typed doc<->doc relations (rel/* bitmaps; reuses bitmapIndex,
+            // delegates membership inheritance to Synapses).
+            this.#relations = new Relations(this.bitmapIndex, this.#synapses);
 
             // Initialize LanceDB under workspace root (rootPath/lance)
             this.#lanceIndex = new LanceIndex({
@@ -1244,6 +1251,7 @@ class SynapsD extends EventEmitter {
                 for (const { id, document } of toDelete) {
                     await this.documents.delete(id);
                     await this.#synapses.clearSynapses(id);
+                    await this.#relations.clearRelations(id);
                     await this.#timelineIndex.removeFromAll(id);
                     await this.#checksumIndex.deleteArray(document.checksumArray);
                     await this.deletedDocumentsBitmap.tick(id);
@@ -1993,6 +2001,7 @@ class SynapsD extends EventEmitter {
                 // Delete document from all bitmaps AND Reverse Index via Synapses
                 // await this.bitmapIndex.untickAll(docId);
                 await this.#synapses.clearSynapses(docId);
+                await this.#relations.clearRelations(docId);
                 debug(`delete: Document ${docId} removed from all bitmaps and Synapses index`);
 
                 // Remove document from all custom and CRUD timelines before recording deletion.
