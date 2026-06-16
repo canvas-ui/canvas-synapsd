@@ -1294,7 +1294,11 @@ class SynapsD extends EventEmitter {
         let directorySpec = null;
         if (this.#isDocumentOperationOptions(contextSpec)) {
             const opts = contextSpec;
-            contextSpec = opts.context ?? { path: '/' };
+            // Preserve an explicit null context (consistent with #updateOne /
+            // putMany / link): a directory-only insert into /.incoming should NOT
+            // tick the context root — see #resolveDocumentMembershipKeys, which
+            // skips root for incoming directory paths when contextSpec is falsy.
+            contextSpec = opts.context ?? null;
             directorySpec = opts.directory ?? null;
             featureBitmapArray = opts.features ?? featureBitmapArray;
             emitEvent = opts.emitEvent ?? emitEvent;
