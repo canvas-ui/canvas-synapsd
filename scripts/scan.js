@@ -4,24 +4,17 @@
 /**
  * scan.js — Recursively scan a directory into a SynapsD database, or query that DB.
  *
- * Usage:
- *   node scripts/scan.js scan   --path <dir>  [--db <dir>] [--exclude <glob>]... [--no-lance]
- *   node scripts/scan.js get    --id <n>      [--db <dir>]
- *   node scripts/scan.js find                 [--db <dir>] [--tree <name>] [--path <tree-path>] [--features <f1,f2>] [--limit <n>]
- *   node scripts/scan.js search --query <txt> [--db <dir>] [--tree <name>] [--features <f1,f2>] [--limit <n>]
- *   node scripts/scan.js tree                 [--db <dir>] [--name <name>]
- *
- * All flags are position-independent and can appear before or after the command.
- * --db defaults to ./.db in the current working directory.
+ *   scan [options] <command> [arguments]
  *
  * Full reference: scripts/scan.readme.md
  */
 
-import { resolve, relative, dirname, basename, extname, join } from 'path';
-import { createReadStream, statSync, readdirSync, existsSync, appendFileSync } from 'fs';
+import { resolve, relative, dirname, basename, join } from 'path';
+import { createReadStream, statSync, readdirSync, existsSync, appendFileSync, readFileSync } from 'fs';
+import { parseArgs } from 'node:util';
+import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
 import { execSync } from 'child_process';
-import SynapsD from '../src/index.js';
 
 // ── Auto-excluded patterns (sockets, runtime, binary junk) ───────────────────
 
@@ -40,121 +33,219 @@ const SCAN_PUT_BATCH = 4096;
 /** Default directory tree name used when --tree is not specified. */
 const SCAN_DEFAULT_TREE = 'filesystem';
 
-// ── Argument parsing ─────────────────────────────────────────────────────────
+const VERSION = JSON.parse(
+    readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../package.json'), 'utf8'),
+).version;
 
-function usage() {
-    console.error([
-        '',
-        'Usage:',
-        '  node scripts/scan.js scan   --path <dir>  [--db <dir>] [--exclude <glob>]... [--no-lance]',
-        '  node scripts/scan.js get    --id <n>      [--db <dir>]',
-        '  node scripts/scan.js find                 [--db <dir>] [--tree <name>] [--path <tree-path>] [--features <f1,f2>] [--limit <n>]',
-        '  node scripts/scan.js search --query <txt> [--db <dir>] [--tree <name>] [--path <tree-path>] [--features <f1,f2>] [--limit <n>]',
-        '  node scripts/scan.js tree                 [--db <dir>] [--name <name>]',
-        '',
-        'Flags can appear anywhere (before or after the command).',
-        'See scripts/scan.readme.md for details.',
-        '',
-    ].join('\n'));
+// ── CLI ──────────────────────────────────────────────────────────────────────
+
+const DB_OPT = { db: { type: 'string', short: 'd', default: '.db', desc: 'Database directory' } };
+const HELP_OPT = { help: { type: 'boolean', short: 'h', default: false } };
+const GLOBAL_OPTS = { ...DB_OPT, ...HELP_OPT, version: { type: 'boolean', short: 'V', default: false } };
+
+function splitFeatures(raw) {
+    return raw?.split(',').map((f) => f.trim()).filter(Boolean) ?? null;
 }
 
-function parseArgs(argv) {
+function parseLimit(raw) {
+    if (raw == null) { return null; }
+    const n = parseInt(raw, 10);
+    if (isNaN(n)) { cliFail('--limit must be a number'); }
+    return n;
+}
+
+const COMMANDS = {
+    scan: {
+        desc: 'Walk a directory and ingest files',
+        usage: 'scan [options] [path]',
+        args: 'path',
+        options: {
+            ...DB_OPT,
+            ...HELP_OPT,
+            path: { type: 'string', short: 'p', desc: 'Directory to ingest' },
+            tree: { type: 'string', short: 't', default: SCAN_DEFAULT_TREE, desc: 'Tree name' },
+            exclude: { type: 'string', short: 'e', multiple: true, desc: 'Extra glob to skip (repeatable)' },
+            'no-lance': { type: 'boolean', default: false, desc: 'Skip LanceDB indexing' },
+        },
+        build(values, positionals) {
+            const scanPath = values.path ?? positionals[0];
+            if (!scanPath) { cliFail('scan requires a directory (positional or --path)'); }
+            return {
+                command: 'scan',
+                scanPath: resolve(scanPath),
+                treeName: values.tree,
+                dbDir: resolve(values.db),
+                excludes: [...AUTO_EXCLUDE_GLOBS, ...(values.exclude ?? [])],
+                noLance: values['no-lance'],
+            };
+        },
+    },
+    get: {
+        desc: 'Retrieve a document by numeric ID',
+        usage: 'get [options] <id>',
+        args: 'id',
+        options: { ...DB_OPT, ...HELP_OPT },
+        build(values, positionals) {
+            const raw = positionals[0];
+            if (!raw) { cliFail('get requires <id>'); }
+            const id = parseInt(raw, 10);
+            if (isNaN(id)) { cliFail('<id> must be a number'); }
+            return { command: 'get', id, dbDir: resolve(values.db) };
+        },
+    },
+    find: {
+        desc: 'List and filter documents',
+        usage: 'find [options]',
+        options: {
+            ...DB_OPT,
+            ...HELP_OPT,
+            tree: { type: 'string', short: 't', desc: 'Filter by tree name' },
+            path: { type: 'string', desc: 'Filter by tree path' },
+            features: { type: 'string', short: 'f', desc: 'Comma-separated schema filters' },
+            limit: { type: 'string', short: 'l', desc: 'Max results' },
+        },
+        build(values) {
+            return {
+                command: 'find',
+                treeName: values.tree ?? null,
+                treePath: values.path ?? null,
+                features: splitFeatures(values.features),
+                limit: parseLimit(values.limit),
+                dbDir: resolve(values.db),
+            };
+        },
+    },
+    search: {
+        desc: 'Full-text search documents',
+        usage: 'search [options] [query...]',
+        args: 'query...',
+        options: {
+            ...DB_OPT,
+            ...HELP_OPT,
+            query: { type: 'string', short: 'q', desc: 'Search query' },
+            tree: { type: 'string', short: 't', desc: 'Filter by tree name' },
+            path: { type: 'string', desc: 'Filter by tree path' },
+            features: { type: 'string', short: 'f', desc: 'Comma-separated schema filters' },
+            limit: { type: 'string', short: 'l', desc: 'Max results' },
+        },
+        build(values, positionals) {
+            const query = values.query ?? positionals.join(' ');
+            if (!query) { cliFail('search requires a query (positional or -q)'); }
+            return {
+                command: 'search',
+                query,
+                treeName: values.tree ?? null,
+                treePath: values.path ?? null,
+                features: splitFeatures(values.features),
+                limit: parseLimit(values.limit),
+                dbDir: resolve(values.db),
+            };
+        },
+    },
+    tree: {
+        desc: 'Dump a tree as JSON, or list all trees',
+        usage: 'tree [options] [name]',
+        args: 'name',
+        options: {
+            ...DB_OPT,
+            ...HELP_OPT,
+            name: { type: 'string', short: 'n', desc: 'Tree to dump (omit to list all)' },
+        },
+        build(values, positionals) {
+            return {
+                command: 'tree',
+                treeName: values.name ?? positionals[0] ?? null,
+                dbDir: resolve(values.db),
+            };
+        },
+    },
+};
+
+function cliFail(message) {
+    console.error(`Error: ${message}`);
+    process.exit(1);
+}
+
+function formatOptions(options) {
+    const lines = [];
+    for (const [key, spec] of Object.entries(options)) {
+        if (key === 'help') { continue; }
+        const long = spec.short ? `-${spec.short}, --${key}` : `--${key}`;
+        const pad = long.padEnd(22);
+        const extra = spec.default != null && spec.type !== 'boolean'
+            ? ` (default: ${spec.default})`
+            : '';
+        lines.push(`  ${pad}${spec.desc ?? ''}${extra}`);
+    }
+    return lines;
+}
+
+function formatHelp(command) {
+    if (!command) {
+        return [
+            `scan v${VERSION} — SynapsD directory scanner and query tool`,
+            '',
+            'Usage: scan [options] <command> [arguments]',
+            '',
+            'Options:',
+            '  -d, --db <dir>        Database directory (default: ./.db)',
+            '  -h, --help            Show help',
+            '  -V, --version         Show version',
+            '',
+            'Commands:',
+            ...Object.entries(COMMANDS).map(([name, spec]) => `  ${name.padEnd(12)}${spec.desc}`),
+            '',
+            'Run `scan <command> --help` for command-specific options.',
+        ].join('\n');
+    }
+
+    const spec = COMMANDS[command];
+    if (!spec) { cliFail(`Unknown command: ${command}`); }
+
+    const lines = [
+        `Usage: scan ${spec.usage}`,
+        '',
+        spec.desc + '.',
+    ];
+    if (spec.args) {
+        lines.push('', 'Arguments:', `  ${spec.args}`);
+    }
+    lines.push('', 'Options:', ...formatOptions(spec.options));
+    return lines.join('\n');
+}
+
+function parseArgv(argv) {
     const args = argv.slice(2);
-    const opts = {
-        command: null,
-        scanPath: null,
-        id: null,
-        query: null,
-        treeName: null,
-        dbDir: null,
-        features: null,
-        limit: null,
-        excludes: [...AUTO_EXCLUDE_GLOBS],
-        noLance: false,
-    };
+    if (args.length === 0) { return { help: true }; }
 
-    const commands = new Set(['scan', 'get', 'find', 'search', 'tree']);
-
-    let i = 0;
-    while (i < args.length) {
-        const arg = args[i++];
-
-        if (!arg.startsWith('-')) {
-            if (!commands.has(arg)) {
-                console.error(`Unknown command: ${arg}`);
-                usage();
-                process.exit(1);
-            }
-            if (opts.command) {
-                console.error(`Unexpected second command: ${arg}`);
-                usage();
-                process.exit(1);
-            }
-            opts.command = arg;
-            continue;
+    const cmdIdx = args.findIndex((a) => !a.startsWith('-') && COMMANDS[a]);
+    if (cmdIdx === -1) {
+        try {
+            const { values } = parseArgs({ args, options: GLOBAL_OPTS, allowPositionals: true, strict: true });
+            if (values.version) { return { version: true }; }
+        } catch (err) {
+            cliFail(err.message);
         }
-
-        const needsValue = (flag) => {
-            if (i >= args.length || args[i].startsWith('-')) {
-                console.error(`${flag} requires a value`);
-                process.exit(1);
-            }
-        };
-
-        switch (arg) {
-            case '--path':    needsValue(arg); opts.scanPath = resolve(args[i++]); break;
-            case '--db':      needsValue(arg); opts.dbDir = resolve(args[i++]); break;
-            case '--id': {
-                needsValue(arg);
-                const n = parseInt(args[i++], 10);
-                if (isNaN(n)) { console.error('--id must be a number'); process.exit(1); }
-                opts.id = n;
-                break;
-            }
-            case '--query':   needsValue(arg); opts.query = args[i++]; break;
-            case '--tree':    needsValue(arg); opts.treeName = args[i++]; break;
-            case '--name':    needsValue(arg); opts.treeName = args[i++]; break;
-            case '--features': needsValue(arg); opts.features = args[i++].split(',').map(f => f.trim()).filter(Boolean); break;
-            case '--limit': {
-                needsValue(arg);
-                const n = parseInt(args[i++], 10);
-                if (isNaN(n)) { console.error('--limit must be a number'); process.exit(1); }
-                opts.limit = n;
-                break;
-            }
-            case '--exclude': needsValue(arg); opts.excludes.push(args[i++]); break;
-            case '--no-lance': opts.noLance = true; break;
-            default:
-                console.error(`Unknown flag: ${arg}`);
-                usage();
-                process.exit(1);
-        }
+        return { help: true };
     }
 
-    if (!opts.command) {
-        usage();
-        process.exit(1);
-    }
+    const command = args[cmdIdx];
+    const spec = COMMANDS[command];
+    const rest = [...args.slice(0, cmdIdx), ...args.slice(cmdIdx + 1)];
 
-    if (!opts.dbDir) {
-        opts.dbDir = resolve('.db');
+    try {
+        const { values, positionals } = parseArgs({
+            args: rest,
+            options: { ...GLOBAL_OPTS, ...spec.options },
+            allowPositionals: true,
+            strict: true,
+        });
+        if (values.version) { return { version: true }; }
+        if (values.help) { return { help: true, command }; }
+        return spec.build(values, positionals);
+    } catch (err) {
+        cliFail(err.message);
     }
-
-    // Per-command validation
-    if (opts.command === 'scan' && !opts.scanPath) {
-        console.error('scan requires --path <directory>');
-        process.exit(1);
-    }
-    if (opts.command === 'get' && opts.id === null) {
-        console.error('get requires --id <n>');
-        process.exit(1);
-    }
-    if (opts.command === 'search' && !opts.query) {
-        console.error('search requires --query <text>');
-        process.exit(1);
-    }
-
-    return opts;
 }
 
 // ── Glob matching (minimatch-lite, no deps) ──────────────────────────────────
@@ -296,7 +387,16 @@ function elapsed(start) {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-    const opts = parseArgs(process.argv);
+    const parsed = parseArgv(process.argv);
+    if (parsed.help) {
+        console.log(formatHelp(parsed.command));
+        return;
+    }
+    if (parsed.version) {
+        console.log(VERSION);
+        return;
+    }
+    const opts = parsed;
 
     // Monkey-patch LanceIndex to skip if --no-lance
     if (opts.noLance) {
@@ -306,6 +406,7 @@ async function main() {
         LanceIndex.prototype.backfill = async function () { /* noop */ };
     }
 
+    const { default: SynapsD } = await import('../src/index.js');
     const db = new SynapsD({
         path: opts.dbDir,
         backupOnOpen: false,
@@ -592,8 +693,8 @@ async function cmdGet(db, opts) {
 
 async function cmdFind(db, opts) {
     const spec = {};
-    if (opts.treeName) { spec.tree = opts.treeName ?? SCAN_DEFAULT_TREE; }
-    if (opts.scanPath) { spec.path = opts.scanPath; }
+    if (opts.treeName) { spec.tree = opts.treeName; }
+    if (opts.treePath) { spec.path = opts.treePath; }
     if (opts.features) { spec.features = opts.features; }
     if (opts.limit) { spec.limit = opts.limit; }
     const t = performance.now();
@@ -604,8 +705,8 @@ async function cmdFind(db, opts) {
 
 async function cmdSearch(db, opts) {
     const spec = { query: opts.query };
-    if (opts.treeName) { spec.tree = opts.treeName ?? SCAN_DEFAULT_TREE; }
-    if (opts.scanPath) { spec.path = opts.scanPath; }
+    if (opts.treeName) { spec.tree = opts.treeName; }
+    if (opts.treePath) { spec.path = opts.treePath; }
     if (opts.features) { spec.features = opts.features; }
     if (opts.limit) { spec.limit = opts.limit; }
     const t = performance.now();
