@@ -1,5 +1,149 @@
 # SynapsD
 
+We need to extend our @src/services/synapsd/ module to support vector search for multiple modalities(text, images, later probably (streaming) video and audio) and connectors for external services to generate embedding vectors besides local ONNX, ideally ollama/anthropic, openai.
+
+But lets start with something else
+
+The current API is, lets say cumbersome  
+I especially dont like how we query trees and tree paths
+
+
+
+We have 
+- allOf  +
+- anyOf  (default)
+- noneOf !
+
+list(paths, features, filters)
+
+put(document, paths, features, filters)
+putMany(documenst, paths, features, filters)
+
+link(id, paths, features, filters)
+linkMany
+
+fts | vector | hybrid
+
+query(
+  "red ferrari", 
+  [
+    'directory://foo/bar/baz'
+  ],
+  [
+    'data/abstraction/file'
+  ],
+  [
+    't:crud:created:thisWeek',
+    't:crud:updated:thisWeek'
+  ]
+)
+
+query(
+  {
+    "image": "base64string..",
+    "text": "red ferrari"
+  },
+  [
+    'context://foo/bar/baz'
+  ],
+  [
+    'data/abstraction/file'
+  ],
+  [
+    't:crud:created:thisWeek',
+    't:crud:updated:thisWeek'
+  ]
+)
+
+list(
+  [
+    'directory://foo/bar/baz',
+    'directory://foo/baf',
+    'context://baf/baz'
+  ],
+  [
+    'data/abstraction/file',
+    'data/abstraction/note',
+    'data/abstraction/tab',
+    'data/source/wikipedia'
+  ],
+  [
+    t:crud:created:thisWeek,
+    t:crud:updated:thisWeek
+    t:wikipedia:
+  ]
+)
+
+Short form:
+
+query: "text"
+
+paths: [
+  'treeId://some/path',
+  'anotherTree://some/other/path',
+  '!treeId://some/path/i/want/to/exclude'
+]
+
+features: [
+  'data/abstraction/tab',
+  'custom/tag/foo',
+  '
+]
+
+filters: [
+  't:timelineName:range'
+  't:wikipedia:today
+]
+
+Long form
+
+query: {
+    fts: "string"
+    text: "string"
+    image: "base64string"
+}
+
+paths: [
+  'treeId://some/path',
+  'anotherTree://some/other/path',
+  '!treeId://some/path/i/want/to/exclude'
+]
+
+features: [
+  'data/abstraction/tab',
+  'custom/tag/foo',
+  '
+]
+
+Query should be parsed and processed as follows:
+
+Paths > Features > Filters > Query on top
+
+
+---
+
+timelines: [
+    {
+        name: 'wikipedia',
+        start: '1215',
+        end: '1215',
+    },
+],
+
+
+
+
+
+There are 2 use-cases I'm planning to test with:
+#1 en wikipedia dataset converted to thousands of markdown files ingested into a workspace > synapsd
+This is pure text so the current embedding model should be sufficient
+- Dataset will be post-processed by a local LLM to associate its content with a dedicated "wikipedia" timeline (naive, simple, stupid for round 1, we'll get to the more interesting hierachical vector trees later)
+
+
+
+------
+
+
 ## Rand
 
 - multi-model support for vec_text but with the new arch this is not on the table
