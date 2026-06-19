@@ -51,6 +51,29 @@ import PrefixedStore from './utils/PrefixedStore.js';
 
 // Constants
 const INTERNAL_BITMAP_ID_MAX = 100000;
+// Default page size for list() when no limit is supplied. "All documents" is an
+// explicit opt-in (limit:0), never the implicit default — a full parse on a 7M
+// row store is a cost cliff.
+const DEFAULT_LIST_LIMIT = 100;
+// Startup migration (#migrateBitmapKeys) is an O(all-docs) transaction. Gate it
+// behind a persisted version so it runs once per bump instead of on every boot.
+// Increment when a new idempotent migration is added.
+const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION_KEY = 'internal/schemaVersion';
+
+// Union extra locations into a document by url (used by in-batch content dedup,
+// where two identical blobs carry different file:// locations). Mutates target.
+function mergeDocumentLocations(target, extraLocations) {
+    if (!Array.isArray(extraLocations) || extraLocations.length === 0) { return; }
+    if (!Array.isArray(target.locations)) { target.locations = []; }
+    const seen = new Set(target.locations.map((l) => l && l.url));
+    for (const loc of extraLocations) {
+        if (loc && loc.url && !seen.has(loc.url)) {
+            target.locations.push(loc);
+            seen.add(loc.url);
+        }
+    }
+}
 
 /**
  * Simplified SynapsD class
@@ -312,11 +335,17 @@ class SynapsD extends EventEmitter {
             await this.#loadTreeRegistry();
             await this.#ensureDefaultTrees();
 
-            // Migrate bitmap keys from legacy format (one-time, idempotent)
-            await this.#migrateBitmapKeys();
-
-            // Backfill root layer bitmaps for existing documents (idempotent startup migration)
-            await this.#migrateRootBitmaps();
+            // True one-time legacy-format migration, gated behind a persisted
+            // schema version so its O(all-docs) pass runs once per bump, not on
+            // every startup.
+            const appliedVersion = Number(this.#internalStore.get(SCHEMA_VERSION_KEY)) || 0;
+            if (appliedVersion < SCHEMA_VERSION) {
+                debug(`Schema migrations: applied=${appliedVersion} < current=${SCHEMA_VERSION}, running`);
+                await this.#migrateBitmapKeys();
+                await this.#internalStore.put(SCHEMA_VERSION_KEY, SCHEMA_VERSION);
+            } else {
+                debug(`Schema migrations: up to date (v${appliedVersion}), skipping`);
+            }
 
             // Set status
             this.#status = 'running';
@@ -612,6 +641,11 @@ class SynapsD extends EventEmitter {
 
         const featureBitmaps = parseBitmapArray(spec.features || features);
         const prepared = [];
+        // In-batch content dedup: two identical files in one batch both miss the
+        // checksum lookup (nothing is written until phase 2), so without this they
+        // fork into two docs and the checksum index keeps only the last id —
+        // corrupting the one-blob-one-doc model. Keyed by primary checksum.
+        const batchByChecksum = new Map();
 
         for (let i = 0; i < documents.length; i++) {
             try {
@@ -677,12 +711,31 @@ class SynapsD extends EventEmitter {
                     }
                 }
 
+                // In-batch dedup (content-addressed only; explicit id-updates are
+                // intentional and never folded). Merge this doc's locations into
+                // the earlier identical entry instead of minting a second doc.
+                if (!isUpdate) {
+                    const primaryChecksum = parsed.getPrimaryChecksum();
+                    if (primaryChecksum) {
+                        const dup = batchByChecksum.get(primaryChecksum);
+                        if (dup) {
+                            mergeDocumentLocations(dup.parsed, parsed.locations);
+                            continue;
+                        }
+                    }
+                }
+
                 const docFeatures = [...featureBitmaps];
                 if (!docFeatures.includes(parsed.schema)) {
                     docFeatures.push(parsed.schema);
                 }
 
-                prepared.push({ parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, docFeatures });
+                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, docFeatures };
+                prepared.push(entry);
+                if (!isUpdate) {
+                    const primaryChecksum = parsed.getPrimaryChecksum();
+                    if (primaryChecksum) { batchByChecksum.set(primaryChecksum, entry); }
+                }
             } catch (error) {
                 const contextualError = new Error(`Failed to prepare document at index ${i}: ${error.message}`);
                 contextualError.cause = error;
@@ -899,6 +952,10 @@ class SynapsD extends EventEmitter {
         const featureBitmaps = parseBitmapArray(featureArray);
 
         const prepared = [];
+        // In-batch content dedup: identical blobs at different directory paths in
+        // one batch would otherwise fork into separate docs (checksum not yet
+        // written). Fold them into a single doc linked under every path.
+        const batchByChecksum = new Map();
 
         for (let i = 0; i < items.length; i++) {
             const { document, path: dirPath } = items[i];
@@ -913,11 +970,6 @@ class SynapsD extends EventEmitter {
                     continue;
                 }
 
-                const docFeatures = [...featureBitmaps];
-                if (!docFeatures.includes(parsed.schema)) {
-                    docFeatures.push(parsed.schema);
-                }
-
                 const norm = this.#normalizeDocumentOperationSpec(
                     { tree: treeName, path: dirPath },
                     featureArray,
@@ -928,7 +980,22 @@ class SynapsD extends EventEmitter {
                     throw new Error(`putManyDirectoryPaths: expected directory tree (${treeName})`);
                 }
 
-                prepared.push({ parsed, docFeatures, directorySpec });
+                // Fold an earlier identical blob: merge locations + add this path.
+                const dup = primaryChecksum ? batchByChecksum.get(primaryChecksum) : null;
+                if (dup) {
+                    mergeDocumentLocations(dup.parsed, parsed.locations);
+                    dup.directorySpecs.push(directorySpec);
+                    continue;
+                }
+
+                const docFeatures = [...featureBitmaps];
+                if (!docFeatures.includes(parsed.schema)) {
+                    docFeatures.push(parsed.schema);
+                }
+
+                const entry = { parsed, docFeatures, directorySpecs: [directorySpec] };
+                prepared.push(entry);
+                if (primaryChecksum) { batchByChecksum.set(primaryChecksum, entry); }
             } catch (error) {
                 const contextualError = new Error(`Failed to prepare document at index ${i}: ${error.message}`);
                 contextualError.cause = error;
@@ -949,13 +1016,16 @@ class SynapsD extends EventEmitter {
 
         try {
             await this.#db.transaction(async () => {
-                for (const { parsed, docFeatures, directorySpec } of prepared) {
+                for (const { parsed, docFeatures, directorySpecs } of prepared) {
                     await this.documents.put(parsed.id, parsed);
                     await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
                     await this.#timelineIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
                     if (parsed.updatedAt) await this.#timelineIndex.insert('crud:updated', parsed.id, parsed.updatedAt);
                     await this.#indexDocumentTimelines(parsed.id, parsed);
-                    await this.#indexDocument(parsed.id, null, directorySpec, docFeatures);
+                    // One doc can be linked under multiple directory paths (folded dups).
+                    for (const directorySpec of directorySpecs) {
+                        await this.#indexDocument(parsed.id, null, directorySpec, docFeatures);
+                    }
                 }
             });
         } catch (error) {
@@ -979,12 +1049,12 @@ class SynapsD extends EventEmitter {
         const storedIds = prepared.map(p => p.parsed.id);
 
         if (emitEvent) {
-            const directoryPaths = [...new Set(prepared.map(p => p.directorySpec?.path).filter(Boolean))];
+            const directoryPaths = [...new Set(prepared.flatMap(p => p.directorySpecs.map(d => d?.path)).filter(Boolean))];
             this.emit(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, {
                 ids: storedIds,
                 count: storedIds.length,
                 batch: true,
-                directory: { tree: prepared[0]?.directorySpec?.tree, paths: directoryPaths },
+                directory: { tree: prepared[0]?.directorySpecs[0]?.tree, paths: directoryPaths },
             }));
         }
 
@@ -1460,19 +1530,16 @@ class SynapsD extends EventEmitter {
     async getBitmapsForDocument(id, prefix = '') {
         if (!id) throw new Error('Document ID required');
 
-        const keys = await this.bitmapIndex.listBitmaps(prefix);
-        const matchingKeys = [];
-
-        for (const key of keys) {
-            // We need to check if the ID exists in this bitmap
-            // Optimization: check cache first? listBitmaps returns keys.
-            // We have to load the bitmap to check.
-            const bitmap = await this.bitmapIndex.getBitmap(key, false);
-            if (bitmap && bitmap.has(id)) {
-                matchingKeys.push(key);
-            }
-        }
-        return matchingKeys;
+        // Use the synapse reverse index (DocID -> membership keys) instead of
+        // scanning + loading every bitmap and testing has(id). Synapse keys are
+        // stored normalized, so normalize the prefix to compare apples-to-apples.
+        // Covers all membership bitmaps (context/directory/feature/device); BSI
+        // slices, timelines and internal bitmaps are intentionally excluded — they
+        // are not document memberships.
+        const layerKeys = await this.#synapses.listSynapses(id);
+        if (!prefix) { return layerKeys; }
+        const normalizedPrefix = BitmapIndex.normalizeKey(prefix);
+        return layerKeys.filter((key) => key.startsWith(normalizedPrefix));
     }
 
     async listDocumentTreePaths(id, treeNameOrId) {
@@ -1564,9 +1631,10 @@ class SynapsD extends EventEmitter {
         const providedLimit = Number.isFinite(effectiveOptions.limit) ? Number(effectiveOptions.limit) : undefined;
         const providedOffset = Number.isFinite(effectiveOptions.offset) ? Number(effectiveOptions.offset) : undefined;
         const providedPage = Number.isFinite(effectiveOptions.page) ? Number(effectiveOptions.page) : undefined;
-        // If no explicit limit provided, don't apply any limit (return all documents)
-        // If limit=0 explicitly provided, also don't apply any limit
-        const limit = providedLimit !== undefined ? Math.max(0, providedLimit) : 0;
+        // Bounded by default to avoid parsing every row on large stores.
+        // "All documents" is an explicit opt-in: pass limit:0 deliberately.
+        // No limit option at all → DEFAULT_LIST_LIMIT.
+        const limit = providedLimit !== undefined ? Math.max(0, providedLimit) : DEFAULT_LIST_LIMIT;
         const offset = Math.max(0, providedOffset !== undefined ? providedOffset : (providedPage && providedPage > 0 ? (providedPage - 1) * (limit || 100) : 0));
 
         if (!Array.isArray(filterArray) && typeof filterArray === 'string') { filterArray = [filterArray]; }
@@ -2769,24 +2837,6 @@ class SynapsD extends EventEmitter {
         }
     }
 
-    async #migrateRootBitmaps() {
-        for (const meta of await this.listTrees('context')) {
-            const tree = this.getTree(meta.id);
-            if (!tree?.rootLayer) continue;
-            const collection = this.#contextBitmapCollectionForTree(meta.id);
-            const allDocsBitmap = await this.#buildContextRootSourceBitmap();
-            if (!allDocsBitmap || allDocsBitmap.isEmpty) continue;
-            const docIds = allDocsBitmap.toArray();
-            debug(`migrateRootBitmaps: ensuring ${docIds.length} docs are in root of tree ${meta.id}`);
-            const rootKey = collection.makeKey(tree.rootLayer.id);
-            await this.#db.transaction(async () => {
-                for (const docId of docIds) {
-                    await this.#addDocumentMembership(docId, [rootKey]);
-                }
-            });
-        }
-    }
-
     /**
      * Shared bitmap indexing for both insert and update operations.
      * Handles: context tree bitmaps, directory tree bitmaps, feature bitmaps, synapses.
@@ -3239,27 +3289,6 @@ class SynapsD extends EventEmitter {
             return new RoaringBitmap32();
         }
         return await collection.OR(layerIds);
-    }
-
-    async #buildContextRootSourceBitmap() {
-        const rootBitmap = await this.#buildAllDocumentsBitmap();
-        if (!rootBitmap || rootBitmap.isEmpty) {
-            return rootBitmap;
-        }
-
-        const incomingTree = this.getTree('directory') || this.getDefaultDirectoryTree();
-        if (!incomingTree || incomingTree.type !== 'directory' || !incomingTree.pathExists('/.incoming')) {
-            return rootBitmap;
-        }
-
-        const incomingBitmap = await this.#buildTreeMembershipBitmap({
-            tree: incomingTree.id,
-            path: '/.incoming',
-        });
-        if (incomingBitmap && !incomingBitmap.isEmpty) {
-            rootBitmap.andNotInPlace(incomingBitmap);
-        }
-        return rootBitmap;
     }
 
     #isIncomingDirectoryPath(path) {

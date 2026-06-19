@@ -50,6 +50,12 @@ export default class BitSlicedIndex {
 
         debug(`setValue: id=${id}, value=${value}, prefix=${this.prefix}`);
 
+        // First insert vs overwrite: if the id has no prior value, the zero-bit
+        // slices already lack it, so unticking them is a pointless full-slice
+        // re-serialize+write per zero bit. Only untick on overwrite.
+        const ebm = await this.bitmapIndex.getBitmap(this.ebmKey, false);
+        const isOverwrite = !!ebm && ebm.has(Number(id));
+
         // 1. Update Existence Bitmap
         await this.bitmapIndex.tick(this.ebmKey, id);
 
@@ -61,7 +67,7 @@ export default class BitSlicedIndex {
 
             if (bit === 1n) {
                 promises.push(this.bitmapIndex.tick(sliceKey, id));
-            } else {
+            } else if (isOverwrite) {
                 promises.push(this.bitmapIndex.untick(sliceKey, id));
             }
         }
