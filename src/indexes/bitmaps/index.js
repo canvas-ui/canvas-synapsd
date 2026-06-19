@@ -307,16 +307,21 @@ class BitmapIndex {
             return bitmap.isEmpty ? null : bitmap;
         }
 
+        const originalSize = bitmap.size;
         bitmap.removeMany(validIds);
 
         if (bitmap.isEmpty) {
-            debug('Bitmap is now empty, deleting', key);
-            await this.deleteBitmap(key);
+            if (originalSize > 0) {
+                debug('Bitmap is now empty, deleting', key);
+                await this.deleteBitmap(key);
+            }
             return null;
-        } else {
+        } else if (bitmap.size !== originalSize) {
             this.#saveBitmapSync(key, bitmap);
             return bitmap;
         }
+        // No change: skip re-serialize+write of the full slice bitmap.
+        return bitmap;
     }
 
     async tickMany(keyArray, ids) {

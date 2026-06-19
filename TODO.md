@@ -1,5 +1,109 @@
 # SynapsD
 
+**Fix before MVP ingest run**
+- [ ] `untick` (single) in `indexes/bitmaps/index.js`: add the size-change guard `untickMany` already has — currently re-serializes+writes a full slice bitmap even when nothing changed.
+- [ ] `BitSlicedIndex.setValue`: stop clearing zero-bits on first insert (only untick on overwrite); ideally batch the 64 slice writes. Together with the line above this is the timeline write-amplification killer for the wikipedia pass.
+- [ ] In-batch content dedup in `putMany` and `putManyDirectoryPaths` (`index.js`): add a `Map<primaryChecksum, preparedEntry>` across the prepare loop; on a hit, merge path/location into the existing entry instead of minting a new id. Today two identical files in one batch fork into two docs and the checksum index keeps only the last → corrupts the one-blob-one-doc model on NAS.
+
+**Scaling / cost cliffs**
+- [ ] Cap `list()` default `limit` (it's `0` = unlimited → parses every row); document "all docs" as an explicit opt-in, not the default.
+- [ ] Gate `#migrateRootBitmaps()` / `#migrateBitmapKeys()` behind a stored schema-version flag — they run an O(N) all-docs transaction on *every* startup.
+- [ ] Audit the `#buildAllDocumentsBitmap()` callers (`noneOf`-only features, `excludeTree`, `excludeContext`, root-source) — each is a full scan; at least short-circuit when the positive set is already bounded.
+- [ ] Lift `indexOptions` (esp. `embeddingOptions`) out of per-document `toJSON()` to schema level — it's GBs of identical config across 7M rows.
+- [ ] Replace `getBitmapsForDocument`'s scan-all-bitmaps with the synapse reverse index (`listSynapses`).
+
+**API collapse (the part you agreed to)**
+- [ ] Merge `list` / `search` / `recall` into one core `query(match, spec)`; `list(spec)` = no-match, `recall` = query + anchor planning on top.
+- [ ] `spec` buckets accept both level-1 sigil strings and level-2 `{allOf, anyOf, noneOf}`; one parser compiles sigils → object.
+- [ ] Fold exclusion into the path grammar (`!tree://path`) and delete the six `excludeTree*/excludeContext*` aliases in `#normalizeQuerySpec`.
+- [ ] Split match-inputs (`{text?, image?}`) from `mode` (`fts|vector|hybrid`); drop the `fts`-vs-`text` key conflation.
+- [ ] `put`/`link` take `{paths, features}` only — no filters/match on writes.
+- [ ] Define the filter prefix registry (`t:` temporal, `g:` glob, `re:` regexp) and make `t:<timeline>:<spec>` uniform across crud + content timelines.
+
+**Low-priority cleanup**
+- [ ] MVP #1 embedding path: ensure wikipedia text lands in a server-embeddable schema (derived `document`/`note`, registered in `embeddableSchemas`) — as `data/abstraction/file` you'd embed `locationUrls`, not the article.
+- [ ] `crypto.js` `uuid()` uses `crypto.rng` (not a real Node 22 API) — looks dead; delete or swap to `crypto.randomUUID()`.
+- [ ] `Email.fromIMAP/fromGraph` don't set `checksumArray`, so the checksum is the data-JSON hash, not the `.eml` blob the comment claims — fix the code or the comment.
+- [ ] Proceed with the schema-registry extraction already in TODO.md (app abstractions → `registerSchema`); the `device/id/<id>` derivation reading only `locations` confirms the seam is clean.
+
+
+
+
+
+
+list(spec?)              // == query(null, spec)
+query(match, spec?)      // match: string | { text?, image? }
+recall(match, spec?)     // query + semantic-anchor planning on top
+
+
+
+put(document, spec?)     // spec: { paths, features }  — no filters, no match
+link(idOrIds, spec)      // spec: { paths, features }
+
+
+// spec buckets, each accepting BOTH levels:
+{
+  paths:    ['ctx:/a/b', '!dir:/staging'],          // or { in:[…], not:[…] }
+  features: ['+tag/red', 'data/abstraction/file', '!tag/spam'],  // or { allOf, anyOf, noneOf }
+  filters:  ['t:crud:updated:thisWeek', 'g:*.pdf'],
+  mode: 'hybrid', limit, offset, parse,             // options live flat here
+}
+
+Buckets intersect; items within a bucket union. paths AND features AND filters AND match (the pipeline is an intersection). Within a bucket the default is anyOf (OR); + promotes an item to required (allOf), ! excludes it (noneOf).
+
+{ text?, image? } — and put fts|vector|hybrid in the spec as mode. (Your
+
+One consolidation worth calling out because it's already hurting you: #normalizeQuerySpec in index.js destructures excludeTree, excludeTrees, excludeContext, excludeContextSpec, excludeContexts, excludeContextSpecs — six aliases. That sprawl is the symptom of exclusion not living in the path grammar. !ctx:/staging and !projects:// (whole tree) collapse all six into the paths bucket. That alone justifies the rewrite.
+
+default trees so ctx:/dir:
+
+ilter prefixes need a small registry now or they'll go ad hoc: t: temporal, g: glob, re: regexp. Keep t:<timeline>:<spec> uniform so t:crud:created:thisWeek (lifecycle) and t:wikipedia:1720 (content) parse the same way — your code splits those two internally, but the surface grammar shouldn't.
+
+
+
+Nevertheless - layered architecture it is - we do this anyway
+We always process(or should always process)
+- tree path bitmaps
+- then feature bitmaps
+- then filters (BSI based timelines, globs/regexp etc)
+- then on a subset of documents sematics(vactor based) queries
+
+only then retrieve documents which are full docs or indexes pointing to external locations
+
+L0 would then be "storage" centric - eg resources, where the physical bit of the full objects are stored and can be retrieved from
+data/resource/blob or file or url/uri? - points to a local or remote resource (immutable)
+data/resource/referene - points to a external source(db, s3)
+
+L1 Semantics 
+data/entity/file ? (blob)
+data/entity/document (JSON doc)
+data/entity/message
+data/entity/event (type: calendar, alert, activity)
+data/entity/task
+data/entity/identity (type: person, organization, service, bot)
+data/entity/device
+data/entity/application
+data/entity/dotfile
+
+data/entity/organization
+
+L2 Relations (would require some cleanup)
+data/relation/references
+data/relation/authored-by
+data/relation/mentions
+data/relation/replies-to
+data/relation/generated-from
+data/relation/executed-on
+data/relation/installed-on
+
+L3 will be specially generated semantic anchors/chunks and summaries with several sub-layers (more on that later)
+
+
+
+
+
+
+
 We need to extend our @src/services/synapsd/ module to support vector search for multiple modalities(text, images, later probably (streaming) video and audio) and connectors for external services to generate embedding vectors besides local ONNX, ideally ollama/anthropic, openai.
 
 But lets start with something else
@@ -7,6 +111,8 @@ But lets start with something else
 The current API is, lets say cumbersome  
 I especially dont like how we query trees and tree paths
 
+
+bitmaps
 
 
 We have 
@@ -40,8 +146,15 @@ query(
 
 query(
   {
-    "image": "base64string..",
-    "text": "red ferrari"
+    "image": {
+      format:
+      content:
+    }
+    "text": {
+      content: {
+
+      }
+    }    
   },
   [
     'context://foo/bar/baz'
