@@ -1828,7 +1828,7 @@ class SynapsD extends EventEmitter {
 
         // fts (BM25) | vector (kNN) | hybrid (RRF); vector/hybrid degrade to fts
         // when the dense stack is unavailable.
-        let mode = (options.mode || 'fts').toLowerCase();
+        let mode = (options.mode || 'hybrid').toLowerCase();
         if ((mode === 'vector' || mode === 'hybrid') && (!this.#vectorIndex || !this.#vectorIndex.isReady)) {
             debug(`rank: mode '${mode}' requested but vector index not ready; falling back to fts`);
             mode = 'fts';
