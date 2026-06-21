@@ -3,62 +3,128 @@
 ## Semantic layer
 
 To test *7M wikipedia articles, ~2 milion files ingestion
+- en wikipedia dataset converted to thousands of markdown files ingested into a workspace > synapsd
+This is pure text so the current embedding model should be sufficient, dataset a bit too clean so not really a prod test yet
+- Dataset will be post-processed by a local LLM to associate its content with a dedicated "wikipedia" timeline (naive, simple, stupid for round 1, we'll get to the more interesting hierachical vector trees later)
 - embedding path: ensure wikipedia text lands in a server-embeddable schema (derived `document`/`note`, registered in `embeddableSchemas`) — as `data/abstraction/file` you'd embed `locationUrls`, not the article.
 - [Input Chunk] ➔ [Qwen3-VL (64d)] ➔ [PCA (e.g., 16d or 32d)] ➔ [Scalar Quantizer (Bands)] ➔ [Roaring Bitmap Index]
 
 ## Refactor v3
 
-! Do NOT use `bitmapIndex.untickAll` (`bitmaps/index.js:415`) — O(all-bitmaps) per delete, that's why it's dead. Bitmap side is ALREADY cleaned precisely + cheaply by `clearSynapses` (`Synapses.js:144`) via the reverse index. Left untickAll dead.
+Do the simplest thing that works; aim to delete more than you add.
 
-- [ ] Majore version bump in package.json
-- [ ] Audit the `#buildAllDocumentsBitmap()` callers (`noneOf`-only features, `excludeTree`, `excludeContext`, root-source) — each is a full scan; at least short-circuit when the positive set is already bounded. *(deferred: needs design.)*
-- [ ] Lift `indexOptions` (esp. `embeddingOptions`) out of per-document `toJSON()` to schema level — it's GBs of identical config across 7M rows. *(deferred: aim for per-abstraction indexOption config, not per-doc storage; needs design + back-compat sign-off.)*
+! Do NOT use `bitmapIndex.untickAll` (`indexes/bitmaps/index.js:415`): O(all-bitmaps) per delete, that's why it's dead. The bitmap side is already cleaned precisely and cheaply by `clearSynapses` (`indexes/inverted/Synapses.js:144`) via the reverse index. Leave `untickAll` dead.
 
-### API changes
+### Target surface
 
-**API consolidation**
-- [ ] Merge `list` / `search` / `recall` into one core `query(match, spec)`; `list(spec)` = no-match, `recall` = query + anchor planning on top.
-- [ ] `spec` buckets accept both level-1 sigil strings and level-2 `{allOf, anyOf, noneOf}`; one parser compiles sigils → object.
-- [ ] Fold exclusion into the path grammar (`!tree://path`) and delete the six `excludeTree*/excludeContext*` aliases in `#normalizeQuerySpec`.
-- [ ] Split match-inputs (`{text?, image?}`) from `mode` (`fts|vector|hybrid`); drop the `fts`-vs-`text` key conflation.
-- [ ] `put`/`link` take `{paths, features}` only — no filters/match on writes.
-- [ ] Define the filter prefix registry (`t:` temporal, `g:` glob, `re:` regexp) and make `t:<timeline>:<spec>` uniform across crud + content timelines.
-
+```
 list(spec?)              // == query(null, spec)
 query(match, spec?)      // match: string | { text?, image? }
-put(document, spec?)     // spec: { paths, features }  — no filters, no match
+recall(match, spec?)     // query + anchor planning on top
+put(document, spec?)     // spec: { paths, features } -- no filters, no match
 putMany(documents, spec?)
 link(idOrIds, spec)      // spec: { paths, features }
 
-
-// spec buckets, each accepting BOTH levels:
-{
-  paths:    ['ctx:/a/b', '!dir:/staging'],          // or { in:[…], not:[…] }
+spec = {
+  paths:    ['ctx:/a/b', '!dir:/staging'],                       // or { in, not }
   features: ['+tag/red', 'data/abstraction/file', '!tag/spam'],  // or { allOf, anyOf, noneOf }
-  filters:  ['t:crud:updated:thisWeek', 'g:*.pdf'],
-  mode: 'hybrid', limit, offset, parse,             // options live flat here
+  filters:  ['+t:crud:updated:thisWeek', 't:wikipedia:1996', 't:personal:1996', 'g:*.pdf', 're:^foo'],
+  mode: 'fts|vector|hybrid', limit, offset, parse, groupBy,      // flat; groupBy:'timeline' buckets the result
 }
+```
 
-Buckets intersect; items within a bucket union. paths AND features AND filters AND match (the pipeline is an intersection). Within a bucket the default is anyOf (OR); + promotes an item to required (allOf), ! excludes it (noneOf).
+Buckets intersect (paths AND features AND filters AND match); items within a bucket union. Per item: default is `anyOf` (OR), `+` promotes to required (`allOf`), `!` excludes (`noneOf`). Pipeline order is fixed: tree-path bitmaps, then feature bitmaps, then filters (BSI timelines, glob, regexp), then semantic (vector) on the surviving subset only.
 
-{ text?, image? } — and put fts|vector|hybrid in the spec as mode. (Your
+### API consolidation
+- [ ] Collapse `list`/`search`/`recall` onto one core `query(match, spec)`; `list(spec)` = `query(null, spec)`, `recall` = `query` + anchor planning. (`list` index.js:1694, `search` index.js:1838, `recall` index.js:585)
+- [ ] One spec parser: each bucket accepts level-1 sigil strings (`+`/`!`) and level-2 `{allOf, anyOf, noneOf}`; compile sigils into the object form. Replaces the alias sprawl in `#normalizeQuerySpec` (index.js:3096).
+- [ ] Fold exclusion into the path grammar (`!ctx:/path`); delete the six `excludeTree*`/`excludeContext*` aliases (index.js:3111-3149).
+- [ ] Split match inputs `{ text?, image? }` from `mode` (`fts|vector|hybrid`); kill the `query`/`search`/`q` and `fts`-vs-`text` key conflation (index.js:1843, index.js:1860).
+- [ ] Move `put`/`putMany`/`link`/`linkMany` to `(document, spec)` with `spec = { paths, features }` only, no filters/match on writes. Currently positional `(document, treeSelector, features, options)` (index.js:568, 589, 618, 1064).
+- [ ] Tree paths as `ctx:/a/b` and `dir:/a/b` (prefix = tree id); drop the `context://` / `directory://` URL form.
+- [ ] Filter prefix registry (`t:` temporal, `g:` glob, `re:` regexp) with the same sigil algebra as paths/features; see "Filter grammar" below.
 
-One consolidation worth calling out because it's already hurting you: #normalizeQuerySpec in index.js destructures excludeTree, excludeTrees, excludeContext, excludeContextSpec, excludeContexts, excludeContextSpecs — six aliases. That sprawl is the symptom of exclusion not living in the path grammar. !ctx:/staging and !projects:// (whole tree) collapse all six into the paths bucket. That alone justifies the rewrite.
+### Filter grammar (`t:` temporal, `g:` glob, `re:` regexp)
 
-default trees so ctx:/dir:
+Surface is uniform `t:<name>:<spec>`; the parser splits internally. Sigil algebra matches paths/features: default `anyOf` (OR), `+` = `allOf` (required gate), `!` = `noneOf` (exclude). The hard part already exists: `TimelineIndex.queryInterval` (indexes/inverted/Timeline.js:188) takes a name array and unions, auto-detects scale (`'1996'` -> year, Timeline.js:482), and has a per-timeline `mode:'layers'` (Timeline.js:349). Arbitrary content timelines are already indexed per-document (`timelines:[{name,start,end}]`, index.js:3004); `crud:*` are reserved auto-managed ones.
 
-ilter prefixes need a small registry now or they'll go ad hoc: t: temporal, g: glob, re: regexp. Keep t:<timeline>:<spec> uniform so t:crud:created:thisWeek (lifecycle) and t:wikipedia:1720 (content) parse the same way — your code splits those two internally, but the surface grammar shouldn't.
+Spec forms:
+- Content point: `t:wikipedia:1996`
+- Content range: `t:wikipedia:1996..1999` (`..`, since `:` is the segment delimiter); relative ages parse too (`t:geology:541mya..252mya`)
+- Lifecycle (reserved `crud`): `t:crud:<action>:<timeframe|range>`, e.g. `t:crud:updated:thisWeek`. Named timeframes stay crud-only (wall-clock relative; meaningless on a content axis).
+
+Overlay = multiple anyOf `t:` items, canonical form is one line per timeline (composes when ranges differ):
+
+```
+filters: ['+t:crud:updated:thisWeek', 't:wikipedia:1996', 't:personal:1996']
+// => crud:updated in thisWeek  AND  (wikipedia ~ 1996  OR  personal ~ 1996)
+```
+
+- [ ] `t:`/`g:`/`re:` prefix dispatch in `parseFilters` (replaces the `datetime:`-only check, filters.js:18); timeline name comes from the token, drop the hardcoded `crud:${action}` (filters.js:103). Today `filters` object only knows `timeline` -> `datetime:updated:<v>` (index.js:3196).
+- [ ] Sigil-aware filter combiner: partition `t:` items into allOf/anyOf/noneOf, resolve each via `queryInterval`, combine `AND(allOf) ∩ OR(anyOf) \ OR(noneOf)`. Replaces the "AND everything" filter loop in `list`/`search` (index.js:1742, index.js:1905).
+- [ ] `groupBy: 'timeline'` result option: union still drives retrieval, response is bucketed per timeline (`{ wikipedia:[...], personal:[...] }`) via `queryInterval` `mode:'layers'`.
+- [ ] (optional, low priority) comma sugar `t:wikipedia,personal:1996` -> split before `queryInterval`. Canonical stays one-line-per-timeline.
+
+### Vectors & modalities
+- [ ] Multimodal vector search: text + image now, (streaming) video/audio later. Carry `match` as `{ text?, image? }` end-to-end.
+- [ ] External embedding connectors besides local ONNX (ollama, openai, anthropic) behind one provider interface.
+
+### Examples
+
+Simple: text match scoped to a context subtree, gated by one timeline.
+
+```
+query('red ferrari', {
+  paths:   ['ctx:/cars'],
+  filters: ['t:crud:created:thisWeek'],
+})
+```
+
+Full: hybrid text + image match, scoped and feature-filtered, with a multi-timeline overlay and a per-timeline grouped result.
+
+```
+query(
+  {
+    text:  'opening ceremony',
+    image: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...'   // base64 data URL
+  },
+  {
+    paths:    ['ctx:/media/olympics', 'dir:/','!dir:/staging'],
+    features: ['data/abstraction/file', 'data/source/wikipedia', '!tag/nsfw'],
+    filters: [
+      '+t:crud:updated:thisWeek',   // gate (allOf): indexed this week
+      't:wikipedia:1996',           // content coordinate
+      't:personal:1996',            // overlaid personal-life entries (anyOf with wikipedia)
+      'g:*.jpg',
+    ],
+    mode:    'hybrid',
+    limit:   50,
+    groupBy: 'timeline',            // result bucketed: { wikipedia:[...], personal:[...] }
+  },
+)
+// => paths ∩ features ∩ crud:updated∈thisWeek ∩ (wikipedia~1996 ∪ personal~1996) ∩ g:*.jpg,
+//    then hybrid text+image ranking on the survivors.
+```
+
+### Perf & storage
+- [ ] Audit `#buildAllDocumentsBitmap()` callers (`noneOf`-only features, `excludeTree`, `excludeContext`, root-source): each is a full scan, short-circuit when the positive set is already bounded (index.js:3412). *(deferred: needs design.)*
+- [ ] Lift `indexOptions` (esp. `embeddingOptions`) out of per-document `toJSON()` to schema level: GBs of identical config across 7M rows. *(deferred: per-abstraction config, not per-doc storage; needs design + back-compat sign-off.)*
+
+### Docs & rollout
+- [ ] Document the v3 API in `src/services/synapsd/README.md`: spec buckets, sigil algebra, filter grammar (`t:`/`g:`/`re:`), multi-timeline overlay, and `groupBy:'timeline'`.
+- [ ] Refactor is its own session. Update the two main consumers of the query surface: `src/core/workspace/Workspace.js` (direct db caller) and `src/core/workspace/lib/WorkspaceStoredIndex.js`; `src/core/context/lib/Context.js` rides on top via `workspace.list/search` (Context.js:1243).
+
+### Release
+- [ ] Major version bump in `package.json` (currently `2.1.1`).
 
 
 
-Nevertheless - layered architecture it is - we do this anyway
-We always process(or should always process)
-- tree path bitmaps
-- then feature bitmaps
-- then filters (BSI based timelines, globs/regexp etc)
-- then on a subset of documents sematics(vactor based) queries
+## Session support
 
-only then retrieve documents which are full docs or indexes pointing to external locations
+
+
+
+----
 
 L0 would then be "storage" centric - eg resources, where the physical bit of the full objects are stored and can be retrieved from
 data/resource/blob or file or url/uri? - points to a local or remote resource (immutable)
@@ -87,165 +153,6 @@ data/relation/executed-on
 data/relation/installed-on
 
 L3 will be specially generated semantic anchors/chunks and summaries with several sub-layers (more on that later)
-
-
-
-
-
-
-
-We need to extend our @src/services/synapsd/ module to support vector search for multiple modalities(text, images, later probably (streaming) video and audio) and connectors for external services to generate embedding vectors besides local ONNX, ideally ollama/anthropic, openai.
-
-But lets start with something else
-
-The current API is, lets say cumbersome  
-I especially dont like how we query trees and tree paths
-
-
-bitmaps
-
-
-We have 
-- allOf  +
-- anyOf  (default)
-- noneOf !
-
-list(paths, features, filters)
-
-put(document, paths, features, filters)
-putMany(documenst, paths, features, filters)
-
-link(id, paths, features, filters)
-linkMany
-
-fts | vector | hybrid
-
-query(
-  "red ferrari", 
-  [
-    'directory://foo/bar/baz'
-  ],
-  [
-    'data/abstraction/file'
-  ],
-  [
-    't:crud:created:thisWeek',
-    't:crud:updated:thisWeek'
-  ]
-)
-
-query(
-  {
-    "image": {
-      format:
-      content:
-    }
-    "text": {
-      content: {
-
-      }
-    }    
-  },
-  [
-    'context://foo/bar/baz'
-  ],
-  [
-    'data/abstraction/file'
-  ],
-  [
-    't:crud:created:thisWeek',
-    't:crud:updated:thisWeek'
-  ]
-)
-
-list(
-  [
-    'directory://foo/bar/baz',
-    'directory://foo/baf',
-    'context://baf/baz'
-  ],
-  [
-    'data/abstraction/file',
-    'data/abstraction/note',
-    'data/abstraction/tab',
-    'data/source/wikipedia'
-  ],
-  [
-    t:crud:created:thisWeek,
-    t:crud:updated:thisWeek
-    t:wikipedia:
-  ]
-)
-
-Short form:
-
-query: "text"
-
-paths: [
-  'treeId://some/path',
-  'anotherTree://some/other/path',
-  '!treeId://some/path/i/want/to/exclude'
-]
-
-features: [
-  'data/abstraction/tab',
-  'custom/tag/foo',
-  '
-]
-
-filters: [
-  't:timelineName:range'
-  't:wikipedia:today
-]
-
-Long form
-
-query: {
-    fts: "string"
-    text: "string"
-    image: "base64string"
-}
-
-paths: [
-  'treeId://some/path',
-  'anotherTree://some/other/path',
-  '!treeId://some/path/i/want/to/exclude'
-]
-
-features: [
-  'data/abstraction/tab',
-  'custom/tag/foo',
-  '
-]
-
-Query should be parsed and processed as follows:
-
-Paths > Features > Filters > Query on top
-
-
----
-
-timelines: [
-    {
-        name: 'wikipedia',
-        start: '1215',
-        end: '1215',
-    },
-],
-
-
-
-
-
-There are 2 use-cases I'm planning to test with:
-#1 en wikipedia dataset converted to thousands of markdown files ingested into a workspace > synapsd
-This is pure text so the current embedding model should be sufficient
-- Dataset will be post-processed by a local LLM to associate its content with a dedicated "wikipedia" timeline (naive, simple, stupid for round 1, we'll get to the more interesting hierachical vector trees later)
-
-
-
-------
-
 
 ## Rand
 
