@@ -202,8 +202,8 @@ matches.
 
 `match` is a string (or `{ text }`). The candidate set scopes a full-text/vector
 search (LanceDB), ranked by relevance. `search(spec)` is a thin wrapper that pulls
-`match` from `spec.query`. Default limit is 50. `mode` selects `fts` (default),
-`vector`, or `hybrid`; vector/hybrid fall back to `fts` when the dense stack is down.
+`match` from `spec.query`. Default limit is 50. `mode` selects `hybrid` (default),
+`fts`, or `vector`; vector/hybrid fall back to `fts` when the dense stack is down.
 
 ### Spec buckets and sigil algebra
 
@@ -216,7 +216,7 @@ uniform sigil algebra: default `anyOf` (OR), `+` `allOf` (gate), `!` `noneOf` (e
 | `context` / `directory` | Tree-qualified selector `{ tree, path }` — use when you need a non-default tree |
 | `features` | `['+tag/red', 'tag/blue', '!tag/spam']` or `{ allOf, anyOf, noneOf }` |
 | `filters` | `['t:crud:updated:thisWeek', '+t:wikipedia:1996', '!t:crud:created:today']` (see filter grammar) |
-| `mode` | `fts` \| `vector` \| `hybrid` (ranked queries only) |
+| `mode` | `hybrid` (default) \| `fts` \| `vector` (ranked queries only) |
 | `limit` | Max documents (`list`: 100, `query`: 50; `0` = all matches) |
 | `offset` / `page` | Pagination |
 | `parse` | Set `false` to return raw stored data |

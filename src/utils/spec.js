@@ -133,7 +133,7 @@ export function parseSpec(rawSpec = {}) {
         features: parseFeatures(rawSpec),
         filters: parseFilters(rawSpec),
         options: {
-            mode: (pick('mode') || 'fts').toLowerCase(),
+            mode: (pick('mode') || 'hybrid').toLowerCase(),
             limit: pick('limit'),
             offset: pick('offset'),
             page: pick('page'),
