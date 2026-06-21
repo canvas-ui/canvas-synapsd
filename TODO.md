@@ -1,36 +1,22 @@
 # SynapsD
 
-To test
+## Semantic layer
 
-[Input Chunk] ➔ [Qwen3-VL (64d)] ➔ [PCA (e.g., 16d or 32d)] ➔ [Scalar Quantizer (Bands)] ➔ [Roaring Bitmap Index]
+To test *7M wikipedia articles, ~2 milion files ingestion
+- embedding path: ensure wikipedia text lands in a server-embeddable schema (derived `document`/`note`, registered in `embeddableSchemas`) — as `data/abstraction/file` you'd embed `locationUrls`, not the article.
+- [Input Chunk] ➔ [Qwen3-VL (64d)] ➔ [PCA (e.g., 16d or 32d)] ➔ [Scalar Quantizer (Bands)] ➔ [Roaring Bitmap Index]
 
+## Refactor v3
 
-## synapsd: restore document-ID GC / reuse (regressed)
+! Do NOT use `bitmapIndex.untickAll` (`bitmaps/index.js:415`) — O(all-bitmaps) per delete, that's why it's dead. Bitmap side is ALREADY cleaned precisely + cheaply by `clearSynapses` (`Synapses.js:144`) via the reverse index. Left untickAll dead.
 
-Freed IDs are currently never reused. `generateDocumentID`/`generateDocumentIDs` (`src/services/synapsd/src/utils/document.js:78,95`) only increment `internal/document-id-counter`. The `internal/gc/deleted` bitmap is ticked on delete (`index.js:2020`) but never unticked and never consulted by the allocator (read only for the `deletedDocumentsCount` stat, `index.js:200`). IDs grow monotonically forever; roaring bitmaps lose density.
+- [ ] Majore version bump in package.json
+- [ ] Audit the `#buildAllDocumentsBitmap()` callers (`noneOf`-only features, `excludeTree`, `excludeContext`, root-source) — each is a full scan; at least short-circuit when the positive set is already bounded. *(deferred: needs design.)*
+- [ ] Lift `indexOptions` (esp. `embeddingOptions`) out of per-document `toJSON()` to schema level — it's GBs of identical config across 7M rows. *(deferred: aim for per-abstraction indexOption config, not per-doc storage; needs design + back-compat sign-off.)*
 
-Refined safe-reuse design (agreed): **DONE** (2026-06-21). Tests: `tests/document-id-gc.test.js`.
-- [x] **Make `internal/gc/deleted` a strict free-id pool, not a tombstone.** Pool admission moved OUT of the delete txn to AFTER lance fts + vector cleanup succeeds, in both `#deleteOne` and `deleteMany`. Failed cleanup → id leaks, never corrupts. NB: the old in-txn `deletedDocumentsBitmap.tick()` was `Bitmap.tick` = in-memory only (never persisted — pool was never read so it didn't matter); admission now uses the persisting `bitmapIndex.tick(deletedDocumentsBitmap.key, …)`.
-- [x] **Allocator pops from the pool first.** New `SynapsD#allocateDocumentIDs(count)`: pop `minimum()` densest-first, top up remainder from counter. Replaces all 3 `generateDocumentID(s)` call sites (`#putOne`, `putMany`, `putManyDirectoryPaths`). Util fns left in `utils/document.js`, no longer imported by index.js.
-- [x] **Do allocation within a single LMDB tx.** `#allocateDocumentIDs` runs pool-pop + counter bump + pool persist (`bitmapIndex.saveBitmapSync`, new public method) inside one `internalStore.transactionSync`. Datasets share one env (`LmdbBackend.createDataset` → `openDB`) so writes commit atomically; the callback is fully synchronous so no async writer can interleave for the same freed id.
+### API changes
 
-Lance delete now returns a success boolean (`LanceIndex.delete/deleteMany`, `VectorIndex.deleteDoc/deleteMany`) so admission can be gated; `!table`/empty counts as success (nothing to clean).
-
-Do NOT use `bitmapIndex.untickAll` (`bitmaps/index.js:415`) — O(all-bitmaps) per delete, that's why it's dead. Bitmap side is ALREADY cleaned precisely + cheaply by `clearSynapses` (`Synapses.js:144`) via the reverse index. Left untickAll dead.
-
-**Fix before MVP ingest run**
-- [ ] `untick` (single) in `indexes/bitmaps/index.js`: add the size-change guard `untickMany` already has — currently re-serializes+writes a full slice bitmap even when nothing changed.
-- [ ] `BitSlicedIndex.setValue`: stop clearing zero-bits on first insert (only untick on overwrite); ideally batch the 64 slice writes. Together with the line above this is the timeline write-amplification killer for the wikipedia pass.
-- [ ] In-batch content dedup in `putMany` and `putManyDirectoryPaths` (`index.js`): add a `Map<primaryChecksum, preparedEntry>` across the prepare loop; on a hit, merge path/location into the existing entry instead of minting a new id. Today two identical files in one batch fork into two docs and the checksum index keeps only the last → corrupts the one-blob-one-doc model on NAS.
-
-**Scaling / cost cliffs**
-- [ ] Cap `list()` default `limit` (it's `0` = unlimited → parses every row); document "all docs" as an explicit opt-in, not the default.
-- [ ] Gate `#migrateRootBitmaps()` / `#migrateBitmapKeys()` behind a stored schema-version flag — they run an O(N) all-docs transaction on *every* startup.
-- [ ] Audit the `#buildAllDocumentsBitmap()` callers (`noneOf`-only features, `excludeTree`, `excludeContext`, root-source) — each is a full scan; at least short-circuit when the positive set is already bounded.
-- [ ] Lift `indexOptions` (esp. `embeddingOptions`) out of per-document `toJSON()` to schema level — it's GBs of identical config across 7M rows.
-- [ ] Replace `getBitmapsForDocument`'s scan-all-bitmaps with the synapse reverse index (`listSynapses`).
-
-**API collapse (the part you agreed to)**
+**API consolidation**
 - [ ] Merge `list` / `search` / `recall` into one core `query(match, spec)`; `list(spec)` = no-match, `recall` = query + anchor planning on top.
 - [ ] `spec` buckets accept both level-1 sigil strings and level-2 `{allOf, anyOf, noneOf}`; one parser compiles sigils → object.
 - [ ] Fold exclusion into the path grammar (`!tree://path`) and delete the six `excludeTree*/excludeContext*` aliases in `#normalizeQuerySpec`.
@@ -38,24 +24,10 @@ Do NOT use `bitmapIndex.untickAll` (`bitmaps/index.js:415`) — O(all-bitmaps) p
 - [ ] `put`/`link` take `{paths, features}` only — no filters/match on writes.
 - [ ] Define the filter prefix registry (`t:` temporal, `g:` glob, `re:` regexp) and make `t:<timeline>:<spec>` uniform across crud + content timelines.
 
-**Low-priority cleanup**
-- [ ] MVP #1 embedding path: ensure wikipedia text lands in a server-embeddable schema (derived `document`/`note`, registered in `embeddableSchemas`) — as `data/abstraction/file` you'd embed `locationUrls`, not the article.
-- [ ] `crypto.js` `uuid()` uses `crypto.rng` (not a real Node 22 API) — looks dead; delete or swap to `crypto.randomUUID()`.
-- [ ] `Email.fromIMAP/fromGraph` don't set `checksumArray`, so the checksum is the data-JSON hash, not the `.eml` blob the comment claims — fix the code or the comment.
-- [ ] Proceed with the schema-registry extraction already in TODO.md (app abstractions → `registerSchema`); the `device/id/<id>` derivation reading only `locations` confirms the seam is clean.
-
-
-
-
-
-
 list(spec?)              // == query(null, spec)
 query(match, spec?)      // match: string | { text?, image? }
-recall(match, spec?)     // query + semantic-anchor planning on top
-
-
-
 put(document, spec?)     // spec: { paths, features }  — no filters, no match
+putMany(documents, spec?)
 link(idOrIds, spec)      // spec: { paths, features }
 
 

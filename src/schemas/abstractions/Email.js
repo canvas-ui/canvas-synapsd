@@ -1,6 +1,7 @@
 'use strict';
 
 import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
+import { generateChecksum } from '../../utils/crypto.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/email';
@@ -254,16 +255,22 @@ export default class Email extends Document {
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
 
         // Inject Email-specific index options BEFORE super().
-        // checksumFields: [] keeps email content-addressable like every other
-        // abstraction — the primary checksum is the raw .eml blob (set by the
-        // ingest layer, e.g. imap service). Header-based identity (messageId,
-        // from, …) is handled separately by the contacts/identity index, not the
-        // content checksum.
+        // checksumFields = stable, protocol-independent identity (NOT the whole
+        // data object, which carries volatile per-fetch fields — receivedAt,
+        // platformMetadata.uid/seqno/flags — that fork a re-ingested message into
+        // duplicates). The RFC Message-ID is the canonical dedup key; from.address
+        // + subject harden against a missing/duplicate Message-ID. Deliberately
+        // excluded: `body` (IMAP text vs Graph html/preview differ for the same
+        // message → would block cross-protocol dedup) and `date` (volatile
+        // new-Date() fallback). The same message in multiple folders/accounts, or
+        // re-fetched, collapses to one doc; folder/location lives in membership.
+        // If the ingest layer supplies `checksumArray` (raw .eml/MIME blob hash),
+        // that still wins (BaseDocument honours an explicit checksumArray).
         options.indexOptions = {
             ...(options.indexOptions || {}),
             ftsSearchFields: ['data.subject', 'data.body', 'data.from.address', 'data.from', 'data.to'],
             vectorEmbeddingFields: ['data.subject', 'data.body'],
-            checksumFields: [],
+            checksumFields: ['data.messageId', 'data.from.address', 'data.subject'],
         };
 
         super(options);
@@ -282,7 +289,9 @@ export default class Email extends Document {
     /**
      * Create an Email from IMAP data
      * @param {Object} parsed - Parsed email from mailparser
-     * @param {Object} imapMetadata - IMAP-specific metadata (uid, seqno, flags)
+     * @param {Object} imapMetadata - IMAP-specific metadata (uid, seqno, flags).
+     *   Pass `checksumArray` (e.g. ['sha1/<hash-of-raw-.eml>']) to content-address
+     *   on the raw blob; omit it to fall back to the parsed-data hash.
      * @returns {Email} New Email instance
      */
     static fromIMAP(parsed, imapMetadata = {}) {
@@ -299,8 +308,19 @@ export default class Email extends Document {
             .trim()
             .slice(0, 200);
 
+        // Deterministic identity: the RFC Message-ID when present, else a stable
+        // synthetic derived from the mailbox uid or content. NEVER Date.now() —
+        // a volatile id would poison the checksum and fork dupes on re-ingest.
+        const fromAddress = parsed.from?.value?.[0]?.address || 'unknown@localhost';
+        const messageId = parsed.messageId
+            || (imapMetadata.uid != null
+                ? `imap-uid-${imapMetadata.uid}`
+                : `imap-synthetic-${generateChecksum(`${fromAddress}|${subject}|${parsed.date?.toISOString() || ''}`)}`);
+
         return new Email({
             schema: DOCUMENT_SCHEMA_NAME,
+            // Honour a raw-blob checksum from the ingest layer when provided.
+            checksumArray: imapMetadata.checksumArray,
             data: {
                 title: subject,
                 name: subject,
@@ -315,7 +335,7 @@ export default class Email extends Document {
                 replyTo: normalizeEmailAddressList(parsed.replyTo) || undefined,
                 date: parsed.date?.toISOString() || new Date().toISOString(),
                 receivedAt: new Date().toISOString(),
-                messageId: parsed.messageId || `imap-${imapMetadata.uid || Date.now()}`,
+                messageId,
                 inReplyTo: parsed.inReplyTo,
                 references: normalizeReferences(parsed.references),
                 attachments: parsed.attachments?.map(att => ({
@@ -347,6 +367,10 @@ export default class Email extends Document {
     static fromGraph(graphMessage) {
         return new Email({
             schema: DOCUMENT_SCHEMA_NAME,
+            // Honour a raw-blob checksum from the ingest layer when provided;
+            // Graph typically has no MIME source, so this usually falls back to
+            // the parsed-data hash.
+            checksumArray: graphMessage.checksumArray,
             data: {
                 subject: graphMessage.subject || '(no subject)',
                 body: graphMessage.bodyPreview || graphMessage.body?.content || '',
