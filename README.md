@@ -29,10 +29,10 @@ The public read surface is just `list()` + `query()`. Writes take `(document, sp
 where `spec = { paths, features }`.
 
 - `get(id, options?)`
-- `query(match, spec?)` — `match: string | { text }`; ranked when `match` is set
-- `list(spec?)` — equals `query(null, spec)`; structural listing, no ranking
-- `search(spec)` — thin wrapper kept for back-compat: `query(spec.query, spec)`
-- `put(document, spec?)` — `spec = { paths, features }`
+- `query(match, spec?)` - `match: string | { text }`; ranked when `match` is set
+- `list(spec?)` - equals `query(null, spec)`; structural listing, no ranking
+- `search(spec)` - thin wrapper kept for back-compat: `query(spec.query, spec)`
+- `put(document, spec?)` - `spec = { paths, features }`
 - `putMany(documents, spec?)`
 - `link(idOrIds, spec?)`
 - `linkMany(ids, spec?)`
@@ -43,8 +43,8 @@ where `spec = { paths, features }`.
 - `deleteMany(ids, options?)`
 - `getByChecksumString(checksum, options?)`
 - `hasByChecksumString(checksum, spec?)`
-- `resolveCandidates(spec) -> { bitmap, keys }` — the candidate-set stage of a query, exposed for sessions
-- `rank(bitmap, match, { mode, limit, offset }) -> page` — the materialize/score stage
+- `resolveCandidates(spec) -> { bitmap, keys }` - the candidate-set stage of a query, exposed for sessions
+- `rank(bitmap, match, { mode, limit, offset }) -> page` - the materialize/score stage
 - `listDocumentTreePaths(id, treeNameOrId)`
 - `listDocumentTreeMemberships(id, treeNameOrId)`
 - `hasDocumentTreeMembership(id, treeNameOrId)`
@@ -191,14 +191,14 @@ query(match, spec) = rank(resolveCandidates(spec).bitmap, match, spec)
 list(spec)         = query(null, spec)
 ```
 
-### `list(spec)` — structural listing
+### `list(spec)` - structural listing
 
 `query(null, spec)`. Returns documents matching the candidate set (tree membership,
 features, timeline/bitmap filters) in insertion order. No ranking. With no buckets,
 `list` returns every document. Default limit is 100; pass `limit: 0` to return all
 matches.
 
-### `query(match, spec)` / `search(spec)` — ranked retrieval
+### `query(match, spec)` / `search(spec)` - ranked retrieval
 
 `match` is a string (or `{ text }`). The candidate set scopes a full-text/vector
 search (LanceDB), ranked by relevance. `search(spec)` is a thin wrapper that pulls
@@ -213,7 +213,7 @@ uniform sigil algebra: default `anyOf` (OR), `+` `allOf` (gate), `!` `noneOf` (e
 | Field | Description |
 |-------|-------------|
 | `paths` | `['ctx:/a/b', 'dir:/x', '!ctx:/staging']` or `{ in, not }`. `ctx:`/`dir:` target default trees |
-| `context` / `directory` | Tree-qualified selector `{ tree, path }` — use when you need a non-default tree |
+| `context` / `directory` | Tree-qualified selector `{ tree, path }` - use when you need a non-default tree |
 | `features` | `['+tag/red', 'tag/blue', '!tag/spam']` or `{ allOf, anyOf, noneOf }` |
 | `filters` | `['t:crud:updated:thisWeek', '+t:wikipedia:1996', '!t:crud:created:today']` (see filter grammar) |
 | `mode` | `hybrid` (default) \| `fts` \| `vector` (ranked queries only) |
@@ -225,10 +225,10 @@ uniform sigil algebra: default `anyOf` (OR), `+` `allOf` (gate), `!` `noneOf` (e
 
 Filters share the sigil algebra and dispatch on a type prefix:
 
-- `t:<name>:<spec>` — temporal. Reserved lifecycle form `t:crud:<action>:<timeframe|range>`
+- `t:<name>:<spec>` - temporal. Reserved lifecycle form `t:crud:<action>:<timeframe|range>`
   (e.g. `t:crud:updated:thisWeek`, `t:crud:created:2026-01-01..2026-05-10`); content
   timelines use `t:<name>:<point|range>` (e.g. `t:wikipedia:1996`, `t:wikipedia:1996..1999`).
-- `g:<glob>` and `re:<regexp>` — recognised but **not yet implemented** (throw).
+- `g:<glob>` and `re:<regexp>` - recognised but **not yet implemented** (throw).
 
 Anything without a recognised prefix is treated as a raw bitmap key (ANDed).
 
@@ -236,9 +236,9 @@ Anything without a recognised prefix is treated as a raw bitmap key (ANDed).
 
 Both return an array with attached metadata:
 
-- `result.count` — number of documents in this page
-- `result.totalCount` — total matching documents (before pagination)
-- `result.error` — error message string, or `null`
+- `result.count` - number of documents in this page
+- `result.totalCount` - total matching documents (before pagination)
+- `result.error` - error message string, or `null`
 
 ### Examples
 
@@ -445,31 +445,31 @@ Current interval semantics are closed intervals: `[start, end]`. Open interval s
 
 ## Bitmap index
 
-Roaring bitmaps back every membership lookup. Keys use typed prefixes — validated in `indexes/bitmaps/lib/keys.js`:
+Roaring bitmaps back every membership lookup. Keys use typed prefixes - validated in `indexes/bitmaps/lib/keys.js`:
 
 | Prefix | Role |
 |--------|------|
 | `context/<treeId>/<layerUlid>` | Context-tree layer membership |
 | `vfs/<treeId>/...` | Directory-tree folder membership |
 | `tag/`, `data/`, `device/`, `custom/`, … | Feature/schema filters (also usable in query `filters`) |
-| `internal/...` | Engine-managed indexes — hidden from default listings |
+| `internal/...` | Engine-managed indexes - hidden from default listings |
 
 Notable `internal/*` keys:
 
-- `internal/ts/<timeline>/<scale>/start|end` — timeline Dual-BSI tiers
-- `internal/lance/fts`, `internal/lance/vectors` — Lance search index coverage
-- `internal/gc/deleted` — soft-deleted document set
+- `internal/ts/<timeline>/<scale>/start|end` - timeline Dual-BSI tiers
+- `internal/lance/fts`, `internal/lance/vectors` - Lance search index coverage
+- `internal/gc/deleted` - soft-deleted document set
 
 ### Introspection (`db.bitmapIndex`)
 
 ```js
-// User-facing bitmaps only (default — omits internal/*)
+// User-facing bitmaps only (default - omits internal/*)
 const keys = await db.bitmapIndex.listBitmaps();
 
 // All keys, including engine-managed internal/*
 const allKeys = await db.bitmapIndex.listBitmaps('', { includeInternal: true });
 
-// Prefix scan — always returns keys under that prefix (internal/* included when prefix matches)
+// Prefix scan - always returns keys under that prefix (internal/* included when prefix matches)
 const timelineKeys = await db.bitmapIndex.listBitmaps('internal/ts');
 const treeLayers = await db.bitmapIndex.listBitmaps(`context/${treeId}`);
 ```
@@ -485,12 +485,12 @@ REST equivalent: `GET /rest/v2/workspaces/:id/bitmaps?includeInternal=true` (wor
 
 ## Trees
 
-SynapsD supports multiple named trees per workspace database. Trees are views on top of your documents — they organise membership and structure, not data. A single document can live in many trees at once.
+SynapsD supports multiple named trees per workspace database. Trees are views on top of your documents - they organise membership and structure, not data. A single document can live in many trees at once.
 
 Two tree types:
 
-- **`context`** — layers with path-intersection semantics. Nodes in a context tree are called **layers**. Querying a path ANDs the bitmaps of every layer along that path.
-- **`directory`** — unique folder nodes with filesystem-like semantics. Nodes are **directories**. Each directory has its own bitmap; recursive queries OR them.
+- **`context`** - layers with path-intersection semantics. Nodes in a context tree are called **layers**. Querying a path ANDs the bitmaps of every layer along that path.
+- **`directory`** - unique folder nodes with filesystem-like semantics. Nodes are **directories**. Each directory has its own bitmap; recursive queries OR them.
 
 ### Tree management
 
