@@ -16,12 +16,12 @@ Do the simplest thing that works; aim to delete more than you add.
 ! Do NOT use `bitmapIndex.untickAll` (`indexes/bitmaps/index.js:415`): O(all-bitmaps) per delete, that's why it's dead. The bitmap side is already cleaned precisely and cheaply by `clearSynapses` (`indexes/inverted/Synapses.js:144`) via the reverse index. Leave `untickAll` dead.
 
 ### Prereq
-- [ ] Split `query()` into two stages, both stateless and pure. No caching inside synapsd: the operand cache is the session's job, the db stays stateless.
+- [x] Split `query()` into two stages, both stateless and pure. No caching inside synapsd: the operand cache is the session's job, the db stays stateless.
       - `resolveCandidates(spec) -> { bitmap, keys }`  (paths ∩ features ∩ filters). `keys` = the bitmap keys the operand actually read, so a session can invalidate precisely instead of dirtying everything.
       - `rank(bitmap, match, {mode,limit,offset}) -> page`  (fts/vector/hybrid; expensive). With `match=null` it degrades to slice+fetch, so `list(spec)` == `rank(resolveCandidates(spec).bitmap, null, …)` — one materializer, not three.
       `query(match, spec)` becomes `rank(resolveCandidates(spec).bitmap, match, …)`.
       Bonus: this seam dedupes today's copy-pasted candidate-building in `list` vs `search` (index.js:1725-1771 vs index.js:1881+). Land it right after the spec parser.
-- [ ] Cacheability is conditional. Path/feature operands have stable keys and cache cleanly. Relative timeframes do NOT: `t:crud:updated:thisWeek` is wall-clock dependent. Resolve relative timeframes to absolute bounds at call time; whether those bounds freeze or slide is the session-mode decision below.
+- [x] Cacheability is conditional. Path/feature operands have stable keys and cache cleanly. Relative timeframes do NOT: `t:crud:updated:thisWeek` is wall-clock dependent. Resolve relative timeframes to absolute bounds at call time; whether those bounds freeze or slide is the session-mode decision below.
 
 ### Target surface
 
@@ -48,13 +48,13 @@ spec = {
 Buckets intersect (paths AND features AND filters AND match); items within a bucket union. Per item: default is `anyOf` (OR), `+` promotes to required (`allOf`), `!` excludes (`noneOf`). Pipeline order is fixed: tree-path bitmaps, then feature bitmaps, then filters (BSI timelines, glob, regexp), then semantic (vector) on the surviving subset only.
 
 ### API consolidation
-- [ ] Public read surface is just `list()` + `query(match, spec)`. `list(spec)` == `query(null, spec)`, kept for back-compat / simple UX (`list` index.js:1694). Collapse `search` into `query` (`search` index.js:1838). `recall` (anchor planning, index.js:585) is deferred to the Session feature.
-- [ ] One spec parser: each bucket accepts level-1 sigil strings (`+`/`!`) and level-2 `{allOf, anyOf, noneOf}`; compile sigils into the object form. Replaces the alias sprawl in `#normalizeQuerySpec` (index.js:3096).
-- [ ] Fold exclusion into the path grammar (`!ctx:/path`); delete the six `excludeTree*`/`excludeContext*` aliases (index.js:3111-3149).
-- [ ] Split match inputs `{ text?, image? }` from `mode` (`fts|vector|hybrid`); kill the `query`/`search`/`q` and `fts`-vs-`text` key conflation (index.js:1843, index.js:1860).
-- [ ] Move `put`/`putMany`/`link`/`linkMany` to `(document, spec)` with `spec = { paths, features }` only, no filters/match on writes. Currently positional `(document, treeSelector, features, options)` (index.js:568, 589, 618, 1064).
-- [ ] Tree paths as `ctx:/a/b` and `dir:/a/b` (prefix = tree id); drop the `context://` / `directory://` URL form.
-- [ ] Filter prefix registry (`t:` temporal, `g:` glob, `re:` regexp) with the same sigil algebra as paths/features; see "Filter grammar" below.
+- [x] Public read surface is just `list()` + `query(match, spec)`. `list(spec)` == `query(null, spec)`, kept for back-compat / simple UX (`list` index.js:1694). Collapse `search` into `query` (`search` index.js:1838). `recall` (anchor planning, index.js:585) is deferred to the Session feature.
+- [x] One spec parser: each bucket accepts level-1 sigil strings (`+`/`!`) and level-2 `{allOf, anyOf, noneOf}`; compile sigils into the object form. Replaces the alias sprawl in `#normalizeQuerySpec` (index.js:3096).
+- [x] Fold exclusion into the path grammar (`!ctx:/path`); delete the six `excludeTree*`/`excludeContext*` aliases (index.js:3111-3149).
+- [x] Split match inputs `{ text?, image? }` from `mode` (`fts|vector|hybrid`); kill the `query`/`search`/`q` and `fts`-vs-`text` key conflation (index.js:1843, index.js:1860).
+- [x] Move `put`/`putMany`/`link`/`linkMany` to `(document, spec)` with `spec = { paths, features }` only, no filters/match on writes. Currently positional `(document, treeSelector, features, options)` (index.js:568, 589, 618, 1064).
+- [x] Tree paths as `ctx:/a/b` and `dir:/a/b` (prefix = tree id); drop the `context://` / `directory://` URL form.
+- [ ] Filter prefix registry (`t:` temporal, `g:` glob, `re:` regexp) with the same sigil algebra as paths/features; see "Filter grammar" below. *(`t:` shipped; `g:`/`re:` parse-time throw, deferred to db schema refactor.)*
 
 ### Filter grammar (`t:` temporal, `g:` glob, `re:` regexp)
 
@@ -72,10 +72,9 @@ filters: ['+t:crud:updated:thisWeek', 't:wikipedia:1996', 't:personal:1996']
 // => crud:updated in thisWeek  AND  (wikipedia ~ 1996  OR  personal ~ 1996)
 ```
 
-- [ ] `t:`/`g:`/`re:` prefix dispatch in `parseFilters` (replaces the `datetime:`-only check, filters.js:18); timeline name comes from the token, drop the hardcoded `crud:${action}` (filters.js:103). Today `filters` object only knows `timeline` -> `datetime:updated:<v>` (index.js:3196).
-- [ ] Sigil-aware filter combiner: partition `t:` items into allOf/anyOf/noneOf, resolve each via `queryInterval`, combine `AND(allOf) ∩ OR(anyOf) \ OR(noneOf)`. Replaces the "AND everything" filter loop in `list`/`search` (index.js:1742, index.js:1905).
+- [ ] `t:`/`g:`/`re:` prefix dispatch in `parseFilters` (replaces the `datetime:`-only check, filters.js:18); timeline name comes from the token, drop the hardcoded `crud:${action}` (filters.js:103). Today `filters` object only knows `timeline` -> `datetime:updated:<v>` (index.js:3196). *(`t:` shipped; `g:`/`re:` deferred to db schema refactor.)*
+- [x] Sigil-aware filter combiner: partition `t:` items into allOf/anyOf/noneOf, resolve each via `queryInterval`, combine `AND(allOf) ∩ OR(anyOf) \ OR(noneOf)`. Replaces the "AND everything" filter loop in `list`/`search` (index.js:1742, index.js:1905).
 - [ ] `groupBy: 'timeline'` result option: union still drives retrieval, response is bucketed per timeline (`{ wikipedia:[...], personal:[...] }`) via `queryInterval` `mode:'layers'`.
-- [ ] (optional, low priority) comma sugar `t:wikipedia,personal:1996` -> split before `queryInterval`. Canonical stays one-line-per-timeline.
 
 ### Vectors & modalities
 - [ ] Multimodal vector search: text + image now, (streaming) video/audio later. Carry `match` as `{ text?, image? }` end-to-end.
@@ -123,11 +122,11 @@ query(
 - [ ] Lift `indexOptions` (esp. `embeddingOptions`) out of per-document `toJSON()` to schema level: GBs of identical config across 7M rows. *(deferred: per-abstraction config, not per-doc storage; needs design + back-compat sign-off.)*
 
 ### Docs & rollout
-- [ ] Document the v3 API in `src/services/synapsd/README.md`: spec buckets, sigil algebra, filter grammar (`t:`/`g:`/`re:`), multi-timeline overlay, and `groupBy:'timeline'`.
-- [ ] Refactor is its own session. Update the two main consumers of the query surface: `src/core/workspace/Workspace.js` (direct db caller) and `src/core/workspace/lib/WorkspaceStoredIndex.js`; `src/core/context/lib/Context.js` rides on top via `workspace.list/search` (Context.js:1243).
+- [x] Document the v3 API in `src/services/synapsd/README.md`: spec buckets, sigil algebra, filter grammar (`t:`/`g:`/`re:`), multi-timeline overlay, and `groupBy:'timeline'`.
+- [x] Refactor is its own session. Update the two main consumers of the query surface: `src/core/workspace/Workspace.js` (direct db caller) and `src/core/workspace/lib/WorkspaceStoredIndex.js`; `src/core/context/lib/Context.js` rides on top via `workspace.list/search` (Context.js:1243).
 
 ### Release
-- [ ] Major version bump in `package.json` (currently `2.1.1`).
+- [x] Major version bump in `package.json` (currently `2.1.1`).
 
 
 ## Session support
