@@ -23,25 +23,28 @@ Context layers filter different data based on `where they are placed`. Iow,
 - `ContextTree` provides layered/intersection semantics.
 - `DirectoryTree` provides exact folder semantics with unique node IDs.
 
-## Canonical API
+## Canonical API (v3)
 
-The current public API shape is:
+The public read surface is just `list()` + `query()`. Writes take `(document, spec)`
+where `spec = { paths, features }`.
 
 - `get(id, options?)`
-- `put(document, treeSelector?, features?, options?)`
-- `putMany(documents, treeSelector?, features?, options?)`
-- `link(id, treeSelector?, features?, options?)`
-- `linkMany(ids, treeSelector?, features?, options?)`
-- `has(id, treeSelector?, features?)`
-- `getByChecksumString(checksum, options?)`
-- `hasByChecksumString(checksum, treeSelector?, features?)`
-- `unlink(id, treeSelector?, features?, options?)`
-- `unlinkMany(ids, treeSelector?, features?, options?)`
+- `query(match, spec?)` — `match: string | { text }`; ranked when `match` is set
+- `list(spec?)` — equals `query(null, spec)`; structural listing, no ranking
+- `search(spec)` — thin wrapper kept for back-compat: `query(spec.query, spec)`
+- `put(document, spec?)` — `spec = { paths, features }`
+- `putMany(documents, spec?)`
+- `link(idOrIds, spec?)`
+- `linkMany(ids, spec?)`
+- `has(id, spec?)`
+- `unlink(idOrIds, spec?)`
+- `unlinkMany(ids, spec?)`
 - `delete(id, options?)`
 - `deleteMany(ids, options?)`
-- `list(spec)`
-- `search(spec)`
-- `recall(query, spec?)`
+- `getByChecksumString(checksum, options?)`
+- `hasByChecksumString(checksum, spec?)`
+- `resolveCandidates(spec) -> { bitmap, keys }` — the candidate-set stage of a query, exposed for sessions
+- `rank(bitmap, match, { mode, limit, offset }) -> page` — the materialize/score stage
 - `listDocumentTreePaths(id, treeNameOrId)`
 - `listDocumentTreeMemberships(id, treeNameOrId)`
 - `hasDocumentTreeMembership(id, treeNameOrId)`
@@ -66,14 +69,20 @@ const db = new SynapsD({ path: '...' });
 await db.start();
 ```
 
-Reusable tree selector and feature list:
+Reusable write spec. `paths` uses the `ctx:`/`dir:` grammar (default trees); for a
+non-default tree pass a tree-qualified selector via `context`/`directory`:
 
 ```js
-const projectTree = { tree: 'projects', path: '/work/project-a' };
-const projectNoteFeatures = ['data/abstraction/note', 'tag/inbox'];
+const noteSpec = {
+    paths: ['ctx:/work/project-a'],
+    features: ['data/abstraction/note', 'tag/inbox'],
+};
+// tree-qualified equivalent:
+const projectTreeSpec = { context: { tree: 'projects', path: '/work/project-a' } };
 ```
 
-Write methods tick every feature you pass. Query methods treat `features: ['a', 'b']` as `anyOf`.
+Write methods tick every feature you pass. Query feature buckets default to `anyOf`;
+`+` promotes to `allOf`, `!` excludes (`noneOf`).
 
 ### Create
 
@@ -83,28 +92,17 @@ Write methods tick every feature you pass. Query methods treat `features: ['a', 
 const id = await db.put(
     {
         schema: 'data/abstraction/note',
-        data: {
-            title: 'Hello',
-            content: 'First draft',
-        },
+        data: { title: 'Hello', content: 'First draft' },
     },
-    projectTree,
-    projectNoteFeatures,
+    noteSpec,
 );
 
 const ids = await db.putMany(
     [
-        {
-            schema: 'data/abstraction/note',
-            data: { title: 'A', content: 'Alpha' },
-        },
-        {
-            schema: 'data/abstraction/note',
-            data: { title: 'B', content: 'Beta' },
-        },
+        { schema: 'data/abstraction/note', data: { title: 'A', content: 'Alpha' } },
+        { schema: 'data/abstraction/note', data: { title: 'B', content: 'Beta' } },
     ],
-    { tree: 'projects', path: ['/work/project-a', '/work/shared'] },
-    projectNoteFeatures,
+    { context: { tree: 'projects', path: ['/work/project-a', '/work/shared'] }, features: ['data/abstraction/note'] },
 );
 ```
 
@@ -119,13 +117,12 @@ const rawDoc = await db.get(id, { parse: false });
 const docByChecksum = await db.getByChecksumString('sha256:...');
 
 const existsAnywhere = await db.has(id);
-const existsInProjectsTree = await db.has(id, { tree: 'projects', path: '/work/project-a' });
-const existsWithInboxFeature = await db.has(id, projectTree, ['tag/inbox']);
+const existsInProjectsTree = await db.has(id, { context: { tree: 'projects', path: '/work/project-a' } });
+const existsWithInboxFeature = await db.has(id, { paths: ['ctx:/work/project-a'], features: ['tag/inbox'] });
 
 const checksumExistsInProject = await db.hasByChecksumString(
     'sha256:...',
-    { tree: 'projects', path: '/work/project-a' },
-    ['data/abstraction/note'],
+    { context: { tree: 'projects', path: '/work/project-a' }, features: ['data/abstraction/note'] },
 );
 ```
 
@@ -150,12 +147,11 @@ await db.put(
         },
         metadata: current.metadata,
     },
-    projectTree,
-    projectNoteFeatures,
+    noteSpec,
 );
 
-await db.link(id, { tree: 'projects', path: '/work/project-a' }, ['tag/reviewed']);
-await db.link(id, { tree: 'filesystem', path: ['/notes', '/archive/notes'] }, ['tag/filed']);
+await db.link(id, { context: { tree: 'projects', path: '/work/project-a' }, features: ['tag/reviewed'] });
+await db.link(id, { directory: { tree: 'filesystem', path: ['/notes', '/archive/notes'] }, features: ['tag/filed'] });
 ```
 
 ### Delete
@@ -167,76 +163,74 @@ await db.link(id, { tree: 'filesystem', path: ['/notes', '/archive/notes'] }, ['
 Context-tree root `/` is a selector for "anything in this tree", not a real removable membership. Directory-tree root `/` is just the literal root folder.
 
 ```js
-await db.unlink(id, { tree: 'projects', path: '/work/project-a/deep' }, ['tag/inbox']);
+await db.unlink(id, { context: { tree: 'projects', path: '/work/project-a/deep' }, features: ['tag/inbox'] });
 
-await db.unlink(id, { tree: 'projects', path: '/work/project-a/deep' }, [], { recursive: true });
+await db.unlink(id, { context: { tree: 'projects', path: '/work/project-a/deep' }, recursive: true });
 
-await db.unlink(id, { tree: 'incoming', path: '/' });
+await db.unlink(id, { directory: { tree: 'incoming', path: '/' } });
 
 const deleted = await db.delete(id);
 await db.delete(id, { emitEvent: false });
 
-const linkResult = await db.linkMany([id1, id2], { tree: 'projects', path: '/work/project-a' }, ['tag/reviewed']);
-const unlinkResult = await db.unlinkMany([id1, id2], { tree: 'projects', path: '/work/project-a' }, ['tag/inbox']);
+const linkResult = await db.linkMany([id1, id2], { context: { tree: 'projects', path: '/work/project-a' }, features: ['tag/reviewed'] });
+const unlinkResult = await db.unlinkMany([id1, id2], { context: { tree: 'projects', path: '/work/project-a' }, features: ['tag/inbox'] });
 
 const deleteResult = await db.deleteMany([id1, id2]);
 ```
 
 `unlinkMany()` and `deleteMany()` return `{ successful, failed, count }`. Batch delete/unlink ids must be numbers; numeric strings are accepted by `get()` / `put()` but rejected by the batch helpers.
 
-## Querying: `list` vs `search`
+## Querying: one seam, two entry points
 
-SynapsD has three query methods. They share the same grounding spec shape where relevant, but serve different purposes.
+A query is two pure stages:
 
-### `list(spec)` — bitmap-filtered listing
-
-Returns documents that match structural criteria: tree membership, features, and datetime/bitmap filters. Results are returned in insertion order (by numeric ID). No ranking is performed.
-
-Use `list` when you know *where* or *what kind* of documents you want — "all notes in this project", "files updated today", "everything except staging".
-
-With no filters, `list` returns all documents in the store.
-
-### `search(spec)` — full-text ranked search
-
-Requires a `query` string. First applies the same bitmap filters as `list` to narrow the candidate set, then runs a full-text search (via LanceDB) over those candidates. Results are ranked by relevance.
-
-Use `search` when you have a text query and want the best matches — "find invoices mentioning 'overdue' in the finance tree".
-
-Default limit is 50 (vs unlimited for `list`).
-
-### `recall(query, spec?)` — semantic cue retrieval
-
-Planned semantic entry point. It accepts a human query string or semantic anchor array, plus an optional deterministic grounding spec. The semantic layer will translate lossy cues into exact timeline/context/filter/search operations. This API is wired but not implemented yet.
-
-```js
-const docs = await db.recall('show me emails from this week', {
-    tree: 'work',
-    features: ['data/abstraction/email'],
-});
+```
+resolveCandidates(spec) -> { bitmap, keys }   // paths ∩ features ∩ filters
+rank(bitmap, match, { mode, limit, offset })  // match=null => slice; else fts/vector/hybrid
+query(match, spec) = rank(resolveCandidates(spec).bitmap, match, spec)
+list(spec)         = query(null, spec)
 ```
 
-### Shared spec fields
+### `list(spec)` — structural listing
 
-`list`, `search`, and `recall` grounding specs accept:
+`query(null, spec)`. Returns documents matching the candidate set (tree membership,
+features, timeline/bitmap filters) in insertion order. No ranking. With no buckets,
+`list` returns every document. Default limit is 100; pass `limit: 0` to return all
+matches.
+
+### `query(match, spec)` / `search(spec)` — ranked retrieval
+
+`match` is a string (or `{ text }`). The candidate set scopes a full-text/vector
+search (LanceDB), ranked by relevance. `search(spec)` is a thin wrapper that pulls
+`match` from `spec.query`. Default limit is 50. `mode` selects `fts` (default),
+`vector`, or `hybrid`; vector/hybrid fall back to `fts` when the dense stack is down.
+
+### Spec buckets and sigil algebra
+
+Buckets intersect (`paths ∩ features ∩ filters`); items within a bucket follow a
+uniform sigil algebra: default `anyOf` (OR), `+` `allOf` (gate), `!` `noneOf` (exclude).
 
 | Field | Description |
 |-------|-------------|
-| `tree` | Tree name or ID to scope the query |
-| `path` | Path(s) within the tree — string or array of strings |
-| `features` | Feature keys as array (treated as `anyOf`) or `{ allOf, anyOf, noneOf }` |
-| `filters` | Array of filter strings — bitmap keys and `datetime:` expressions |
-| `excludeTree` | Tree name/ID to exclude from results |
-| `excludeTrees` | Array of tree names/IDs to exclude |
-| `limit` | Max documents to return (`list`: unlimited, `search`: 50) |
-| `offset` | Skip N documents before returning results |
-| `page` | Page number (alternative to offset, uses limit as page size) |
-| `parse` | Set `false` to return raw stored data instead of parsed document instances |
+| `paths` | `['ctx:/a/b', 'dir:/x', '!ctx:/staging']` or `{ in, not }`. `ctx:`/`dir:` target default trees |
+| `context` / `directory` | Tree-qualified selector `{ tree, path }` — use when you need a non-default tree |
+| `features` | `['+tag/red', 'tag/blue', '!tag/spam']` or `{ allOf, anyOf, noneOf }` |
+| `filters` | `['t:crud:updated:thisWeek', '+t:wikipedia:1996', '!t:crud:created:today']` (see filter grammar) |
+| `mode` | `fts` \| `vector` \| `hybrid` (ranked queries only) |
+| `limit` | Max documents (`list`: 100, `query`: 50; `0` = all matches) |
+| `offset` / `page` | Pagination |
+| `parse` | Set `false` to return raw stored data |
 
-`search` additionally requires:
+### Filter grammar
 
-| Field | Description |
-|-------|-------------|
-| `query` | The full-text search string (also accepts `search` or `q` as aliases) |
+Filters share the sigil algebra and dispatch on a type prefix:
+
+- `t:<name>:<spec>` — temporal. Reserved lifecycle form `t:crud:<action>:<timeframe|range>`
+  (e.g. `t:crud:updated:thisWeek`, `t:crud:created:2026-01-01..2026-05-10`); content
+  timelines use `t:<name>:<point|range>` (e.g. `t:wikipedia:1996`, `t:wikipedia:1996..1999`).
+- `g:<glob>` and `re:<regexp>` — recognised but **not yet implemented** (throw).
+
+Anything without a recognised prefix is treated as a raw bitmap key (ANDed).
 
 ### Return value
 
@@ -249,36 +243,29 @@ Both return an array with attached metadata:
 ### Examples
 
 ```js
-// list: all notes in a project, excluding deleted
+// list: all files in a path, excluding deleted, updated today
 const docs = await db.list({
-    tree: 'projects',
-    path: '/foo/bar',
-    features: {
-        allOf: ['data/abstraction/file'],
-        noneOf: ['tag/deleted'],
-    },
-    filters: ['datetime:updated:today'],
+    paths: ['ctx:/foo/bar'],
+    features: { allOf: ['data/abstraction/file'], noneOf: ['tag/deleted'] },
+    filters: ['t:crud:updated:today'],
     limit: 100,
 });
 
-// list: directory tree, multiple paths
+// list: directory tree, multiple paths (non-default tree -> selector)
 const exactDirectoryMatches = await db.list({
-    tree: 'filesystem',
-    path: ['/docs/contracts', '/docs/invoices'],
+    directory: { tree: 'filesystem', path: ['/docs/contracts', '/docs/invoices'] },
     features: ['data/abstraction/file'],
 });
 
-// list: everything except a specific tree
+// list: everything except a staging context
 const withoutStaging = await db.list({
-    excludeTree: 'incoming',
+    paths: ['!ctx:/staging'],
     features: ['data/abstraction/file'],
 });
 
-// search: ranked full-text within a scoped tree
-const ranked = await db.search({
-    query: 'invoice',
-    tree: 'projects',
-    path: '/finance/2026',
+// query: ranked full-text within a scoped path
+const ranked = await db.query('invoice', {
+    paths: ['ctx:/finance/2026'],
     features: ['data/abstraction/file', 'tag/finance'],
     limit: 20,
 });
@@ -299,18 +286,19 @@ Canonical calendar/time semantics:
 
 ### System CRUD Timelines
 
-Document lifecycle events are automatically indexed into `crud:created`, `crud:updated`, and `crud:deleted` timelines. You can filter queries using `datetime:` strings in the `filters` array.
+Document lifecycle events are automatically indexed into `crud:created`, `crud:updated`, and `crud:deleted` timelines. You filter queries using `t:` strings in the `filters` array.
 
 Formats:
-- `datetime:ACTION:TIMEFRAME` (e.g., `datetime:updated:thisWeek`)
-- `datetime:ACTION:range:START:END` (e.g., `datetime:created:range:2026-01-01:2026-05-10`)
+- `t:crud:ACTION:TIMEFRAME` (e.g., `t:crud:updated:thisWeek`)
+- `t:crud:ACTION:START..END` (e.g., `t:crud:created:2026-01-01..2026-05-10`)
 
 Supported timeframe tokens: `now` (current hour), `today`, `yesterday`, `tomorrow`, `lastWeek`, `thisWeek`, `nextWeek`, `lastMonth`, `thisMonth`, `nextMonth`, `lastYear`, `thisYear`, `nextYear`, `lastDecade`, `thisDecade`, `nextDecade`, `lastCentury`, `thisCentury`, `nextCentury`, `lastMillennium`, `thisMillennium`, `nextMillennium`.
 
 ```js
+// allOf gate: created this week AND updated today
 const recentDocs = await db.list({
-    tree: 'projects',
-    filters: ['datetime:created:thisWeek', 'datetime:updated:today']
+    paths: ['ctx:/projects'],
+    filters: ['+t:crud:created:thisWeek', '+t:crud:updated:today'],
 });
 ```
 
@@ -543,15 +531,15 @@ const id = await db.put(
         schema: 'data/abstraction/email',
         data: { subject: 'Invoice', from: 'billing@example.com' },
     },
-    { tree: 'incoming', path: '/email/imap/account-a/inbox' },
+    { directory: { tree: 'incoming', path: '/email/imap/account-a/inbox' } },
 );
 
 // promote into a user tree, then remove from staging
-await db.link(id, { tree: 'projects', path: '/finance/invoices' }, ['tag/triaged']);
-await db.unlink(id, { tree: 'incoming', path: '/email/imap/account-a/inbox' });
+await db.link(id, { context: { tree: 'projects', path: '/finance/invoices' }, features: ['tag/triaged'] });
+await db.unlink(id, { directory: { tree: 'incoming', path: '/email/imap/account-a/inbox' } });
 
-// exclude staging from broad queries
-const docs = await db.list({ excludeTree: 'incoming' });
+// exclude a staging context from broad queries
+const docs = await db.list({ paths: ['!ctx:/staging'] });
 ```
 
 Tree metadata lives in the internal store, while tree memberships are mapped to typed bitmap namespaces.

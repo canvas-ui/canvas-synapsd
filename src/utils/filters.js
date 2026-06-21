@@ -1,117 +1,105 @@
 'use strict';
 
 import debugInstance from 'debug';
+import { createRequire } from 'module';
+import TimelineIndex from '../indexes/inverted/Timeline.js';
+
 const debug = debugInstance('canvas:synapsd:filters');
+const require = createRequire(import.meta.url);
+const { RoaringBitmap32 } = require('roaring');
+
+// Filter grammar. Uniform surface `t:<name>:<spec>` (temporal), `g:` (glob),
+// `re:` (regexp). Sigil algebra matches paths/features: default anyOf (OR),
+// '+' = allOf (gate), '!' = noneOf (exclude). Anything else is treated as a
+// raw bitmap key (ANDed). Glob/regexp are recognised but not yet implemented.
+
+const CRUD_TIMEFRAMES = new Set([
+    'now', 'today', 'yesterday', 'tomorrow',
+    'lastWeek', 'thisWeek', 'nextWeek',
+    'lastMonth', 'thisMonth', 'nextMonth',
+    'lastYear', 'thisYear', 'nextYear',
+    'lastDecade', 'thisDecade', 'nextDecade',
+    'lastCentury', 'thisCentury', 'nextCentury',
+    'lastMillennium', 'thisMillennium', 'nextMillennium',
+]);
+
+function splitSigil(token) {
+    const t = String(token).trim();
+    if (t.startsWith('+')) { return { sigil: 'allOf', body: t.slice(1).trim() }; }
+    if (t.startsWith('!')) { return { sigil: 'noneOf', body: t.slice(1).trim() }; }
+    return { sigil: 'anyOf', body: t };
+}
+
+// Resolve a timeline token body (already stripped of `t:`) to { name, start, end }.
+// Relative crud timeframes resolve to absolute bounds here, at call time.
+function parseTimelineToken(rest) {
+    const segs = rest.split(':');
+    let name, specStr;
+    if (segs[0] === 'crud') {
+        name = `crud:${segs[1]}`;
+        specStr = segs.slice(2).join(':');
+    } else {
+        name = segs[0];
+        specStr = segs.slice(1).join(':');
+    }
+    if (!name || !specStr) { return null; }
+
+    if (name.startsWith('crud:') && CRUD_TIMEFRAMES.has(specStr)) {
+        const { start, end } = TimelineIndex.getTimeframeBounds(specStr);
+        return { name, start, end };
+    }
+    if (specStr.includes('..')) {
+        const [start, end] = specStr.split('..');
+        return { name, start, end };
+    }
+    return { name, start: specStr, end: specStr };
+}
 
 /**
- * Parse filterArray into bitmap filters and datetime filters
+ * Partition a filter token array into bitmap-key filters (ANDed) and
+ * sigil-tagged timeline filters.
  * @param {Array} filterArray
- * @returns {{ bitmapFilters: Array, datetimeFilters: Array }}
+ * @returns {{ bitmapFilters: Array, timelineFilters: Array<{sigil,name,start,end}> }}
  */
 export function parseFilters(filterArray) {
     const bitmapFilters = [];
-    const datetimeFilters = [];
+    const timelineFilters = [];
 
     for (const filter of filterArray) {
-        if (typeof filter === 'object' && filter !== null && filter.type === 'datetime') {
-            datetimeFilters.push(filter);
-        } else if (typeof filter === 'string' && filter.startsWith('datetime:')) {
-            const parsed = parseDatetimeFilterString(filter);
-            if (parsed) { datetimeFilters.push(parsed); }
+        if (typeof filter !== 'string') {
+            bitmapFilters.push(filter);
+            continue;
+        }
+
+        const { sigil, body } = splitSigil(filter);
+
+        if (body.startsWith('t:')) {
+            const parsed = parseTimelineToken(body.slice(2));
+            if (parsed) { timelineFilters.push({ sigil, ...parsed }); }
+        } else if (body.startsWith('g:') || body.startsWith('re:')) {
+            const kind = body.startsWith('g:') ? 'glob' : 'regexp';
+            throw new Error(`Filter "${kind}" is not yet implemented`);
         } else {
             bitmapFilters.push(filter);
         }
     }
 
-    return { bitmapFilters, datetimeFilters };
+    return { bitmapFilters, timelineFilters };
 }
 
 /**
- * Parse string-based datetime filter into object format
- * Formats:
- *   datetime:ACTION:TIMEFRAME (e.g., datetime:updated:today)
- *   datetime:ACTION:range:START:END (e.g., datetime:created:range:2023-10-01:2023-10-31)
- * @param {string} filterString
- * @returns {Object|null}
+ * Resolve one timeline filter to a bitmap of matching document IDs.
+ * @param {{name,start,end}} filter
+ * @param {Object} timelineIndex
+ * @returns {Promise<RoaringBitmap32>}
  */
-export function parseDatetimeFilterString(filterString) {
-    const parts = filterString.split(':');
-    if (parts.length < 3) { return null; }
-
-    const [, action, specType, ...rest] = parts;
-    if (!['created', 'updated', 'deleted'].includes(action)) { return null; }
-
-    if (specType === 'range' && rest.length === 2) {
-        return { type: 'datetime', action, range: { start: rest[0], end: rest[1] } };
-    }
-
-    const validTimeframes = [
-        'now',
-        'today',
-        'yesterday',
-        'tomorrow',
-        'lastWeek',
-        'thisWeek',
-        'nextWeek',
-        'lastMonth',
-        'thisMonth',
-        'nextMonth',
-        'lastYear',
-        'thisYear',
-        'nextYear',
-        'lastDecade',
-        'thisDecade',
-        'nextDecade',
-        'lastCentury',
-        'thisCentury',
-        'nextCentury',
-        'lastMillennium',
-        'thisMillennium',
-        'nextMillennium',
-    ];
-    if (validTimeframes.includes(specType)) {
-        return { type: 'datetime', action, timeframe: specType };
-    }
-
-    return null;
-}
-
-/**
- * Apply datetime filter and return bitmap of matching document IDs
- * @param {Object} filter - Parsed datetime filter
- * @param {Object} timelineIndex - TimelineIndex instance
- * @returns {RoaringBitmap32|null}
- */
-export async function applyDatetimeFilter(filter, timelineIndex) {
-    if (!timelineIndex) { return null; }
-
+export async function applyTimelineFilter(filter, timelineIndex) {
+    if (!timelineIndex) { return new RoaringBitmap32(); }
     try {
-        const action = filter.action;
-        let start, end;
-
-        if (filter.timeframe) {
-            const bounds = timelineIndex.constructor.getTimeframeBounds(filter.timeframe);
-            start = bounds.start;
-            end = bounds.end;
-        } else if (filter.range) {
-            start = filter.range.start;
-            end = filter.range.end;
-        } else {
-            return null;
-        }
-
-        const timelineName = `crud:${action}`;
-        const ids = await timelineIndex.queryInterval(timelineName, start, end);
-
-        if (ids && ids.length > 0) {
-            const roaring = await import('roaring');
-            const { RoaringBitmap32 } = roaring.default || roaring;
-            return new RoaringBitmap32(ids);
-        }
-
-        return null;
+        const ids = await timelineIndex.queryInterval(filter.name, filter.start, filter.end);
+        return ids && ids.length > 0 ? new RoaringBitmap32(ids) : new RoaringBitmap32();
     } catch (error) {
-        debug(`Error applying datetime filter: ${error.message}`);
-        return null;
+        debug(`Error applying timeline filter: ${error.message}`);
+        return new RoaringBitmap32();
     }
 }

@@ -100,24 +100,65 @@ describe('SynapsD query and membership invariants', () => {
         db = new Db({ path: rootPath, backupOnOpen: false, backupOnClose: false });
         await db.start();
 
-        expect(ids(await db.list({ attributes: { allOf: ['tag/imported'] } }))).toEqual([alphaId]);
-        expect(ids(await db.list({ attributes: { allOf: ['tag/urgent'] } }))).toEqual([]);
-        await expectSearchIds(db, { query: 'alpha', attributes: { allOf: ['tag/imported'] } }, [alphaId]);
+        expect(ids(await db.list({ features: { allOf: ['tag/imported'] } }))).toEqual([alphaId]);
+        expect(ids(await db.list({ features: { allOf: ['tag/urgent'] } }))).toEqual([]);
+        await expectSearchIds(db, { query: 'alpha', features: { allOf: ['tag/imported'] } }, [alphaId]);
     });
 
-    test('lists by attributes, context, directory, timeline, and pagination', async () => {
+    test('lists by features, paths, directory, timeline, and pagination', async () => {
         const { alphaId, betaId, gammaId } = await seed();
 
-        expect(ids(await db.list({ attributes: { allOf: ['tag/red'] } }))).toEqual([alphaId, betaId]);
-        expect(ids(await db.list({ attributes: { anyOf: ['tag/urgent', 'tag/blue'] } }))).toEqual([alphaId, gammaId]);
-        expect(ids(await db.list({ attributes: { allOf: ['tag/red'], noneOf: ['tag/backlog'] } }))).toEqual([alphaId]);
-        expect(ids(await db.list({ context: { path: '/Projects/Alpha' } }))).toEqual([alphaId, gammaId]);
-        expect(ids(await db.list({ directory: { path: '/notes' } }))).toEqual([alphaId, betaId]);
+        expect(ids(await db.list({ features: { allOf: ['tag/red'] } }))).toEqual([alphaId, betaId]);
+        expect(ids(await db.list({ features: ['+tag/red'] }))).toEqual([alphaId, betaId]);
+        expect(ids(await db.list({ features: { anyOf: ['tag/urgent', 'tag/blue'] } }))).toEqual([alphaId, gammaId]);
+        expect(ids(await db.list({ features: { allOf: ['tag/red'], noneOf: ['tag/backlog'] } }))).toEqual([alphaId]);
+        expect(ids(await db.list({ paths: ['ctx:/Projects/Alpha'] }))).toEqual([alphaId, gammaId]);
+        expect(ids(await db.list({ paths: ['dir:/notes'] }))).toEqual([alphaId, betaId]);
         expect(ids(await db.list({ filters: { timeline: 'today' } }))).toEqual([alphaId, betaId, gammaId]);
 
-        const page = await db.list({ attributes: { anyOf: ['tag/red', 'tag/blue'] }, limit: 1, offset: 1 });
+        const page = await db.list({ features: { anyOf: ['tag/red', 'tag/blue'] }, limit: 1, offset: 1 });
         expect(page).toHaveLength(1);
         expect(page.totalCount).toBe(3);
+    });
+
+    test('lists by noneOf-only, context exclusion, and limit:0 full scan', async () => {
+        const { alphaId, betaId, gammaId } = await seed();
+
+        // noneOf with no positive set scans all docs then subtracts.
+        expect(ids(await db.list({ features: { noneOf: ['tag/blue'] } }))).toEqual([alphaId, betaId]);
+        expect(ids(await db.list({ features: ['!tag/red'] }))).toEqual([gammaId]);
+
+        // Excluding the Alpha context drops both docs anchored there.
+        expect(ids(await db.list({ paths: ['!ctx:/Projects/Alpha'] }))).toEqual([betaId]);
+
+        // limit:0 is the explicit "all matching" opt-in.
+        const all = await db.list({ features: { anyOf: ['tag/red', 'tag/blue'] }, limit: 0 });
+        expect(ids(all)).toEqual([alphaId, betaId, gammaId]);
+        expect(all.totalCount).toBe(3);
+    });
+
+    test('paginates search results', async () => {
+        await seed();
+
+        const full = await db.search({ query: 'search', limit: 0 });
+        if (full.error === 'FTS not initialized') {
+            expect(full).toHaveLength(0);
+            return;
+        }
+        expect(full.error).toBeNull();
+        const total = full.totalCount;
+        if (total < 2) {
+            return; // tokenizer matched <2 docs; nothing to paginate
+        }
+
+        const first = await db.search({ query: 'search', limit: 1, offset: 0 });
+        expect(first).toHaveLength(1);
+        expect(first.totalCount).toBe(total);
+
+        const second = await db.search({ query: 'search', limit: 1, offset: 1 });
+        expect(second).toHaveLength(1);
+        // Two single-item pages cover distinct documents (no overlap).
+        expect(first[0].id).not.toBe(second[0].id);
     });
 
     test('pins unsupported glob and regexp filter behavior', async () => {
@@ -125,6 +166,24 @@ describe('SynapsD query and membership invariants', () => {
 
         await expect(db.list({ filters: { glob: '*.md' } })).rejects.toThrow('unsupported filter "glob"');
         await expect(db.list({ filters: { regexp: 'alpha' } })).rejects.toThrow('unsupported filter "regexp"');
+        await expect(db.list({ filters: ['g:*.md'] })).rejects.toThrow('not yet implemented');
+        await expect(db.list({ filters: ['re:^alpha'] })).rejects.toThrow('not yet implemented');
+    });
+
+    test('filters via the t: timeline grammar with sigil algebra', async () => {
+        const { alphaId, betaId, gammaId } = await seed();
+
+        // Reserved crud lifecycle timeline, named timeframe.
+        expect(ids(await db.list({ filters: ['t:crud:updated:today'] }))).toEqual([alphaId, betaId, gammaId]);
+
+        // allOf gate combined with a feature bucket.
+        expect(ids(await db.list({
+            features: { allOf: ['tag/red'] },
+            filters: ['+t:crud:created:today'],
+        }))).toEqual([alphaId, betaId]);
+
+        // noneOf timeline excludes everything created today -> empty.
+        expect(ids(await db.list({ filters: ['!t:crud:created:today'] }))).toEqual([]);
     });
 
     test('searches globally and with context, attribute, and timeline filters', async () => {
@@ -132,7 +191,7 @@ describe('SynapsD query and membership invariants', () => {
 
         await expectSearchIds(db, { query: 'alpha' }, [alphaId]);
         await expectSearchIds(db, { query: 'alpha', context: { path: '/Projects/Alpha' } }, [alphaId]);
-        await expectSearchIds(db, { query: 'beta', attributes: { allOf: ['tag/backlog'] } }, [betaId]);
+        await expectSearchIds(db, { query: 'beta', features: { allOf: ['tag/backlog'] } }, [betaId]);
         await expectSearchIds(db, { query: 'alpha', filters: { timeline: 'today' } }, [alphaId]);
     });
 });
