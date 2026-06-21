@@ -6,7 +6,7 @@ To test *7M wikipedia articles, ~2 milion files ingestion
 - en wikipedia dataset converted to thousands of markdown files ingested into a workspace > synapsd
 This is pure text so the current embedding model should be sufficient, dataset a bit too clean so not really a prod test yet
 - Dataset will be post-processed by a local LLM to associate its content with a dedicated "wikipedia" timeline (naive, simple, stupid for round 1, we'll get to the more interesting hierachical vector trees later)
-- embedding path: ensure wikipedia text lands in a server-embeddable schema (derived `document`/`note`, registered in `embeddableSchemas`) — as `data/abstraction/file` you'd embed `locationUrls`, not the article.
+- embedding path: ensure wikipedia text lands in a server-embeddable schema (derived `document`/`note`, registered in `embeddableSchemas`) - as `data/abstraction/file` you'd embed `locationUrls`, not the article.
 - [Input Chunk] ➔ [Qwen3-VL (64d)] ➔ [PCA (e.g., 16d or 32d)] ➔ [Scalar Quantizer (Bands)] ➔ [Roaring Bitmap Index]
 
 ## Refactor v3
@@ -16,21 +16,26 @@ Do the simplest thing that works; aim to delete more than you add.
 ! Do NOT use `bitmapIndex.untickAll` (`indexes/bitmaps/index.js:415`): O(all-bitmaps) per delete, that's why it's dead. The bitmap side is already cleaned precisely and cheaply by `clearSynapses` (`indexes/inverted/Synapses.js:144`) via the reverse index. Leave `untickAll` dead.
 
 ### Prereq
-- [ ] Split `query()` into two callable stages:
-      - `resolveCandidates(spec) -> bitmap`  (paths ∩ features ∩ filters; deterministic, cacheable)
-      - `rank(bitmap, match, {mode,limit,offset}) -> page`  (fts/vector/hybrid; expensive)
-      `query(match, spec)` becomes `rank(resolveCandidates(spec), match, …)`.
-      The session is built on this seam: cache stage 1 per spec, run stage 2 on demand.
+- [ ] Split `query()` into two stages, both stateless and pure. No caching inside synapsd: the operand cache is the session's job, the db stays stateless.
+      - `resolveCandidates(spec) -> { bitmap, keys }`  (paths ∩ features ∩ filters). `keys` = the bitmap keys the operand actually read, so a session can invalidate precisely instead of dirtying everything.
+      - `rank(bitmap, match, {mode,limit,offset}) -> page`  (fts/vector/hybrid; expensive). With `match=null` it degrades to slice+fetch, so `list(spec)` == `rank(resolveCandidates(spec).bitmap, null, …)` — one materializer, not three.
+      `query(match, spec)` becomes `rank(resolveCandidates(spec).bitmap, match, …)`.
+      Bonus: this seam dedupes today's copy-pasted candidate-building in `list` vs `search` (index.js:1725-1771 vs index.js:1881+). Land it right after the spec parser.
+- [ ] Cacheability is conditional. Path/feature operands have stable keys and cache cleanly. Relative timeframes do NOT: `t:crud:updated:thisWeek` is wall-clock dependent. Resolve relative timeframes to absolute bounds at call time; whether those bounds freeze or slide is the session-mode decision below.
 
 ### Target surface
 
 ```
-list(spec?)              // == query(null, spec)
+// Public read surface = list() + query(). Nothing else. (get(id) is trivial, not shown.)
+list(spec?)              // == query(null, spec); kept for back-compat + simple UX, no match
 query(match, spec?)      // match: string | { text?, image? }
-recall(match, spec?)     // query + anchor planning on top
+
+// Writes
 put(document, spec?)     // spec: { paths, features } -- no filters, no match
 putMany(documents, spec?)
 link(idOrIds, spec)      // spec: { paths, features }
+
+// recall (anchor planning) + search: folded into the Session feature, not this cut.
 
 spec = {
   paths:    ['ctx:/a/b', '!dir:/staging'],                       // or { in, not }
@@ -43,7 +48,7 @@ spec = {
 Buckets intersect (paths AND features AND filters AND match); items within a bucket union. Per item: default is `anyOf` (OR), `+` promotes to required (`allOf`), `!` excludes (`noneOf`). Pipeline order is fixed: tree-path bitmaps, then feature bitmaps, then filters (BSI timelines, glob, regexp), then semantic (vector) on the surviving subset only.
 
 ### API consolidation
-- [ ] Collapse `list`/`search`/`recall` onto one core `query(match, spec)`; `list(spec)` = `query(null, spec)`, `recall` = `query` + anchor planning. (`list` index.js:1694, `search` index.js:1838, `recall` index.js:585)
+- [ ] Public read surface is just `list()` + `query(match, spec)`. `list(spec)` == `query(null, spec)`, kept for back-compat / simple UX (`list` index.js:1694). Collapse `search` into `query` (`search` index.js:1838). `recall` (anchor planning, index.js:585) is deferred to the Session feature.
 - [ ] One spec parser: each bucket accepts level-1 sigil strings (`+`/`!`) and level-2 `{allOf, anyOf, noneOf}`; compile sigils into the object form. Replaces the alias sprawl in `#normalizeQuerySpec` (index.js:3096).
 - [ ] Fold exclusion into the path grammar (`!ctx:/path`); delete the six `excludeTree*`/`excludeContext*` aliases (index.js:3111-3149).
 - [ ] Split match inputs `{ text?, image? }` from `mode` (`fts|vector|hybrid`); kill the `query`/`search`/`q` and `fts`-vs-`text` key conflation (index.js:1843, index.js:1860).
@@ -131,29 +136,38 @@ The "Why"
 
 **Conversational drill-down (REPL / the expansion UI you sketched).**  
 In a user-session query:  
-"car" → add "red" → add "near the market" → drop "red." *Why a session:* per-spec operand cache — each cue is resolved to a bitmap once, every refinement is just a re-AND, and removing a cue is free. Stateless re-resolves the whole conjunction on every keystroke; a 5-step refinement costs 5 resolves instead of 1+2+3+4+5.
+"car" → add "red" → add "near the market" → drop "red." *Why a session:* per-spec operand cache - each cue is resolved to a bitmap once, every refinement is just a re-AND, and removing a cue is free. Stateless re-resolves the whole conjunction on every keystroke; a 5-step refinement costs 5 resolves instead of 1+2+3+4+5.
 
 **Agent working memory across turns (canvas-agentd).**  
-Turn 1 commits `ctx:/work/dc-migration`, turn 3 adds `t:crud:updated:thisWeek`, turn 5 patches in a person. The session *is* the accumulated retrieval context you hand the LLM each turn — the agent mutates it in place instead of reconstructing the full spec every turn. *Bonus:* because the spec list is the only authoritative state, `serialize()` gives you durable agent working memory that survives a process restart for a few hundred bytes.
+Turn 1 commits `ctx:/work/dc-migration`, turn 3 adds `t:crud:updated:thisWeek`, turn 5 patches in a person. The session *is* the accumulated retrieval context you hand the LLM each turn - the agent mutates it in place instead of reconstructing the full spec every turn. *Bonus:* because the spec list is the only authoritative state, `serialize()` gives you durable agent working memory that survives a process restart for a few hundred bytes.
 
-**A read-only stream that converges (camera at `/work`, `journalctl -u apache2 -f`).** Each frame or log line becomes a fading spec; the session holds the decaying accumulation of the last few seconds and emits related docs continuously. Continuity over a stream is intrinsically stateful — you're maintaining a running result, debounced and decayed, not answering one-shot questions. A burst of related apache errors *converges* on the right runbook instead of flickering one doc per line.
+**A read-only stream that converges (camera at `/work`, `journalctl -u apache2 -f`).** Each frame or log line becomes a fading spec; the session holds the decaying accumulation of the last few seconds and emits related docs continuously. Continuity over a stream is intrinsically stateful - you're maintaining a running result, debounced and decayed, not answering one-shot questions. A burst of related apache errors *converges* on the right runbook instead of flickering one doc per line.
 
 **A standing live view (invalidation).** Leave "everything about project-foo" open while ingestion runs; new foo docs appear the moment they land, no re-query, no polling. "Did the dc-migration reply arrive yet" flips empty→non-empty on ingest. *Why a session:* event-driven invalidation makes the open result a live view; stateless `query()` is a snapshot frozen at call time.
 
-**Cheap probing, expensive only at commit.** Across a whole exploration the session answers `count()`, "is there anything," and "which cue narrows most" from the combined bitmap with zero document loads, and materializes actual docs exactly once, at "show me." *Why a session:* lazy materialization at *session* granularity — your 90%-without-the-doc goal at the interaction level. "Do we have new emails for foo" is a `count()`, never a fetch.
+**Cheap probing, expensive only at commit.** Across a whole exploration the session answers `count()`, "is there anything," and "which cue narrows most" from the combined bitmap with zero document loads, and materializes actual docs exactly once, at "show me." *Why a session:* lazy materialization at *session* granularity - your 90%-without-the-doc goal at the interaction level. "Do we have new emails for foo" is a `count()`, never a fetch.
 
-**Lens toggling and what-if branching.** Hold named specs as lenses — wikipedia / personal / work — and toggle one off without restating the rest, or fork the spec list to compare two refinements' overlap counts before committing. *Why a session:* cached operands plus an authoritative, forkable spec list make add/remove/branch nearly free.
+**Lens toggling and what-if branching.** Hold named specs as lenses - wikipedia / personal / work - and toggle one off without restating the rest, or fork the spec list to compare two refinements' overlap counts before committing. *Why a session:* cached operands plus an authoritative, forkable spec list make add/remove/branch nearly free.
 
 And the honest counterweight: **a one-shot lookup - "find acme's latest invoice" - should stay a stateless `query()`.** There's no continuity to amortize, so the session is pure overhead. The abstraction earns its complexity only when there's continuity in the access pattern: iterative refinement, a stream, a standing live view, multi-turn agent context, or repeated cheap probing of one candidate set. If a use-case has none of those, it's a query, not a session.
 
 A session pays off exactly when *the candidate set outlives a single question* 
 
+Not on the table yet, but landing shortly: the focus shift to canvas-agentd needs durable per-turn retrieval context, which is exactly a session. Build the `resolveCandidates`/`rank` seam now so the session is a thin layer on top, not a rewrite.
+
+### Session modes
+
+The dividing line is whether real-time streaming is supported out of the box. Two cuts, same container:
+
+- **Frozen-in-time (v1, default, easiest).** Relative timeframes resolve to absolute bounds at `add()` time and stay put; operands are pure cached bitmaps; invalidation is optional. This is agent working memory: `thisWeek` means the week the cue was added, and the session is a stable snapshot you keep handing the LLM.
+- **Live / streaming (v2).** Operands re-resolve against the snapshot at query-run time; relative timeframes slide; this is where the invalidation path below earns its keep. Target optimizations beyond the raw API (dirty-key subscriptions, debounce, decay) so a stream converges instead of re-resolving the whole conjunction per event.
+
 ### Session container
-- [ ] Keyed, ordered map `label -> querySpec` — the spec list is the ONLY authoritative state.
+- [ ] Keyed, ordered map `label -> querySpec` - the spec list is the ONLY authoritative state.
 - [ ] Per-spec cached operand bitmap (from `resolveCandidates`) + a `dirty` flag.
 - [ ] Combined result bitmap, recomputed lazily from operands.
       Default combinator: intersection across specs.
-      (Optional flag: soft overlap — rank docs by how many specs they hit, a cheap bitmap sum. Ship hard-AND first.)
+      (Optional flag: soft overlap - rank docs by how many specs they hit, a cheap bitmap sum. Ship hard-AND first.)
 
 ### Mutation (hydrate / drain / refine)
 - [ ] `add(spec, label?) -> label`   (resolve operand, mark combined dirty)
@@ -162,12 +176,13 @@ A session pays off exactly when *the candidate set outlives a single question*
 - [ ] `clear()`
 
 ### Read (lazy materialization)
-- [ ] `count()` / `ids()` — from the combined bitmap, no doc load.
-- [ ] `materialize(match?, {limit,offset,mode}) -> docs` — `rank` the combined survivors, then fetch docs.
+- [ ] `count()` / `ids()` - from the combined bitmap, no doc load.
+- [ ] `materialize(match?, {limit,offset,mode}) -> docs` - `rank` the combined survivors, then fetch docs.
       Ranking match is a materialize-time arg (default: most-recently-added spec's match).
 
-### Invalidation (thin, live)
-- [ ] Each operand records the bitmap keys it touched.
+### Invalidation (thin, live — streaming mode only)
+- [ ] Each operand records the bitmap keys it touched (the `keys` from `resolveCandidates`).
+- [ ] Precise invalidation only covers path/feature operands (stable keys). Temporal (BSI range), glob, and regexp operands have no stable key set: mark them coarse and re-resolve on read.
 - [ ] Subscribe to existing write events; a write hitting a dependent key dirties that operand; recompute on next read.
       (v1 shortcut acceptable: dirty the whole session on any write + a manual `refresh()`.)
 
@@ -180,7 +195,7 @@ A session pays off exactly when *the candidate set outlives a single question*
 - co-occurrence `suggest()` (reads combined bitmap + synapses)
 - decay / streaming driver (a per-spec weight + a quantize→spec feeder)
 - zoom aggregates / centroids on nodes
-- anchor/quantizer operand sources (a spec's operand can later come from band-bitmaps instead of paths/features — the container doesn't change)
+- anchor/quantizer operand sources (a spec's operand can later come from band-bitmaps instead of paths/features - the container doesn't change)
 
 
 ----
@@ -324,7 +339,7 @@ Functional requirements:
   - `/projects/dc-migration/foo` where foo is a standard context layer/canvas etc, does a logical AND of all 3 layers
   - `/projects/dc-migration/dc/frankfurt` where `dc` is a mountpoint to `/infra/dc` does a AND on `/infra/dc`, inserting(linking) data to `/projects/dc-migration/dc/frankfurt` ticks `/infra/dc/frankfurt`
 - Creating a subtree `/projects/dc-migration/dc/frankfurt/foo` in a mounted path creates it in the source path `/infra/dc/frankfurt/foo` to keep things simple(tm) but not secure(tm), easy to forget that your agent bound to /infra/dc now also sees foo, in phase II we should definitely implement mount permissions
-- Cycle prevention - Reachability check: cycle prevention is a reachability check at mount-creation time — reject a mount O→D if D is reachable from O in the mount graph; this guarantees the mount graph is a DAG - iow - when creating a mount from origin O into destination D, walk O's transitive mount-graph and confirm D (and D's mount-ancestors) are not reachable from O. If D is reachable from O, mounting O into D closes a loop — reject.
+- Cycle prevention - Reachability check: cycle prevention is a reachability check at mount-creation time - reject a mount O→D if D is reachable from O in the mount graph; this guarantees the mount graph is a DAG - iow - when creating a mount from origin O into destination D, walk O's transitive mount-graph and confirm D (and D's mount-ancestors) are not reachable from O. If D is reachable from O, mounting O into D closes a loop - reject.
 - Nested mounts: Allow with configurable depth cap (lets say 2 as the default)
 - Synapsd must expose the origin path of any resolved node
 - All project and task metadata(timelines, milestones, deadlines, dates) live as the app concern in the layers `metadata` object, db does not care here
@@ -334,7 +349,7 @@ Functional requirements:
 - [] Ensure all batch methods are using the accompanied backend(LMDB/Lance) batch methods too whereever it makes sense
 - [] Add backup/restore or dump/import functionality internally
 - [] Add DB snapshot/restore option(on top of versioning? fetaures) to enable undo/redo ops || db op logs + traversal
-LMDB copy/snapshot — mdb_copy (or the env .copy() API) gives a consistent point-in-time snapshot of the whole store without stopping writers. Wire it to a workspace.snapshot() that copies the data dir to a timestamped folder. Simplest possible "undo" net.
+LMDB copy/snapshot - mdb_copy (or the env .copy() API) gives a consistent point-in-time snapshot of the whole store without stopping writers. Wire it to a workspace.snapshot() that copies the data dir to a timestamped folder. Simplest possible "undo" net.
 
 - [] Add proper support for Layer of type "label", this type of layer is not bound to a bitmap, hence not processed when supplied via contextSpec/contextArray
 - [] Ensure locked layers can not be moved/removed/deleted/renamed
@@ -378,9 +393,9 @@ LMDB copy/snapshot — mdb_copy (or the env .copy() API) gives a consistent poin
 hard-coded `SchemaRegistry` still carries app-specific abstractions (contact, email, tab, note,
 todo, dotfile, application, message, device). The db only ever needs three things per schema:
 
-- `dataSchema` — zod schema for `data`, used for validate-on-write
-- `indexOptions` — which fields to checksum / FTS / vector-embed
-- `(de)serialization` — `toJSON` shape (round-trip)
+- `dataSchema` - zod schema for `data`, used for validate-on-write
+- `indexOptions` - which fields to checksum / FTS / vector-embed
+- `(de)serialization` - `toJSON` shape (round-trip)
 
 Everything else (e.g. `Email.fromIMAP`, `Email.fromGraph`, `Message.fromSlack/fromTeams/fromIRC`)
 is ingest/integration logic that does **not** belong in the storage layer.
@@ -397,23 +412,23 @@ db.registerSchema('data/abstraction/email', {
 
 - **Builtin core** stays in `synapsd` (schema-agnostic primitives only):
   `document` (generic JSON), `blob`/`file`, `bucket`, `link`.
-- **App-registered**: contact, email, tab, note, todo, dotfile, application, message, device —
+- **App-registered**: contact, email, tab, note, todo, dotfile, application, message, device -
   definitions move to `canvas-server`, registered on startup.
 - The `device/id/<id>` presence-bitmap derivation reads `locations` only and is fully
-  schema-agnostic — it stays in the db and is untouched by this refactor (validates the seam).
+  schema-agnostic - it stays in the db and is untouched by this refactor (validates the seam).
 
 **Cutover is migration-free.** Schema id strings (`data/abstraction/email`) are persisted in each
 doc's `schema` field and in the `metadata.features` bitmap. Moving a class app-side changes only
-*where the definition lives*, not the stored id strings or bitmaps — so no data migration, and old
+*where the definition lives*, not the stored id strings or bitmaps - so no data migration, and old
 and new can coexist during the move. Do it incrementally: register one abstraction app-side, delete
 it from the builtin map, repeat.
 
 **Cheap pre-work (independent, low-risk):** lift the provider factories
 (`Email.fromIMAP`/`fromGraph`, `Message.fromSlack`/`fromTeams`/`fromIRC`) out of the schema classes
-into the app ingest layer now — no registry change, no data change, removes the worst of the leak.
+into the app ingest layer now - no registry change, no data change, removes the worst of the leak.
 
 **Sequencing:** post-deployment. Not on the critical path for the current customer deploy
-(roaming profiles / browser sync / dotfiles / imap+o365) — those use the existing abstractions
+(roaming profiles / browser sync / dotfiles / imap+o365) - those use the existing abstractions
 as-is, and the clutter has no runtime/security/perf cost, only maintainability.
 
 ## Tests
