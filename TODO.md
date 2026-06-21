@@ -15,6 +15,13 @@ Do the simplest thing that works; aim to delete more than you add.
 
 ! Do NOT use `bitmapIndex.untickAll` (`indexes/bitmaps/index.js:415`): O(all-bitmaps) per delete, that's why it's dead. The bitmap side is already cleaned precisely and cheaply by `clearSynapses` (`indexes/inverted/Synapses.js:144`) via the reverse index. Leave `untickAll` dead.
 
+### Prereq
+- [ ] Split `query()` into two callable stages:
+      - `resolveCandidates(spec) -> bitmap`  (paths ∩ features ∩ filters; deterministic, cacheable)
+      - `rank(bitmap, match, {mode,limit,offset}) -> page`  (fts/vector/hybrid; expensive)
+      `query(match, spec)` becomes `rank(resolveCandidates(spec), match, …)`.
+      The session is built on this seam: cache stage 1 per spec, run stage 2 on demand.
+
 ### Target surface
 
 ```
@@ -118,10 +125,62 @@ query(
 - [ ] Major version bump in `package.json` (currently `2.1.1`).
 
 
-
 ## Session support
 
+The "Why"
 
+**Conversational drill-down (REPL / the expansion UI you sketched).**  
+In a user-session query:  
+"car" → add "red" → add "near the market" → drop "red." *Why a session:* per-spec operand cache — each cue is resolved to a bitmap once, every refinement is just a re-AND, and removing a cue is free. Stateless re-resolves the whole conjunction on every keystroke; a 5-step refinement costs 5 resolves instead of 1+2+3+4+5.
+
+**Agent working memory across turns (canvas-agentd).**  
+Turn 1 commits `ctx:/work/dc-migration`, turn 3 adds `t:crud:updated:thisWeek`, turn 5 patches in a person. The session *is* the accumulated retrieval context you hand the LLM each turn — the agent mutates it in place instead of reconstructing the full spec every turn. *Bonus:* because the spec list is the only authoritative state, `serialize()` gives you durable agent working memory that survives a process restart for a few hundred bytes.
+
+**A read-only stream that converges (camera at `/work`, `journalctl -u apache2 -f`).** Each frame or log line becomes a fading spec; the session holds the decaying accumulation of the last few seconds and emits related docs continuously. Continuity over a stream is intrinsically stateful — you're maintaining a running result, debounced and decayed, not answering one-shot questions. A burst of related apache errors *converges* on the right runbook instead of flickering one doc per line.
+
+**A standing live view (invalidation).** Leave "everything about project-foo" open while ingestion runs; new foo docs appear the moment they land, no re-query, no polling. "Did the dc-migration reply arrive yet" flips empty→non-empty on ingest. *Why a session:* event-driven invalidation makes the open result a live view; stateless `query()` is a snapshot frozen at call time.
+
+**Cheap probing, expensive only at commit.** Across a whole exploration the session answers `count()`, "is there anything," and "which cue narrows most" from the combined bitmap with zero document loads, and materializes actual docs exactly once, at "show me." *Why a session:* lazy materialization at *session* granularity — your 90%-without-the-doc goal at the interaction level. "Do we have new emails for foo" is a `count()`, never a fetch.
+
+**Lens toggling and what-if branching.** Hold named specs as lenses — wikipedia / personal / work — and toggle one off without restating the rest, or fork the spec list to compare two refinements' overlap counts before committing. *Why a session:* cached operands plus an authoritative, forkable spec list make add/remove/branch nearly free.
+
+And the honest counterweight: **a one-shot lookup - "find acme's latest invoice" - should stay a stateless `query()`.** There's no continuity to amortize, so the session is pure overhead. The abstraction earns its complexity only when there's continuity in the access pattern: iterative refinement, a stream, a standing live view, multi-turn agent context, or repeated cheap probing of one candidate set. If a use-case has none of those, it's a query, not a session.
+
+A session pays off exactly when *the candidate set outlives a single question* 
+
+### Session container
+- [ ] Keyed, ordered map `label -> querySpec` — the spec list is the ONLY authoritative state.
+- [ ] Per-spec cached operand bitmap (from `resolveCandidates`) + a `dirty` flag.
+- [ ] Combined result bitmap, recomputed lazily from operands.
+      Default combinator: intersection across specs.
+      (Optional flag: soft overlap — rank docs by how many specs they hit, a cheap bitmap sum. Ship hard-AND first.)
+
+### Mutation (hydrate / drain / refine)
+- [ ] `add(spec, label?) -> label`   (resolve operand, mark combined dirty)
+- [ ] `remove(label)`                (drop operand, recombine)
+- [ ] `patch(label, partialSpec)`    (re-resolve just that operand)
+- [ ] `clear()`
+
+### Read (lazy materialization)
+- [ ] `count()` / `ids()` — from the combined bitmap, no doc load.
+- [ ] `materialize(match?, {limit,offset,mode}) -> docs` — `rank` the combined survivors, then fetch docs.
+      Ranking match is a materialize-time arg (default: most-recently-added spec's match).
+
+### Invalidation (thin, live)
+- [ ] Each operand records the bitmap keys it touched.
+- [ ] Subscribe to existing write events; a write hitting a dependent key dirties that operand; recompute on next read.
+      (v1 shortcut acceptable: dirty the whole session on any write + a manual `refresh()`.)
+
+### Lifecycle (falls out of the authoritative-spec-list rule)
+- [ ] `serialize()` -> spec list + labels + combinator (+ ttl). Tiny.
+- [ ] `rehydrate(serialized)` -> rebuild operands lazily on first read.
+- [ ] TTL governs residency, not identity: idle -> drop operands + unsubscribe, keep specs; rebuild on touch.
+
+### Deliberately NOT in this cut (they slot onto the above unchanged)
+- co-occurrence `suggest()` (reads combined bitmap + synapses)
+- decay / streaming driver (a per-spec weight + a quantize→spec feeder)
+- zoom aggregates / centroids on nodes
+- anchor/quantizer operand sources (a spec's operand can later come from band-bitmaps instead of paths/features — the container doesn't change)
 
 
 ----
