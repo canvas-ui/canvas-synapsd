@@ -46,7 +46,7 @@ import DirectoryTree from './views/DirectoryTree.js';
 // Extracted utilities
 import { parseContextSpecForInsert, parseBitmapArray } from './utils/parsing.js';
 import { parseFilters, applyDatetimeFilter } from './utils/filters.js';
-import { parseDocumentData, initializeDocument, parseInitializeDocument, generateDocumentID, generateDocumentIDs } from './utils/document.js';
+import { parseDocumentData, initializeDocument, parseInitializeDocument } from './utils/document.js';
 import PrefixedStore from './utils/PrefixedStore.js';
 
 // Constants
@@ -748,7 +748,7 @@ class SynapsD extends EventEmitter {
         // Batch-generate IDs for new documents in one transaction
         const newDocs = prepared.filter(p => !p.existing);
         if (newDocs.length > 0) {
-            const ids = generateDocumentIDs(this.#internalStore, newDocs.length, INTERNAL_BITMAP_ID_MAX);
+            const ids = this.#allocateDocumentIDs(newDocs.length);
             for (let i = 0; i < newDocs.length; i++) {
                 newDocs[i].parsed.id = ids[i];
             }
@@ -1005,7 +1005,7 @@ class SynapsD extends EventEmitter {
 
         if (prepared.length === 0) { return []; }
 
-        const ids = generateDocumentIDs(this.#internalStore, prepared.length, INTERNAL_BITMAP_ID_MAX);
+        const ids = this.#allocateDocumentIDs(prepared.length);
         for (let i = 0; i < prepared.length; i++) {
             prepared[i].parsed.id = ids[i];
         }
@@ -1324,7 +1324,7 @@ class SynapsD extends EventEmitter {
                     await this.#relations.clearRelations(id);
                     await this.#timelineIndex.removeFromAll(id);
                     await this.#checksumIndex.deleteArray(document.checksumArray);
-                    await this.deletedDocumentsBitmap.tick(id);
+                    // Free-pool admission deferred until after lance cleanup (below).
                     await this.#timelineIndex.insert('crud:deleted', id, document.updatedAt || now);
                 }
             });
@@ -1335,15 +1335,35 @@ class SynapsD extends EventEmitter {
             return result;
         }
 
-        // Best-effort Lance cleanup (outside transaction — separate system)
+        // Best-effort Lance cleanup (outside transaction — separate system).
+        // Bulk delete is all-or-nothing, so free-pool admission is batch-wide:
+        // recycle the ids only if both fts and vector cleanup succeed; otherwise
+        // they leak (stay allocated) rather than risk reuse with stale residue.
+        const deletedIds = toDelete.map(({ id }) => id);
+        let lanceClean = true;
         try {
-            await this.#lanceIndex.deleteMany(toDelete.map(({ id }) => id));
+            lanceClean = await this.#lanceIndex.deleteMany(deletedIds);
         } catch (e) {
+            lanceClean = false;
             debug(`deleteMany: Lance deleteMany failed: ${e.message}`);
         }
         if (this.#vectorIndex) {
-            try { await this.#vectorIndex.deleteMany(toDelete.map(({ id }) => id)); } catch (e) {
+            try {
+                const vecClean = await this.#vectorIndex.deleteMany(deletedIds);
+                lanceClean = lanceClean && vecClean;
+            } catch (e) {
+                lanceClean = false;
                 debug(`deleteMany: Vector deleteMany failed: ${e.message}`);
+            }
+        }
+
+        if (lanceClean) {
+            try {
+                // Persisting tick (Bitmap.tick is in-memory only); accepts the id array.
+                await this.bitmapIndex.tick(this.deletedDocumentsBitmap.key, deletedIds);
+                debug(`deleteMany: ${deletedIds.length} ids admitted to free-id pool`);
+            } catch (e) {
+                debug(`deleteMany: free-pool admission failed (ids leak): ${e.message}`);
             }
         }
 
@@ -1355,6 +1375,62 @@ class SynapsD extends EventEmitter {
         }
 
         return result;
+    }
+
+    /**
+     * Allocate `count` document IDs, reusing freed IDs before minting new ones.
+     *
+     * `internal/gc/deleted` (this.deletedDocumentsBitmap) is a strict free-id
+     * pool: ids land there only after a delete fully cleans (incl. lance). We pop
+     * densest-first (minimum()) so reused ids cluster low → best roaring density,
+     * then top up the shortfall from the monotonic counter.
+     *
+     * Pool pop + counter bump + pool persist run in ONE LMDB transactionSync.
+     * The datasets share a single env (see LmdbBackend), so the writes commit
+     * atomically; and because the callback is fully synchronous, no other async
+     * writer can interleave and grab the same freed id (the allocation lock).
+     *
+     * @param {number} count
+     * @returns {number[]} allocated ids (length === count)
+     */
+    #allocateDocumentIDs(count) {
+        if (!Number.isInteger(count) || count <= 0) { return []; }
+        const counterKey = 'internal/document-id-counter';
+        const pool = this.deletedDocumentsBitmap;
+
+        return this.#internalStore.transactionSync(() => {
+            const ids = [];
+
+            // 1. Reuse freed ids, densest-first.
+            if (pool) {
+                while (ids.length < count && !pool.isEmpty) {
+                    const id = pool.minimum();
+                    pool.remove(id);
+                    ids.push(id);
+                }
+            }
+            const popped = ids.length;
+
+            // 2. Top up the remainder from the monotonic counter.
+            const need = count - popped;
+            if (need > 0) {
+                let currentCounter = this.#internalStore.get(counterKey);
+                if (currentCounter === undefined || currentCounter === null) {
+                    currentCounter = INTERNAL_BITMAP_ID_MAX;
+                }
+                const firstId = currentCounter + 1;
+                this.#internalStore.putSync(counterKey, currentCounter + need);
+                for (let i = 0; i < need; i++) { ids.push(firstId + i); }
+            }
+
+            // 3. Persist the shrunken pool in the SAME tx as the counter bump so a
+            //    crash can't leave a popped id both reused and still in the pool.
+            if (pool && popped > 0) {
+                this.bitmapIndex.saveBitmapSync(pool.key, pool);
+            }
+
+            return ids;
+        });
     }
 
     async #putOne(document, contextSpec = { path: '/' }, featureBitmapArray = [], emitEvent = true) {
@@ -1387,7 +1463,7 @@ class SynapsD extends EventEmitter {
             if (storedDocument.createdAt) { parsedDocument.createdAt = storedDocument.createdAt; }
             if (storedDocument.updatedAt) { parsedDocument.updatedAt = storedDocument.updatedAt; }
         } else {
-            parsedDocument.id = generateDocumentID(this.#internalStore, INTERNAL_BITMAP_ID_MAX);
+            parsedDocument.id = this.#allocateDocumentIDs(1)[0];
         }
 
         parsedDocument.validate();
@@ -2084,9 +2160,8 @@ class SynapsD extends EventEmitter {
                 await this.#checksumIndex.deleteArray(document.checksumArray);
                 debug(`delete: Checksums for document ${docId} deleted from index`);
 
-                // Add document ID to deleted documents bitmap
-                await this.deletedDocumentsBitmap.tick(docId);
-                debug(`delete: Document ${docId} added to deleted documents bitmap`);
+                // NOTE: free-pool admission (deletedDocumentsBitmap) happens AFTER
+                // lance cleanup succeeds, outside this tx — see below.
 
                 // Update timestamp index
                 await this.#timelineIndex.insert('crud:deleted', docId, document.updatedAt || new Date());
@@ -2105,16 +2180,36 @@ class SynapsD extends EventEmitter {
 
         // Best-effort Lance delete (outside transaction since it's a separate system)
         if (transactionSuccess) {
+            // Gate free-pool admission on lance cleanup: only recycle the id if
+            // the fts (+ vector) rows are gone. If cleanup fails the id leaks
+            // (stays allocated) but is never reused with a stale residue. The
+            // crud:deleted timeline already serves any audit/tombstone need.
+            let lanceClean = true;
             try {
-                await this.#lanceIndex.delete(docId);
-                debug(`delete: LanceDB cleanup completed for document ${docId}`);
+                lanceClean = await this.#lanceIndex.delete(docId);
+                debug(`delete: LanceDB cleanup ${lanceClean ? 'completed' : 'FAILED'} for document ${docId}`);
             } catch (e) {
+                lanceClean = false;
                 debug(`delete: Lance delete failed for ${docId}: ${e.message}`);
-                // Don't fail the entire operation if Lance cleanup fails
             }
             if (this.#vectorIndex) {
-                try { await this.#vectorIndex.deleteDoc(docId); } catch (e) {
+                try {
+                    const vecClean = await this.#vectorIndex.deleteDoc(docId);
+                    lanceClean = lanceClean && vecClean;
+                } catch (e) {
+                    lanceClean = false;
                     debug(`delete: Vector delete failed for ${docId}: ${e.message}`);
+                }
+            }
+
+            if (lanceClean) {
+                try {
+                    // Persisting tick (Bitmap.tick is in-memory only); keeps the
+                    // cached deletedDocumentsBitmap instance and the store in sync.
+                    await this.bitmapIndex.tick(this.deletedDocumentsBitmap.key, docId);
+                    debug(`delete: Document ${docId} admitted to free-id pool`);
+                } catch (e) {
+                    debug(`delete: free-pool admission failed for ${docId} (id leaks): ${e.message}`);
                 }
             }
 
