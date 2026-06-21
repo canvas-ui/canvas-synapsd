@@ -130,25 +130,33 @@ export default class VectorIndex {
         }
     }
 
+    // Returns true when vector rows are gone (or nothing to clean), false when the
+    // delete threw — callers gate doc-ID free-pool admission on this.
     async deleteDoc(docId) {
-        if (!this.#table || !docId) { return; }
-        try { await this.#table.delete(`id = ${docId}`); } catch (_) { }
+        if (!this.#table || !docId) { return true; }
+        try { await this.#table.delete(`id = ${docId}`); } catch (e) {
+            debug(`deleteDoc failed for ${docId}: ${e.message}`);
+            return false;
+        }
         if (this.#bitmapIndex) {
             try { await this.#bitmapIndex.untick(this.#vectorBitmapKey, docId); } catch (_) { }
         }
+        return true;
     }
 
     async deleteMany(docIds) {
-        if (!this.#table || !Array.isArray(docIds) || docIds.length === 0) { return; }
+        if (!this.#table) { return true; }
+        if (!Array.isArray(docIds) || docIds.length === 0) { return true; }
         const ids = docIds.filter(id => id != null);
-        if (ids.length === 0) { return; }
+        if (ids.length === 0) { return true; }
         try { await this.#table.delete(`id IN (${ids.join(',')})`); } catch (e) {
             debug(`deleteMany failed: ${e.message}`);
-            return;
+            return false;
         }
         if (this.#bitmapIndex) {
             try { await this.#bitmapIndex.untickMany([this.#vectorBitmapKey], ids); } catch (_) { }
         }
+        return true;
     }
 
     /** Pure dense kNN. Returns { pageIds, totalCount, error } deduped to docIds (best chunk wins). */

@@ -1,5 +1,23 @@
 # SynapsD
 
+To test
+
+[Input Chunk] ➔ [Qwen3-VL (64d)] ➔ [PCA (e.g., 16d or 32d)] ➔ [Scalar Quantizer (Bands)] ➔ [Roaring Bitmap Index]
+
+
+## synapsd: restore document-ID GC / reuse (regressed)
+
+Freed IDs are currently never reused. `generateDocumentID`/`generateDocumentIDs` (`src/services/synapsd/src/utils/document.js:78,95`) only increment `internal/document-id-counter`. The `internal/gc/deleted` bitmap is ticked on delete (`index.js:2020`) but never unticked and never consulted by the allocator (read only for the `deletedDocumentsCount` stat, `index.js:200`). IDs grow monotonically forever; roaring bitmaps lose density.
+
+Refined safe-reuse design (agreed): **DONE** (2026-06-21). Tests: `tests/document-id-gc.test.js`.
+- [x] **Make `internal/gc/deleted` a strict free-id pool, not a tombstone.** Pool admission moved OUT of the delete txn to AFTER lance fts + vector cleanup succeeds, in both `#deleteOne` and `deleteMany`. Failed cleanup → id leaks, never corrupts. NB: the old in-txn `deletedDocumentsBitmap.tick()` was `Bitmap.tick` = in-memory only (never persisted — pool was never read so it didn't matter); admission now uses the persisting `bitmapIndex.tick(deletedDocumentsBitmap.key, …)`.
+- [x] **Allocator pops from the pool first.** New `SynapsD#allocateDocumentIDs(count)`: pop `minimum()` densest-first, top up remainder from counter. Replaces all 3 `generateDocumentID(s)` call sites (`#putOne`, `putMany`, `putManyDirectoryPaths`). Util fns left in `utils/document.js`, no longer imported by index.js.
+- [x] **Do allocation within a single LMDB tx.** `#allocateDocumentIDs` runs pool-pop + counter bump + pool persist (`bitmapIndex.saveBitmapSync`, new public method) inside one `internalStore.transactionSync`. Datasets share one env (`LmdbBackend.createDataset` → `openDB`) so writes commit atomically; the callback is fully synchronous so no async writer can interleave for the same freed id.
+
+Lance delete now returns a success boolean (`LanceIndex.delete/deleteMany`, `VectorIndex.deleteDoc/deleteMany`) so admission can be gated; `!table`/empty counts as success (nothing to clean).
+
+Do NOT use `bitmapIndex.untickAll` (`bitmaps/index.js:415`) — O(all-bitmaps) per delete, that's why it's dead. Bitmap side is ALREADY cleaned precisely + cheaply by `clearSynapses` (`Synapses.js:144`) via the reverse index. Left untickAll dead.
+
 **Fix before MVP ingest run**
 - [ ] `untick` (single) in `indexes/bitmaps/index.js`: add the size-change guard `untickMany` already has — currently re-serializes+writes a full slice bitmap even when nothing changed.
 - [ ] `BitSlicedIndex.setValue`: stop clearing zero-bits on first insert (only untick on overwrite); ideally batch the 64 slice writes. Together with the line above this is the timeline write-amplification killer for the wikipedia pass.

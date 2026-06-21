@@ -147,27 +147,41 @@ class LanceIndex {
         }
     }
 
+    // Returns true when the fts row is gone (or nothing to clean), false when the
+    // delete threw. Callers gate doc-ID free-pool admission on this — a failed
+    // clean must NOT recycle the id (a reused id with a stale fts row corrupts
+    // search). Nothing to clean (no table) counts as success.
     async delete(docId) {
-        if (!this.#table || !docId) { return; }
-        await this.#table.delete?.(`id = ${docId}`);
+        if (!this.#table || !docId) { return true; }
+        try {
+            await this.#table.delete?.(`id = ${docId}`);
+        } catch (e) {
+            debug(`LanceIndex delete failed for ${docId}: ${e.message}`);
+            return false;
+        }
         if (this.#bitmapIndex) {
             try { await this.#bitmapIndex.untick(this.#ftsBitmapKey, docId); } catch (_) { }
         }
+        return true;
     }
 
+    // Batch variant. Bulk table.delete is all-or-nothing, so success/failure is
+    // batch-wide. See delete() for why callers gate pool admission on the result.
     async deleteMany(docIds) {
-        if (!this.#table || !Array.isArray(docIds) || docIds.length === 0) { return; }
+        if (!this.#table) { return true; }
+        if (!Array.isArray(docIds) || docIds.length === 0) { return true; }
         const ids = docIds.filter(id => id != null);
-        if (ids.length === 0) { return; }
+        if (ids.length === 0) { return true; }
         try {
             await this.#table.delete(`id IN (${ids.join(',')})`);
         } catch (e) {
             debug(`LanceIndex deleteMany failed: ${e.message}`);
-            return;
+            return false;
         }
         if (this.#bitmapIndex) {
             try { await this.#bitmapIndex.untickMany([this.#ftsBitmapKey], ids); } catch (_) { }
         }
+        return true;
     }
 
     /**

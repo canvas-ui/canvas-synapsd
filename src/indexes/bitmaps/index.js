@@ -715,6 +715,13 @@ class BitmapIndex {
      * Database operations
      */
 
+    // Public synchronous save. Lets callers persist a mutated in-memory bitmap
+    // inside an LMDB transactionSync (e.g. the doc-ID free-pool allocator, which
+    // must pop the pool and bump the id counter atomically in one tx).
+    saveBitmapSync(key, bitmap) {
+        return this.#saveBitmapSync(key, bitmap);
+    }
+
     #saveBitmapSync(key, bitmap) {
         debug('Storing bitmap to persistent store', key);
         if (!key) { throw new Error('Key is required'); }
