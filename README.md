@@ -18,6 +18,8 @@ Compared to FS-like trees, there are a couple of additinal methods for day-to-da
 - `merge layer` - Merge a selected layer(bitmap) to 1-N additional layers (more comprehensive description TBD)
 - `subract layer` - Subtract a selected layer(bitmap) from 1-N additional layers (description TBD)
 
+Context trees enable a natural "zoom" feature on top of indexed data, and paired with session-based "evolving queries" a way to fine-tune retrieval dynamically (query for "project emails", add thisWeek, add !today, add "dc migration", add "*.pdf")
+
 ### Directory trees
 
 More familiar UX, a virtual directory is a self-contained movable/copyable container; 
