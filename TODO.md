@@ -1,5 +1,9 @@
 # SynapsD
 
+The v3 surface mixes structural consolidation with net-new capabilities. g: glob and groupBy:'timeline' don't exist yet (glob/regexp filters currently throw, per query-and-membership.test.js:123-128), while the parser/seam/t: grammar/write-signature work is pure consolidation. How do you want cut #1 scoped?
+
+
+
 ## Semantic layer
 
 To test *7M wikipedia articles, ~2 milion files ingestion

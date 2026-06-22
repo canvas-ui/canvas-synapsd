@@ -6,7 +6,7 @@ Its meant to index all data from a configured data source of a workpace (files, 
 
 Context or Directory tree paths `/travel/2025/barcelona` and `/work/architecture/interior design/living room/` can return the same list of photos regardless whether they are stored at nas@home, beefy-pc, s3 or "corsair-usb"(client/consumer app can choose which indexed data path to use based on its contextual data).
 
-Search is powered by roaring bitmaps and its api could use a cleanup :)  
+Candidate selection is powered by roaring bitmaps; ranking (BM25 full-text and dense-vector / hybrid) runs on top via LanceDB.  
 Context tree - as one of the tree view abstractions - is built on top of bitmap-based "layers" directly and may take some time to get used-to.
 
 Within a Context Tree, a `reports` layer in `/work/customer-a/reports` and `/work/customer-b/reports` is stored under the same uuid linking to the same bitmap - renaming/removing/updating one will update all occurences in the context tree.
@@ -19,7 +19,7 @@ Context layers filter different data based on `where they are placed`. Iow,
 
 - `LMDB` as the storage backend(for now at least).
 - `Roaring bitmaps` context, feature and membership lookups.
-- `LanceDB` handles ranked/full-text search.
+- `LanceDB` handles ranked search: BM25 full-text plus dense-vector / hybrid (RRF).
 - `ContextTree` provides layered/intersection semantics.
 - `DirectoryTree` provides exact folder semantics with unique node IDs.
 
@@ -45,6 +45,8 @@ where `spec = { paths, features }`.
 - `hasByChecksumString(checksum, spec?)`
 - `resolveCandidates(spec) -> { bitmap, keys }` - the candidate-set stage of a query, exposed for sessions
 - `rank(bitmap, match, { mode, limit, offset }) -> page` - the materialize/score stage
+- `storeDocumentEmbeddings(docId, schema, updatedAt, chunks)` - app-provided vectors (see **Semantic search**)
+- `getStats()` - async stats incl. FTS + dense-vector internals
 - `listDocumentTreePaths(id, treeNameOrId)`
 - `listDocumentTreeMemberships(id, treeNameOrId)`
 - `hasDocumentTreeMembership(id, treeNameOrId)`
@@ -270,6 +272,78 @@ const ranked = await db.query('invoice', {
     limit: 20,
 });
 ```
+
+## Semantic search (vectors)
+
+`query()` defaults to `mode: 'hybrid'`: dense-vector kNN fused with BM25 via RRF. The
+candidate bitmap (`paths ∩ features ∩ filters`) still scopes retrieval first; ranking
+runs only on survivors. `vector`/`hybrid` degrade to `fts` when the dense stack is
+unavailable, and `list()` (`match = null`) never embeds.
+
+Dense vectors live in a LanceDB `vec_text` table at chunk granularity (one row per
+`(docId, chunkId)`). Coverage is tracked by the `internal/lance/vectors` bitmap.
+
+### What gets embedded
+
+Only schemas in `embeddableSchemas` (default `['data/abstraction/note']`) are embedded
+by the server. For those, it reads the schema's `vectorEmbeddingFields`, chunks the
+text, and embeds the chunks. Everything else is FTS-only unless the app ships its own
+vectors.
+
+Files (`data/abstraction/file`) are **not** embedded: a file doc carries only
+`locationUrls` (the `stored://` blob refs), not content. To make text searchable by
+vector, ingest it as a `note`/`document` (which hold inline `data`), not as a blob.
+
+### How it runs
+
+- **Model:** local in-process ONNX via `fastembed`, `bge-small-en-v1.5` (384-dim). The
+  worker thread is spawned lazily on first embed/query; the model is cached under
+  `<root>/lance/models` (first use downloads ~130 MB).
+- **Async + resumable:** `put`/`putMany` enqueue embeddable docs; the `EmbeddingQueue`
+  embeds off the main thread. The presence bitmap lets it skip already-embedded docs,
+  and `start()` backfills the unfinished tail after a crash/restart.
+- **Query time:** the query string is embedded once, then vector/hybrid searched.
+
+### App-provided vectors
+
+For blobs/media the server can't read, compute vectors in the app and store them
+directly (bypasses the queue):
+
+```js
+await db.storeDocumentEmbeddings(docId, schema, updatedAt, [
+    { chunkId: 0, text: 'caption or transcript', vector: [/* dim floats */] },
+]);
+```
+
+### Config & introspection
+
+Semantic options are passed at construction (Workspace uses the defaults):
+
+```js
+const db = new SynapsD({
+    path: '...',
+    semantic: {
+        enabled: true,                              // false => fts-only, no worker
+        model: 'bge-small-en-v1.5',
+        dim: 384,                                   // must match the model
+        maxLength: 512,
+        cacheDir: '/path/to/models',                // default <root>/lance/models
+        embeddableSchemas: ['data/abstraction/note'],
+    },
+});
+```
+
+| Option (`semantic.*`) | Default | Role |
+|-----------------------|---------|------|
+| `enabled` | `true` | Spin up the dense stack; `false` is FTS-only |
+| `model` | `bge-small-en-v1.5` | fastembed model id |
+| `dim` | `384` | Vector dimension (must match the model) |
+| `maxLength` | `512` | Max tokens per chunk passed to the model |
+| `cacheDir` | `<root>/lance/models` | On-disk model store |
+| `embeddableSchemas` | `['data/abstraction/note']` | Schemas the server embeds |
+
+`await db.getStats()` returns a `.semantic` block (`model`, `dim`, `embeddableSchemas`,
+plus `vector`, `embedder`, and `queue` sub-status) for diagnostics UIs.
 
 ## Timelines & Intervals
 
