@@ -1,19 +1,30 @@
 # SynapsD
 
-SynapsD is a small KV DB built on top of LMDB, primarily used as a in-process index and JSON document store for Canvas Workspaces.  
+SynapsD is a small KV database built on top of `LMDB` with `roaring-bitmap` and `lancedb` based indexes, primarily used as an in-process index and, secondarily, as a JSON document store for [Canvas Workspaces](https://github.com/canvas-ui/canvas-server).
 
-Its meant to index all data from a configured data source of a workpace (files, emails, notes, browser tabs, github repos, dotfiles etc), and provide a unified tree abstraction on top that should ideally mimick whatever mental model you need to make work with your data more efficient.
+This module is meant to index all data from configured data sources of a Workpace (files, emails, notes, browser tabs, github repos, dotfiles etc), and provide a unified virtual fs-like tree abstraction on top that should ideally mimick whatever mental model you need to make work with your data more efficient.
 
-Context or Directory tree paths `/travel/2025/barcelona` and `/work/architecture/interior design/living room/` can return the same list of photos regardless whether they are stored at nas@home, beefy-pc, s3 or "corsair-usb"(client/consumer app can choose which indexed data path to use based on its contextual data).
+## View abstractions
 
-Candidate selection is powered by roaring bitmaps; ranking (BM25 full-text and dense-vector / hybrid) runs on top via LanceDB.  
-Context tree - as one of the tree view abstractions - is built on top of bitmap-based "layers" directly and may take some time to get used-to.
+### Context trees
 
-Within a Context Tree, a `reports` layer in `/work/customer-a/reports` and `/work/customer-b/reports` is stored under the same uuid linking to the same bitmap - renaming/removing/updating one will update all occurences in the context tree.
+Contex trees are built on top of unique-by-name layers linked to bitmaps.
+- `ctx:/work/customer-a/devops/issues/issue-1001` - Does a logical AND on all path-based bitmaps, result bitmap represents all data linked to issue 1001
+- `ctx:/work/customer-a/devops/issues/issue-1002` - Result bitmap represents all data linked to issue 1002
+- `ctx:/work/customer-a/devops/issues` - Result bitmap shows all data linked to all indexed issues
+- `ctx:/issues` - Ad-hoc path that would show all data related to all issues across all customers
 
-Context layers filter different data based on `where they are placed`. Iow, 
-- Moving `reports` to `/reports` would show you all data linked to the `reports` layer within your Universe
-- Moving `reports` under `/work/customer-a/reports` would do a logical `AND` on the `work`, `customer-a` and `reports` layer bitmaps and result in a filtered view of data that are linked to `all of` the layers in your path(iow, return only data linked to customer-a).
+Compared to FS-like trees, there are a couple of additinal methods for day-to-day use
+- `merge layer` - Merge a selected layer(bitmap) to 1-N additional layers (more comprehensive description TBD)
+- `subract layer` - Subtract a selected layer(bitmap) from 1-N additional layers (description TBD)
+
+### Directory trees
+
+More familiar UX, a virtual directory is a self-contained movable/copyable container; 
+
+### Sessions for real-time contextual data streaming
+
+v4 feature for evolving long-running queries
 
 ## Core components
 
