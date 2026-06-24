@@ -140,21 +140,28 @@ export default class Synapses {
      * Used when deleting a document.
      *
      * @param {number} docId
+     * @param {object} options - { syncBitmaps } pass false to skip the bitmap untick
+     *   (the caller defers it post-commit); reverse index is still cleared in-tx.
+     * @returns {Promise<string[]>} The layers the doc was unlinked from (for deferral)
      */
-    async clearSynapses(docId) {
-        if (!docId) { return; }
+    async clearSynapses(docId, options = {}) {
+        if (!docId) { return []; }
 
         const currentLayers = await this.listSynapses(docId);
-        if (currentLayers.length === 0) { return; }
+        if (currentLayers.length === 0) { return []; }
 
         debug(`clearSynapses: Unlinking doc ${docId} from all ${currentLayers.length} layers`);
 
         // 1. Update Forward Index (Bitmaps)
         // This is more efficient than iterating individually if untickMany is optimized
-        await this.bitmapIndex.untickMany(currentLayers, docId);
+        if (options.syncBitmaps !== false) {
+            await this.bitmapIndex.untickMany(currentLayers, docId);
+        }
 
         // 2. Delete Reverse Index Entry
         await this.dataset.remove(docId);
+
+        return currentLayers;
     }
 }
 
