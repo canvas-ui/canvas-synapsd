@@ -111,6 +111,14 @@ class SynapsD extends EventEmitter {
     #synapses;
     #relations;
 
+    // Active deferred-membership buffer. Bitmap ticks/unticks are NOT bound to the
+    // LMDB transaction (they mutate a shared, never-evicting in-memory cache via
+    // putSync). To keep bitmaps consistent with a rolled-back write, membership
+    // mutations are buffered during a #withDeferredMembership transaction and only
+    // flushed to bitmaps after the transaction commits — discarded on rollback.
+    // The synapse reverse-index (durable truth) is still written inside the tx.
+    #membershipBuffer = null;
+
     // LanceDB
     #lanceIndex;
 
@@ -756,7 +764,7 @@ class SynapsD extends EventEmitter {
         // ── Phase 2: Batch write ─────────────────────────────────────────
 
         try {
-            await this.#db.transaction(async () => {
+            await this.#withDeferredMembership(async () => {
                 for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, docFeatures } of prepared) {
                     await this.documents.put(parsed.id, parsed);
 
@@ -994,7 +1002,7 @@ class SynapsD extends EventEmitter {
         }
 
         try {
-            await this.#db.transaction(async () => {
+            await this.#withDeferredMembership(async () => {
                 for (const { parsed, docFeatures, directorySpecs } of prepared) {
                     await this.documents.put(parsed.id, parsed);
                     await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
@@ -1094,7 +1102,7 @@ class SynapsD extends EventEmitter {
 
         // Single transaction for all index operations
         try {
-            await this.#db.transaction(async () => {
+            await this.#withDeferredMembership(async () => {
                 for (const { id, docFeatures } of toProcess) {
                     await this.#indexDocument(id, contextSpec, directorySpec, docFeatures);
                 }
@@ -1217,7 +1225,7 @@ class SynapsD extends EventEmitter {
 
         // Single transaction for all membership removals
         try {
-            await this.#db.transaction(async () => {
+            await this.#withDeferredMembership(async () => {
                 for (const { id } of validEntries) {
                     if (uniqueLayers.length > 0) {
                         await this.#removeDocumentMembership(id, uniqueLayers);
@@ -1296,10 +1304,11 @@ class SynapsD extends EventEmitter {
 
         // Single transaction for all deletes
         try {
-            await this.#db.transaction(async () => {
+            await this.#withDeferredMembership(async () => {
                 for (const { id, document } of toDelete) {
                     await this.documents.delete(id);
-                    await this.#synapses.clearSynapses(id);
+                    const clearedLayers = await this.#synapses.clearSynapses(id, { syncBitmaps: false });
+                    await this.#applyMembership('untick', id, clearedLayers);
                     await this.#relations.clearRelations(id);
                     await this.#timelineIndex.removeFromAll(id);
                     await this.#checksumIndex.deleteArray(document.checksumArray);
@@ -1453,7 +1462,7 @@ class SynapsD extends EventEmitter {
         }
 
         try {
-            await this.#db.transaction(async () => {
+            await this.#withDeferredMembership(async () => {
                 await this.documents.put(parsedDocument.id, parsedDocument);
                 await this.#checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
                 await this.#timelineIndex.insert('crud:created', parsedDocument.id, parsedDocument.createdAt || new Date());
@@ -1519,7 +1528,7 @@ class SynapsD extends EventEmitter {
             featureBitmaps.push(storedDocument.schema);
         }
 
-        await this.#db.transaction(async () => {
+        await this.#withDeferredMembership(async () => {
             await this.#indexDocument(numericId, contextSpec, directorySpec, featureBitmaps);
         });
 
@@ -1959,7 +1968,7 @@ class SynapsD extends EventEmitter {
         }
 
         try {
-            await this.#db.transaction(async () => {
+            await this.#withDeferredMembership(async () => {
                 await this.documents.put(updatedDocument.id, updatedDocument);
                 await this.#checksumIndex.deleteArray(storedDocument.checksumArray);
                 await this.#checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
@@ -2048,7 +2057,7 @@ class SynapsD extends EventEmitter {
 
         try {
             if (layersToRemove.length > 0) {
-                await this.#db.transaction(async () => {
+                await this.#withDeferredMembership(async () => {
                     await this.#removeDocumentMembership(docId, Array.from(new Set(layersToRemove)));
                 });
                 debug(`unlink: Removed doc ${docId} from ${layersToRemove.length} layers via Synapses`);
@@ -2088,14 +2097,15 @@ class SynapsD extends EventEmitter {
             debug('delete > Document: ', document);
 
             // Wrap all critical database operations in a single transaction for atomicity
-            await this.#db.transaction(async () => {
+            await this.#withDeferredMembership(async () => {
                 // Delete document from main database
                 await this.documents.delete(docId);
                 debug(`delete: Document ${docId} deleted from main store`);
 
                 // Delete document from all bitmaps AND Reverse Index via Synapses
                 // await this.bitmapIndex.untickAll(docId);
-                await this.#synapses.clearSynapses(docId);
+                const clearedLayers = await this.#synapses.clearSynapses(docId, { syncBitmaps: false });
+                await this.#applyMembership('untick', docId, clearedLayers);
                 await this.#relations.clearRelations(docId);
                 debug(`delete: Document ${docId} removed from all bitmaps and Synapses index`);
 
@@ -2342,7 +2352,7 @@ class SynapsD extends EventEmitter {
         if (validEntries.length > 0) {
             try {
                 const featureKeys = normalizeBitmapKeys(featureBitmapArray);
-                await this.#db.transaction(async () => {
+                await this.#withDeferredMembership(async () => {
                     for (const { id } of validEntries) {
                         await this.#addDocumentMembership(id, featureKeys);
                     }
@@ -2397,7 +2407,7 @@ class SynapsD extends EventEmitter {
         if (validEntries.length > 0) {
             try {
                 const featureKeys = normalizeBitmapKeys(featureBitmapArray);
-                await this.#db.transaction(async () => {
+                await this.#withDeferredMembership(async () => {
                     for (const { id } of validEntries) {
                         await this.#removeDocumentMembership(id, featureKeys);
                     }
@@ -3020,13 +3030,71 @@ class SynapsD extends EventEmitter {
         return Array.from(new Set(allSynapseKeys));
     }
 
+    /**
+     * Run an LMDB transaction with rollback-safe bitmap membership.
+     *
+     * Bitmap ticks/unticks issued inside `txBody` (via #add/#removeDocumentMembership
+     * and clearSynapses) are buffered, not applied, while the transaction runs. They
+     * are flushed to the bitmap index only after the transaction commits — so a
+     * rollback leaves no phantom ticks in the shared bitmap cache. The synapse
+     * reverse index is still written transactionally inside `txBody`.
+     *
+     * Reentrancy: a nested call shares the outermost buffer; only the outermost
+     * flush runs (matching how raw #db.transaction nesting would behave today).
+     */
+    async #withDeferredMembership(txBody) {
+        if (this.#membershipBuffer) {
+            return this.#db.transaction(txBody);
+        }
+        const buffer = [];
+        this.#membershipBuffer = buffer;
+        try {
+            await this.#db.transaction(txBody);
+        } finally {
+            this.#membershipBuffer = null;
+        }
+        // Only reached when the transaction committed (a throw propagates above and
+        // skips this), so the buffer is discarded on rollback.
+        await this.#flushMembershipBuffer(buffer);
+    }
+
+    async #flushMembershipBuffer(buffer) {
+        for (const { op, docId, keys } of buffer) {
+            try {
+                if (op === 'tick') {
+                    await this.bitmapIndex.tickMany(keys, docId);
+                } else {
+                    await this.bitmapIndex.untickMany(keys, docId);
+                }
+            } catch (error) {
+                // Committed doc may now lack/keep a bitmap membership it should
+                // not — recoverable by reindexing from the synapse reverse index.
+                debug(`Post-commit bitmap ${op} failed for doc ${docId}: ${error.message}`);
+            }
+        }
+    }
+
+    /** Buffer a bitmap membership op if a deferred-membership tx is active, else apply now. */
+    async #applyMembership(op, docId, keys) {
+        if (this.#membershipBuffer) {
+            this.#membershipBuffer.push({ op, docId, keys });
+            return;
+        }
+        if (op === 'tick') {
+            await this.bitmapIndex.tickMany(keys, docId);
+        } else {
+            await this.bitmapIndex.untickMany(keys, docId);
+        }
+    }
+
     async #addDocumentMembership(docId, bitmapKeys) {
         const keys = normalizeBitmapKeys(bitmapKeys);
         if (keys.length === 0) {
             return false;
         }
-        await this.bitmapIndex.tickMany(keys, docId);
+        // Synapse reverse index stays in-tx (durable truth); bitmap tick is deferred.
         await this.#synapses.createSynapses(docId, keys, { syncBitmaps: false });
+        await this.#applyMembership('tick', docId, keys);
         return true;
     }
 
@@ -3035,7 +3103,8 @@ class SynapsD extends EventEmitter {
         if (keys.length === 0) {
             return false;
         }
-        await this.#synapses.removeSynapses(docId, keys);
+        await this.#synapses.removeSynapses(docId, keys, { syncBitmaps: false });
+        await this.#applyMembership('untick', docId, keys);
         return true;
     }
 
