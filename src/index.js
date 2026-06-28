@@ -796,15 +796,33 @@ class SynapsD extends EventEmitter {
 
         // ── Phase 3: Lance (best-effort, single batch add) ───────────────
 
+        // Re-index FTS/vectors only for genuinely new or content-changed docs.
+        // A membership-only re-tick (same content added to another tree path —
+        // e.g. multi-path "Sync To") keeps identical checksums, so its Lance row
+        // and embedding already exist. Re-adding them is wasteful and, because
+        // phase 3 is awaited, was making each extra path's insert slow enough to
+        // blow the client's 10s timeout (only the first path stuck → "order
+        // decides the folder").
+        const isContentChanged = (p) => {
+            if (!p.existing) { return true; }
+            const prev = p.prevChecksums;
+            if (!Array.isArray(prev)) { return true; }
+            const cur = p.parsed.checksumArray || [];
+            if (prev.length !== cur.length) { return true; }
+            const prevSet = new Set(prev);
+            return cur.some((c) => !prevSet.has(c));
+        };
+        const reindexDocs = prepared.filter(isContentChanged);
+
         const needLanceRows = !skipLance || Array.isArray(deferredLanceBuffer);
         const lanceDocs = needLanceRows
-            ? prepared.map(({ parsed }) => parseInitializeDocument(parsed))
+            ? reindexDocs.map(({ parsed }) => parseInitializeDocument(parsed))
             : [];
         if (skipLance) {
             if (Array.isArray(deferredLanceBuffer)) {
                 deferredLanceBuffer.push(...lanceDocs);
             }
-        } else {
+        } else if (lanceDocs.length > 0) {
             try {
                 await this.#lanceIndex.addMany(lanceDocs);
             } catch (_) { }
@@ -813,8 +831,8 @@ class SynapsD extends EventEmitter {
         // ── Phase 3.5: Dense vectors (async, server-embeddable docs) ─────
         // Skipped under skipLance so bulk importers control timing; they
         // re-drive via indexDocumentsInLance (which also enqueues).
-        if (!skipLance) {
-            this.#enqueueEmbeddable(prepared.map(p => p.parsed));
+        if (!skipLance && reindexDocs.length > 0) {
+            this.#enqueueEmbeddable(reindexDocs.map(p => p.parsed));
         }
 
         // ── Phase 4: Events ──────────────────────────────────────────────
