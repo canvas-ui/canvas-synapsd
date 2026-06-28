@@ -304,6 +304,23 @@ We already map:
 
 ## TODO
 
+### Enforce name-unique trees per workspace
+
+Trees within a workspace must have unique `name`s (DB-level constraint on create/rename).
+Today a workspace can hold two trees both named `context` (observed on `universe`:
+ids `…XMXK` and `…QQSH`), so `name` cannot reliably address a tree — only `id` can.
+
+**Why:** human-readable deep links. The webui addresses trees by name in the URL
+(`/workspaces/:ws/trees/:treeName/path/...`) and the browser extension links by tree
+*type name* (`directory`). Both break if names collide. Uniqueness lets `treeNameOrTreeId`
+resolve a name unambiguously instead of falling back to id-only.
+
+- [ ] Reject create/rename when a sibling tree in the same workspace shares the name.
+- [ ] Migration: de-dup existing collisions (the stray second `universe` `context` tree).
+- [ ] Keep `treeNameOrTreeId` resolution accepting both, but name now guaranteed unique.
+
+Related: the existing LayerIndex name-uniqueness collision issue.
+
 ### Support context and directory tree mountpoints
 
 This feature stems from a requirement of Canvas to enable `Project` and `Task` abstractions on top of existing tree structures without the need to replicate whole subtrees "the standard way".
