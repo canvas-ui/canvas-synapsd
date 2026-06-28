@@ -19,6 +19,10 @@ const EVENTS = Object.freeze({
     DOCUMENT_UPDATED:  'document.updated',
     DOCUMENT_REMOVED:  'document.removed',
     DOCUMENT_DELETED:  'document.deleted',
+    // Batch variants: a single event for a bulk op (purge / bulk remove) so a
+    // 1000-doc operation does not fan out into 1000 socket emits.
+    DOCUMENT_REMOVED_BATCH: 'document.removed.batch',
+    DOCUMENT_DELETED_BATCH: 'document.deleted.batch',
 
     // Tree management
     TREE_CREATED: 'tree.created',
