@@ -12,6 +12,15 @@ import BitSlicedIndex from '../bitmaps/lib/BitSlicedIndex.js';
 const BIT_DEPTH = 64;
 const SIGNED_OFFSET = 1n << 63n;
 
+// Open-interval sentinels. An ongoing interval ("born 1912, still alive") stores
+// its end as the max signed value, so the overlap test `end >= range.start` is
+// always true on the upper side — it extends to +∞ with no query changes. The
+// symmetric OPEN_START covers "since forever" (-∞, end]. These are scale-agnostic
+// (already the BSI extreme), so they're stored verbatim in the bounded endpoint's
+// scale tier and never scale-converted.
+const OPEN_END_VALUE = (1n << 63n) - 1n;   // +∞ / ongoing
+const OPEN_START_VALUE = -(1n << 63n);     // -∞ / since forever
+
 const SCALE_ALIASES = {
     gyr: 'Gyr',
     gya: 'Gyr',
@@ -43,7 +52,11 @@ const SCALE_ALIASES = {
 
 const SCALES = ['Gyr', 'Myr', 'Kyr', 'year', 'month', 'day', 'second', 'ms', 'ns'];
 const SCALE_ORDER = new Map(SCALES.map((scale, index) => [scale, index]));
-const RANGE_MODES = new Set(['union', 'layers']);
+// union   → one flat id array across all timelines + scales
+// layers  → { name: { scale: [ids] } } (per timeline, per scale)
+// grouped → { name: [ids] } (per timeline, scales pre-unioned) — e.g. "zeitgeist
+//           of year 600": one id list per timeline overlapping that instant
+const RANGE_MODES = new Set(['union', 'layers', 'grouped']);
 
 /**
  * TimelineIndex maps source/domain timelines to internal scale tiers.
@@ -53,11 +66,26 @@ const RANGE_MODES = new Set(['union', 'layers']);
  * `internal/ts/<timeline>/<scale>/start|end`.
  */
 export default class TimelineIndex {
-    constructor(bitmapIndex) {
+    constructor(bitmapIndex, options = {}) {
         if (!bitmapIndex) { throw new Error('BitmapIndex required for TimelineIndex'); }
         this.bitmapIndex = bitmapIndex;
         this.timelines = {};
+        // Point-event ("instant") timelines store a SINGLE BSI per tier (the
+        // timestamp) instead of the interval Dual-BSI (start+end). For an instant
+        // start === end, so the end BSI is pure duplication — a point tier halves
+        // the bitmaps and slice-writes. crud:* lifecycle stamps are point by
+        // convention; extra names can be registered via options.pointTimelines.
+        this.#pointTimelines = new Set(options.pointTimelines || []);
         debug(`TimelineIndex initialized with tiered Dual-BSI (${BIT_DEPTH}-bit per tier)`);
+    }
+
+    #pointTimelines;
+
+    // A timeline is point-mode (single-BSI instants) when its name is a crud:*
+    // lifecycle stamp or explicitly registered. Deterministic by name so the mode
+    // is stable across restarts without persisting it.
+    #isPointTimeline(name) {
+        return name.startsWith('crud:') || this.#pointTimelines.has(name);
     }
 
     // ========================================
@@ -87,7 +115,9 @@ export default class TimelineIndex {
         this.#assertTimelineName(name);
         const key = this.#timelineKey(name);
         return this.bitmapIndex.hasBitmap(`internal/ts/${key}/meta`)
-            || SCALES.some(scale => this.bitmapIndex.hasBitmap(`internal/ts/${key}/${scale}/start/ebm`));
+            || SCALES.some(scale =>
+                this.bitmapIndex.hasBitmap(`internal/ts/${key}/${scale}/start/ebm`)
+                || this.bitmapIndex.hasBitmap(`internal/ts/${key}/${scale}/ts/ebm`));
     }
 
     async deleteTimeline(name) {
@@ -110,7 +140,8 @@ export default class TimelineIndex {
 
         for (const scale of SCALES) {
             const tier = this.#getTier(timelineName, scale);
-            const ebm = await this.bitmapIndex.getBitmap(tier.start.ebmKey, false);
+            const ebmKey = tier.point ? tier.point.ebmKey : tier.start.ebmKey;
+            const ebm = await this.bitmapIndex.getBitmap(ebmKey, false);
             if (ebm) { union.orInPlace(ebm); }
         }
 
@@ -130,21 +161,41 @@ export default class TimelineIndex {
      * - insert('crud:created', id, new Date())
      * - insert('wikipedia', id, '17200101', '17201231')
      */
-    async insert(timelineName, id, startOrInterval, endVal = null) {
+    // endVal omitted (undefined) → instant (end = start). Pass an explicit open
+    // marker (null / Infinity / 'ongoing') to record an open-ended interval.
+    async insert(timelineName, id, startOrInterval, endVal) {
         this.#assertTimelineName(timelineName);
         if (id === undefined || id === null) { throw new Error('ID required for insert'); }
         if (startOrInterval === undefined || startOrInterval === null) { throw new Error('start required for insert'); }
 
         const interval = this.#normalizeInterval(startOrInterval, endVal);
         await this.createTimeline(timelineName);
-        const tier = this.#getTier(timelineName, interval.scale);
 
-        await Promise.all([
-            tier.start.setValue(id, this.#encodeSigned(interval.start)),
-            tier.end.setValue(id, this.#encodeSigned(interval.end)),
-        ]);
+        // crud:* are high-frequency lifecycle stamps (created/updated/deleted) fed
+        // from JS Dates → ms scale. ms precision is spurious for them and widens
+        // the BSI tier (~41 slice bitmaps vs ~31 at second) plus that many extra
+        // slice writes per insert. Pin them to 'second'. Range queries are
+        // unaffected: queryInterval scans every scale tier and converts the range.
+        const writeScale = (timelineName.startsWith('crud:') && (interval.scale === 'ms' || interval.scale === 'ns'))
+            ? 'second'
+            : interval.scale;
+        const start = writeScale === interval.scale ? interval.start : this.#convertValue({ scale: interval.scale, value: interval.start }, writeScale);
+        const end = writeScale === interval.scale ? interval.end : this.#convertValue({ scale: interval.scale, value: interval.end }, writeScale);
 
-        debug(`Set ID ${id} in timeline '${timelineName}/${interval.scale}' [${interval.start}, ${interval.end}]`);
+        const tier = this.#getTier(timelineName, writeScale);
+
+        if (tier.point) {
+            // Instant: collapse to a single timestamp (start === end for a point;
+            // a stray interval into a point timeline records its start instant).
+            await tier.point.setValue(id, this.#encodeSigned(start));
+            debug(`Set ID ${id} in point timeline '${timelineName}/${writeScale}' @${start}`);
+        } else {
+            await Promise.all([
+                tier.start.setValue(id, this.#encodeSigned(start)),
+                tier.end.setValue(id, this.#encodeSigned(end)),
+            ]);
+            debug(`Set ID ${id} in timeline '${timelineName}/${writeScale}' [${start}, ${end}]`);
+        }
         return true;
     }
 
@@ -155,7 +206,9 @@ export default class TimelineIndex {
         const scales = this.#selectScales(options.scales || options.scale);
         await Promise.all(scales.flatMap((scale) => {
             const tier = this.#getTier(timelineName, scale);
-            return [tier.start.removeValue(id), tier.end.removeValue(id)];
+            return tier.point
+                ? [tier.point.removeValue(id)]
+                : [tier.start.removeValue(id), tier.end.removeValue(id)];
         }));
 
         debug(`Removed ID ${id} from timeline '${timelineName}'`);
@@ -194,6 +247,9 @@ export default class TimelineIndex {
         const scales = this.#selectQueryScales(range.scale, queryOptions);
         if (mode === 'layers') {
             return await this.#queryIntervalLayers(names, scales, range);
+        }
+        if (mode === 'grouped') {
+            return await this.#queryIntervalGrouped(names, scales, range);
         }
 
         const union = new RoaringBitmap32();
@@ -346,6 +402,21 @@ export default class TimelineIndex {
     // Query Helpers
     // ========================================
 
+    // Per-timeline id list, scales pre-unioned. One overlap query per (name, scale)
+    // OR'd into a single bitmap per name. Empty timelines are included as [] so the
+    // caller sees every requested timeline.
+    async #queryIntervalGrouped(names, scales, range) {
+        const grouped = {};
+        for (const name of names) {
+            this.#assertTimelineName(name);
+            const union = new RoaringBitmap32();
+            const bitmaps = await Promise.all(scales.map(scale => this.#queryIntervalBitmap(name, scale, range)));
+            for (const bitmap of bitmaps) { union.orInPlace(bitmap); }
+            grouped[name] = union.toArray();
+        }
+        return grouped;
+    }
+
     async #queryIntervalLayers(names, scales, range) {
         const layers = {};
 
@@ -377,12 +448,35 @@ export default class TimelineIndex {
 
     async #queryIntervalBitmap(name, scale, range) {
         this.#assertTimelineName(name);
-        const tierRange = this.#convertRangeToScale(range, scale);
+
+        // A range value that doesn't fit this scale's 64-bit window (e.g. year 1500
+        // expressed in ns) can't match anything stored at this tier — skip it
+        // rather than throwing. Queries fan across all scales, so far-from-epoch or
+        // deep-time ranges are answered by the coarse tiers and the fine tiers no-op.
+        let tierRange, encStart, encEnd;
+        try {
+            tierRange = this.#convertRangeToScale(range, scale);
+            encStart = this.#encodeSigned(tierRange.start);
+            encEnd = this.#encodeSigned(tierRange.end);
+        } catch {
+            return new RoaringBitmap32();
+        }
+
         const tier = this.#getTier(name, scale);
 
+        if (tier.point) {
+            // Instant in [start, end]: ts >= start AND ts <= end on the single BSI.
+            const [geStart, leEnd] = await Promise.all([
+                tier.point.query('>=', encStart),
+                tier.point.query('<=', encEnd),
+            ]);
+            return RoaringBitmap32.and(geStart, leEnd);
+        }
+
+        // Interval overlap: start <= range.end AND end >= range.start.
         const [startMatches, endMatches] = await Promise.all([
-            tier.start.query('<=', this.#encodeSigned(tierRange.end)),
-            tier.end.query('>=', this.#encodeSigned(tierRange.start)),
+            tier.start.query('<=', encEnd),
+            tier.end.query('>=', encStart),
         ]);
 
         return RoaringBitmap32.and(startMatches, endMatches);
@@ -397,8 +491,13 @@ export default class TimelineIndex {
             }
         }
 
+        // Query convenience: an omitted/null end means "to +∞" (everything from
+        // start onwards); a null start means "from -∞". Pass both through as an
+        // interval object so #normalizeInterval's open handling applies. (A point
+        // query still works by passing the same value for start and end, which is
+        // what the filter layer does.)
         return {
-            range: this.#normalizeInterval({ start: queryStart, end: queryEnd ?? queryStart }),
+            range: this.#normalizeInterval({ start: queryStart ?? null, end: queryEnd ?? null }),
             queryOptions: options,
         };
     }
@@ -421,12 +520,45 @@ export default class TimelineIndex {
     // ========================================
 
     #normalizeInterval(startOrInterval, endVal = null) {
-        const startInput = this.#extractEndpoint(startOrInterval, 'start');
-        const endInput = this.#extractEndpoint(
-            endVal !== null && endVal !== undefined ? endVal : startOrInterval,
-            'end',
-            startInput
-        );
+        // Resolve raw start/end inputs while distinguishing three cases per side:
+        //   value      → bounded
+        //   null / ∞   → open (handled by #openKind, side-aware)
+        //   undefined  → omitted; end defaults to start (an instant)
+        const isIntervalObject = startOrInterval
+            && typeof startOrInterval === 'object'
+            && !(startOrInterval instanceof Date)
+            && !Array.isArray(startOrInterval)
+            && ('start' in startOrInterval || 'end' in startOrInterval);
+
+        let startInput, endInput;
+        if (isIntervalObject) {
+            startInput = ('start' in startOrInterval) ? startOrInterval.start : startOrInterval.end;
+            endInput = ('end' in startOrInterval) ? startOrInterval.end : startOrInterval.start;
+        } else {
+            startInput = startOrInterval;
+            // Positional: undefined end → instant (end = start); explicit null → open.
+            endInput = (endVal === undefined) ? startOrInterval : endVal;
+        }
+
+        // Open intervals: one endpoint is unbounded (+∞ / -∞). The scale comes from
+        // the bounded side; the open side is stored as a sentinel (not scale-converted).
+        const startOpen = this.#openKind(startInput, 'start');
+        const endOpen = this.#openKind(endInput, 'end');
+
+        if (endOpen === 'end' && startOpen === 'start') {
+            // (-∞, +∞): "always". Stored without a meaningful scale; use 'year'.
+            return { scale: 'year', start: OPEN_START_VALUE, end: OPEN_END_VALUE };
+        }
+        if (endOpen === 'end') {
+            const bounded = this.#normalizeEndpoint(startInput);
+            return { scale: bounded.scale, start: this.#convertValue(bounded, bounded.scale), end: OPEN_END_VALUE };
+        }
+        if (startOpen === 'start') {
+            const bounded = this.#normalizeEndpoint(endInput);
+            return { scale: bounded.scale, start: OPEN_START_VALUE, end: this.#convertValue(bounded, bounded.scale) };
+        }
+        // Reject nonsensical orientations (e.g. start:+∞ or end:-∞).
+        if (startOpen || endOpen) { throw new Error('Invalid open interval: use end:+∞ (ongoing) or start:-∞ (since forever)'); }
 
         const start = this.#normalizeEndpoint(startInput);
         const end = this.#normalizeEndpoint(endInput, start.scale);
@@ -439,12 +571,25 @@ export default class TimelineIndex {
         return { scale, start: startValue, end: endValue };
     }
 
-    #extractEndpoint(input, field, fallback = null) {
+    // Detect unbounded endpoints. Returns 'end' for +∞ (ongoing/present),
+    // 'start' for -∞, else null. `side` ('start'|'end') is the position the value
+    // occupies, so an explicit `null` means "open on this side". Also accepts
+    // Infinity, ±'inf'/'infinity', '∞', 'ongoing', 'present' (and unwraps
+    // { value } / { scale, value }).
+    #openKind(input, side) {
+        let v = input;
         if (input && typeof input === 'object' && !(input instanceof Date) && !Array.isArray(input)) {
-            if (field in input) { return input[field]; }
-            if ('value' in input || 'scale' in input) { return input; }
+            if ('value' in input) { v = input.value; } else { return null; }
         }
-        return fallback || input;
+        if (v === null) { return side; }
+        if (v === Infinity) { return 'end'; }
+        if (v === -Infinity) { return 'start'; }
+        if (typeof v === 'string') {
+            const s = v.trim().toLowerCase();
+            if (s === '∞' || s === '+∞' || /^\+?(inf|infinity|ongoing|present)$/.test(s)) { return 'end'; }
+            if (s === '-∞' || /^-(inf|infinity)$/.test(s)) { return 'start'; }
+        }
+        return null;
     }
 
     #normalizeEndpoint(input, fallbackScale = null) {
@@ -639,10 +784,16 @@ export default class TimelineIndex {
 
         if (!timeline.has(normalizedScale)) {
             const key = this.#timelineKey(timelineName);
-            timeline.set(normalizedScale, {
-                start: new BitSlicedIndex(`internal/ts/${key}/${normalizedScale}/start`, this.bitmapIndex, BIT_DEPTH),
-                end: new BitSlicedIndex(`internal/ts/${key}/${normalizedScale}/end`, this.bitmapIndex, BIT_DEPTH),
-            });
+            if (this.#isPointTimeline(timelineName)) {
+                timeline.set(normalizedScale, {
+                    point: new BitSlicedIndex(`internal/ts/${key}/${normalizedScale}/ts`, this.bitmapIndex, BIT_DEPTH),
+                });
+            } else {
+                timeline.set(normalizedScale, {
+                    start: new BitSlicedIndex(`internal/ts/${key}/${normalizedScale}/start`, this.bitmapIndex, BIT_DEPTH),
+                    end: new BitSlicedIndex(`internal/ts/${key}/${normalizedScale}/end`, this.bitmapIndex, BIT_DEPTH),
+                });
+            }
         }
 
         return timeline.get(normalizedScale);
