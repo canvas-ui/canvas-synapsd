@@ -1143,6 +1143,9 @@ class SynapsD extends EventEmitter {
 
     async unlinkMany(ids, spec = {}) {
         const normSpec = this.#normalizeDocumentOperationSpec(spec);
+        // `recursive` rides in on the spec (Workspace.unlinkMany spreads its options
+        // into the spec). There is no separate `options` param here.
+        const recursive = Boolean(spec.recursive);
         if (!Array.isArray(ids)) {
             throw new Error('Document ID array must be an array');
         }
@@ -1186,7 +1189,7 @@ class SynapsD extends EventEmitter {
                     if (filteredLayers.length === 0) {
                         throw new Error('Cannot unlink from root context "/". Unlink a real path or delete the document.');
                     }
-                    const targetLayers = options.recursive
+                    const targetLayers = recursive
                         ? filteredLayers
                         : [filteredLayers[filteredLayers.length - 1]];
                     const layerIds = contextTree.resolveLayerIds(targetLayers);
@@ -1206,7 +1209,7 @@ class SynapsD extends EventEmitter {
                 const { tree: directoryTree, collection: directoryCollection, path: normalizedDirectoryPath } = this.#resolveTreeSelection('directory', directorySpec, '/');
                 const directoryPaths = Array.isArray(normalizedDirectoryPath) ? normalizedDirectoryPath : [normalizedDirectoryPath];
                 for (const directoryPath of directoryPaths) {
-                    const nodeIds = directoryTree.getNodeIdsForPath(directoryPath, { recursive: Boolean(options.recursive) });
+                    const nodeIds = directoryTree.getNodeIdsForPath(directoryPath, { recursive });
                     layersToRemove.push(...nodeIds.map((nodeId) => directoryCollection.makeKey(nodeId)));
                     if (nodeIds.length > 0) {
                         removedDirectoryPaths.push(directoryPath);
@@ -1248,7 +1251,7 @@ class SynapsD extends EventEmitter {
                     contextArray: removedContextPaths,
                     directoryArray: removedDirectoryPaths,
                     featureArray: featureKeys,
-                    recursive: options.recursive,
+                    recursive,
                 }));
             } catch (eventError) {
                 debug(`unlinkMany: Failed to emit events for doc ${id}: ${eventError.message}`);
@@ -2804,8 +2807,12 @@ class SynapsD extends EventEmitter {
                 else if (body.startsWith('ctx:')) { ctx.push(body.slice(4)); }
                 else { ctx.push(body); }
             }
-            if (ctx.length > 0) { context = { path: ctx.length === 1 ? ctx[0] : ctx }; }
-            if (dir.length > 0) { directory = { path: dir.length === 1 ? dir[0] : dir }; }
+            // The paths grammar is authoritative: derive BOTH selectors from it and
+            // do not retain the implicit root-context default. Otherwise a dir-only
+            // op (e.g. unlink from dir:/foo) also targets ctx:/ → "Cannot unlink
+            // from root context".
+            context = ctx.length > 0 ? { path: ctx.length === 1 ? ctx[0] : ctx } : null;
+            directory = dir.length > 0 ? { path: dir.length === 1 ? dir[0] : dir } : null;
         }
 
         const legacyFeatures = spec.features ?? spec.attributes?.allOf ?? spec.attributes ?? [];

@@ -91,4 +91,44 @@ describe('Workspace query translation', () => {
 
         expect(ids(await workspace.list({ context: '/Saved' }))).toEqual([canvasDocId]);
     });
+
+    // Regression: the ctx:/dir: grammar migration must be honored on EVERY op,
+    // not just writes. These guard the bugs that broke directory-tree sync:
+    //   - reads forcing the selector into context (dir docs queried as ctx:)
+    //   - unlinkMany referencing a non-existent `options` ("options is not defined")
+    //   - the paths grammar not being authoritative (dir-only op dragging in ctx:/)
+    describe('directory tree operations', () => {
+        test('put → list → has → unlink round-trips on a directory path', async () => {
+            const id = await workspace.put(note('dir-doc'), { context: null, directory: '/Docs' });
+
+            // List must target the directory tree, not context.
+            expect(ids(await workspace.list({ directory: '/Docs' }))).toEqual([id]);
+            expect(await workspace.has(id, { directory: '/Docs' })).toBe(true);
+
+            // Unlink from a directory path must succeed (no "options is not defined").
+            const result = await workspace.unlinkMany([id], { directory: '/Docs' });
+            expect(result.failed).toEqual([]);
+            expect(ids(result.successful)).toEqual([id]);
+
+            // Gone from the directory path afterwards.
+            expect(ids(await workspace.list({ directory: '/Docs' }))).toEqual([]);
+        });
+
+        test('context and directory trees are isolated at the same path', async () => {
+            const ctxId = await workspace.put(note('ctx'), { context: '/Shared' });
+            const dirId = await workspace.put(note('dir'), { context: null, directory: '/Shared' });
+
+            expect(ids(await workspace.list({ context: '/Shared' }))).toEqual([ctxId]);
+            expect(ids(await workspace.list({ directory: '/Shared' }))).toEqual([dirId]);
+        });
+
+        test('a directory-only write does not leak into a context path', async () => {
+            const dirId = await workspace.put(note('dir-only'), { context: null, directory: '/Isolated' });
+
+            // Addressable under the directory tree, but not via the same context path
+            // (root '/' is the universal set, so we assert the specific path instead).
+            expect(ids(await workspace.list({ directory: '/Isolated' }))).toEqual([dirId]);
+            expect(ids(await workspace.list({ context: '/Isolated' }))).toEqual([]);
+        });
+    });
 });
