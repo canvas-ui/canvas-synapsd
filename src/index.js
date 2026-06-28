@@ -821,18 +821,11 @@ class SynapsD extends EventEmitter {
 
         const storedIds = prepared.map(p => p.parsed.id);
 
-        if (storedIds.length > 0 && contextSpec) {
-            try {
-                const { tree: batchTree } = this.#resolveTreeSelection('context', contextSpec, '/');
-                batchTree.emit(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, createEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, {
-                    documentIds: storedIds,
-                    contextSpec,
-                    layerNames: [],
-                    source: 'tree',
-                }));
-            } catch (treeError) {
-                debug(`putMany: Failed to emit tree batch event, error: ${treeError.message}`);
-            }
+        if (storedIds.length > 0) {
+            // Emit for whichever tree(s) the docs landed in so cross-client
+            // auto-open fires on both context and directory inserts.
+            this.#emitTreeDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'context', contextSpec, storedIds);
+            this.#emitTreeDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'directory', directorySpec, storedIds);
         }
 
         // Split inserts from updates so consumers (ws bridge, UIs) can tell an
@@ -1242,20 +1235,33 @@ class SynapsD extends EventEmitter {
             return result;
         }
 
-        // Emit events for all successfully unlinked docs
         for (const { index, id } of validEntries) {
             result.successful.push({ index, id });
-            try {
-                this.emit(EVENTS.DOCUMENT_REMOVED, createEvent(EVENTS.DOCUMENT_REMOVED, {
-                    id,
-                    contextArray: removedContextPaths,
-                    directoryArray: removedDirectoryPaths,
-                    featureArray: featureKeys,
-                    recursive,
-                }));
-            } catch (eventError) {
-                debug(`unlinkMany: Failed to emit events for doc ${id}: ${eventError.message}`);
+        }
+
+        // One event per op: single for a lone doc, batch otherwise (avoids a
+        // socket-emit storm on large bulk removes).
+        try {
+            const ids = validEntries.map((e) => e.id);
+            const shared = {
+                contextArray: removedContextPaths,
+                directoryArray: removedDirectoryPaths,
+                featureArray: featureKeys,
+                recursive,
+            };
+            if (ids.length === 1) {
+                this.emit(EVENTS.DOCUMENT_REMOVED, createEvent(EVENTS.DOCUMENT_REMOVED, { id: ids[0], ...shared }));
+            } else if (ids.length > 1) {
+                this.emit(EVENTS.DOCUMENT_REMOVED_BATCH, createEvent(EVENTS.DOCUMENT_REMOVED_BATCH, { ids, ...shared }));
             }
+
+            // Tree-scoped events drive cross-client auto-close (browser extension)
+            // and web UI refresh — they carry the path + tree id/name the consumers
+            // match on. Emit for whichever tree(s) the unlink touched.
+            this.#emitTreeDocumentEvent(EVENTS.TREE_DOCUMENT_REMOVED_BATCH, 'context', contextSpec, ids);
+            this.#emitTreeDocumentEvent(EVENTS.TREE_DOCUMENT_REMOVED_BATCH, 'directory', directorySpec, ids);
+        } catch (eventError) {
+            debug(`unlinkMany: Failed to emit events: ${eventError.message}`);
         }
 
         return result;
@@ -1360,8 +1366,16 @@ class SynapsD extends EventEmitter {
 
         for (const { index, id } of toDelete) {
             result.successful.push({ index, id });
-            if (emitEvent) {
-                this.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id }));
+        }
+
+        // One event per op: single for a lone doc, batch otherwise (avoids a
+        // socket-emit storm on large purges).
+        if (emitEvent && result.successful.length > 0) {
+            const ids = result.successful.map((e) => e.id);
+            if (ids.length === 1) {
+                this.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: ids[0] }));
+            } else {
+                this.emit(EVENTS.DOCUMENT_DELETED_BATCH, createEvent(EVENTS.DOCUMENT_DELETED_BATCH, { ids }));
             }
         }
 
@@ -2668,6 +2682,31 @@ class SynapsD extends EventEmitter {
                 : this.#directoryBitmapCollectionForTree(tree.id),
             path,
         };
+    }
+
+    // Emit a tree.document.* event for a context/directory selection. Emitting on
+    // the tree means #registerTreeEvents stamps treeId/treeName/treeType, and the
+    // workspace runtime listener adds workspaceId — the shape clients (browser
+    // extension auto-open/close, web UI) rely on. Carries documentIds + the path
+    // so consumers can fetch/close by id without inline document bodies.
+    // Public: emit a tree-scoped document event for an already-known selection
+    // (e.g. a scoped purge that deleted ids at a specific tree+path). Lets callers
+    // that hold the selector drive cross-client auto-close without per-doc
+    // membership reconstruction. Pass whichever of context/directory applies.
+    emitTreeDocumentEvent(eventName, { context = null, directory = null, documentIds = [] } = {}) {
+        this.#emitTreeDocumentEvent(eventName, 'context', context, documentIds);
+        this.#emitTreeDocumentEvent(eventName, 'directory', directory, documentIds);
+    }
+
+    #emitTreeDocumentEvent(eventName, type, spec, documentIds) {
+        if (!spec || !Array.isArray(documentIds) || documentIds.length === 0) { return; }
+        try {
+            const { tree, path } = this.#resolveTreeSelection(type, spec, '/');
+            const contextSpec = Array.isArray(path) ? (path[0] ?? '/') : (path ?? '/');
+            tree.emit(eventName, createEvent(eventName, { documentIds, contextSpec, source: 'tree' }));
+        } catch (error) {
+            debug(`#emitTreeDocumentEvent ${eventName} (${type}) failed: ${error.message}`);
+        }
     }
 
     #isDocumentOperationOptions(value) {
