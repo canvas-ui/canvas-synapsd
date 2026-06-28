@@ -360,9 +360,78 @@ plus `vector`, `embedder`, and `queue` sub-status) for diagnostics UIs.
 
 ## Timelines & Intervals
 
-SynapsD supports source/domain timelines (`wikipedia`, `britannica`, `historian-x`, `crud:updated`) backed by internal scale tiers. The developer-facing name stays simple; internally each timeline owns lazy Dual-BSI tiers for `Gyr`, `Myr`, `Kyr`, `year`, `month`, `day`, `second`, `ms`, and `ns`.
+SynapsD supports source/domain timelines (`wikipedia`, `britannica`, `historian-x`, `crud:updated`) backed by internal scale tiers. The developer-facing name stays simple; internally each timeline owns lazy per-scale tiers for `Gyr`, `Myr`, `Kyr`, `year`, `month`, `day`, `second`, `ms`, and `ns`.
 
 Each stored interval is normalized to `{ scale, start, end }`. If you omit `scale`, SynapsD infers it from the input and errors when it cannot do that safely. Inference is a convenience at the API edge; the index core always stores an explicit scale. No fake precision. Dinosaurs did not have millisecond timestamps, despite what software would like to believe.
+
+### Storage modes: interval vs point-event
+
+A tier is stored one of two ways:
+
+- **Interval (Dual-BSI)** — two bit-sliced indexes per tier (`start` + `end`). Used for ranges that genuinely span time (`wikipedia` 1720–1750, geology eras). Overlap query: `start <= range.end AND end >= range.start`.
+- **Point-event (single-BSI)** — one bit-sliced index per tier (`ts`). Used for **instants** (a thing happened at a moment). For an instant `start === end`, so the interval model's `end` BSI is pure duplication; the point tier halves the slice bitmaps **and** the per-insert slice writes. Range query: `ts >= range.start AND ts <= range.end`. The BSI's existence bitmap (`ebm`) doubles as the "which ids have this event" presence set — no separate membership bitmap needed.
+
+A timeline is point-mode when its name is a `crud:*` lifecycle stamp (by convention) or is registered explicitly:
+
+```js
+// Register extra point-event timelines at construction.
+const timeline = new TimelineIndex(bitmapIndex, { pointTimelines: ['visited', 'opened'] });
+```
+
+The mode is deterministic from the name, so it is stable across restarts without persisting a flag. Queries are identical regardless of mode — `queryInterval(...)` works the same; it just reads one BSI instead of two for point timelines. Existing interval timelines are unaffected.
+
+### Open (unbounded) intervals
+
+Interval timelines support open ends for things that started but have not finished — a person's life, an ongoing subscription, an unended era. Use the object form with an open marker:
+
+```js
+// Born 1912-12-12, still alive.
+await db.timeline.insert('life', personId, { start: '1912-12-12', end: Infinity });
+
+// Open lower bound: "everything up to 2000".
+await db.timeline.insert('until', id, { start: -Infinity, end: '2000' });
+```
+
+Accepted open markers: `Infinity` / `-Infinity`, or the strings `'inf'`, `'+inf'`, `'infinity'`, `'∞'`, `'ongoing'`, `'present'` (upper) and `'-inf'`, `'-infinity'`, `'-∞'` (lower). The scale comes from the bounded endpoint; the open side is stored as a BSI extreme sentinel, so the normal overlap test (`end >= range.start`, `start <= range.end`) extends to ±∞ with no special query path. A query like "alive in 2026" (`{ start: '2026', end: '2026' }`) matches every still-open life automatically.
+
+> For **inserts**, use the **object form** (`{ start, end }`) for open intervals — open markers are not supported in the positional `insert(name, id, start, end)` form, where an omitted end means "instant" (so crud stamps stay points).
+
+**Open-ended queries.** On `queryInterval`, a `null`/omitted bound means open on that side — handy for "from X onwards" / "up to Y":
+
+```js
+await db.timeline.queryInterval('life', '1990');        // [1990, +∞): anything still active at/after 1990
+await db.timeline.queryInterval('life', null, '2000');  // (-∞, 2000]: anything that had started by 2000
+await db.timeline.queryInterval('life', '2008', '2008'); // bounded point: active in 2008
+```
+
+(The filter layer always passes explicit start+end, so `t:` timeline filters are unaffected.)
+
+### Multi-timeline retrieval — `mode: 'grouped'` (zeitgeist)
+
+`queryInterval` takes one or more timeline names and a query `mode`:
+
+- `union` (default) — one flat id array across all timelines and scales.
+- `layers` — `{ name: { scale: [ids] } }`, per timeline **and** per scale.
+- `grouped` — `{ name: [ids] }`, per timeline with scales pre-unioned.
+
+`grouped` is the one-call primitive for "what was the world like at instant X" — pick a point and fan it across every relevant timeline at once. Because queries span all scale tiers, a single instant matches a king's reign stored at `year` **and** the geological era stored at `Myr` in the same call; open-ended ("ongoing") intervals match naturally.
+
+```js
+// Zeitgeist of the year 600: one id list per timeline.
+const z = await db.timeline.queryInterval(
+  ['wikipedia', 'historian-foo', 'geology', 'climate'],
+  { start: '600', end: '600' },   // the instant
+  { mode: 'grouped' },
+);
+// → {
+//   wikipedia:        [periodId, ...],   // "Early Middle Ages" (500–800)
+//   'historian-foo':  [kingId, ...],     // rulers/authors alive in 600 (incl. open-ended dynasties)
+//   geology:          [eraId],           // Quaternary  (−2 Myr → ongoing)  — NOT Paleozoic (long over)
+//   climate:          [],                // requested but nothing indexed → []
+// }
+```
+
+Every requested timeline is present in the result (empty as `[]`). Scale precision is intentional: year 600 converts to ~0 `Myr`, so it lands "in the Quaternary" — the `Myr` tier distinguishes eras, the `year` tier distinguishes centuries. Composing the per-timeline ids into a single narrative object is left to the caller; `grouped` just hands you the buckets.
 
 Canonical calendar/time semantics:
 - Calendar dates use the proleptic Gregorian calendar internally.
@@ -373,7 +442,7 @@ Canonical calendar/time semantics:
 
 ### System CRUD Timelines
 
-Document lifecycle events are automatically indexed into `crud:created`, `crud:updated`, and `crud:deleted` timelines. You filter queries using `t:` strings in the `filters` array.
+Document lifecycle events are automatically indexed into `crud:created`, `crud:updated`, and `crud:deleted` timelines. These are **point-event** timelines (instants, single-BSI) pinned to **second** resolution — ms precision on a wall-clock lifecycle stamp is spurious and only widens the BSI. You filter queries using `t:` strings in the `filters` array.
 
 Formats:
 - `t:crud:ACTION:TIMEFRAME` (e.g., `t:crud:updated:thisWeek`)
@@ -389,7 +458,7 @@ const recentDocs = await db.list({
 });
 ```
 
-CRUD timestamps are stored with their natural Date precision, but timeframe queries fan out across the internal tiers so `today`, `thisWeek`, and explicit ranges still find matching CRUD events.
+CRUD timestamps are stored at second resolution as point events; timeframe queries fan out across the internal tiers so `today`, `thisWeek`, and explicit ranges still find matching CRUD events regardless of the tier they were written to.
 
 ### Custom Timelines
 
