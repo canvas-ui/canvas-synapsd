@@ -460,6 +460,17 @@ const recentDocs = await db.list({
 
 CRUD timestamps are stored at second resolution as point events; timeframe queries fan out across the internal tiers so `today`, `thisWeek`, and explicit ranges still find matching CRUD events regardless of the tier they were written to.
 
+#### Reindexing crud timelines
+
+The crud timelines moved from interval/ms (dual-BSI) to point-event/second (single-BSI) storage. A DB populated **before** that change has crud memberships in tiers the new code never reads — `t:crud:*` filters will return nothing for those docs until the timelines are rebuilt. Run the one-time, idempotent rebuild (deletes the stale crud bitmaps, re-derives `crud:created`/`crud:updated` from each document's `createdAt`/`updatedAt`):
+
+```sh
+# Per workspace DB directory (e.g. server/users/<user>/workspaces/<ws>/db)
+node scripts/reindex-crud.js -d <workspace-db-dir>
+```
+
+Or programmatically: `await db.reindexCrudTimelines()`. Note: `crud:deleted` is not rebuilt — those documents are gone — so past deletion history is dropped.
+
 ### Custom Timelines
 
 Use `db.timeline` for custom source/domain timelines.

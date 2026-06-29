@@ -3377,6 +3377,64 @@ class SynapsD extends EventEmitter {
         return result;
     }
 
+    /**
+     * One-time rebuild of the crud:* lifecycle timelines from the document store.
+     *
+     * The crud timelines moved from interval/ms (dual-BSI) to point-event/second
+     * (single-BSI ts) storage. Memberships written under the old scheme live in
+     * tiers the new code never reads, so they're orphaned. This deletes the stale
+     * crud bitmaps and re-derives crud:created (createdAt) + crud:updated
+     * (updatedAt) for every stored document, writing them into the new tiers.
+     *
+     * Idempotent (delete + rebuild from the doc store). crud:deleted is NOT
+     * rebuilt — those documents are gone — so past deletion history is dropped.
+     *
+     * @returns {Promise<{ scanned, created, updated, removedTimelines }>}
+     */
+    async reindexCrudTimelines({ batchSize = 1000, onProgress = null } = {}) {
+        if (!this.isRunning()) { throw new Error('Database is not running'); }
+
+        // 1. Drop stale crud timelines (clears BOTH old start/end and any ts bitmaps).
+        const crudTimelines = ['crud:created', 'crud:updated', 'crud:deleted'];
+        let removedTimelines = 0;
+        for (const name of crudTimelines) {
+            if (await this.#timelineIndex.deleteTimeline(name)) { removedTimelines++; }
+        }
+
+        // 2. Collect every document id.
+        const ids = [];
+        for await (const { key } of this.documents.getRange()) {
+            const id = Number(key);
+            if (Number.isInteger(id) && id > 0) { ids.push(id); }
+        }
+
+        // 3. Re-derive crud:created/updated in id batches, buffered per batch.
+        const counts = { scanned: 0, created: 0, updated: 0, removedTimelines };
+        for (let i = 0; i < ids.length; i += batchSize) {
+            const slice = ids.slice(i, i + batchSize);
+            const docs = this.#safeParseDocuments(await this.documents.getMany(slice));
+
+            await this.#withDeferredMembership(async () => {
+                for (const doc of docs) {
+                    counts.scanned++;
+                    if (doc.createdAt) {
+                        await this.#timelineIndex.insert('crud:created', doc.id, new Date(doc.createdAt));
+                        counts.created++;
+                    }
+                    if (doc.updatedAt) {
+                        await this.#timelineIndex.insert('crud:updated', doc.id, new Date(doc.updatedAt));
+                        counts.updated++;
+                    }
+                }
+            });
+
+            if (onProgress) { onProgress({ ...counts, total: ids.length }); }
+        }
+
+        debug(`reindexCrudTimelines: scanned ${counts.scanned}, created ${counts.created}, updated ${counts.updated}`);
+        return counts;
+    }
+
     clearSync() {
         if (!this.isRunning()) {
             throw new Error('Database is not running');
