@@ -1924,7 +1924,19 @@ class SynapsD extends EventEmitter {
             if (!queryVector) {
                 ({ pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit, offset }));
             } else if (mode === 'hybrid') {
-                ({ pageIds, totalCount, error } = await this.#vectorIndex.hybridSearch(queryVector, queryString, scopedIds, { limit, offset }));
+                // Fuse DOCUMENT-level FTS (every doc — tabs included) with dense
+                // kNN (embedded docs only) via RRF. The VectorIndex's own
+                // hybridSearch only fuses chunk-text BM25 over the vector table, so
+                // it can't see un-embedded docs (e.g. tabs); doc-level FTS can.
+                const depth = Math.max((limit + offset) * 5, 100);
+                const [vec, fts] = await Promise.all([
+                    this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit: depth, offset: 0 }),
+                    this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit: depth, offset: 0 }),
+                ]);
+                const fused = this.#rrfMerge([vec.pageIds || [], fts.pageIds || []]);
+                totalCount = fused.length;
+                pageIds = fused.slice(offset, offset + limit);
+                error = vec.error || fts.error || null;
             } else {
                 ({ pageIds, totalCount, error } = await this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit, offset }));
             }
@@ -1938,6 +1950,21 @@ class SynapsD extends EventEmitter {
         result.totalCount = totalCount;
         result.error = error;
         return result;
+    }
+
+    // Reciprocal Rank Fusion of several ranked id lists → one ranking. A doc's
+    // score is Σ 1/(k + rank) across the lists it appears in (k=60 standard),
+    // so agreement across signals (dense + lexical) floats to the top and either
+    // signal alone still contributes. Returns doc ids, best first.
+    #rrfMerge(lists, k = 60) {
+        const score = new Map();
+        for (const ids of lists) {
+            for (let rank = 0; rank < ids.length; rank++) {
+                const id = ids[rank];
+                score.set(id, (score.get(id) || 0) + 1 / (k + rank + 1));
+            }
+        }
+        return [...score.keys()].sort((a, b) => score.get(b) - score.get(a));
     }
 
     #emptyResult() {
