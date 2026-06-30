@@ -204,10 +204,13 @@ class LanceIndex {
             return { pageIds: [], totalCount: 0, error: null };
         }
 
-        // Overfetch so post-filtering + pagination still yields enough results
-        const fetchLimit = candidateSet
-            ? Math.min(candidateSet.size, (limit + offset) * 10 + 1000)
-            : limit + offset;
+        // Overfetch so post-filtering + pagination still yields enough results,
+        // AND so totalCount reflects the real match count (not just the page). The
+        // unscoped branch previously fetched only limit+offset rows, which capped
+        // totalCount at the page size and broke deep pagination on whole-workspace
+        // search (every query looked like the same fixed candidate set).
+        const overfetch = (limit + offset) * 10 + 1000;
+        const fetchLimit = candidateSet ? Math.min(candidateSet.size, overfetch) : overfetch;
 
         let rows;
         try {

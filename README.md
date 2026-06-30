@@ -24,9 +24,12 @@ Context trees enable a natural "zoom" feature on top of indexed data, and paired
 
 More familiar UX, a virtual directory is a self-contained movable/copyable container; 
 
-### Sessions for real-time contextual data streaming
+### Sessions & evolving queries
 
-v4 feature for evolving long-running queries
+Two ways to refine a candidate set over time, both built on the same `resolveCandidates` + `rank` seam:
+
+- **`QuerySession`** (stateful, optionally live) — a long-running, refinable query: add/remove/patch labelled cues, cheap `count()`/`ids()` probing, `materialize()` on demand. Subscribe with `on('change')` for a **live view** that updates the instant a matching document is ingested (precise per-cue invalidation via the `membership.changed` signal). Frozen mode = a stable snapshot (agent working memory, `serialize`/`rehydrate`); live mode = sliding windows. See **Long-running sessions** below.
+- **`searchRefined`** (stateless) — ad-hoc multi-query refinement with no session/persistence: AND-narrow a stack of text queries (each scopes the previous), over an optional structured base. The non-streaming sibling of `QuerySession.materialize`.
 
 ## Core components
 
@@ -56,8 +59,11 @@ where `spec = { paths, features }`.
 - `deleteMany(ids, options?)`
 - `getByChecksumString(checksum, options?)`
 - `hasByChecksumString(checksum, spec?)`
-- `resolveCandidates(spec) -> { bitmap, keys }` - the candidate-set stage of a query, exposed for sessions
+- `resolveCandidates(spec) -> { bitmap, keys, collectionKeys, coarse }` - candidate-set stage; `collectionKeys` are the real bitmap keys consulted (for precise session invalidation), `coarse` flags a temporal dependency with no stable key
 - `rank(bitmap, match, { mode, limit, offset }) -> page` - the materialize/score stage
+- `searchRefined(queries[], baseSpec?, { limit, offset, mode }) -> page` - stateless multi-query refinement (AND-narrow text queries by fts-scoping; last ranks)
+- `openSession(specs?, opts) -> QuerySession` - long-running refinable/live query session (see **Long-running sessions**)
+- `reindexCrudTimelines(opts?) -> { scanned, created, updated }` - rebuild crud:* timelines from the doc store (see **Reindexing crud timelines**)
 - `storeDocumentEmbeddings(docId, schema, updatedAt, chunks)` - app-provided vectors (see **Semantic search**)
 - `getStats()` - async stats incl. FTS + dense-vector internals
 - `listDocumentTreePaths(id, treeNameOrId)`
@@ -200,11 +206,16 @@ const deleteResult = await db.deleteMany([id1, id2]);
 A query is two pure stages:
 
 ```
-resolveCandidates(spec) -> { bitmap, keys }   // paths ∩ features ∩ filters
-rank(bitmap, match, { mode, limit, offset })  // match=null => slice; else fts/vector/hybrid
+resolveCandidates(spec) -> { bitmap, keys, collectionKeys, coarse }  // paths ∩ features ∩ filters
+rank(bitmap, match, { mode, limit, offset })                         // match=null => slice; else fts/vector/hybrid
 query(match, spec) = rank(resolveCandidates(spec).bitmap, match, spec)
 list(spec)         = query(null, spec)
 ```
+
+`collectionKeys` are the actual bitmap keys consulted (collection vocabulary:
+`context/<treeId>/<layerId>`, `vfs/<treeId>/<nodeId>`, feature keys), so a live
+session can intersect them against `membership.changed` for precise invalidation;
+`coarse` marks a temporal (BSI-range) dependency that has no stable key.
 
 ### `list(spec)` - structural listing
 
@@ -285,6 +296,62 @@ const ranked = await db.query('invoice', {
     limit: 20,
 });
 ```
+
+## Long-running sessions
+
+`openSession()` returns a stateful, refinable query whose candidate set outlives a
+single question. It reuses `resolveCandidates`/`rank` — no duplicated query logic.
+A session is an ordered map of **cues** (labelled sub-specs); the combined result
+is the hard-AND of cue bitmaps. Cheap to probe (`count()`/`ids()` load no
+documents), cheap to refine (each cue is resolved once and cached).
+
+```js
+const s = await db.openSession([], { mode: 'live', emit: 'delta' });
+await s.add({ features: ['tag/important'] }, 'important');
+await s.add({ context: { tree: 'projects', path: '/inbox' } }, 'inbox');
+
+s.count();                       // survivors, no doc load
+s.ids();                         // combined id array (null = unconstrained)
+await s.materialize(null, { limit: 20 });   // page the set (string match → fts/vector)
+
+// Live view: fires the instant an ingested doc matches (or stops matching).
+const off = s.on('change', ({ added, removed, count }) => updateCanvas(added, removed, count));
+
+await s.patch('inbox', { features: ['+tag/urgent'] });   // refine one cue
+await s.remove('important');                              // widen
+off(); s.close();                                        // unsubscribe
+```
+
+- **emit modes:** `delta` (default, `{ added, removed, count }`), `ids`, `page`.
+- **modes:** `frozen` (default) freezes relative timeframes at `add()` and never
+  slides — a stable snapshot for agent working memory; `live` re-resolves temporal
+  cues each recompute (sliding windows) and pushes `change` events.
+- **precise invalidation:** a write only re-evaluates cues whose `collectionKeys`
+  it touched (temporal cues are `coarse` → re-resolved on any relevant write).
+- **lifecycle:** `serialize()` → tiny JSON (specs + labels, no bitmaps);
+  `QuerySession.rehydrate(db, json)` rebuilds it, re-resolving on first read.
+
+The live path is driven by the `membership.changed` event (post-commit, carries the
+exact ticked collection keys — see **Events**).
+
+## Stateless refinement — `searchRefined`
+
+When you just want ad-hoc "drill-down" without a session object, fold a stack of
+text queries: each AND-narrows the previous result set (fts-scoping), the last one
+ranks. An optional `baseSpec` supplies the structured starting scope.
+
+```js
+// "car" → within those, "red" → within those, "market"; ranked by "market".
+const page = await db.searchRefined(
+    ['car', 'red', 'market'],
+    { context: { tree: 'projects', path: '/inbox' }, features: ['data/abstraction/email'] },
+    { limit: 20 },
+);
+```
+
+Zero/one query degrade to a plain list / single search. The web UI exposes this as
+stacked search chips (`?q=car&q=red`); the REST `GET …/documents?q=` param accepts a
+repeated `q` for the same effect.
 
 ## Semantic search (vectors)
 
