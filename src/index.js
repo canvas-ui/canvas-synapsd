@@ -1933,7 +1933,16 @@ class SynapsD extends EventEmitter {
                     this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit: depth, offset: 0 }),
                     this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit: depth, offset: 0 }),
                 ]);
-                const fused = this.#rrfMerge([vec.pageIds || [], fts.pageIds || []]);
+                // Weight lexical above dense: vector kNN always returns its top-K
+                // nearest neighbours with no absolute-similarity floor, so on a
+                // small/irrelevant embedded corpus a rank-0 vector hit would
+                // otherwise tie a rank-0 EXACT lexical hit and pollute the top.
+                // FTS weight 2 keeps exact matches on top while dense still
+                // contributes (semantic recall).
+                const fused = this.#rrfMerge([
+                    { ids: fts.pageIds || [], weight: 2 },
+                    { ids: vec.pageIds || [], weight: 1 },
+                ]);
                 totalCount = fused.length;
                 pageIds = fused.slice(offset, offset + limit);
                 error = vec.error || fts.error || null;
@@ -1952,16 +1961,19 @@ class SynapsD extends EventEmitter {
         return result;
     }
 
-    // Reciprocal Rank Fusion of several ranked id lists → one ranking. A doc's
-    // score is Σ 1/(k + rank) across the lists it appears in (k=60 standard),
-    // so agreement across signals (dense + lexical) floats to the top and either
-    // signal alone still contributes. Returns doc ids, best first.
+    // Weighted Reciprocal Rank Fusion of ranked id lists → one ranking. A doc's
+    // score is Σ weight/(k + rank) across the lists it appears in (k=60 standard),
+    // so agreement across signals floats to the top and either signal alone still
+    // contributes. Accepts plain id arrays (weight 1) or { ids, weight } entries.
+    // Returns doc ids, best first.
     #rrfMerge(lists, k = 60) {
         const score = new Map();
-        for (const ids of lists) {
+        for (const entry of lists) {
+            const ids = Array.isArray(entry) ? entry : entry.ids;
+            const weight = Array.isArray(entry) ? 1 : (entry.weight ?? 1);
             for (let rank = 0; rank < ids.length; rank++) {
                 const id = ids[rank];
-                score.set(id, (score.get(id) || 0) + 1 / (k + rank + 1));
+                score.set(id, (score.get(id) || 0) + weight / (k + rank + 1));
             }
         }
         return [...score.keys()].sort((a, b) => score.get(b) - score.get(a));
