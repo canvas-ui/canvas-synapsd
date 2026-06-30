@@ -64,6 +64,8 @@ where `spec = { paths, features }`.
 - `searchRefined(queries[], baseSpec?, { limit, offset, mode }) -> page` - stateless multi-query refinement (AND-narrow text queries by fts-scoping; last ranks)
 - `openSession(specs?, opts) -> QuerySession` - long-running refinable/live query session (see **Long-running sessions**)
 - `reindexCrudTimelines(opts?) -> { scanned, created, updated }` - rebuild crud:* timelines from the doc store (see **Reindexing crud timelines**)
+- `reindexSearchIndex(opts?) -> { indexed, totalDocs, alreadyIndexed }` - backfill the FTS index for un-indexed docs (idempotent; FTS only)
+- `reindexEmbeddings() -> { enqueued, totalEmbeddable, queued }` - enqueue embeddable docs missing dense vectors (async; drains off-thread)
 - `storeDocumentEmbeddings(docId, schema, updatedAt, chunks)` - app-provided vectors (see **Semantic search**)
 - `getStats()` - async stats incl. FTS + dense-vector internals
 - `listDocumentTreePaths(id, treeNameOrId)`
@@ -675,7 +677,7 @@ const exists = db.timeline.hasTimeline('wikipedia');
 await db.timeline.deleteTimeline('wikipedia');
 ```
 
-Current interval semantics are closed intervals: `[start, end]`. Open interval support belongs in the next pass.
+Intervals are closed `[start, end]` and may be open-ended (`Infinity` / `-Infinity`) — see **Open (unbounded) intervals** above.
 
 ## Bitmap index
 
@@ -796,6 +798,16 @@ Canonical strings (constant on `EVENTS` in parentheses):
 - `document.updated` (`DOCUMENT_UPDATED`)
 - `document.removed` (`DOCUMENT_REMOVED`)
 - `document.deleted` (`DOCUMENT_DELETED`)
+- `document.removed.batch` (`DOCUMENT_REMOVED_BATCH`) - one event for a bulk remove (avoids N emits)
+- `document.deleted.batch` (`DOCUMENT_DELETED_BATCH`) - one event for a bulk delete/purge
+
+### Membership
+
+- `membership.changed` (`MEMBERSHIP_CHANGED`) - emitted post-commit with the exact
+  collection bitmap keys ticked/unticked: `{ changes: [{ docId, op: 'tick'|'untick', keys }] }`.
+  Drives precise live invalidation in `QuerySession` (intersect against an operand's
+  `collectionKeys`). Fires before the corresponding `document.*` event, so a session
+  re-resolves against already-committed bitmaps.
 
 ### Tree management
 
