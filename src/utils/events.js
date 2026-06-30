@@ -23,6 +23,10 @@ const EVENTS = Object.freeze({
     // 1000-doc operation does not fan out into 1000 socket emits.
     DOCUMENT_REMOVED_BATCH: 'document.removed.batch',
     DOCUMENT_DELETED_BATCH: 'document.deleted.batch',
+    // Low-level bitmap-membership change, emitted post-commit with the exact
+    // collection keys ticked/unticked. Drives precise live invalidation for
+    // long-running query sessions (QuerySession). Payload: { changes:[{docId,op,keys}] }.
+    MEMBERSHIP_CHANGED: 'membership.changed',
 
     // Tree management
     TREE_CREATED: 'tree.created',

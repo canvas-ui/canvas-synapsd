@@ -48,6 +48,7 @@ import { parseContextSpecForInsert, parseBitmapArray } from './utils/parsing.js'
 import { parseFilters, applyTimelineFilter } from './utils/filters.js';
 import { parseSpec } from './utils/spec.js';
 import { parseDocumentData, initializeDocument, parseInitializeDocument } from './utils/document.js';
+import QuerySession from './session/QuerySession.js';
 import PrefixedStore from './utils/PrefixedStore.js';
 
 // Constants
@@ -1719,10 +1720,13 @@ class SynapsD extends EventEmitter {
     // ========================================
     //
     // The public read API is list() + query(). Both are thin callers of one seam:
-    //   resolveCandidates(spec) -> { bitmap, keys }   paths ∩ features ∩ filters
+    //   resolveCandidates(spec) -> { bitmap, keys, collectionKeys, coarse }
     //   rank(bitmap, match, opts) -> page             match=null slices, else fts/vector/hybrid
-    // The db stays stateless: `keys` lets a session invalidate precisely, but
-    // nothing is cached here.
+    // The db stays stateless. `keys` is the legacy human-readable key list;
+    // `collectionKeys` are the real bitmap keys consulted (collection vocabulary)
+    // so a QuerySession can intersect them against membership.changed signals for
+    // precise invalidation; `coarse` flags a temporal (BSI) dependency that has no
+    // stable key and must be re-resolved on any relevant write. Nothing cached here.
 
     async resolveCandidates(rawSpec = {}) {
         return await this.#resolveParsed(parseSpec(rawSpec));
@@ -1731,10 +1735,16 @@ class SynapsD extends EventEmitter {
     async #resolveParsed(parsed) {
         const { paths, features, filters } = parsed;
         const keys = [];
+        // collectionKeys: the actual bitmap keys (collection vocabulary) consulted,
+        // for precise QuerySession invalidation. coarse: this candidate set depends
+        // on an operand with no stable key (temporal BSI range) → consumers must
+        // re-resolve it on any relevant write rather than key-intersect.
+        const collectionKeys = [];
+        let coarse = false;
         let bitmap = null;
         let constrained = false;
 
-        const includeBitmap = await this.#buildPathsBitmap(paths.in, keys);
+        const includeBitmap = await this.#buildPathsBitmap(paths.in, keys, collectionKeys);
         if (includeBitmap) {
             bitmap = includeBitmap;
             constrained = true;
@@ -1743,6 +1753,9 @@ class SynapsD extends EventEmitter {
         const featureBitmap = await this.#buildFeaturesBitmap(features);
         if (featureBitmap) {
             keys.push(...features.allOf, ...features.anyOf, ...features.noneOf);
+            // Feature keys are already collection vocabulary (same normalization as
+            // membership feature keys), so they intersect tick keys directly.
+            collectionKeys.push(...normalizeBitmapKeys([...features.allOf, ...features.anyOf, ...features.noneOf]));
             if (bitmap) { bitmap.andInPlace(featureBitmap); } else { bitmap = featureBitmap; }
             constrained = true;
         }
@@ -1752,6 +1765,7 @@ class SynapsD extends EventEmitter {
             if (bitmapFilters.length > 0) {
                 const filterKeys = normalizeBitmapKeys(bitmapFilters);
                 keys.push(...filterKeys);
+                collectionKeys.push(...filterKeys);
                 const filterBitmap = await this.bitmapIndex.AND(filterKeys);
                 if (bitmap) { bitmap.andInPlace(filterBitmap); } else { bitmap = filterBitmap; }
                 constrained = true;
@@ -1759,13 +1773,16 @@ class SynapsD extends EventEmitter {
             if (timelineFilters.length > 0) {
                 const timelineBitmap = await this.#combineTimelineFilters(timelineFilters);
                 keys.push(...timelineFilters.map((f) => `t:${f.name}`));
+                // Temporal filters live in BSI tiers, not stable membership keys —
+                // a write does not tick a key we can intersect. Mark coarse.
+                coarse = true;
                 if (bitmap) { bitmap.andInPlace(timelineBitmap); } else { bitmap = timelineBitmap; }
                 constrained = true;
             }
         }
 
         if (paths.not.length > 0) {
-            const excludeBitmap = await this.#buildPathsBitmap(paths.not, keys);
+            const excludeBitmap = await this.#buildPathsBitmap(paths.not, keys, collectionKeys);
             if (excludeBitmap && !excludeBitmap.isEmpty) {
                 const base = bitmap || await this.#buildAllDocumentsBitmap();
                 base.andNotInPlace(excludeBitmap);
@@ -1774,19 +1791,26 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        return { bitmap: constrained ? (bitmap || new RoaringBitmap32()) : null, keys };
+        return {
+            bitmap: constrained ? (bitmap || new RoaringBitmap32()) : null,
+            keys,
+            collectionKeys: Array.from(new Set(collectionKeys)),
+            coarse,
+        };
     }
 
     // Union bitmap for a set of {type, path} entries; null when there are none.
-    async #buildPathsBitmap(entries = [], keys = []) {
+    // collectionKeys (optional) collects the real bitmap keys consulted per entry
+    // (context/<treeId>/<layerId>, vfs/<treeId>/<nodeId>) for precise invalidation.
+    async #buildPathsBitmap(entries = [], keys = [], collectionKeys = null) {
         if (!Array.isArray(entries) || entries.length === 0) { return null; }
         let result = null;
         for (const { type, path, tree } of entries) {
             keys.push(`${type}:${path}`);
             const selector = tree ? { tree, path } : { path };
             const bm = type === 'directory'
-                ? await this.#buildDirectorySelectorBitmap(selector)
-                : await this.#buildContextSelectorBitmap(selector);
+                ? await this.#buildDirectorySelectorBitmap(selector, collectionKeys)
+                : await this.#buildContextSelectorBitmap(selector, collectionKeys);
             if (!bm) { continue; }
             if (result) { result.orInPlace(bm); } else { result = bm; }
         }
@@ -1954,6 +1978,84 @@ class SynapsD extends EventEmitter {
             throw new ArgumentError('Query must be a string', 'query');
         }
         return await this.query(queryString, spec);
+    }
+
+    /**
+     * Stateless multi-query refinement: AND a stack of full-text queries by
+     * fts-scoping (each query narrows the previous result set), over an optional
+     * structured base scope (paths/features/filters). The last query ranks the
+     * final page; earlier queries act as lexical filters. No session/persistence —
+     * this is the ad-hoc sibling of QuerySession.materialize.
+     *
+     *   searchRefined(['car','red','market'], { context:{path:'/Inbox'} }, { limit })
+     *
+     * @param {string[]} queries     ordered query strings; last one ranks
+     * @param {object|null} baseSpec structured scope ({context,features,filters,...})
+     * @param {object} options       { limit, offset, mode }
+     * @returns docs[] with .count/.totalCount/.error (same shape as rank())
+     */
+    async searchRefined(queries = [], baseSpec = null, options = {}) {
+        const texts = (Array.isArray(queries) ? queries : [queries])
+            .filter((q) => typeof q === 'string' && q.trim().length > 0);
+
+        // Structured base scope (null = unconstrained / all docs).
+        const base = baseSpec ? (await this.#resolveParsed(parseSpec(baseSpec))).bitmap : null;
+
+        // No text → plain structured listing (slice path, no Lance needed).
+        if (texts.length === 0) {
+            return await this.rank(base, null, options);
+        }
+        // Single text → one scoped ranked search (existing behavior).
+        if (texts.length === 1) {
+            return await this.rank(base, texts[0], options);
+        }
+
+        if (!this.#lanceIndex || !this.#lanceIndex.isReady) {
+            const empty = this.#emptyResult();
+            empty.error = 'FTS not initialized';
+            return empty;
+        }
+
+        // Fold all but the last query into a scope bitmap. Intermediate steps need
+        // the FULL matching id set (not a page), so request a large internal limit;
+        // scoped fts fetches every candidate, so the AND is exact for query 2+.
+        const FOLD_LIMIT = 1_000_000;
+        let scope = base; // RoaringBitmap32 | null (null = all docs)
+        for (let i = 0; i < texts.length - 1; i++) {
+            const scopeIds = scope ? scope.toArray() : [];
+            const { pageIds, error } = await this.#lanceIndex.ftsQuery(texts[i], scopeIds, { limit: FOLD_LIMIT, offset: 0 });
+            if (error) {
+                const empty = this.#emptyResult();
+                empty.error = error;
+                return empty;
+            }
+            const matched = new RoaringBitmap32(pageIds);
+            scope = scope ? RoaringBitmap32.and(scope, matched) : matched;
+            if (scope.isEmpty) { return this.#emptyResult(); }
+        }
+
+        // Final query ranks + paginates within the folded scope.
+        return await this.rank(scope, texts[texts.length - 1], options);
+    }
+
+    /**
+     * Open a long-running, refinable query session bound to this db. Reuses
+     * resolveCandidates/rank — no duplicated query logic. See QuerySession.
+     *
+     * @param {object|object[]} specs  one spec, an array of specs, or {spec,label}[]
+     * @param {object} opts            { mode, emit, combinator, debounceMs, limit, offset }
+     */
+    async openSession(specs = [], opts = {}) {
+        const session = new QuerySession(this, opts);
+        const list = Array.isArray(specs) ? specs : (specs ? [specs] : []);
+        for (const entry of list) {
+            if (entry && typeof entry === 'object' && 'spec' in entry) {
+                await session.add(entry.spec, entry.label);
+            } else {
+                await session.add(entry);
+            }
+        }
+        return session;
     }
 
     async #updateOne(docIdentifier, updateData = null, contextSpec = null, featureBitmapArray = []) {
@@ -3123,19 +3225,20 @@ class SynapsD extends EventEmitter {
     }
 
     async #flushMembershipBuffer(buffer) {
+        const changes = [];
         for (const { op, docId, keys } of buffer) {
             try {
-                if (op === 'tick') {
-                    await this.bitmapIndex.tickMany(keys, docId);
-                } else {
-                    await this.bitmapIndex.untickMany(keys, docId);
-                }
+                const affected = op === 'tick'
+                    ? await this.bitmapIndex.tickMany(keys, docId)
+                    : await this.bitmapIndex.untickMany(keys, docId);
+                if (affected && affected.length) { changes.push({ docId, op, keys: affected }); }
             } catch (error) {
                 // Committed doc may now lack/keep a bitmap membership it should
                 // not — recoverable by reindexing from the synapse reverse index.
                 debug(`Post-commit bitmap ${op} failed for doc ${docId}: ${error.message}`);
             }
         }
+        this.#emitMembershipChanged(changes);
     }
 
     /** Buffer a bitmap membership op if a deferred-membership tx is active, else apply now. */
@@ -3144,11 +3247,21 @@ class SynapsD extends EventEmitter {
             this.#membershipBuffer.push({ op, docId, keys });
             return;
         }
-        if (op === 'tick') {
-            await this.bitmapIndex.tickMany(keys, docId);
-        } else {
-            await this.bitmapIndex.untickMany(keys, docId);
+        const affected = op === 'tick'
+            ? await this.bitmapIndex.tickMany(keys, docId)
+            : await this.bitmapIndex.untickMany(keys, docId);
+        if (affected && affected.length) {
+            this.#emitMembershipChanged([{ docId, op, keys: affected }]);
         }
+    }
+
+    // Post-commit signal of the exact collection bitmap keys that changed, so a
+    // QuerySession can precisely invalidate only the operands that touched them.
+    // Keys are collection-vocabulary (context/<treeId>/<layerId>, vfs/<treeId>/<nodeId>,
+    // feature keys) — the same vocabulary resolveCandidates() reports as collectionKeys.
+    #emitMembershipChanged(changes) {
+        if (!changes || changes.length === 0) { return; }
+        this.emit(EVENTS.MEMBERSHIP_CHANGED, createEvent(EVENTS.MEMBERSHIP_CHANGED, { changes }));
     }
 
     async #addDocumentMembership(docId, bitmapKeys) {
@@ -3201,13 +3314,14 @@ class SynapsD extends EventEmitter {
             : await this.#buildContextSelectorBitmap(selection.spec);
     }
 
-    async #buildContextSelectorBitmap(contextSpec) {
+    async #buildContextSelectorBitmap(contextSpec, collectionKeys = null) {
         if (!contextSpec) {
             return null;
         }
 
         const { tree, collection, path } = this.#resolveTreeSelection('context', contextSpec, '/');
         const pathLayersArray = parseContextSpecForInsert(path);
+        const recordKey = (id) => { if (collectionKeys && id != null) { collectionKeys.push(collection.makeKey(id)); } };
         let resultBitmap = null;
         let sawExplicitPath = false;
         let sawExistingPath = false;
@@ -3215,6 +3329,7 @@ class SynapsD extends EventEmitter {
         for (const pathLayers of pathLayersArray) {
             if (pathLayers.length === 1 && pathLayers[0] === '/') {
                 sawExplicitPath = true;
+                if (tree.rootLayer) { recordKey(tree.rootLayer.id); }
                 const rootBitmap = await this.#getContextRootBitmap(tree, collection);
                 if (rootBitmap && !rootBitmap.isEmpty) {
                     if (resultBitmap) {
@@ -3241,8 +3356,10 @@ class SynapsD extends EventEmitter {
             // under '/' return all docs at the root, not zero.
             let pathBitmap;
             if (layerIds.length === 0) {
+                if (tree.rootLayer) { recordKey(tree.rootLayer.id); }
                 pathBitmap = await this.#getContextRootBitmap(tree, collection);
             } else {
+                for (const id of layerIds) { recordKey(id); }
                 pathBitmap = await collection.AND(layerIds);
             }
             if (!pathBitmap || pathBitmap.isEmpty) {
@@ -3270,12 +3387,12 @@ class SynapsD extends EventEmitter {
         return await collection.OR([tree.rootLayer.id]);
     }
 
-    async #buildDirectorySelectorBitmap(directorySpec) {
+    async #buildDirectorySelectorBitmap(directorySpec, collectionKeys = null) {
         if (!directorySpec) {
             return null;
         }
 
-        const { tree, path } = this.#resolveTreeSelection('directory', directorySpec, '/');
+        const { tree, collection, path } = this.#resolveTreeSelection('directory', directorySpec, '/');
         const directoryPaths = Array.isArray(path) ? path.filter(Boolean) : [path].filter(Boolean);
         if (directoryPaths.length === 0) {
             return null;
@@ -3289,6 +3406,14 @@ class SynapsD extends EventEmitter {
             }
 
             sawExistingPath = true;
+            // find() reads exactly the path's own node bitmap (non-recursive) — the
+            // same node a doc inserted at this path ticks. Record that collection key
+            // so a write to this path precisely invalidates the operand.
+            if (collectionKeys) {
+                for (const nodeId of tree.getNodeIdsForPath(directoryPath, { recursive: false })) {
+                    collectionKeys.push(collection.makeKey(nodeId));
+                }
+            }
             const directoryBitmap = await tree.find(directoryPath);
             if (!directoryBitmap || directoryBitmap.isEmpty) {
                 continue;
