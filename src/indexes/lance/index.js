@@ -12,22 +12,32 @@ const { MatchQuery, BooleanQuery, Operator, Occur } = lancedb;
  * signature (see #ensureFtsIndex) can detect changes and rebuild the index
  * on existing data without the operator having to nuke the lance dir.
  *
- * - simple base tokenizer splits on punctuation, so URLs like
- *   `https://example.com/foo-bar` index as [https, example, com, foo, bar].
- * - asciiFolding + lowercase fold "Café" → "cafe"; stem folds "running" → "run".
- * - stop words kept: titles/URLs are short, dropping "the"/"a" loses recall.
- * - withPosition enables future phrase queries.
+ * We use an **ngram** base tokenizer (character n-grams) so substring and
+ * concatenated/camelCase matches work — the recurring pain point. With `simple`,
+ * "JobsIreland.ie" indexed as [jobsireland, ie] and a search for "ireland" or
+ * "jobs" missed it; with ngram, "ireland" matches the `jobsireland` substring.
+ * - ngramMinLength/MaxLength 3..4: trigram+quadgram. Good recall, bounded index
+ *   size (our fields — titles/URLs/short notes — are tiny).
+ * - prefixOnly false: index ngrams anywhere in the token, not just the prefix.
+ * - lowercase + asciiFolding fold case/accents ("Café" → "cafe").
+ * - stem off: stemming is a word-token transform and meaningless on ngrams.
+ * Because the field is ngram-tokenized, fuzzy matching on top over-expands —
+ * `#buildFtsQuery` uses exact (fuzziness 0) MatchQueries when IS_NGRAM.
  */
 const FTS_INDEX_CONFIG = {
-    withPosition: true,
-    baseTokenizer: 'simple',
+    withPosition: false,   // phrase queries are meaningless on ngrams; saves index size
+    baseTokenizer: 'ngram',
     lowercase: true,
-    stem: true,
+    stem: false,
     removeStopWords: false,
     asciiFolding: true,
     maxTokenLength: 60,
+    ngramMinLength: 3,
+    ngramMaxLength: 4,
+    prefixOnly: false,
 };
 const FTS_CONFIG_SIGNATURE = JSON.stringify(FTS_INDEX_CONFIG);
+const IS_NGRAM = FTS_INDEX_CONFIG.baseTokenizer === 'ngram';
 
 /**
  * LanceIndex - FTS and vector search via LanceDB
@@ -354,7 +364,10 @@ class LanceIndex {
         if (tokens.length === 0) { return null; }
 
         const toMatch = (token) => {
-            const fuzziness = token.length <= 3 ? 0 : token.length <= 6 ? 1 : 2;
+            // ngram fields already give partial/substring matching; fuzzy on top of
+            // ngrams over-expands wildly, so match exactly there. For word-token
+            // tokenizers, keep the length-scaled fuzziness for typo tolerance.
+            const fuzziness = IS_NGRAM ? 0 : (token.length <= 3 ? 0 : token.length <= 6 ? 1 : 2);
             return new MatchQuery(token, this.#ftsColumn, {
                 fuzziness,
                 prefixLength: 1,
