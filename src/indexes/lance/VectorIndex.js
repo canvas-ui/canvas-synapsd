@@ -161,7 +161,20 @@ export default class VectorIndex {
 
     /** Pure dense kNN. Returns { pageIds, totalCount, error } deduped to docIds (best chunk wins). */
     async vectorSearch(queryVector, candidateIds = [], opts = {}) {
-        return this.#search(q => q.nearestTo(queryVector), candidateIds, opts, 'vector');
+        const { minDistance, maxDistance } = opts;
+        const hasFloor = minDistance != null || maxDistance != null;
+        return this.#search((q) => {
+            let vq = q.nearestTo(queryVector);
+            if (hasFloor) {
+                // Force cosine so the bound is interpretable ([0,2], 0 = identical)
+                // regardless of the index's build metric, then drop neighbours
+                // outside [min,max]. Prunes "nearest but irrelevant" kNN hits before
+                // fusion — a query with nothing close contributes nothing from the
+                // dense side instead of its top-K garbage.
+                vq = vq.distanceType('cosine').distanceRange(minDistance ?? undefined, maxDistance ?? undefined);
+            }
+            return vq;
+        }, candidateIds, opts, 'vector');
     }
 
     /** Hybrid: dense kNN + BM25 on chunkText, fused by RRF. */

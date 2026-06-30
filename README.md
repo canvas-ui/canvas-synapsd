@@ -245,6 +245,7 @@ uniform sigil algebra: default `anyOf` (OR), `+` `allOf` (gate), `!` `noneOf` (e
 | `features` | `['+tag/red', 'tag/blue', '!tag/spam']` or `{ allOf, anyOf, noneOf }` |
 | `filters` | `['t:crud:updated:thisWeek', '+t:wikipedia:1996', '!t:crud:created:today']` (see filter grammar) |
 | `mode` | `hybrid` (default) \| `fts` \| `vector` (ranked queries only) |
+| `minDistance` / `maxDistance` | Optional cosine-distance floor for the dense side of `vector`/`hybrid` — drops kNN neighbours outside `[min, max]` before fusion (`0` = identical, `2` = opposite). Omit for no floor. Keeps "nearest but irrelevant" hits out of the result on a small/loose embedded corpus |
 | `limit` | Max documents (`list`: 100, `query`: 50; `0` = all matches) |
 | `offset` / `page` | Pagination |
 | `parse` | Set `false` to return raw stored data |

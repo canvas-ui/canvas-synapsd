@@ -139,6 +139,11 @@ export function parseSpec(rawSpec = {}) {
             page: pick('page'),
             parse: pick('parse'),
             groupBy: pick('groupBy'),
+            // Optional cosine-distance floor for the dense side of vector/hybrid
+            // search: drop kNN neighbours outside [minDistance, maxDistance] before
+            // fusion. 0 = identical, 2 = opposite. Omit for no floor.
+            minDistance: pick('minDistance'),
+            maxDistance: pick('maxDistance'),
         },
     };
 }

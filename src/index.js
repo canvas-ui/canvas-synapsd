@@ -1930,7 +1930,7 @@ class SynapsD extends EventEmitter {
                 // it can't see un-embedded docs (e.g. tabs); doc-level FTS can.
                 const depth = Math.max((limit + offset) * 5, 100);
                 const [vec, fts] = await Promise.all([
-                    this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit: depth, offset: 0 }),
+                    this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit: depth, offset: 0, minDistance: options.minDistance, maxDistance: options.maxDistance }),
                     this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit: depth, offset: 0 }),
                 ]);
                 // Weight lexical above dense: vector kNN always returns its top-K
@@ -1947,7 +1947,7 @@ class SynapsD extends EventEmitter {
                 pageIds = fused.slice(offset, offset + limit);
                 error = vec.error || fts.error || null;
             } else {
-                ({ pageIds, totalCount, error } = await this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit, offset }));
+                ({ pageIds, totalCount, error } = await this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit, offset, minDistance: options.minDistance, maxDistance: options.maxDistance }));
             }
         } else {
             ({ pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit, offset }));
