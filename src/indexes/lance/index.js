@@ -280,6 +280,23 @@ class LanceIndex {
         }
     }
 
+    /**
+     * Wipe the FTS table and reset the coverage bitmap. Used to recover from a
+     * drift where the LMDB coverage bitmap claims docs are indexed but the Lance
+     * table is missing their rows (e.g. the table dir was rebuilt/lost while the
+     * bitmap persisted). After this, a full backfill re-adds every document with
+     * no duplicate rows.
+     */
+    async clearFts() {
+        if (!this.#table) { return; }
+        try { await this.#table.delete('id >= 0'); } catch (e) { debug(`clearFts: table delete failed: ${e.message}`); }
+        if (this.#bitmapIndex) {
+            try { await this.#bitmapIndex.deleteBitmap(this.#ftsBitmapKey); } catch (_) { }
+            try { await this.#bitmapIndex.createBitmap(this.#ftsBitmapKey); } catch (_) { }
+        }
+        debug('clearFts: table + coverage bitmap reset');
+    }
+
     /** Index health/size snapshot for diagnostics UIs. */
     async stats() {
         if (!this.#table) { return { ready: false }; }
