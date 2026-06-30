@@ -368,11 +368,17 @@ class LanceIndex {
             // ngrams over-expands wildly, so match exactly there. For word-token
             // tokenizers, keep the length-scaled fuzziness for typo tolerance.
             const fuzziness = IS_NGRAM ? 0 : (token.length <= 3 ? 0 : token.length <= 6 ? 1 : 2);
+            // On an ngram field a term expands to its character ngrams. OR-ing them
+            // matches any shared ngram → a common trigram ("and", "lan") pulls in a
+            // third of the corpus. AND-ing requires the term's FULL ngram set →
+            // effectively a substring match (high precision). Word tokenizers keep
+            // OR (each token is already a whole word).
+            const operator = IS_NGRAM ? Operator.And : Operator.Or;
             return new MatchQuery(token, this.#ftsColumn, {
                 fuzziness,
                 prefixLength: 1,
                 maxExpansions: 50,
-                operator: Operator.Or,
+                operator,
             });
         };
 
