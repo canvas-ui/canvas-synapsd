@@ -3572,11 +3572,15 @@ class SynapsD extends EventEmitter {
      *
      * @returns {Promise<{ indexed, totalDocs, alreadyIndexed }>}
      */
-    async reindexSearchIndex({ batchSize = 1000, onProgress = null } = {}) {
+    async reindexSearchIndex({ batchSize = 1000, rebuild = false, onProgress = null } = {}) {
         if (!this.isRunning()) { throw new Error('Database is not running'); }
         if (!this.#lanceIndex || !this.#lanceIndex.isReady) {
             throw new Error('FTS index not available (semantic disabled or Lance not ready)');
         }
+
+        // rebuild: wipe the table + coverage bitmap first, so a drift where the
+        // bitmap over-claims (rows lost but bitmap persisted) is fully repaired.
+        if (rebuild) { await this.#lanceIndex.clearFts(); }
 
         const totalDocs = await this.documents.getCount();
         const startStats = await this.#lanceIndex.stats().catch(() => ({ indexedDocs: 0 }));
