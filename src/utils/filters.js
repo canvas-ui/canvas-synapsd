@@ -13,7 +13,7 @@ const { RoaringBitmap32 } = require('roaring');
 // '+' = allOf (gate), '!' = noneOf (exclude). Anything else is treated as a
 // raw bitmap key (ANDed). Glob/regexp are recognised but not yet implemented.
 
-const CRUD_TIMEFRAMES = new Set([
+export const CRUD_TIMEFRAMES = new Set([
     'now', 'today', 'yesterday', 'tomorrow',
     'lastWeek', 'thisWeek', 'nextWeek',
     'lastMonth', 'thisMonth', 'nextMonth',
