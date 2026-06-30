@@ -3560,6 +3560,45 @@ class SynapsD extends EventEmitter {
         return counts;
     }
 
+    /**
+     * Backfill the Lance FTS index for every document not yet indexed. Needed for
+     * databases populated before FTS existed (or only partially backfilled — start()
+     * caps its backfill per run, so a large doc tail can stay unindexed across a few
+     * restarts). Idempotent: addMany ticks the `internal/lance/fts` coverage bitmap,
+     * so already-indexed docs are skipped. Runs in batches until no progress.
+     *
+     * Note: this populates BM25 full-text only. Dense vectors for old docs are a
+     * separate (heavier) embedding backfill via the embedding queue.
+     *
+     * @returns {Promise<{ indexed, totalDocs, alreadyIndexed }>}
+     */
+    async reindexSearchIndex({ batchSize = 1000, onProgress = null } = {}) {
+        if (!this.isRunning()) { throw new Error('Database is not running'); }
+        if (!this.#lanceIndex || !this.#lanceIndex.isReady) {
+            throw new Error('FTS index not available (semantic disabled or Lance not ready)');
+        }
+
+        const totalDocs = await this.documents.getCount();
+        const startStats = await this.#lanceIndex.stats().catch(() => ({ indexedDocs: 0 }));
+        const alreadyIndexed = startStats.indexedDocs || 0;
+
+        // Loop bounded batches until coverage stops growing (backfill skips indexed
+        // docs and processes up to `batchSize` new ones per call).
+        let prevIndexed = alreadyIndexed;
+        for (;;) {
+            await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, batchSize);
+            const stats = await this.#lanceIndex.stats().catch(() => ({ indexedDocs: prevIndexed }));
+            const nowIndexed = stats.indexedDocs || 0;
+            if (onProgress) { onProgress({ indexed: nowIndexed, totalDocs }); }
+            if (nowIndexed <= prevIndexed) { break; } // no progress → done (or stuck)
+            prevIndexed = nowIndexed;
+        }
+
+        try { await this.#lanceIndex.optimize(); } catch (e) { debug(`reindexSearchIndex: optimize failed: ${e.message}`); }
+
+        return { indexed: prevIndexed - alreadyIndexed, totalDocs, alreadyIndexed: prevIndexed };
+    }
+
     clearSync() {
         if (!this.isRunning()) {
             throw new Error('Database is not running');
