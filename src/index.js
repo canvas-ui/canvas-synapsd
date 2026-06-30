@@ -3599,6 +3599,38 @@ class SynapsD extends EventEmitter {
         return { indexed: prevIndexed - alreadyIndexed, totalDocs, alreadyIndexed: prevIndexed };
     }
 
+    /**
+     * Enqueue every embeddable document missing a dense vector for (re)embedding.
+     * Embeddable = schema in `semantic.embeddableSchemas` (default
+     * `['data/abstraction/note']`; tabs/files are NOT embedded). Idempotent: docs
+     * already in the `internal/lance/vectors` coverage bitmap are skipped.
+     *
+     * ASYNC: this only ENQUEUES. The EmbeddingQueue drains off the main thread
+     * (model inference per doc), so embedding completes in the background. Poll
+     * progress via `getStats().semantic.queue` / `.vector`, or `drainEmbeddingQueue()`.
+     *
+     * @returns {Promise<{ enqueued, totalEmbeddable, queued, embeddableSchemas }>}
+     */
+    async reindexEmbeddings() {
+        if (!this.isRunning()) { throw new Error('Database is not running'); }
+        if (!this.#vectorIndex || !this.#embeddingQueue) {
+            throw new Error('Dense vector stack not available (semantic disabled or not ready)');
+        }
+        const embeddableSchemas = Array.from(this.#semanticConfig.embeddableSchemas);
+        if (embeddableSchemas.length === 0) {
+            return { enqueued: 0, totalEmbeddable: 0, queued: this.#embeddingQueue.size, embeddableSchemas };
+        }
+        const embeddable = await this.bitmapIndex.OR(normalizeBitmapKeys(embeddableSchemas));
+        const totalEmbeddable = embeddable ? embeddable.size : 0;
+        if (embeddable && !embeddable.isEmpty) {
+            const done = await this.bitmapIndex.getBitmap('internal/lance/vectors', false);
+            if (done) { embeddable.andNotInPlace(done); }
+        }
+        const ids = embeddable ? embeddable.toArray() : [];
+        if (ids.length > 0) { this.#embeddingQueue.enqueueMany(ids); }
+        return { enqueued: ids.length, totalEmbeddable, queued: this.#embeddingQueue.size, embeddableSchemas };
+    }
+
     clearSync() {
         if (!this.isRunning()) {
             throw new Error('Database is not running');
