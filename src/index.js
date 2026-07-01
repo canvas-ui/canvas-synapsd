@@ -36,8 +36,6 @@ import LanceIndex from './indexes/lance/index.js';
 import VectorIndex from './indexes/lance/VectorIndex.js';
 import { normalizeBitmapKeys, normalizeBitmapKey } from './indexes/bitmaps/lib/keys.js';
 import SemanticEngine from './semantic/index.js';
-import Embedder from './semantic/Embedder.js';
-import EmbeddingQueue from './semantic/EmbeddingQueue.js';
 
 // Views / Abstractions
 import ContextTree from './views/ContextTree.js';
@@ -125,9 +123,8 @@ class SynapsD extends EventEmitter {
 
     // Semantic recall (dense + hybrid vector search)
     #semantic;
-    #vectorIndex;
-    #embedder;
-    #embeddingQueue;
+    #vectorIndex;              // the 'text' space (primary; drives search)
+    #vectorSpaces = new Map(); // space name -> VectorIndex (includes 'text')
     #semanticConfig;
 
     constructor(options = {
@@ -193,19 +190,26 @@ class SynapsD extends EventEmitter {
         this.#semantic = new SemanticEngine({ db: this });
 
         // Semantic / dense-vector config. Disabled => fts-only (vector + hybrid
-        // search degrade gracefully to lexical). cacheDir is fastembed's model
-        // store; defaults under the workspace lance dir, but a shared
-        // canvas-server store can be passed to avoid an N×model footprint.
+        // search degrade gracefully to lexical). synapsd owns no embedding model:
+        // vectors arrive via storeDocumentEmbeddings (the embedd service / any app),
+        // and query embedding is an injected `embedQuery(text, space)` callback.
         const sem = options.semantic || {};
         this.#semanticConfig = {
             enabled: sem.enabled !== false,
-            model: sem.model || 'bge-small-en-v1.5',
             dim: sem.dim || 384,
-            maxLength: sem.maxLength || 512,
-            cacheDir: sem.cacheDir || path.join(this.#rootPath, 'lance', 'models'),
-            // JSON abstractions the server can read + embed itself. Everything
-            // else (blobs/media) relies on app-provided vectors.
+            // Injected query-embedder (embedd service). Absent → vector/hybrid
+            // search degrades to FTS (see rank()).
+            embedQuery: typeof sem.embedQuery === 'function' ? sem.embedQuery : null,
+            // Default candidate schemas for the unembedded-gap ledger when a caller
+            // passes none. embedd normally supplies per-space candidate schemas.
             embeddableSchemas: new Set(sem.embeddableSchemas || ['data/abstraction/note']),
+            // Vector "spaces": one LanceDB table per embedding model/dim. The
+            // embedd service pushes vectors keyed by space; text keeps the legacy
+            // table + bitmap key so existing data is not orphaned.
+            spaces: sem.spaces || {
+                text: { table: 'vec_text', dim: sem.dim || 384, bitmapKey: 'internal/lance/vectors' },
+                image: { table: 'vec_image', dim: 512, bitmapKey: 'internal/lance/vectors/image' },
+            },
         };
 
         this.contextBitmapCollection = null;
@@ -254,15 +258,13 @@ class SynapsD extends EventEmitter {
 
         out.semantic = {
             enabled: true,
-            model: this.#semanticConfig.model,
             dim: this.#semanticConfig.dim,
-            cacheDir: this.#semanticConfig.cacheDir,
+            // Embedding is external (embedd service); synapsd owns no model.
+            embedder: 'external',
+            embedQuery: !!this.#semanticConfig.embedQuery,
             embeddableSchemas: [...this.#semanticConfig.embeddableSchemas],
+            spaces: Object.keys(this.#semanticConfig.spaces || {}),
             vector: this.#vectorIndex ? await this.#vectorIndex.stats().catch(e => ({ ready: false, error: e.message })) : { ready: false },
-            embedder: this.#embedder ? this.#embedder.status() : { workerSpawned: false },
-            queue: this.#embeddingQueue
-                ? { pending: this.#embeddingQueue.size, draining: this.#embeddingQueue.isDraining }
-                : null,
         };
         return out;
     }
@@ -309,34 +311,23 @@ class SynapsD extends EventEmitter {
             // Dense-vector stack (best-effort: failure leaves fts-only search intact)
             if (this.#semanticConfig.enabled) {
                 try {
+                    const textSpace = this.#semanticConfig.spaces.text || { table: 'vec_text', dim: this.#semanticConfig.dim, bitmapKey: 'internal/lance/vectors' };
                     this.#vectorIndex = new VectorIndex({
                         rootPath: path.join(this.#rootPath, 'lance'),
-                        dim: this.#semanticConfig.dim,
+                        tableName: textSpace.table,
+                        dim: textSpace.dim,
+                        vectorBitmapKey: textSpace.bitmapKey,
                         bitmapIndex: this.bitmapIndex,
                     });
                     await this.#vectorIndex.initialize();
-
-                    this.#embedder = new Embedder({
-                        model: this.#semanticConfig.model,
-                        dim: this.#semanticConfig.dim,
-                        maxLength: this.#semanticConfig.maxLength,
-                        cacheDir: this.#semanticConfig.cacheDir,
-                    });
-
-                    this.#embeddingQueue = new EmbeddingQueue({
-                        embedder: this.#embedder,
-                        vectorIndex: this.#vectorIndex,
-                        documentsStore: this.documents,
-                        parseDoc: parseInitializeDocument,
-                    });
-                    this.#embeddingQueue.on('error', ({ docId, error }) => debug(`embed queue: doc ${docId}: ${error}`));
-
-                    // Resume: enqueue embeddable docs missing from the vectors bitmap.
-                    await this.#backfillVectors();
+                    this.#vectorSpaces.set('text', this.#vectorIndex);
+                    // No embedder/queue here anymore — embedding is owned by the
+                    // external embedd service, which drives ingestion off-thread and
+                    // pushes vectors back via storeDocumentEmbeddings. synapsd only
+                    // stores + searches, and reads the unembedded gap on request.
                 } catch (e) {
                     debug(`Semantic vector stack init failed (continuing fts-only): ${e.message}`);
                     this.#vectorIndex = null;
-                    this.#embeddingQueue = null;
                 }
             }
 
@@ -487,9 +478,8 @@ class SynapsD extends EventEmitter {
             this.emit(EVENTS.BEFORE_SHUTDOWN, createEvent(EVENTS.BEFORE_SHUTDOWN));
             // Close index backends
             // LanceDB uses filesystem-based storage; no explicit close needed.
-            // Tear down the embedding worker thread (and stop the queue).
-            if (this.#embeddingQueue) { this.#embeddingQueue.stop(); }
-            if (this.#embedder) { try { await this.#embedder.stop(); } catch (_) { } }
+            // No embedding worker to tear down — embedding lives in the external
+            // embedd service, which the server stops separately.
             // Close database backend
             await this.#db.close();
 
@@ -829,12 +819,9 @@ class SynapsD extends EventEmitter {
             } catch (_) { }
         }
 
-        // ── Phase 3.5: Dense vectors (async, server-embeddable docs) ─────
-        // Skipped under skipLance so bulk importers control timing; they
-        // re-drive via indexDocumentsInLance (which also enqueues).
-        if (!skipLance && reindexDocs.length > 0) {
-            this.#enqueueEmbeddable(reindexDocs.map(p => p.parsed));
-        }
+        // ── Phase 3.5: Dense vectors ─────────────────────────────────────
+        // Embedding is owned by the external embedd service, driven off the
+        // DOCUMENT_INSERTED event below — synapsd no longer enqueues here.
 
         // ── Phase 4: Events ──────────────────────────────────────────────
 
@@ -878,8 +865,6 @@ class SynapsD extends EventEmitter {
         try {
             await this.#lanceIndex.addMany(documents);
         } catch (_) { }
-        // Deferred-lance importers route embedding here too.
-        this.#enqueueEmbeddable(documents);
     }
 
     async optimizeLance() {
@@ -896,51 +881,100 @@ class SynapsD extends EventEmitter {
         return await this.#vectorIndex.ensureVectorIndex();
     }
 
-    /** Wait for the async embedding queue to drain (test/import helper). */
-    async drainEmbeddingQueue() {
-        if (this.#embeddingQueue) { await this.#embeddingQueue.drained(); }
+    /** Per-space "seen" bitmap key — docs the embedder has processed (incl. skips). */
+    #seenKey(space) { return `internal/embed/seen/${space}`; }
+
+    /**
+     * The durable embedding work-ledger: docIds that match `schemas` but have not
+     * been processed for `space` yet. gap = OR(schemas) AND-NOT seen(space).
+     * Pure bitmap read (LMDB-backed, survives restart). The external embedd
+     * service pulls this to reconcile after downtime / on demand.
+     * @param {string} space
+     * @param {string[]|null} schemas candidate schema keys (defaults to embeddableSchemas)
+     * @returns {Promise<number[]>}
+     */
+    async getUnembeddedDocIds(space = 'text', schemas = null) {
+        const cand = (Array.isArray(schemas) && schemas.length)
+            ? schemas
+            : Array.from(this.#semanticConfig.embeddableSchemas);
+        if (cand.length === 0) { return []; }
+        const set = await this.bitmapIndex.OR(normalizeBitmapKeys(cand));
+        if (!set || set.isEmpty) { return []; }
+        const seen = await this.bitmapIndex.getBitmap(this.#seenKey(space), false);
+        if (seen) { set.andNotInPlace(seen); }
+        return set.toArray();
     }
 
-    /** A JSON abstraction the server can read and embed itself (vs app-provided vectors). */
-    #isServerEmbeddable(doc) {
-        return !!doc && this.#semanticConfig.embeddableSchemas.has(doc.schema);
+    /**
+     * Wipe an embedding space for a full re-embed: drop its vectors + presence
+     * bitmap + seen ledger. After this, getUnembeddedDocIds returns everything.
+     * @param {string} space
+     */
+    async clearSpace(space = 'text') {
+        const vi = await this.#getVectorSpace(space);
+        if (!vi) { return false; }
+        // Ids currently tracked in either bitmap.
+        const seenKey = this.#seenKey(space);
+        const presenceKey = this.#semanticConfig.spaces[space]?.bitmapKey;
+        const ids = new Set();
+        for (const key of [seenKey, presenceKey]) {
+            if (!key) { continue; }
+            const bm = await this.bitmapIndex.getBitmap(key, false);
+            if (bm) { for (const id of bm.toArray()) { ids.add(id); } }
+        }
+        const idArr = [...ids];
+        if (idArr.length > 0) {
+            await vi.deleteMany(idArr);                       // rows + presence untick
+            try { await this.bitmapIndex.untickMany([seenKey], idArr); } catch (_) { }
+        }
+        return true;
     }
 
-    /** Enqueue server-embeddable docs for async vector indexing. No-op when disabled. */
-    #enqueueEmbeddable(parsedDocs) {
-        if (!this.#embeddingQueue) { return; }
-        for (const doc of parsedDocs) {
-            if (this.#isServerEmbeddable(doc)) { this.#embeddingQueue.enqueue(doc.id); }
+    /**
+     * Lazily create + initialize the VectorIndex for a named space. Returns null
+     * if the semantic stack is disabled or the space is unknown.
+     */
+    async #getVectorSpace(space) {
+        if (!this.#semanticConfig.enabled) { return null; }
+        if (this.#vectorSpaces.has(space)) { return this.#vectorSpaces.get(space); }
+        const cfg = this.#semanticConfig.spaces[space];
+        if (!cfg) { debug(`unknown vector space '${space}'`); return null; }
+        try {
+            const vi = new VectorIndex({
+                rootPath: path.join(this.#rootPath, 'lance'),
+                tableName: cfg.table,
+                dim: cfg.dim,
+                vectorBitmapKey: cfg.bitmapKey,
+                bitmapIndex: this.bitmapIndex,
+            });
+            await vi.initialize();
+            this.#vectorSpaces.set(space, vi);
+            return vi;
+        } catch (e) {
+            debug(`failed to init vector space '${space}': ${e.message}`);
+            return null;
         }
     }
 
     /**
      * Store app-provided chunk vectors for a document (the non-JSON / media path —
-     * server doesn't decode blobs, the client computes and ships vectors).
+     * server doesn't decode blobs, the embedd service computes and ships vectors).
      * @param {number} docId
      * @param {string} schema
      * @param {string} updatedAt
      * @param {{chunkId:number, text?:string, vector:number[]}[]} chunks
+     * @param {{space?:string}} [opts] target embedding space (default 'text')
      */
-    async storeDocumentEmbeddings(docId, schema, updatedAt, chunks) {
-        if (!this.#vectorIndex) { return false; }
-        await this.#vectorIndex.upsertChunks(docId, schema, updatedAt, chunks);
+    async storeDocumentEmbeddings(docId, schema, updatedAt, chunks, opts = {}) {
+        const space = opts.space || 'text';
+        const vi = await this.#getVectorSpace(space);
+        if (!vi) { return false; }
+        // upsertChunks ticks the presence bitmap when chunks>0 (unticks otherwise).
+        await vi.upsertChunks(docId, schema, updatedAt, chunks);
+        // Always mark the doc as processed in the ledger — even a deliberate skip
+        // (0 chunks) must leave the unembedded gap, or reconcile re-fetches it forever.
+        try { await this.bitmapIndex.tick(this.#seenKey(space), Number(docId)); } catch (_) { }
         return true;
-    }
-
-    /** Enqueue embeddable docs absent from the vectors bitmap (startup resume). */
-    async #backfillVectors() {
-        const schemas = Array.from(this.#semanticConfig.embeddableSchemas);
-        if (schemas.length === 0) { return; }
-        const embeddable = await this.bitmapIndex.OR(normalizeBitmapKeys(schemas));
-        if (!embeddable || embeddable.isEmpty) { return; }
-        const done = await this.bitmapIndex.getBitmap('internal/lance/vectors', false);
-        if (done) { embeddable.andNotInPlace(done); }
-        const ids = embeddable.toArray();
-        if (ids.length > 0) {
-            debug(`vector backfill: enqueuing ${ids.length} unembedded docs`);
-            this.#embeddingQueue.enqueueMany(ids);
-        }
     }
 
     /**
@@ -1363,10 +1397,12 @@ class SynapsD extends EventEmitter {
             lanceClean = false;
             debug(`deleteMany: Lance deleteMany failed: ${e.message}`);
         }
-        if (this.#vectorIndex) {
+        if (this.#vectorSpaces.size > 0) {
             try {
-                const vecClean = await this.#vectorIndex.deleteMany(deletedIds);
-                lanceClean = lanceClean && vecClean;
+                for (const vi of this.#vectorSpaces.values()) {
+                    const vecClean = await vi.deleteMany(deletedIds);
+                    lanceClean = lanceClean && vecClean;
+                }
             } catch (e) {
                 lanceClean = false;
                 debug(`deleteMany: Vector deleteMany failed: ${e.message}`);
@@ -1516,7 +1552,6 @@ class SynapsD extends EventEmitter {
 
         // Best-effort Lance upsert
         try { await this.#lanceIndex.upsert(parseInitializeDocument(parsedDocument)); } catch (_) { }
-        this.#enqueueEmbeddable([parsedDocument]);
 
         if (emitEvent) {
             const { tree: contextTree } = this.#resolveTreeSelection('context', contextSpec, '/');
@@ -1917,7 +1952,9 @@ class SynapsD extends EventEmitter {
         if (mode === 'vector' || mode === 'hybrid') {
             let queryVector = null;
             try {
-                queryVector = await this.#embedder.embedQuery(queryString);
+                // Query embedding is injected (embedd service); absent → FTS fallback.
+                const embedQuery = this.#semanticConfig.embedQuery;
+                queryVector = embedQuery ? await embedQuery(queryString, 'text') : null;
             } catch (e) {
                 debug(`rank: query embedding failed (${e.message}); falling back to fts`);
             }
@@ -2165,8 +2202,12 @@ class SynapsD extends EventEmitter {
             } catch (e) {
                 debug(`put/update: Lance upsert failed for ${updatedDocument.id}: ${e.message}`);
             }
-            // Content changed → re-embed (queue is idempotent; replaces chunks).
-            this.#enqueueEmbeddable([updatedDocument]);
+            // Content changed → the doc must be re-embedded. The external embedd
+            // service reacts to DOCUMENT_UPDATED; here we drop it from the seen
+            // ledger so a reconcile re-embeds it even if the live event is missed.
+            for (const space of this.#vectorSpaces.keys()) {
+                try { await this.bitmapIndex.untick(this.#seenKey(space), Number(updatedDocument.id)); } catch (_) { }
+            }
 
             return updatedDocument.id;
         } catch (error) {
@@ -2325,10 +2366,12 @@ class SynapsD extends EventEmitter {
                 lanceClean = false;
                 debug(`delete: Lance delete failed for ${docId}: ${e.message}`);
             }
-            if (this.#vectorIndex) {
+            if (this.#vectorSpaces.size > 0) {
                 try {
-                    const vecClean = await this.#vectorIndex.deleteDoc(docId);
-                    lanceClean = lanceClean && vecClean;
+                    for (const vi of this.#vectorSpaces.values()) {
+                        const vecClean = await vi.deleteDoc(docId);
+                        lanceClean = lanceClean && vecClean;
+                    }
                 } catch (e) {
                     lanceClean = false;
                     debug(`delete: Vector delete failed for ${docId}: ${e.message}`);
@@ -3643,35 +3686,27 @@ class SynapsD extends EventEmitter {
     }
 
     /**
-     * Enqueue every embeddable document missing a dense vector for (re)embedding.
-     * Embeddable = schema in `semantic.embeddableSchemas` (default
-     * `['data/abstraction/note']`; tabs/files are NOT embedded). Idempotent: docs
-     * already in the `internal/lance/vectors` coverage bitmap are skipped.
+     * Report the embedding work-ledger for a space (docs missing embeddings).
+     * synapsd no longer runs a model or a queue — the external embedd service
+     * pulls this gap and drains it. Kept for the admin/reindex route, which now
+     * hands the ids to embedd (or clears the space first for a full re-embed).
      *
-     * ASYNC: this only ENQUEUES. The EmbeddingQueue drains off the main thread
-     * (model inference per doc), so embedding completes in the background. Poll
-     * progress via `getStats().semantic.queue` / `.vector`, or `drainEmbeddingQueue()`.
-     *
-     * @returns {Promise<{ enqueued, totalEmbeddable, queued, embeddableSchemas }>}
+     * @param {{space?:string, schemas?:string[]}} [opts]
+     * @returns {Promise<{ space, unembedded:number[], totalEmbeddable, embeddableSchemas }>}
      */
-    async reindexEmbeddings() {
+    async reindexEmbeddings(opts = {}) {
         if (!this.isRunning()) { throw new Error('Database is not running'); }
-        if (!this.#vectorIndex || !this.#embeddingQueue) {
-            throw new Error('Dense vector stack not available (semantic disabled or not ready)');
+        if (!this.#vectorIndex) {
+            throw new Error('Dense vector store not available (semantic disabled or not ready)');
         }
-        const embeddableSchemas = Array.from(this.#semanticConfig.embeddableSchemas);
-        if (embeddableSchemas.length === 0) {
-            return { enqueued: 0, totalEmbeddable: 0, queued: this.#embeddingQueue.size, embeddableSchemas };
-        }
-        const embeddable = await this.bitmapIndex.OR(normalizeBitmapKeys(embeddableSchemas));
-        const totalEmbeddable = embeddable ? embeddable.size : 0;
-        if (embeddable && !embeddable.isEmpty) {
-            const done = await this.bitmapIndex.getBitmap('internal/lance/vectors', false);
-            if (done) { embeddable.andNotInPlace(done); }
-        }
-        const ids = embeddable ? embeddable.toArray() : [];
-        if (ids.length > 0) { this.#embeddingQueue.enqueueMany(ids); }
-        return { enqueued: ids.length, totalEmbeddable, queued: this.#embeddingQueue.size, embeddableSchemas };
+        const space = opts.space || 'text';
+        const embeddableSchemas = (Array.isArray(opts.schemas) && opts.schemas.length)
+            ? opts.schemas
+            : Array.from(this.#semanticConfig.embeddableSchemas);
+        const all = await this.bitmapIndex.OR(normalizeBitmapKeys(embeddableSchemas));
+        const totalEmbeddable = all ? all.size : 0;
+        const unembedded = await this.getUnembeddedDocIds(space, embeddableSchemas);
+        return { space, unembedded, totalEmbeddable, embeddableSchemas };
     }
 
     clearSync() {
