@@ -1501,9 +1501,9 @@ class SynapsD extends EventEmitter {
         if (this.#isDocumentOperationOptions(contextSpec)) {
             const opts = contextSpec;
             // Preserve an explicit null context (consistent with #updateOne /
-            // putMany / link): a directory-only insert into /.incoming should NOT
+            // putMany / link): a directory-only insert into /.backends should NOT
             // tick the context root — see #resolveDocumentMembershipKeys, which
-            // skips root for incoming directory paths when contextSpec is falsy.
+            // skips root for backends directory paths when contextSpec is falsy.
             contextSpec = opts.context ?? null;
             directorySpec = opts.directory ?? null;
             featureBitmapArray = opts.features ?? featureBitmapArray;
@@ -2739,7 +2739,7 @@ class SynapsD extends EventEmitter {
             await this.createTree('default', 'context', { isDefault: true });
         }
         if ((await this.listTrees('directory')).length === 0) {
-            await this.createTree('incoming', 'directory', { isDefault: true });
+            await this.createTree('directory', 'directory', { isDefault: true });
         }
 
         if (!this.#defaultTreeIds.context) {
@@ -3265,7 +3265,7 @@ class SynapsD extends EventEmitter {
             const collection = this.#directoryBitmapCollectionForTree(directoryTree.id);
             allSynapseKeys.push(...nodeIds.map((nodeId) => collection.makeKey(nodeId)));
 
-            if (!contextSpec && dirs.some((dirPath) => !this.#isIncomingDirectoryPath(dirPath))) {
+            if (!contextSpec && dirs.some((dirPath) => !this.#isBackendsDirectoryPath(dirPath))) {
                 const contextTree = this.getDefaultContextTree();
                 if (contextTree?.rootLayer) {
                     const collection = this.#contextBitmapCollectionForTree(contextTree.id);
@@ -3549,9 +3549,12 @@ class SynapsD extends EventEmitter {
         return featureBitmap || new RoaringBitmap32();
     }
 
-    #isIncomingDirectoryPath(path) {
+    #isBackendsDirectoryPath(path) {
         const normalized = String(path || '/').trim().replace(/\/+/g, '/').replace(/\/$/, '') || '/';
-        return normalized === '/.incoming' || normalized.startsWith('/.incoming/');
+        // Legacy '/.incoming' matched too: writers racing the Workspace-level
+        // drop+resync migration must never leak backend docs into context root.
+        return normalized === '/.backends' || normalized.startsWith('/.backends/')
+            || normalized === '/.incoming' || normalized.startsWith('/.incoming/');
     }
 
     async #buildAllDocumentsBitmap() {
