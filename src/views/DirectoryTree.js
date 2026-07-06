@@ -12,10 +12,10 @@ const debug = debugInstance('canvas:synapsd:directory-tree');
 
 const ROOT_NODE_ID = 'root';
 const INHERITED_LOCK_METADATA_KEY = 'inheritedLocks';
-// `system:*` locks (e.g. system:incoming) protect a SINGLE node from structural
-// ops (remove/rename/move) — they are NOT subtree locks and must not cascade to
-// children. Without this, every backend-ingested subfolder under /.incoming
-// inherited the root lock and could never be deleted.
+// `system:*` locks (e.g. system:backends, system:backend:<name>) protect a
+// SINGLE node from structural ops (remove/rename/move) — they are NOT subtree
+// locks and must not cascade to children. Without this, every backend-ingested
+// subfolder under /.backends inherited the root lock and could never be deleted.
 const SYSTEM_LOCK_PREFIX = 'system:';
 const isSystemLock = (lock) => String(lock).startsWith(SYSTEM_LOCK_PREFIX);
 
@@ -708,7 +708,7 @@ class DirectoryTree extends EventEmitter {
             .trim()
             .replace(/[\\/]/g, '_')
             .replace(/\s+/g, ' ')
-            .replace(/[^\p{L}\p{N}\p{M} .+_@-]/gu, '_')
+            .replace(/[^\p{L}\p{N}\p{M} .+_@:-]/gu, '_')
             .replace(/_+/g, '_');
         return sanitized || '_';
     }

@@ -1,8 +1,42 @@
 # SynapsD
 
-The v3 surface mixes structural consolidation with net-new capabilities. g: glob and groupBy:'timeline' don't exist yet (glob/regexp filters currently throw, per query-and-membership.test.js:123-128), while the parser/seam/t: grammar/write-signature work is pure consolidation. How do you want cut #1 scoped?
+## Proper synapse support + schema refactor
+
+(partially implemented, needs to be extended)
+
+### L0 "storage" centric
+Resources, where the physical bits of the full objects are stored and can be retrieved from
+data/resource/blob or file or url/uri? - points to a local or remote resource (immutable)
+data/resource/referene - points to a external source(db, s3)
+
+### L1 Semantics 
+data/entity/file ? (blob)
+data/entity/document (JSON doc)
+data/entity/message
+data/entity/event (type: calendar, alert, activity)
+data/entity/task
+data/entity/identity (type: person, organization, service, bot)
+data/entity/device
+data/entity/application
+data/entity/dotfile
+? data/entity/organization
+
+### L2 Relations (would require some cleanup)
+data/relation/references
+data/relation/authored-by
+data/relation/mentions
+data/relation/replies-to
+data/relation/generated-from
+data/relation/executed-on
+data/relation/installed-on
+
+### L3 Semantic anchors
+Specially generated semantic anchors/chunks and summaries with several sub-layers (more on that later)
+Hierarchical semantic tree(s) on top of semantic layers
 
 
+## Spatial GeoIndex(s2?)
+- A lossy spatial index to be built on top of geoindex in the synapsd semantic layer
 
 ## Semantic layer
 
@@ -52,12 +86,6 @@ spec = {
 Buckets intersect (paths AND features AND filters AND match); items within a bucket union. Per item: default is `anyOf` (OR), `+` promotes to required (`allOf`), `!` excludes (`noneOf`). Pipeline order is fixed: tree-path bitmaps, then feature bitmaps, then filters (BSI timelines, glob, regexp), then semantic (vector) on the surviving subset only.
 
 ### API consolidation
-- [x] Public read surface is just `list()` + `query(match, spec)`. `list(spec)` == `query(null, spec)`, kept for back-compat / simple UX (`list` index.js:1694). Collapse `search` into `query` (`search` index.js:1838). `recall` (anchor planning, index.js:585) is deferred to the Session feature.
-- [x] One spec parser: each bucket accepts level-1 sigil strings (`+`/`!`) and level-2 `{allOf, anyOf, noneOf}`; compile sigils into the object form. Replaces the alias sprawl in `#normalizeQuerySpec` (index.js:3096).
-- [x] Fold exclusion into the path grammar (`!ctx:/path`); delete the six `excludeTree*`/`excludeContext*` aliases (index.js:3111-3149).
-- [x] Split match inputs `{ text?, image? }` from `mode` (`fts|vector|hybrid`); kill the `query`/`search`/`q` and `fts`-vs-`text` key conflation (index.js:1843, index.js:1860).
-- [x] Move `put`/`putMany`/`link`/`linkMany` to `(document, spec)` with `spec = { paths, features }` only, no filters/match on writes. Currently positional `(document, treeSelector, features, options)` (index.js:568, 589, 618, 1064).
-- [x] Tree paths as `ctx:/a/b` and `dir:/a/b` (prefix = tree id); drop the `context://` / `directory://` URL form.
 - [ ] Filter prefix registry (`t:` temporal, `g:` glob, `re:` regexp) with the same sigil algebra as paths/features; see "Filter grammar" below. *(`t:` shipped; `g:`/`re:` parse-time throw, deferred to db schema refactor.)*
 
 ### Filter grammar (`t:` temporal, `g:` glob, `re:` regexp)
@@ -124,14 +152,6 @@ query(
 ### Perf & storage
 - [ ] Audit `#buildAllDocumentsBitmap()` callers (`noneOf`-only features, `excludeTree`, `excludeContext`, root-source): each is a full scan, short-circuit when the positive set is already bounded (index.js:3412). *(deferred: needs design.)*
 - [ ] Lift `indexOptions` (esp. `embeddingOptions`) out of per-document `toJSON()` to schema level: GBs of identical config across 7M rows. *(deferred: per-abstraction config, not per-doc storage; needs design + back-compat sign-off.)*
-
-### Docs & rollout
-- [x] Document the v3 API in `src/services/synapsd/README.md`: spec buckets, sigil algebra, filter grammar (`t:`/`g:`/`re:`), multi-timeline overlay, and `groupBy:'timeline'`.
-- [x] Refactor is its own session. Update the two main consumers of the query surface: `src/core/workspace/Workspace.js` (direct db caller) and `src/core/workspace/lib/WorkspaceStoredIndex.js`; `src/core/context/lib/Context.js` rides on top via `workspace.list/search` (Context.js:1243).
-
-### Release
-- [x] Major version bump in `package.json` (currently `2.1.1`).
-
 
 ## Session support
 
@@ -200,107 +220,6 @@ The dividing line is whether real-time streaming is supported out of the box. Tw
 - zoom aggregates / centroids on nodes
 - anchor/quantizer operand sources (a spec's operand can later come from band-bitmaps instead of paths/features - the container doesn't change)
 
-
-----
-
-L0 would then be "storage" centric - eg resources, where the physical bit of the full objects are stored and can be retrieved from
-data/resource/blob or file or url/uri? - points to a local or remote resource (immutable)
-data/resource/referene - points to a external source(db, s3)
-
-L1 Semantics 
-data/entity/file ? (blob)
-data/entity/document (JSON doc)
-data/entity/message
-data/entity/event (type: calendar, alert, activity)
-data/entity/task
-data/entity/identity (type: person, organization, service, bot)
-data/entity/device
-data/entity/application
-data/entity/dotfile
-
-data/entity/organization
-
-L2 Relations (would require some cleanup)
-data/relation/references
-data/relation/authored-by
-data/relation/mentions
-data/relation/replies-to
-data/relation/generated-from
-data/relation/executed-on
-data/relation/installed-on
-
-L3 will be specially generated semantic anchors/chunks and summaries with several sub-layers (more on that later)
-
-## Rand
-
-- multi-model support for vec_text but with the new arch this is not on the table
-
-## High level architecture
-
-Retrieval
-- bitmaps
-  - context
-  - filter
-    - timelines
-  - feature
-- glob/regex
-- primitive vector based sim-search
-- bm25?
-
-- Hierarchical vector index
-
-
-### Layer 1: JSON Store
-
-- LMDB KV backend levaraging LMDB datasets for documents, all indexes(inverted, roaring), high level abstractions(layers/tree nodes and internal structures)
-- Values are always schema-validated JSON documents or BLOBs(roaring bitmaps) with content(data) and/or location URLs pointint to non-local data
-
-### Layer 2: Indexes
-
-- Bitmap (roaring bitmaps)
-- Inverted
-  - Checksums
-  - Synapses (nested bitmaps, to be replaced eventually)
-- Bit-sliced indexes (current timeline implementation)
-  - Reference: https://www.pilosa.com/docs/architecture/#bsi-range-encoding
-- Vector (LanceDB)
-
-### Layer 3: Semantic projection
-
-There are couple of (experimental, not production/battle-tested) premises this engine is built on 
-- That we won't go into right now :) 
-
-Easiest implementation for "semantic" recall is our timeline module `src/indexes/inverted/Timeline.js` which is fairly easy to use in agentic scenarios without much needed on the db level.
-
-We already map:
-
-- **`now`** - Documents matching the current hour
-- **`today`** - Documents from today
-- **`yesterday`** - Documents from yesterday
-- **`tomorrow`** - Documents from tomorrow
-- **`lastWeek`** - Documents from last week
-- **`thisWeek`** - Documents from this week
-- **`nextWeek`** - Documents from next week
-- **`lastMonth`** - Documents from last month
-- **`thisMonth`** - Documents from this month
-- **`nextMonth`** - Documents from next month
-- **`lastYear`** - Documents from last year
-- **`thisYear`** - Documents from this year
-- **`nextYear`** - Documents from next year
-- **`lastDecade`**, **`thisDecade`**, **`nextDecade`**
-- **`lastCentury`**, **`thisCentury`**, **`nextCentury`**
-- **`lastMillennium`**, **`thisMillennium`**, **`nextMillennium`**
-
-## Views
-
-### Trees
-
-- `contextTree`
-- `directoryTree`
-
-### Buckets
-
-### Timelines
 
 ## TODO
 
