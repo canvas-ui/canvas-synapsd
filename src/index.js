@@ -840,10 +840,19 @@ class SynapsD extends EventEmitter {
         const updatedIds = prepared.filter(p => p.isUpdate).map(p => p.parsed.id);
 
         if (insertedIds.length > 0) {
+            // Singular event with `batch: true` kept for pre-batch consumers
+            // (ws bridge, embedd enqueue); the .batch event is the canonical
+            // one for batch-aware consumers (workspace hooks).
             this.emit(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, {
                 ids: insertedIds,
                 count: insertedIds.length,
                 batch: true,
+                context: contextSpec,
+                directory: directorySpec,
+            }));
+            this.emit(EVENTS.DOCUMENT_INSERTED_BATCH, createEvent(EVENTS.DOCUMENT_INSERTED_BATCH, {
+                ids: insertedIds,
+                count: insertedIds.length,
                 context: contextSpec,
                 directory: directorySpec,
             }));
@@ -853,6 +862,12 @@ class SynapsD extends EventEmitter {
                 ids: updatedIds,
                 count: updatedIds.length,
                 batch: true,
+            }));
+            this.emit(EVENTS.DOCUMENT_UPDATED_BATCH, createEvent(EVENTS.DOCUMENT_UPDATED_BATCH, {
+                ids: updatedIds,
+                count: updatedIds.length,
+                context: contextSpec,
+                directory: directorySpec,
             }));
         }
 
