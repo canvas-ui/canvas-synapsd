@@ -134,6 +134,9 @@ export function parseSpec(rawSpec = {}) {
         filters: parseFilters(rawSpec),
         options: {
             mode: (pick('mode') || 'hybrid').toLowerCase(),
+            // Listing order (no-match path only): 'asc' (id/insertion order,
+            // default) or 'desc' (newest ids first).
+            order: (String(pick('order') || 'asc').toLowerCase() === 'desc') ? 'desc' : 'asc',
             limit: pick('limit'),
             offset: pick('offset'),
             page: pick('page'),

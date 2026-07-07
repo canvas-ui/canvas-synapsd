@@ -22,11 +22,15 @@ export function normalizeBitmapKey(key) {
 
     const isNegated = key.startsWith('!');
     const rawKey = isNegated ? key.slice(1) : key;
+    // Allowed charset: a-z 0-9 _ - . / @ : — '@' and ':' are kept so backend
+    // addresses stay readable (data/backend/imap/user@domain.tld,
+    // data/backend/workspace:home). '!' (negation), '/' (hierarchy/range
+    // scans) and whitespace stay reserved.
     const normalized = rawKey
         .replace(/\\/g, '/')
         .replace(/\s+/g, '_')
         .toLowerCase()
-        .replace(/[^a-z0-9_\-./]/g, '_')
+        .replace(/[^a-z0-9_\-./@:]/g, '_')
         .replace(/_+/g, '_')
         .replace(/\/+/g, '/');
 
