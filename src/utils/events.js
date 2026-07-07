@@ -19,8 +19,12 @@ const EVENTS = Object.freeze({
     DOCUMENT_UPDATED:  'document.updated',
     DOCUMENT_REMOVED:  'document.removed',
     DOCUMENT_DELETED:  'document.deleted',
-    // Batch variants: a single event for a bulk op (purge / bulk remove) so a
-    // 1000-doc operation does not fan out into 1000 socket emits.
+    // Batch variants: a single event for a bulk op (batch insert / purge /
+    // bulk remove) so a 1000-doc operation does not fan out into 1000 socket
+    // emits. Insert/update batches ALSO emit the singular event once with
+    // `{ ids, batch: true }` for consumers that predate the batch names.
+    DOCUMENT_INSERTED_BATCH: 'document.inserted.batch',
+    DOCUMENT_UPDATED_BATCH: 'document.updated.batch',
     DOCUMENT_REMOVED_BATCH: 'document.removed.batch',
     DOCUMENT_DELETED_BATCH: 'document.deleted.batch',
     // Low-level bitmap-membership change, emitted post-commit with the exact
