@@ -195,6 +195,22 @@ class BitmapIndex {
         return bitmap;
     }
 
+    // One-time key migration: OR the legacy bitmap into the canonical key and
+    // delete the legacy one (used when the allowed key charset widens, e.g.
+    // '@'/':' — data/backend/imap/user_domain.tld → .../user@domain.tld).
+    // No-op when the keys normalize identically or the legacy bitmap does not
+    // exist. Returns true when a merge happened.
+    async migrateKey(legacyKey, canonicalKey) {
+        const from = BitmapIndex.normalizeKey(legacyKey);
+        const to = BitmapIndex.normalizeKey(canonicalKey);
+        if (!from || !to || from === to) { return false; }
+        if (!this.hasBitmap(from)) { return false; }
+        await this.applyToMany(from, [to]);
+        await this.deleteBitmap(from);
+        debug(`Migrated bitmap key "${from}" -> "${to}"`);
+        return true;
+    }
+
     async deleteBitmap(key) {
         BitmapIndex.validateKey(key);
         key = BitmapIndex.normalizeKey(key);

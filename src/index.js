@@ -1910,12 +1910,15 @@ class SynapsD extends EventEmitter {
             // Bounded by default; limit:0 is the explicit "all documents" opt-in.
             const limit = providedLimit !== undefined ? Math.max(0, providedLimit) : DEFAULT_LIST_LIMIT;
             const offset = Math.max(0, providedOffset !== undefined ? providedOffset : (providedPage && providedPage > 0 ? (providedPage - 1) * (limit || 100) : 0));
+            // 'desc' = newest ids first (ids are allocated in insertion order;
+            // GC id-reuse makes this approximate for reused ids).
+            const descending = options.order === 'desc';
 
             if (bitmap === null) {
                 const totalCount = await this.documents.getCount();
                 const pagedDocs = [];
                 let seen = 0;
-                for await (const { value } of this.documents.getRange()) {
+                for await (const { value } of this.documents.getRange({ reverse: descending })) {
                     if (seen++ < offset) { continue; }
                     pagedDocs.push(value);
                     if (limit > 0 && pagedDocs.length >= limit) { break; }
@@ -1929,6 +1932,7 @@ class SynapsD extends EventEmitter {
 
             const ids = bitmap.toArray();
             if (ids.length === 0) { return this.#emptyResult(); }
+            if (descending) { ids.reverse(); }
             const totalCount = ids.length;
             const slicedIds = limit === 0 ? ids : ids.slice(offset, offset + limit);
             const docs = await this.documents.getMany(slicedIds);
@@ -3149,6 +3153,16 @@ class SynapsD extends EventEmitter {
         if (migrated > 0) {
             debug(`Bitmap key migration: renamed ${migrated} bitmap(s) to new format`);
         }
+    }
+
+    /**
+     * Merge a legacy bitmap key into its canonical form (OR + delete legacy).
+     * For callers that know a key's true spelling after the allowed charset
+     * widened ('@'/':' used to squash to '_'). Idempotent; returns true when
+     * a merge happened.
+     */
+    async migrateBitmapKey(legacyKey, canonicalKey) {
+        return this.bitmapIndex.migrateKey(legacyKey, canonicalKey);
     }
 
     /**
