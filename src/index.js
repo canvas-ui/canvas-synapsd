@@ -3551,10 +3551,7 @@ class SynapsD extends EventEmitter {
 
     #isBackendsDirectoryPath(path) {
         const normalized = String(path || '/').trim().replace(/\/+/g, '/').replace(/\/$/, '') || '/';
-        // Legacy '/.incoming' matched too: writers racing the Workspace-level
-        // drop+resync migration must never leak backend docs into context root.
-        return normalized === '/.backends' || normalized.startsWith('/.backends/')
-            || normalized === '/.incoming' || normalized.startsWith('/.incoming/');
+        return normalized === '/.backends' || normalized.startsWith('/.backends/');
     }
 
     async #buildAllDocumentsBitmap() {
