@@ -101,6 +101,12 @@ const documentSchema = z.object({
     // Document data/payload
     data: z.record(z.any()),
 
+    // Optional, user-authored free-text note ("sofa from the cozmo bar in Košice").
+    // Top-level (not under data) so it survives every per-schema migration/re-index
+    // unconditionally, stays out of checksumFields (no dedup/re-embed churn on edit),
+    // and is the one text class that can never be regenerated — user-editable only.
+    comment: z.string().optional(),
+
     // Locations: addressable copies of the data content. Each entry is
     // { url, metadata? }; the URL authority encodes the device (file://<deviceId>/…)
     // for device-local detection/preference.
@@ -180,6 +186,9 @@ class BaseDocument {
 
         // Document data/payload
         this.data = options.data ?? {};
+
+        // User-authored free-text comment (see documentSchema). Empty string = none.
+        this.comment = typeof options.comment === 'string' ? options.comment : '';
 
         // Locations: canonical source-of-truth for where the data lives ({ url, metadata? }).
         this.locations = Array.isArray(options.locations) ? options.locations : [];
@@ -268,6 +277,13 @@ class BaseDocument {
         if (data.data) {
             this.data = data.data;
             dataUpdated = true;
+        }
+
+        // Update the user-authored comment if provided. Deliberately outside the
+        // dataUpdated path — a comment edit must not regenerate checksums (no dedup
+        // churn / no content re-embed). Empty string clears it.
+        if (data.comment !== undefined) {
+            this.comment = typeof data.comment === 'string' ? data.comment : '';
         }
 
         // Update locations if provided
@@ -441,15 +457,17 @@ class BaseDocument {
      */
     generateFtsData() {
         try {
-            if (!this.indexOptions?.ftsSearchFields?.length) {return null;}
-
-            // Extract specified fields
-            const fieldValues = this.indexOptions.ftsSearchFields
+            // Extract specified fields (ftsSearchFields may be empty for blob docs)
+            const fieldValues = (this.indexOptions?.ftsSearchFields || [])
                 .map((field) => {
                     const value = this.getNestedValue(this, field);
                     return value ? String(value).trim() : null;
                 })
                 .filter(Boolean);  // Remove null/empty values
+
+            // Always FTS the user-authored comment — even when a doc declares no
+            // ftsSearchFields (photos/files), so its comment alone makes it searchable.
+            if (this.hasComment) { fieldValues.push(this.comment.trim()); }
 
             return fieldValues.length > 0 ? fieldValues : null;
         } catch (error) {
@@ -540,12 +558,18 @@ class BaseDocument {
         return this.locations.map((l) => l.url).join(' ');
     }
 
+    /** True when the doc carries a non-empty user-authored comment. */
+    get hasComment() {
+        return typeof this.comment === 'string' && this.comment.trim().length > 0;
+    }
+
     toJSON() {
         return {
             id: this.id,
             schema: this.schema,
             schemaVersion: this.schemaVersion,
             data: this.data,
+            comment: this.comment,
             locations: this.locations,
             timelines: this.timelines,
             metadata: this.metadata,

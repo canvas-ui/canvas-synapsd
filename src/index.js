@@ -61,6 +61,11 @@ const DEFAULT_LIST_LIMIT = 100;
 const SCHEMA_VERSION = 1;
 const SCHEMA_VERSION_KEY = 'internal/schemaVersion';
 
+// Presence bitmap for docs carrying a non-empty user-authored comment. A `feature/`
+// key so it is non-internal (listed + user-filterable in the toolbox). Ticked/unticked
+// from doc state on every write, so it is derived and can never drift.
+const COMMENT_BITMAP_KEY = 'feature/has-comment';
+
 // Union extra locations into a document by url (used by in-batch content dedup,
 // where two identical blobs carry different file:// locations). Mutates target.
 function mergeDocumentLocations(target, extraLocations) {
@@ -778,6 +783,7 @@ class SynapsD extends EventEmitter {
                     if (existing) {
                         await this.#removeStaleDeviceMembership(parsed.id, prevLocations || [], parsed.locations, docFeatures);
                     }
+                    await this.#applyMembership(parsed.hasComment ? 'tick' : 'untick', parsed.id, [COMMENT_BITMAP_KEY]);
                 }
             });
 
@@ -916,8 +922,12 @@ class SynapsD extends EventEmitter {
         const cand = (Array.isArray(schemas) && schemas.length)
             ? schemas
             : Array.from(this.#semanticConfig.embeddableSchemas);
-        if (cand.length === 0) { return []; }
-        const set = await this.bitmapIndex.OR(normalizeBitmapKeys(cand));
+        // The user-authored comment always embeds into the text space, so any doc
+        // carrying one belongs in the text gap even when its schema is not otherwise
+        // embeddable (photos, files, tabs). hasComment AND-NOT seen = lazy-embed queue.
+        const keys = space === 'text' ? [...cand, COMMENT_BITMAP_KEY] : cand;
+        if (keys.length === 0) { return []; }
+        const set = await this.bitmapIndex.OR(normalizeBitmapKeys(keys));
         if (!set || set.isEmpty) { return []; }
         const seen = await this.bitmapIndex.getBitmap(this.#seenKey(space), false);
         if (seen) { set.andNotInPlace(seen); }
@@ -978,6 +988,9 @@ class SynapsD extends EventEmitter {
     /**
      * Store app-provided chunk vectors for a document (the non-JSON / media path —
      * server doesn't decode blobs, the embedd service computes and ships vectors).
+     * Content chunks use ordinal chunkIds (0..N). chunkId -1 is RESERVED for the
+     * doc's user-authored comment chunk (embedd's COMMENT_CHUNK_ID), so it never
+     * collides with content ordinals and keeps provenance at the vector layer.
      * @param {number} docId
      * @param {string} schema
      * @param {string} updatedAt
@@ -1569,6 +1582,7 @@ class SynapsD extends EventEmitter {
                 if (storedDocument) {
                     await this.#removeStaleDeviceMembership(parsedDocument.id, storedDocument.locations, parsedDocument.locations, featureBitmaps);
                 }
+                await this.#applyMembership(parsedDocument.hasComment ? 'tick' : 'untick', parsedDocument.id, [COMMENT_BITMAP_KEY]);
             });
         } catch (error) {
             throw new Error('Error inserting document atomically: ' + error.message);
@@ -2235,6 +2249,8 @@ class SynapsD extends EventEmitter {
                 // Index across all views using shared helper
                 await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
                 await this.#removeStaleDeviceMembership(updatedDocument.id, previousLocations, updatedDocument.locations, featureBitmaps);
+                // Presence bitmap tracks comment state; untick when cleared on this edit.
+                await this.#applyMembership(updatedDocument.hasComment ? 'tick' : 'untick', updatedDocument.id, [COMMENT_BITMAP_KEY]);
             });
 
             this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument, ...(provenance || {}) }));
