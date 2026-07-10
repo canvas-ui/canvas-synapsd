@@ -647,6 +647,7 @@ class SynapsD extends EventEmitter {
                 let isUpdate = false;
                 let prevChecksums = null;
                 let prevLocations = null;
+                let prevComment = null;
                 let prevTimelineState = null;
 
                 // Dedup priority: a supplied id that exists is an UPDATE — the id
@@ -667,6 +668,7 @@ class SynapsD extends EventEmitter {
                         // so stale checksums/timelines/device tags can be cleaned.
                         prevChecksums = Array.isArray(existing.checksumArray) ? [...existing.checksumArray] : [];
                         prevLocations = Array.isArray(existing.locations) ? [...existing.locations] : [];
+                        prevComment = typeof existing.comment === 'string' ? existing.comment : '';
                         prevTimelineState = {
                             timelines: Array.isArray(existing.timelines)
                                 ? existing.timelines.map(entry => ({ ...entry }))
@@ -694,6 +696,7 @@ class SynapsD extends EventEmitter {
                         if (existing.updatedAt) { parsed.updatedAt = existing.updatedAt; }
                         prevChecksums = Array.isArray(existing.checksumArray) ? [...existing.checksumArray] : [];
                         prevLocations = Array.isArray(existing.locations) ? [...existing.locations] : [];
+                        prevComment = typeof existing.comment === 'string' ? existing.comment : '';
                         prevTimelineState = {
                             timelines: Array.isArray(existing.timelines)
                                 ? existing.timelines.map(entry => ({ ...entry }))
@@ -721,7 +724,7 @@ class SynapsD extends EventEmitter {
                     docFeatures.push(parsed.schema);
                 }
 
-                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, docFeatures };
+                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevTimelineState, docFeatures };
                 prepared.push(entry);
                 if (!isUpdate) {
                     const primaryChecksum = parsed.getPrimaryChecksum();
@@ -802,6 +805,9 @@ class SynapsD extends EventEmitter {
         // decides the folder").
         const isContentChanged = (p) => {
             if (!p.existing) { return true; }
+            // A comment-only edit leaves the checksum untouched but changes FTS text
+            // (generateFtsData always includes the comment), so it must reindex too.
+            if ((p.prevComment ?? '') !== (typeof p.parsed.comment === 'string' ? p.parsed.comment : '')) { return true; }
             const prev = p.prevChecksums;
             if (!Array.isArray(prev)) { return true; }
             const cur = p.parsed.checksumArray || [];
