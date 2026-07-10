@@ -1,5 +1,7 @@
 'use strict';
 
+import crypto from 'crypto';
+
 /**
  * Canonical event names for SynapsD.
  *
@@ -19,6 +21,12 @@ const EVENTS = Object.freeze({
     DOCUMENT_UPDATED:  'document.updated',
     DOCUMENT_REMOVED:  'document.removed',
     DOCUMENT_DELETED:  'document.deleted',
+    // Membership changes as first-class events. link/unlink ALSO emit
+    // document.updated / document.removed (membership-only payloads) for
+    // consumers that predate these names; linked/unlinked carry the full
+    // document so automation (workspace hooks/rules) can match on content.
+    DOCUMENT_LINKED:   'document.linked',
+    DOCUMENT_UNLINKED: 'document.unlinked',
     // Batch variants: a single event for a bulk op (batch insert / purge /
     // bulk remove) so a 1000-doc operation does not fan out into 1000 socket
     // emits. Insert/update batches ALSO emit the singular event once with
@@ -77,8 +85,12 @@ const EVENTS = Object.freeze({
  * Shape:
  *   {
  *     event:     string,   // canonical event name
+ *     eventId:   string,   // unique per emit — idempotency/provenance key
  *     source:    string,   // originator: 'db' | 'tree' | caller-provided
  *     timestamp: string,   // ISO 8601
+ *     origin:    string,   // provenance: 'user' | 'hook' | 'rule' | 'agent' | 'backfill' | 'replay'
+ *     causedBy:  ?string,  // eventId of the event whose automation caused this write
+ *     depth:     number,   // automation cascade depth (0 = direct user/system write)
  *     treeId:    ?string,  // present on tree-scoped events
  *     treeName:  ?string,
  *     treeType:  ?string,
@@ -88,8 +100,12 @@ const EVENTS = Object.freeze({
 class SynapsDEvent {
     constructor(event, detail = {}, source = 'db') {
         this.event = event;
+        this.eventId = detail.eventId ?? crypto.randomUUID();
         this.source = detail.source ?? source;
         this.timestamp = detail.timestamp ?? new Date().toISOString();
+        this.origin = detail.origin ?? 'user';
+        this.causedBy = detail.causedBy ?? null;
+        this.depth = Number.isInteger(detail.depth) ? detail.depth : 0;
         this.treeId = detail.treeId ?? null;
         this.treeName = detail.treeName ?? null;
         this.treeType = detail.treeType ?? null;

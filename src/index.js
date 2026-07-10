@@ -849,12 +849,14 @@ class SynapsD extends EventEmitter {
                 batch: true,
                 context: contextSpec,
                 directory: directorySpec,
+                ...(normSpec.provenance || {}),
             }));
             this.emit(EVENTS.DOCUMENT_INSERTED_BATCH, createEvent(EVENTS.DOCUMENT_INSERTED_BATCH, {
                 ids: insertedIds,
                 count: insertedIds.length,
                 context: contextSpec,
                 directory: directorySpec,
+                ...(normSpec.provenance || {}),
             }));
         }
         if (updatedIds.length > 0) {
@@ -862,12 +864,14 @@ class SynapsD extends EventEmitter {
                 ids: updatedIds,
                 count: updatedIds.length,
                 batch: true,
+                ...(normSpec.provenance || {}),
             }));
             this.emit(EVENTS.DOCUMENT_UPDATED_BATCH, createEvent(EVENTS.DOCUMENT_UPDATED_BATCH, {
                 ids: updatedIds,
                 count: updatedIds.length,
                 context: contextSpec,
                 directory: directorySpec,
+                ...(normSpec.provenance || {}),
             }));
         }
 
@@ -1193,6 +1197,7 @@ class SynapsD extends EventEmitter {
                 this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
                     id,
                     memberships: { context: contextSpec, directory: directorySpec, features: docFeatures },
+                    ...(normSpec.provenance || {}),
                 }));
             } catch (eventError) {
                 debug(`linkMany: Failed to emit events for doc ${id}: ${eventError.message}`);
@@ -1316,6 +1321,7 @@ class SynapsD extends EventEmitter {
                 directoryArray: removedDirectoryPaths,
                 featureArray: featureKeys,
                 recursive,
+                ...(normSpec.provenance || {}),
             };
             if (ids.length === 1) {
                 this.emit(EVENTS.DOCUMENT_REMOVED, createEvent(EVENTS.DOCUMENT_REMOVED, { id: ids[0], ...shared }));
@@ -1442,10 +1448,11 @@ class SynapsD extends EventEmitter {
         // socket-emit storm on large purges).
         if (emitEvent && result.successful.length > 0) {
             const ids = result.successful.map((e) => e.id);
+            const provenance = this.#normalizeProvenance(options.provenance) || {};
             if (ids.length === 1) {
-                this.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: ids[0] }));
+                this.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: ids[0], ...provenance }));
             } else {
-                this.emit(EVENTS.DOCUMENT_DELETED_BATCH, createEvent(EVENTS.DOCUMENT_DELETED_BATCH, { ids }));
+                this.emit(EVENTS.DOCUMENT_DELETED_BATCH, createEvent(EVENTS.DOCUMENT_DELETED_BATCH, { ids, ...provenance }));
             }
         }
 
@@ -1513,6 +1520,7 @@ class SynapsD extends EventEmitter {
 
         // Canonical document insert signature accepts a selector/options object.
         let directorySpec = null;
+        let provenance = null;
         if (this.#isDocumentOperationOptions(contextSpec)) {
             const opts = contextSpec;
             // Preserve an explicit null context (consistent with #updateOne /
@@ -1523,6 +1531,7 @@ class SynapsD extends EventEmitter {
             directorySpec = opts.directory ?? null;
             featureBitmapArray = opts.features ?? featureBitmapArray;
             emitEvent = opts.emitEvent ?? emitEvent;
+            provenance = this.#normalizeProvenance(opts.provenance);
         }
 
         const featureBitmaps = parseBitmapArray(featureBitmapArray);
@@ -1581,6 +1590,7 @@ class SynapsD extends EventEmitter {
                 document: parsedDocument,
                 context: contextSpec,
                 directory: directorySpec,
+                ...(provenance || {}),
             }));
         }
 
@@ -1591,12 +1601,14 @@ class SynapsD extends EventEmitter {
         if (!docId) { throw new Error('Document id required'); }
 
         let directorySpec = null;
+        let provenance = null;
         if (this.#isDocumentOperationOptions(contextSpec)) {
             const opts = contextSpec;
             contextSpec = opts.context ?? null;
             directorySpec = opts.directory ?? null;
             featureBitmapArray = opts.features ?? featureBitmapArray;
             emitEvent = opts.emitEvent ?? emitEvent;
+            provenance = this.#normalizeProvenance(opts.provenance);
         }
 
         const numericId = typeof docId === 'string' ? parseInt(docId, 10) : docId;
@@ -1633,6 +1645,16 @@ class SynapsD extends EventEmitter {
             this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
                 id: numericId,
                 memberships: { context: contextSpec, directory: directorySpec, features: featureBitmaps },
+                ...(provenance || {}),
+            }));
+            // First-class membership event carrying the full document so
+            // automation (hooks/rules) can match on content, which the
+            // membership-only document.updated above cannot support.
+            this.emit(EVENTS.DOCUMENT_LINKED, createEvent(EVENTS.DOCUMENT_LINKED, {
+                id: numericId,
+                document: storedDocument,
+                memberships: { context: contextSpec, directory: directorySpec, features: featureBitmaps },
+                ...(provenance || {}),
             }));
         }
 
@@ -2160,11 +2182,13 @@ class SynapsD extends EventEmitter {
 
         // Canonical update signature accepts a selector/options object.
         let directorySpec = null;
+        let provenance = null;
         if (this.#isDocumentOperationOptions(contextSpec)) {
             const opts = contextSpec;
             contextSpec = opts.context ?? null;
             directorySpec = opts.directory ?? null;
             featureBitmapArray = opts.features ?? featureBitmapArray;
+            provenance = this.#normalizeProvenance(opts.provenance);
         }
 
         const docId = docIdentifier;
@@ -2213,7 +2237,7 @@ class SynapsD extends EventEmitter {
                 await this.#removeStaleDeviceMembership(updatedDocument.id, previousLocations, updatedDocument.locations, featureBitmaps);
             });
 
-            this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument }));
+            this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument, ...(provenance || {}) }));
 
             // Best-effort Lance upsert
             try {
@@ -2241,11 +2265,13 @@ class SynapsD extends EventEmitter {
         if (typeof options !== 'object') { options = { recursive: false }; }
 
         let directorySpec = null;
+        let provenance = null;
         if (this.#isDocumentOperationOptions(contextSpec)) {
             const opts = contextSpec;
             contextSpec = opts.context ?? null;
             directorySpec = opts.directory ?? null;
             featureBitmapArray = opts.features ?? featureBitmapArray;
+            provenance = this.#normalizeProvenance(opts.provenance);
         }
 
         const featureKeys = normalizeBitmapKeys(featureBitmapArray);
@@ -2305,7 +2331,27 @@ class SynapsD extends EventEmitter {
                 directoryArray: removedDirectoryPaths,
                 featureArray: featureKeys,
                 recursive: options.recursive,
+                ...(provenance || {}),
             }));
+            // First-class membership event carrying the full document (still in
+            // the store — unlink only drops memberships) so automation can match
+            // on content. Omitted if the document is gone.
+            try {
+                const unlinkedData = await this.documents.get(docId);
+                if (unlinkedData) {
+                    this.emit(EVENTS.DOCUMENT_UNLINKED, createEvent(EVENTS.DOCUMENT_UNLINKED, {
+                        id: docId,
+                        document: parseDocumentData(unlinkedData),
+                        contextArray: removedContextPaths,
+                        directoryArray: removedDirectoryPaths,
+                        featureArray: featureKeys,
+                        recursive: options.recursive,
+                        ...(provenance || {}),
+                    }));
+                }
+            } catch (error) {
+                debug(`unlink: document.unlinked emit skipped for ${docId}: ${error.message}`);
+            }
             return docId;
         } catch (error) {
             debug(`Error during unlink for ID ${docId}: ${error.message}`);
@@ -2317,6 +2363,7 @@ class SynapsD extends EventEmitter {
     async #deleteOne(docId, options = {}) {
         if (!docId) { throw new Error('Document id required'); }
         const { emitEvent = true } = options;
+        const provenance = this.#normalizeProvenance(options.provenance);
         debug(`delete: Document with ID "${docId}" found (or context check passed), proceeding to delete..`);
 
         let document = null;
@@ -2409,7 +2456,7 @@ class SynapsD extends EventEmitter {
             }
 
             if (emitEvent) {
-                this.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: docId }));
+                this.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: docId, ...(provenance || {}) }));
             }
             debug(`delete: Successfully deleted document ID: ${docId}`);
             return true;
@@ -2935,7 +2982,7 @@ class SynapsD extends EventEmitter {
             value &&
             typeof value === 'object' &&
             !Array.isArray(value) &&
-            ['context', 'directory', 'features', 'attributes', 'emitEvent'].some((key) => Object.prototype.hasOwnProperty.call(value, key))
+            ['context', 'directory', 'features', 'attributes', 'emitEvent', 'provenance'].some((key) => Object.prototype.hasOwnProperty.call(value, key))
         );
     }
 
@@ -3081,7 +3128,20 @@ class SynapsD extends EventEmitter {
             directory,
             features: this.#normalizeWriteFeatures(legacyFeatures),
             emitEvent: spec.emitEvent ?? true,
+            provenance: this.#normalizeProvenance(spec.provenance),
         };
+    }
+
+    // Caller-supplied provenance rides on emitted events so automation layers
+    // (workspace hooks/rules) can detect and bound their own cascades. Only the
+    // three known keys pass through; anything else is dropped.
+    #normalizeProvenance(provenance) {
+        if (!provenance || typeof provenance !== 'object' || Array.isArray(provenance)) { return null; }
+        const out = {};
+        if (typeof provenance.origin === 'string' && provenance.origin) { out.origin = provenance.origin; }
+        if (typeof provenance.causedBy === 'string' && provenance.causedBy) { out.causedBy = provenance.causedBy; }
+        if (Number.isInteger(provenance.depth) && provenance.depth >= 0) { out.depth = provenance.depth; }
+        return Object.keys(out).length > 0 ? out : null;
     }
 
     /**
