@@ -1,3 +1,55 @@
+# Notes
+
+RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval
+https://arxiv.org/html/2401.18059v1
+
+Spatial representation relies on two primary frameworks:
+Allocentric: A map-like perspective centered on external landmarks (e.g., "The coffee shop is north of the park").
+
+Egocentric: A self-centered perspective based on your own body axis (e.g., "The coffee shop is to my immediate left")
+
+place cells (fire at specific locations), grid cells (form a repeating, triangular-shaped coordinate grid), and head direction cells (act as an internal compass)
+
+
+The high-dimensional space you are thinking of is a neural manifold (specifically, a low-dimensional attractor manifold or toroidal manifold). [1, 2, 3] 
+While the brain contains billions of neurons—creating a massive, high-dimensional neural firing space—the activity of spatial cells is tightly constrained. The collective firing patterns map onto a highly organized, lower-dimensional geometric shape. [1, 4, 5] 
+## The Toroidal Manifold (T²)
+Because grid cells fire in a repeating, hexagonal lattice across space, their population activity does not stretch out into infinite Euclidean space. Instead, mathematically, if you "glue" the periodic edges of their firing fields together, the activity wraps into a two-dimensional torus (a donut shape). [1, 2, 6, 7] 
+
+* 
+* The Structure: As you walk through a flat room, the high-dimensional neural state vector moves like a continuous trajectory tracing the surface of this donut. [2, 8] 
+* Discovery: This was experimentally proven in 2022 by researchers at the Kavli Institute using topological data analysis, showing that even during sleep, the internal network dynamics of grid cells maintain this rigid, toroidal structure. [2] 
+* 
+
+## Continuous Attractor Networks (CANs)
+The mechanism keeping the brain's data on this manifold is a Continuous Attractor Network. [1, 9] 
+
+* 
+* In this high-dimensional state space, the physical constraints of the neural wiring create "valleys" of stable energy.
+* The system is "attracted" to these valleys, restricting the chaotic possibilities of billions of firing neurons into a smooth, structured mathematical surface that directly corresponds to physical coordinates. [1, 4] 
+* 
+
+## Hyperbolic Space
+For complex, multi-layered environments or hierarchical mental maps, neuroscientists have also discovered that the hippocampus encodes information using hyperbolic geometry (a non-Euclidean space with negative curvature, resembling a saddle). This allows the brain to exponentially pack scale and distant landmarks into a compact network. [10, 11, 12, 13] 
+If you'd like, we can look deeper into how topological data analysis (TDA) was used to pull that donut shape out of messy brain signals, or explore how continuous attractors prevent us from instantly forgetting our location. [1, 2] 
+
+[1] [https://pmc.ncbi.nlm.nih.gov](https://pmc.ncbi.nlm.nih.gov/articles/PMC11620739/)
+[2] [https://www.youtube.com](https://www.youtube.com/watch?v=0eW4w3zl7JY&t=13)
+[3] [https://medium.com](https://medium.com/@wickjparabellum/lost-in-high-dimensions-the-manifold-hypothesis-offers-a-map-6aab6a9af46d)
+[4] [https://elifesciences.org](https://elifesciences.org/reviewed-preprints/89851v1)
+[5] [https://eureka.patsnap.com](https://eureka.patsnap.com/article/manifold-learning-why-high-dimensional-data-lives-on-low-dimensional-curves)
+[6] [https://www.youtube.com](https://www.youtube.com/watch?v=4oIH6Rzp96Y&t=1)
+[7] [https://www.quantamagazine.org](https://www.quantamagazine.org/how-animals-map-3d-spaces-surprises-brain-researchers-20211014/)
+[8] [https://www.sciencedirect.com](https://www.sciencedirect.com/science/article/abs/pii/S1571064519300089)
+[9] [https://arxiv.org](https://arxiv.org/abs/2507.00598)
+[10] [https://arxiv.org](https://arxiv.org/html/2409.12990v1)
+[11] [https://ijrar.org](https://ijrar.org/papers/IJRAR19D6761.pdf)
+[12] [https://www.wall.org](https://www.wall.org/~aron/blog/curvature-i-space/)
+[13] [https://www.salk.edu](https://www.salk.edu/news-release/the-brains-ability-to-perceive-space-expands-like-the-universe/)
+
+
+---
+
 # SynapsD
 
 ## Proper synapse support + schema refactor
@@ -35,8 +87,48 @@ Specially generated semantic anchors/chunks and summaries with several sub-layer
 Hierarchical semantic tree(s) on top of semantic layers
 
 
-## Spatial GeoIndex(s2?)
-- A lossy spatial index to be built on top of geoindex in the synapsd semantic layer
+## baseDocument: `comment` field
+
+Optional, user-authored, free-text `comment: string` on baseDocument ("sofa from the cozmo
+bar in Košice") — context that cannot be inferred from content/exif. Survives every schema
+migration/re-index unconditionally; it is the one text class that can never be regenerated.
+
+- Naming: `comment`, NOT `description` (captioning pipelines will want that name) and NOT
+  `annotation` (ML labeling / W3C structured connotation). Precedent: xattr `user.comment`,
+  Finder comments. Singular string, no `annotations[]` ceremony.
+- **Provenance rule: user-editable only.** Categorizer/caption/summary pipelines never write
+  this field — that's what keeps it a high-trust ranking signal. Generated captions get their
+  own field/doc later.
+- Indexing: always FTS. Embed as its own dedicated chunk row (reserved chunkId, e.g. `comment`)
+  so it keeps provenance at the vector layer and can be weighted in fusion. Rule: any doc with
+  a non-empty comment gets at least that one vector regardless of `embeddableSchemas` — makes
+  blob-backed docs (photos/files, which carry no content text) semantically searchable.
+- Presence bitmap `document/hasComment` (non-internal, so usable as a raw bitmap key in
+  `filters` — "show everything I bothered to annotate"). Maintained transactionally in
+  `put()`: tick when non-empty, untick when cleared — derived from doc state, can't drift.
+  Bonus: `hasComment AND NOT <vector-coverage>` = the lazy-embedding work queue, one bitmap op.
+
+## Spatial GeoIndex (S2)
+
+- A lossy spatial index for candidate sets only — display/rendering reads raw GPS coords from
+  the doc (exif → OSM etc.); the index never needs to reproduce coordinates.
+- **Preferred shape: single BSI over the S2 cellId, not per-level membership bitmaps.** Store
+  one full-precision cellId per geotagged doc in a point-style BSI (same machinery as point
+  timelines). S2 containment is an id-range: every ancestor cell covers the contiguous interval
+  `[rangeMin, rangeMax]` of its descendants — so "in cell X" = one BSI range query, any level,
+  no per-level index at all. Region query: S2 region coverer → k cells → k range queries ORed →
+  AND into `resolveCandidates` like any other bucket.
+- This dissolves the how-many-levels question: bitmap count is fixed at the BSI slice width
+  (~2×maxLevel + 3 face bits), independent of precision and of which levels queries use.
+- Precision cap: level 30 (~1 cm) is fake precision for GPS (~3–10 m accuracy). Cap stored ids
+  at **level 21 (~5 m)** — honest for exif, trims the BSI to ~45 slices. Same no-fake-precision
+  stance as the timeline scales.
+- Alternative (fallback if BSI range perf disappoints): per-level cell-membership bitmaps
+  `geo/s2/<level>/<cellId>` at 3–4 fixed levels (e.g. 6 ~150 km region, 10 ~10 km city,
+  13 ~1 km neighborhood, 16 ~150 m venue), coverer snapped to indexed levels. Cheaper single-AND
+  per cell, but level grid is frozen at index time and occupied-cell key count grows with data.
+- Optional micro-opt on top of the BSI: one coarse presence/prefilter bitmap (`geo/hasLocation`)
+  to skip the BSI entirely for non-geo corpora.
 
 ## Semantic layer
 
@@ -46,6 +138,27 @@ This is pure text so the current embedding model should be sufficient, dataset a
 - Dataset will be post-processed by a local LLM to associate its content with a dedicated "wikipedia" timeline (naive, simple, stupid for round 1, we'll get to the more interesting hierachical vector trees later)
 - embedding path: ensure wikipedia text lands in a server-embeddable schema (derived `document`/`note`, registered in `embeddableSchemas`) - as `data/abstraction/file` you'd embed `locationUrls`, not the article.
 - [Input Chunk] ➔ [Qwen3-VL (64d)] ➔ [PCA (e.g., 16d or 32d)] ➔ [Scalar Quantizer (Bands)] ➔ [Roaring Bitmap Index]
+
+### Semantic dimension trees (reuse ContextTree)
+
+The anchor layer is NOT a new index — it's tree construction. Reuse the existing tree module:
+one internal context-type tree per semantic dimension (topic, visual, episode, …), anchors are
+ordinary layers, queried alongside user trees via multi-spec AND:
+`semantic:/…/… ∩ semantic-visual:/…/… ∩ ctx:/work/dc-migration`.
+
+- **Graded recall for free:** ticking along the path makes ancestor bitmaps ⊇ descendants, so
+  walking root-ward widens the candidate set *semantically* (zoom-out / deep-recall). Backoff
+  loop: deepest matching anchors → `count()` → too thin? replace cue with parent path, recount —
+  one operand re-resolve per step in a QuerySession; `materialize()` = escalate to exact docs.
+- **Derived, disposable:** semantic trees are engine-owned (locked, hidden from user edit),
+  rebuilt as a whole — build `semantic-topic@v2` alongside, atomic swap, drop v1. Docs untouched.
+- Machine-generated layer names prefixed per type/modality (shared-layer-by-name stays a
+  context-tree feature; prefixes just keep anchor vocabularies from colliding across dimensions).
+- Relations stay flat bitmap keys / L2 relation schemas, not tree layers — except identity
+  special cases (contacts/persons) where a per-entity dimension layer is warranted.
+- Payoff: anchor-construction strategies (clustering, layered summaries, quantizer bands,
+  LLM taxonomy) are swappable tree builders producing the same artifact — benchmark against the
+  same gold set, engine unchanged.
 
 ## Refactor v3
 
@@ -238,7 +351,6 @@ resolve a name unambiguously instead of falling back to id-only.
 - [ ] Migration: de-dup existing collisions (the stray second `universe` `context` tree).
 - [ ] Keep `treeNameOrTreeId` resolution accepting both, but name now guaranteed unique.
 
-Related: the existing LayerIndex name-uniqueness collision issue.
 
 ### Support context and directory tree mountpoints
 
