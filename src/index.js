@@ -213,7 +213,7 @@ class SynapsD extends EventEmitter {
             // table + bitmap key so existing data is not orphaned.
             spaces: sem.spaces || {
                 text: { table: 'vec_text', dim: sem.dim || 384, bitmapKey: 'internal/lance/vectors' },
-                image: { table: 'vec_image', dim: 512, bitmapKey: 'internal/lance/vectors/image' },
+                image: { table: 'vec_image', dim: 768, bitmapKey: 'internal/lance/vectors/image' },
             },
         };
 
@@ -963,6 +963,29 @@ class SynapsD extends EventEmitter {
             try { await this.bitmapIndex.untickMany([seenKey], idArr); } catch (_) { }
         }
         return true;
+    }
+
+    /**
+     * kNN the image (CLIP/SigLIP) space with a text query embedded by that space's
+     * text encoder — the joint space means "red car" lands near matching photos.
+     * Returns [] (and loads no model) unless photos are actually embedded, so
+     * text-only searches never pay for the image model.
+     * @returns {Promise<number[]>} candidate docIds, best-first
+     */
+    async #imageVectorSearch(queryString, scopedIds, depth) {
+        const cfg = this.#semanticConfig.spaces?.image;
+        const embedQuery = this.#semanticConfig.embedQuery;
+        if (!cfg || typeof embedQuery !== 'function') { return []; }
+        const presence = await this.bitmapIndex.getBitmap(cfg.bitmapKey, false);
+        if (!presence || presence.isEmpty) { return []; }
+        const vi = await this.#getVectorSpace('image');
+        if (!vi || !vi.isReady) { return []; }
+        const qv = await embedQuery(queryString, 'image');
+        if (!qv) { return []; }
+        // No distance bound: CLIP cosine magnitudes differ from the text model's,
+        // so rely on top-K + RRF fusion rather than a text-tuned threshold.
+        const res = await vi.vectorSearch(qv, scopedIds, { limit: depth, offset: 0 });
+        return res.pageIds || [];
     }
 
     /**
@@ -2011,6 +2034,7 @@ class SynapsD extends EventEmitter {
 
         let pageIds, totalCount, error;
         if (mode === 'vector' || mode === 'hybrid') {
+            const depth = Math.max((limit + offset) * 5, 100);
             let queryVector = null;
             try {
                 // Query embedding is injected (embedd service); absent → FTS fallback.
@@ -2019,16 +2043,26 @@ class SynapsD extends EventEmitter {
             } catch (e) {
                 debug(`rank: query embedding failed (${e.message}); falling back to fts`);
             }
-            if (!queryVector) {
+            // CLIP/SigLIP image fan-out: embed the query with the image space's
+            // text encoder and kNN the photo vectors (shared space), so "red car"
+            // matches pictures. No-op (and no model load) unless photos are embedded.
+            let imgIds = [];
+            try {
+                imgIds = await this.#imageVectorSearch(queryString, scopedIds, depth);
+            } catch (e) {
+                debug(`rank: image search failed (${e.message})`);
+            }
+            if (!queryVector && imgIds.length === 0) {
                 ({ pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit, offset }));
             } else if (mode === 'hybrid') {
                 // Fuse DOCUMENT-level FTS (every doc — tabs included) with dense
-                // kNN (embedded docs only) via RRF. The VectorIndex's own
-                // hybridSearch only fuses chunk-text BM25 over the vector table, so
-                // it can't see un-embedded docs (e.g. tabs); doc-level FTS can.
-                const depth = Math.max((limit + offset) * 5, 100);
+                // kNN (embedded docs only) and image kNN via RRF. The VectorIndex's
+                // own hybridSearch only fuses chunk-text BM25 over the vector table,
+                // so it can't see un-embedded docs (e.g. tabs); doc-level FTS can.
                 const [vec, fts] = await Promise.all([
-                    this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit: depth, offset: 0, minDistance: options.minDistance, maxDistance: options.maxDistance }),
+                    queryVector
+                        ? this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit: depth, offset: 0, minDistance: options.minDistance, maxDistance: options.maxDistance })
+                        : Promise.resolve({ pageIds: [], error: null }),
                     this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit: depth, offset: 0 }),
                 ]);
                 // Weight lexical above dense: vector kNN always returns its top-K
@@ -2036,16 +2070,35 @@ class SynapsD extends EventEmitter {
                 // small/irrelevant embedded corpus a rank-0 vector hit would
                 // otherwise tie a rank-0 EXACT lexical hit and pollute the top.
                 // FTS weight 2 keeps exact matches on top while dense still
-                // contributes (semantic recall).
-                const fused = this.#rrfMerge([
+                // contributes (semantic recall). Image kNN gets weight 1 too — for
+                // photos it's the only signal, but it can't outrank exact lexical.
+                const operands = [
                     { ids: fts.pageIds || [], weight: 2 },
                     { ids: vec.pageIds || [], weight: 1 },
-                ]);
+                ];
+                if (imgIds.length) { operands.push({ ids: imgIds, weight: 1 }); }
+                const fused = this.#rrfMerge(operands);
                 totalCount = fused.length;
                 pageIds = fused.slice(offset, offset + limit);
                 error = vec.error || fts.error || null;
             } else {
-                ({ pageIds, totalCount, error } = await this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit, offset, minDistance: options.minDistance, maxDistance: options.maxDistance }));
+                // Pure vector mode: fuse text + image kNN (both dense, equal weight).
+                const vec = queryVector
+                    ? await this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit: depth, offset: 0, minDistance: options.minDistance, maxDistance: options.maxDistance })
+                    : { pageIds: [], error: null };
+                if (imgIds.length) {
+                    const fused = this.#rrfMerge([
+                        { ids: vec.pageIds || [], weight: 1 },
+                        { ids: imgIds, weight: 1 },
+                    ]);
+                    totalCount = fused.length;
+                    pageIds = fused.slice(offset, offset + limit);
+                    error = vec.error || null;
+                } else {
+                    totalCount = (vec.pageIds || []).length;
+                    pageIds = (vec.pageIds || []).slice(offset, offset + limit);
+                    error = vec.error || null;
+                }
             }
         } else {
             ({ pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit, offset }));

@@ -66,6 +66,19 @@ export default class VectorIndex {
         ]);
     }
 
+    // The fixed vector width of the on-disk table, or null if unknown. Used to
+    // detect a dim change vs the configured model (triggers a recreate).
+    async #tableVectorDim() {
+        try {
+            const schema = await this.#table.schema();
+            const field = (schema?.fields || []).find((f) => f.name === 'vector');
+            const size = field?.type?.listSize;
+            return Number.isInteger(size) ? size : null;
+        } catch (_) {
+            return null;
+        }
+    }
+
     async initialize() {
         try {
             if (!this.#rootPath) { throw new Error('VectorIndex rootPath required'); }
@@ -75,6 +88,16 @@ export default class VectorIndex {
 
             try {
                 this.#table = await this.#db.openTable(this.#tableName);
+                // Guard against a stale table built for a different embedding dim
+                // (e.g. vec_image created at 512 before the CLIP/SigLIP 768 model was
+                // wired). A vector added under the wrong dim throws, so recreate the
+                // table to match the configured dim. Callers re-embed to refill it.
+                const existingDim = await this.#tableVectorDim();
+                if (existingDim !== null && existingDim !== this.#dim) {
+                    debug(`VectorIndex '${this.#tableName}': dim ${existingDim} != configured ${this.#dim}; recreating`);
+                    await this.#db.dropTable(this.#tableName);
+                    this.#table = await this.#db.createEmptyTable(this.#tableName, this.#schema());
+                }
             } catch (_) {
                 this.#table = await this.#db.createEmptyTable(this.#tableName, this.#schema());
             }
