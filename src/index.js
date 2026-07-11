@@ -469,6 +469,11 @@ class SynapsD extends EventEmitter {
             createdAt: now,
             updatedAt: now,
             isDefault: options.isDefault ?? !this.#defaultTreeIds[type],
+            // Generic per-tree settings bag; synapsd only interprets generic
+            // flags (e.g. linkContextRoot) — policy names live at the caller.
+            settings: options.settings && typeof options.settings === 'object'
+                ? { ...options.settings }
+                : {},
         };
 
         await this.#internalStore.put(this.#treeMetaKey(meta.id), meta);
@@ -1889,7 +1894,9 @@ class SynapsD extends EventEmitter {
 
         const collection = this.#directoryBitmapCollectionForTree(tree.id);
         const layerKeys = await this.#synapses.listSynapses(id);
-        const prefix = collection.prefix;
+        // Synapse keys are stored normalized (lowercased); the raw collection
+        // prefix carries the uppercase ULID tree id, so normalize to compare.
+        const prefix = BitmapIndex.normalizeKey(collection.prefix);
         const paths = [];
 
         for (const layerKey of layerKeys) {
@@ -1897,7 +1904,10 @@ class SynapsD extends EventEmitter {
                 continue;
             }
             const nodeId = layerKey.slice(prefix.length);
-            const path = await tree.getPathByNodeId(nodeId);
+            // Node ids are uppercase ULIDs but arrive lowercased through key
+            // normalization — try both casings.
+            const path = await tree.getPathByNodeId(nodeId)
+                ?? await tree.getPathByNodeId(nodeId.toUpperCase());
             if (path) {
                 paths.push(path);
             }
@@ -1919,7 +1929,7 @@ class SynapsD extends EventEmitter {
         }
 
         const collection = this.#contextBitmapCollectionForTree(tree.id);
-        const prefix = collection.prefix;
+        const prefix = BitmapIndex.normalizeKey(collection.prefix);
         const paths = [];
 
         for (const layerKey of layerKeys) {
@@ -1927,7 +1937,8 @@ class SynapsD extends EventEmitter {
                 continue;
             }
             const layerId = layerKey.slice(prefix.length);
-            const path = tree.getPathByLayerId(layerId);
+            const path = tree.getPathByLayerId(layerId)
+                ?? tree.getPathByLayerId(layerId.toUpperCase());
             if (path) {
                 paths.push(path);
             }
@@ -1943,11 +1954,75 @@ class SynapsD extends EventEmitter {
             throw new Error(`Tree not found: ${treeNameOrId}`);
         }
 
-        const prefix = tree.type === 'directory'
+        const prefix = BitmapIndex.normalizeKey(tree.type === 'directory'
             ? this.#directoryBitmapCollectionForTree(tree.id).prefix
-            : this.#contextBitmapCollectionForTree(tree.id).prefix;
+            : this.#contextBitmapCollectionForTree(tree.id).prefix);
         const layerKeys = await this.#synapses.listSynapses(id);
         return layerKeys.some((layerKey) => layerKey.startsWith(prefix));
+    }
+
+    /**
+     * List documents under `path` of a directory tree, optionally filtered by
+     * whether they are ALSO linked into any other tree. `linked: false` returns
+     * documents present only in this tree (e.g. backend mirrors never filed
+     * anywhere — safe-to-purge candidates); `linked: true` the inverse;
+     * `linked: null` returns everything under the path. Pure bitmap algebra.
+     */
+    async listTreeDocuments(treeNameOrId, options = {}) {
+        const { path = '/', linked = null, limit = null, offset = 0, parse = true, idsOnly = false } = options;
+        const tree = this.getTree(treeNameOrId);
+        if (!tree) { throw new Error(`Tree not found: ${treeNameOrId}`); }
+        if (tree.type !== 'directory') { throw new Error(`Tree "${tree.name}" is not a directory tree`); }
+
+        const candidates = await tree.findRecursive(path);
+        const result = candidates ? candidates.clone() : new RoaringBitmap32();
+        if (!result.isEmpty && (linked === true || linked === false)) {
+            const linkedElsewhere = await this.#membershipBitmapExcludingTree(tree.id);
+            if (linked) {
+                result.andInPlace(linkedElsewhere);
+            } else {
+                result.andNotInPlace(linkedElsewhere);
+            }
+        }
+
+        const totalCount = result.size;
+        let ids = result.toArray();
+        if (offset > 0) { ids = ids.slice(offset); }
+        if (limit != null && limit >= 0) { ids = ids.slice(0, limit); }
+        if (idsOnly) {
+            return { ids, count: ids.length, totalCount };
+        }
+        const fetched = ids.length > 0
+            ? await this.getDocumentsByIdArray(ids, { parse })
+            : { data: [] };
+        const documents = Array.isArray(fetched) ? fetched : (fetched?.data ?? []);
+        return {
+            documents: documents.filter(Boolean),
+            count: ids.length,
+            totalCount,
+        };
+    }
+
+    // Union of document memberships across every tree except the given one.
+    // Context trees are covered by their root layer bitmap alone (every insert
+    // ticks the root — universal membership); directory trees by the recursive
+    // union of their node bitmaps.
+    async #membershipBitmapExcludingTree(excludedTreeId) {
+        const union = new RoaringBitmap32();
+        for (const meta of this.#treeMetadata.values()) {
+            if (meta.id === excludedTreeId) { continue; }
+            const other = this.getTree(meta.id);
+            if (!other) { continue; }
+            if (meta.type === 'context') {
+                if (!other.rootLayer) { continue; }
+                const bitmap = await this.#contextBitmapCollectionForTree(meta.id).getBitmap(other.rootLayer.id, false);
+                if (bitmap) { union.orInPlace(bitmap); }
+            } else {
+                const bitmap = await other.findRecursive('/');
+                if (bitmap) { union.orInPlace(bitmap); }
+            }
+        }
+        return union;
     }
 
     // ========================================
@@ -3064,6 +3139,7 @@ class SynapsD extends EventEmitter {
                 bitmapIndex: this.bitmapIndex,
                 treeId: meta.id,
                 treeName: meta.name,
+                settings: meta.settings,
                 bitmapCollection: this.#directoryBitmapCollectionForTree(meta.id),
             })
             : new ContextTree({
@@ -3071,6 +3147,7 @@ class SynapsD extends EventEmitter {
                 db: this,
                 treeId: meta.id,
                 treeName: meta.name,
+                settings: meta.settings,
                 bitmapCollection: this.#contextBitmapCollectionForTree(meta.id),
             });
 
@@ -3563,7 +3640,11 @@ class SynapsD extends EventEmitter {
             const collection = this.#directoryBitmapCollectionForTree(directoryTree.id);
             allSynapseKeys.push(...nodeIds.map((nodeId) => collection.makeKey(nodeId)));
 
-            if (!contextSpec && dirs.some((dirPath) => !this.#isBackendsDirectoryPath(dirPath))) {
+            // Directory-only inserts surface at the default context root unless
+            // the tree opts out (settings.linkContextRoot === false) — e.g. a
+            // backend-mirror tree whose documents should stay out of the user's
+            // context until explicitly filed.
+            if (!contextSpec && directoryTree.settings?.linkContextRoot !== false) {
                 const contextTree = this.getDefaultContextTree();
                 if (contextTree?.rootLayer) {
                     const collection = this.#contextBitmapCollectionForTree(contextTree.id);
@@ -3845,11 +3926,6 @@ class SynapsD extends EventEmitter {
         }
 
         return featureBitmap || new RoaringBitmap32();
-    }
-
-    #isBackendsDirectoryPath(path) {
-        const normalized = String(path || '/').trim().replace(/\/+/g, '/').replace(/\/$/, '') || '/';
-        return normalized === '/.backends' || normalized.startsWith('/.backends/');
     }
 
     async #buildAllDocumentsBitmap() {
