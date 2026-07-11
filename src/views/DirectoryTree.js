@@ -25,6 +25,7 @@ class DirectoryTree extends EventEmitter {
     #collection;
     #treeId;
     #treeName;
+    #settings;
     #initialized = false;
 
     constructor(options = {}) {
@@ -44,6 +45,7 @@ class DirectoryTree extends EventEmitter {
         this.#db = options.db || null;
         this.#treeId = options.treeId;
         this.#treeName = options.treeName || options.name || options.treeId;
+        this.#settings = options.settings && typeof options.settings === 'object' ? options.settings : {};
         this.#collection = options.bitmapCollection || options.bitmapIndex.createCollection(`vfs/${this.#treeId}`);
         this.root = null;
     }
@@ -53,6 +55,7 @@ class DirectoryTree extends EventEmitter {
     // See ContextTree: keep cached instance name in sync on rename.
     set name(value) { if (value) this.#treeName = String(value); }
     get type() { return 'directory'; }
+    get settings() { return this.#settings; }
     get collection() { return this.#collection; }
 
     get paths() {
@@ -339,7 +342,7 @@ class DirectoryTree extends EventEmitter {
         return true;
     }
 
-    async removePath(path, recursive = false) {
+    async removePath(path, recursive = false, options = {}) {
         const normalizedPath = this.#normalizePath(path);
         if (normalizedPath === '/') {
             throw new Error('Cannot remove the root directory');
@@ -348,7 +351,9 @@ class DirectoryTree extends EventEmitter {
         if (!node) {
             return { data: null, count: 0, error: `Path not found: ${normalizedPath}` };
         }
-        this.#assertNodeMutable(node);
+        if (!options.ignoreLocks) {
+            this.#assertNodeMutable(node);
+        }
         if (!recursive && node.hasChildren) {
             return { data: null, count: 0, error: 'Directory is not empty' };
         }
@@ -356,7 +361,7 @@ class DirectoryTree extends EventEmitter {
         const parent = this.#getParentNode(normalizedPath);
         parent.removeChild(node.id);
         await this.#persistNode(parent);
-        await this.#deleteSubtree(node);
+        const removedNodeIds = await this.#deleteSubtree(node);
 
         this.#emitTreeEvent(EVENTS.TREE_PATH_REMOVED, {
             path: normalizedPath,
@@ -365,7 +370,7 @@ class DirectoryTree extends EventEmitter {
         });
 
         return {
-            data: { nodeId: node.id, path: normalizedPath },
+            data: { nodeId: node.id, path: normalizedPath, removedNodeIds },
             count: 1,
             error: null,
         };
@@ -463,12 +468,30 @@ class DirectoryTree extends EventEmitter {
         }
     }
 
-    async #deleteSubtree(node) {
+    async #deleteSubtree(node, removedNodeIds = []) {
         for (const child of node.children.values()) {
-            await this.#deleteSubtree(child);
+            await this.#deleteSubtree(child, removedNodeIds);
         }
+        // Clean each member document's synapse reverse index BEFORE dropping the
+        // node bitmap — otherwise stale vfs/<treeId>/<nodeId> keys survive and
+        // corrupt membership listings and linked/unlinked queries.
+        await this.#cleanupNodeSynapses(node.id);
         await this.#collection.deleteBitmap(node.id).catch(() => null);
         await this.#dataStore.remove(this.#nodeKey(node.id));
+        removedNodeIds.push(node.id);
+        return removedNodeIds;
+    }
+
+    async #cleanupNodeSynapses(nodeId) {
+        const synapses = this.#db?.synapses;
+        if (!synapses) { return; }
+        const bitmap = await this.#collection.getBitmap(nodeId, false);
+        if (!bitmap || bitmap.size === 0) { return; }
+        const key = this.#collection.makeKey(nodeId);
+        for (const docId of bitmap.toArray()) {
+            // Bitmap itself is deleted right after — skip the untick.
+            await synapses.removeSynapses(docId, key, { syncBitmaps: false }).catch(() => null);
+        }
     }
 
     async #loadTree() {

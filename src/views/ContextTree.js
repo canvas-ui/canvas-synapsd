@@ -52,6 +52,7 @@ class ContextTree extends EventEmitter {
     #bitmapCollection = null;
     #treeId = null;
     #treeName = null;
+    #settings = {};
 
     // Runtime state
     #initialized = false;
@@ -80,6 +81,7 @@ class ContextTree extends EventEmitter {
         this.#bitmapCollection = options.bitmapCollection || null;
         this.#treeId = options.treeId || null;
         this.#treeName = options.treeName || options.name || this.#treeId;
+        this.#settings = options.settings && typeof options.settings === 'object' ? options.settings : {};
 
         // Options
         this.#showHiddenLayers = options.showHiddenLayers || false;
@@ -129,6 +131,7 @@ class ContextTree extends EventEmitter {
     // share's treeName) capture the stale construction-time name.
     set name(value) { if (value) this.#treeName = String(value); }
     get type() { return 'context'; }
+    get settings() { return this.#settings; }
     get collection() { return this.#bitmapCollection; }
 
     get paths() {
