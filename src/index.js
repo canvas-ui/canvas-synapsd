@@ -215,6 +215,12 @@ class SynapsD extends EventEmitter {
                 text: { table: 'vec_text', dim: sem.dim || 384, bitmapKey: 'internal/lance/vectors' },
                 image: { table: 'vec_image', dim: 768, bitmapKey: 'internal/lance/vectors/image' },
             },
+            // Image search relevance floor (cosine distance, 0 = identical). CLIP
+            // image kNN returns its top-K for ANY query, so without a cap every
+            // search folds in unrelated photos. 0.9 is a sane default for the
+            // default SigLIP model; live-tunable per workspace (setSearchTuning) and
+            // env-overridable (CANVAS_IMAGE_MAX_DISTANCE). null/0 = no floor.
+            imageMaxDistance: typeof sem.imageMaxDistance === 'number' ? sem.imageMaxDistance : 0.9,
         };
 
         this.contextBitmapCollection = null;
@@ -261,6 +267,15 @@ class SynapsD extends EventEmitter {
             return out;
         }
 
+        // Per-space stats for every INITIALIZED vector space (text always; image
+        // once it's been embedded/queried). Reports dim + chunkRows + embeddedDocs
+        // so the image space (768-d CLIP) is visible, not just text (384-d).
+        const vectorSpaces = {};
+        for (const [name, vi] of this.#vectorSpaces) {
+            try { vectorSpaces[name] = await vi.stats(); }
+            catch (e) { vectorSpaces[name] = { ready: false, error: e.message }; }
+        }
+
         out.semantic = {
             enabled: true,
             dim: this.#semanticConfig.dim,
@@ -269,9 +284,26 @@ class SynapsD extends EventEmitter {
             embedQuery: !!this.#semanticConfig.embedQuery,
             embeddableSchemas: [...this.#semanticConfig.embeddableSchemas],
             spaces: Object.keys(this.#semanticConfig.spaces || {}),
-            vector: this.#vectorIndex ? await this.#vectorIndex.stats().catch(e => ({ ready: false, error: e.message })) : { ready: false },
+            // Tunable search knobs (surfaced so the UI can show/edit current values).
+            imageMaxDistance: this.#semanticConfig.imageMaxDistance,
+            // Back-compat: `vector` stays the text space; `vectorSpaces` breaks it
+            // out per space (text, image, …) so image embedding is observable.
+            vector: vectorSpaces.text || (this.#vectorIndex ? await this.#vectorIndex.stats().catch(e => ({ ready: false, error: e.message })) : { ready: false }),
+            vectorSpaces,
         };
         return out;
+    }
+
+    /**
+     * Live-tunable search knobs (no restart). Currently the image relevance floor.
+     * @param {{imageMaxDistance?: number|null}} tuning
+     */
+    setSearchTuning(tuning = {}) {
+        if (Object.prototype.hasOwnProperty.call(tuning, 'imageMaxDistance')) {
+            const v = tuning.imageMaxDistance;
+            this.#semanticConfig.imageMaxDistance = (v === null || Number.isFinite(v)) ? v : this.#semanticConfig.imageMaxDistance;
+        }
+        return { imageMaxDistance: this.#semanticConfig.imageMaxDistance };
     }
 
     get db() { return this.#db; } // For testing only
@@ -982,9 +1014,14 @@ class SynapsD extends EventEmitter {
         if (!vi || !vi.isReady) { return []; }
         const qv = await embedQuery(queryString, 'image');
         if (!qv) { return []; }
-        // No distance bound: CLIP cosine magnitudes differ from the text model's,
-        // so rely on top-K + RRF fusion rather than a text-tuned threshold.
-        const res = await vi.vectorSearch(qv, scopedIds, { limit: depth, offset: 0 });
+        // Relevance floor (cosine distance cap, 0 = identical; smaller = stricter):
+        // image kNN otherwise returns its top-K for ANY query, so every search folds
+        // in unrelated photos. Precedence: env override → workspace setting → 0.9
+        // default. A non-positive value disables the floor (legacy top-K behaviour).
+        const envMax = process.env.CANVAS_IMAGE_MAX_DISTANCE;
+        const cfgMax = (envMax != null && envMax !== '') ? Number(envMax) : this.#semanticConfig.imageMaxDistance;
+        const maxDistance = Number.isFinite(cfgMax) && cfgMax > 0 ? cfgMax : undefined;
+        const res = await vi.vectorSearch(qv, scopedIds, { limit: depth, offset: 0, maxDistance });
         return res.pageIds || [];
     }
 
