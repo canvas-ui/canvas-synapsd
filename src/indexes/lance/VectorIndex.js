@@ -249,20 +249,25 @@ export default class VectorIndex {
             return { pageIds: [], totalCount: 0, error: e.message };
         }
 
-        // Rows arrive ranked; keep first (best) occurrence per docId.
+        // Rows arrive ranked; keep first (best) occurrence per docId. `_distance`
+        // is auto-included by LanceDB even under select(['id']); capture it when
+        // asked (opts.withDistances) so callers can surface it for threshold
+        // calibration.
         const seen = new Set();
         const rankedIds = [];
+        const distances = opts.withDistances ? {} : null;
         for (const r of rows) {
             const id = Number(r.id);
             if (seen.has(id)) { continue; }
             if (candidateSet && !candidateSet.has(id)) { continue; }
             seen.add(id);
             rankedIds.push(id);
+            if (distances && distances[id] === undefined) { distances[id] = r._distance; }
         }
 
         const totalCount = rankedIds.length;
         const pageIds = rankedIds.slice(offset, offset + limit);
-        return { pageIds, totalCount, error: null };
+        return { pageIds, totalCount, error: null, distances };
     }
 
     /** Vector-table health/size snapshot for diagnostics UIs. */

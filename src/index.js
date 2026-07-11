@@ -1026,6 +1026,48 @@ class SynapsD extends EventEmitter {
     }
 
     /**
+     * The FULL set of docIds a single query matches, across modalities — doc-level
+     * FTS (lexical, all schemas) UNION image kNN (photos, above the relevance
+     * floor). Used by searchRefined's intermediate fold: FTS alone can never match
+     * a photo (blobs have no text), so refining "library" then "table" over images
+     * needs the image side here. Not a ranking — just membership, for AND-ing.
+     * @returns {Promise<number[]>}
+     */
+    async #queryMatchSet(queryString, scopeIds, limit) {
+        const [fts, img] = await Promise.all([
+            this.#lanceIndex.ftsQuery(queryString, scopeIds, { limit, offset: 0 }).catch(() => ({ pageIds: [] })),
+            this.#imageVectorSearch(queryString, scopeIds, limit).catch(() => []),
+        ]);
+        const ids = new Set(fts.pageIds || []);
+        for (const id of img) { ids.add(id); }
+        return [...ids];
+    }
+
+    /**
+     * Debug/calibration: the top-N image kNN matches for a query WITH their cosine
+     * distances (0 = identical … 1 = orthogonal … 2 = opposite; distance = 1 −
+     * cosine similarity) and NO relevance floor — so you can see where matches
+     * actually land and pick a sane `imageMaxDistance`. Best-first.
+     * @returns {Promise<Array<{id:number, distance:number}>>}
+     */
+    async #imageDistances(queryString, scopedIds, n = 25) {
+        const cfg = this.#semanticConfig.spaces?.image;
+        const embedQuery = this.#semanticConfig.embedQuery;
+        if (!cfg || typeof embedQuery !== 'function') { return []; }
+        const presence = await this.bitmapIndex.getBitmap(cfg.bitmapKey, false);
+        if (!presence || presence.isEmpty) { return []; }
+        const vi = await this.#getVectorSpace('image');
+        if (!vi || !vi.isReady) { return []; }
+        const qv = await embedQuery(queryString, 'image');
+        if (!qv) { return []; }
+        // min 0 / max 2 forces cosine and keeps the full range (no filtering), so
+        // every returned neighbour comes back with an interpretable distance.
+        const res = await vi.vectorSearch(qv, scopedIds, { limit: n, offset: 0, minDistance: 0, maxDistance: 2, withDistances: true });
+        const dist = res.distances || {};
+        return (res.pageIds || []).map((id) => ({ id, distance: dist[id] }));
+    }
+
+    /**
      * Lazily create + initialize the VectorIndex for a named space. Returns null
      * if the semantic stack is disabled or the space is unknown.
      */
@@ -2146,6 +2188,13 @@ class SynapsD extends EventEmitter {
         result.count = result.length;
         result.totalCount = totalCount;
         result.error = error;
+        // Calibration aid: when debug is requested, attach the raw (unfloored)
+        // image kNN distances for this query so a caller can pick imageMaxDistance
+        // from real numbers. Best-effort; never fails the search.
+        if (options.debug) {
+            try { result.debug = { imageDistances: await this.#imageDistances(queryString, scopedIds, 25) }; }
+            catch (e) { result.debug = { imageDistances: [], error: e.message }; }
+        }
         return result;
     }
 
@@ -2250,13 +2299,12 @@ class SynapsD extends EventEmitter {
         let scope = base; // RoaringBitmap32 | null (null = all docs)
         for (let i = 0; i < texts.length - 1; i++) {
             const scopeIds = scope ? scope.toArray() : [];
-            const { pageIds, error } = await this.#lanceIndex.ftsQuery(texts[i], scopeIds, { limit: FOLD_LIMIT, offset: 0 });
-            if (error) {
-                const empty = this.#emptyResult();
-                empty.error = error;
-                return empty;
-            }
-            const matched = new RoaringBitmap32(pageIds);
+            // Match across FTS ∪ image kNN (not FTS-only) so refinement narrows by
+            // photos too — otherwise "library" folds to text docs and image refine
+            // is impossible. The image floor makes each set meaningful (else every
+            // photo matches every query and the AND is a no-op).
+            const matchedIds = await this.#queryMatchSet(texts[i], scopeIds, FOLD_LIMIT);
+            const matched = new RoaringBitmap32(matchedIds);
             scope = scope ? RoaringBitmap32.and(scope, matched) : matched;
             if (scope.isEmpty) { return this.#emptyResult(); }
         }
