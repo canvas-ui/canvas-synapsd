@@ -217,10 +217,11 @@ class SynapsD extends EventEmitter {
             },
             // Image search relevance floor (cosine distance, 0 = identical). CLIP
             // image kNN returns its top-K for ANY query, so without a cap every
-            // search folds in unrelated photos. 0.9 is a sane default for the
-            // default SigLIP model; live-tunable per workspace (setSearchTuning) and
+            // search folds in unrelated photos. 0.97 is a sane default for the
+            // default SigLIP model (empirically usable across car/table/wine
+            // queries); live-tunable per workspace (setSearchTuning) and
             // env-overridable (CANVAS_IMAGE_MAX_DISTANCE). null/0 = no floor.
-            imageMaxDistance: typeof sem.imageMaxDistance === 'number' ? sem.imageMaxDistance : 0.9,
+            imageMaxDistance: typeof sem.imageMaxDistance === 'number' ? sem.imageMaxDistance : 0.97,
         };
 
         this.contextBitmapCollection = null;
@@ -939,13 +940,25 @@ class SynapsD extends EventEmitter {
     }
 
     /**
-     * Optimize + (re)build the dense-vector index. Best-effort; safe to call
-     * after a bulk import to compact fragments and build the ANN index.
+     * Optimize dense-vector spaces: compact fragments, prune old versions, and
+     * (re)build the ANN index. Pass a space name ('text'|'image') to optimize just
+     * that Lance table; omit to optimize every configured space. Best-effort per
+     * space — safe to call after a bulk import/re-embed. Returns { <space>: stats }.
      */
-    async optimizeVectors() {
-        if (!this.#vectorIndex) { return null; }
-        await this.#vectorIndex.optimize();
-        return await this.#vectorIndex.ensureVectorIndex();
+    async optimizeVectors(space = null) {
+        const names = space ? [space] : Object.keys(this.#semanticConfig.spaces || {});
+        const out = {};
+        for (const name of names) {
+            const vi = await this.#getVectorSpace(name);
+            if (!vi) { out[name] = { ready: false }; continue; }
+            try {
+                await vi.optimize();
+                out[name] = await vi.ensureVectorIndex();
+            } catch (e) {
+                out[name] = { error: e.message };
+            }
+        }
+        return out;
     }
 
     /** Per-space "seen" bitmap key — docs the embedder has processed (incl. skips). */
@@ -1020,7 +1033,7 @@ class SynapsD extends EventEmitter {
         if (!qv) { return []; }
         // Relevance floor (cosine distance cap, 0 = identical; smaller = stricter):
         // image kNN otherwise returns its top-K for ANY query, so every search folds
-        // in unrelated photos. Precedence: env override → workspace setting → 0.9
+        // in unrelated photos. Precedence: env override → workspace setting → 0.97
         // default. A non-positive value disables the floor (legacy top-K behaviour).
         const envMax = process.env.CANVAS_IMAGE_MAX_DISTANCE;
         const cfgMax = (envMax != null && envMax !== '') ? Number(envMax) : this.#semanticConfig.imageMaxDistance;

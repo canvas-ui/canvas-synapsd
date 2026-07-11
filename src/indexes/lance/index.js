@@ -7,6 +7,13 @@ const debug = debugInstance('canvas:synapsd:lance-index');
 import * as lancedb from '@lancedb/lancedb';
 const { MatchQuery, BooleanQuery, Operator, Occur } = lancedb;
 
+// Default version-retention window for optimize(): prune dataset versions older
+// than 1 day (Lance's own default is 7). Env-overridable in hours.
+const CLEANUP_RETENTION_HOURS = Math.max(0, Number(process.env.CANVAS_LANCE_RETENTION_HOURS) || 24);
+function defaultCleanupCutoff() {
+    return CLEANUP_RETENTION_HOURS > 0 ? new Date(Date.now() - CLEANUP_RETENTION_HOURS * 3600 * 1000) : null;
+}
+
 /**
  * Tokenizer config for the BM25 index. Kept in one place so the on-disk
  * signature (see #ensureFtsIndex) can detect changes and rebuild the index
@@ -319,10 +326,14 @@ class LanceIndex {
         return { ready: true, ftsRows, indexedDocs };
     }
 
-    async optimize() {
+    // Compact fragments AND prune old dataset versions (default 1-day retention;
+    // Lance's own default is 7 days). Pass a Date to override, or null to keep the
+    // Lance default. Env-overridable via CANVAS_LANCE_RETENTION_HOURS.
+    async optimize({ cleanupOlderThan = defaultCleanupCutoff() } = {}) {
         if (!this.#table) { return null; }
         try {
-            const stats = await this.#table.optimize();
+            const opts = cleanupOlderThan ? { cleanupOlderThan } : undefined;
+            const stats = await this.#table.optimize(opts);
             debug(`optimize: compacted ${stats?.compaction?.fragmentsRemoved ?? '?'} fragments`);
             return stats;
         } catch (e) {

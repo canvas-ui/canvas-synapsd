@@ -9,6 +9,13 @@ import { Schema, Field, Float64, Int32, Utf8, Float32, FixedSizeList } from 'apa
 
 const { RRFReranker } = lancedb.rerankers;
 
+// Default version-retention window for optimize(): prune dataset versions older
+// than 1 day (Lance's own default is 7). Env-overridable in hours.
+const CLEANUP_RETENTION_HOURS = Math.max(0, Number(process.env.CANVAS_LANCE_RETENTION_HOURS) || 24);
+function defaultCleanupCutoff() {
+    return CLEANUP_RETENTION_HOURS > 0 ? new Date(Date.now() - CLEANUP_RETENTION_HOURS * 3600 * 1000) : null;
+}
+
 // Tokenizer for the chunkText BM25 side of hybrid search. Mirrors the document
 // FTS index (URL-aware simple tokenizer, fold + stem) so lexical behavior is
 // consistent across the lexical-only and hybrid code paths.
@@ -287,9 +294,17 @@ export default class VectorIndex {
         return { ready: true, dim: this.#dim, chunkRows, embeddedDocs, annIndex };
     }
 
-    async optimize() {
+    // Compact fragments AND prune old dataset versions. reindex:true re-embeds
+    // churn every row (delete + re-add), so without pruning the table keeps every
+    // superseded version around (Lance's default retention is 7 days) — bloating
+    // disk and slowing scans. Default to a 1-day retention window; pass a Date to
+    // override, or null to keep Lance's default.
+    async optimize({ cleanupOlderThan = defaultCleanupCutoff() } = {}) {
         if (!this.#table) { return null; }
-        try { return await this.#table.optimize(); } catch (e) { debug(`optimize: ${e.message}`); return null; }
+        try {
+            const opts = cleanupOlderThan ? { cleanupOlderThan } : undefined;
+            return await this.#table.optimize(opts);
+        } catch (e) { debug(`optimize: ${e.message}`); return null; }
     }
 
     /**
