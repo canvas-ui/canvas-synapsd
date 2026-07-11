@@ -60,8 +60,8 @@ where `spec = { paths, features }`.
 - `getByChecksumString(checksum, options?)`
 - `hasByChecksumString(checksum, spec?)`
 - `resolveCandidates(spec) -> { bitmap, keys, collectionKeys, coarse }` - candidate-set stage; `collectionKeys` are the real bitmap keys consulted (for precise session invalidation), `coarse` flags a temporal dependency with no stable key
-- `rank(bitmap, match, { mode, limit, offset }) -> page` - the materialize/score stage
-- `searchRefined(queries[], baseSpec?, { limit, offset, mode }) -> page` - stateless multi-query refinement (AND-narrow text queries by fts-scoping; last ranks)
+- `rank(bitmap, match, { mode, limit, offset, debug }) -> page` - the materialize/score stage. `debug:true` attaches `result.debug.imageDistances` (unfloored image-kNN cosine distances, best-first) so you can calibrate the `imageMaxDistance` relevance floor from real numbers.
+- `searchRefined(queries[], baseSpec?, { limit, offset, mode }) -> page` - stateless multi-query refinement: each query AND-narrows the previous across FTS ∪ image-vector (so photos refine too), the last query ranks
 - `openSession(specs?, opts) -> QuerySession` - long-running refinable/live query session (see **Long-running sessions**)
 - `reindexCrudTimelines(opts?) -> { scanned, created, updated }` - rebuild crud:* timelines from the doc store (see **Reindexing crud timelines**)
 - `reindexSearchIndex(opts?) -> { indexed, totalDocs, alreadyIndexed }` - backfill the FTS index for un-indexed docs (idempotent; FTS only)
