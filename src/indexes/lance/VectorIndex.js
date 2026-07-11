@@ -16,19 +16,6 @@ function defaultCleanupCutoff() {
     return CLEANUP_RETENTION_HOURS > 0 ? new Date(Date.now() - CLEANUP_RETENTION_HOURS * 3600 * 1000) : null;
 }
 
-// Tokenizer for the chunkText BM25 side of hybrid search. Mirrors the document
-// FTS index (URL-aware simple tokenizer, fold + stem) so lexical behavior is
-// consistent across the lexical-only and hybrid code paths.
-const CHUNK_FTS_CONFIG = {
-    withPosition: true,
-    baseTokenizer: 'simple',
-    lowercase: true,
-    stem: true,
-    removeStopWords: false,
-    asciiFolding: true,
-    maxTokenLength: 60,
-};
-
 /**
  * VectorIndex — dense + hybrid retrieval over chunk-level rows in a LanceDB
  * table (`vec_text`). One row per (docId, chunkId).
@@ -109,7 +96,7 @@ export default class VectorIndex {
                 this.#table = await this.#db.createEmptyTable(this.#tableName, this.#schema());
             }
 
-            await this.#ensureChunkFtsIndex();
+            await this.#dropChunkTextIndex();
 
             if (this.#bitmapIndex) {
                 await this.#bitmapIndex.createBitmap(this.#vectorBitmapKey);
@@ -207,7 +194,13 @@ export default class VectorIndex {
         }, candidateIds, opts, 'vector');
     }
 
-    /** Hybrid: dense kNN + BM25 on chunkText, fused by RRF. */
+    /**
+     * Hybrid: dense kNN + BM25 on chunkText, fused by RRF. NOTE: the active search
+     * path (index.js rank()) does NOT use this — it fuses doc-level FTS with dense
+     * kNN instead — and the chunkText BM25 index is no longer built (see
+     * #dropChunkTextIndex). Kept for API completeness; degrades to pure dense
+     * search when the chunkText index is absent.
+     */
     async hybridSearch(queryVector, queryText, candidateIds = [], opts = {}) {
         if (!this.#table) { return { pageIds: [], totalCount: 0, error: 'VectorIndex not ready' }; }
 
@@ -224,12 +217,18 @@ export default class VectorIndex {
             return this.vectorSearch(queryVector, candidateIds, opts);
         }
 
-        return this.#search(
-            q => q.nearestTo(queryVector).fullTextSearch(text, { columns: ['chunkText'] }).rerank(reranker),
-            candidateIds,
-            opts,
-            'hybrid',
-        );
+        try {
+            return await this.#search(
+                q => q.nearestTo(queryVector).fullTextSearch(text, { columns: ['chunkText'] }).rerank(reranker),
+                candidateIds,
+                opts,
+                'hybrid',
+            );
+        } catch (e) {
+            // No chunkText FTS index (dropped) → fullTextSearch errors; fall back.
+            debug(`hybridSearch: chunk BM25 unavailable, falling back to vector: ${e.message}`);
+            return this.vectorSearch(queryVector, candidateIds, opts);
+        }
     }
 
     async #search(buildQuery, candidateIds, opts, label) {
@@ -324,28 +323,26 @@ export default class VectorIndex {
         }
     }
 
-    async #ensureChunkFtsIndex() {
+    // Drop the (dead) chunkText BM25 index if a prior version built one. The active
+    // search path fuses DOCUMENT-level FTS (index.js rank()) with dense kNN, never
+    // chunk-level BM25 (hybridSearch is uncalled). Worse, LanceDB's optimize()
+    // incremental FTS-index merge throws on this index ("No field named chunktext"),
+    // which aborts optimize() BEFORE it prunes old versions — so keeping it both
+    // wasted build time/disk and defeated compaction's version cleanup. Best-effort;
+    // hybridSearch degrades to pure dense search when the index is absent.
+    async #dropChunkTextIndex() {
         if (!this.#table) { return; }
-        const sigPath = path.join(this.#rootPath, `.${this.#tableName}-fts-signature`);
-        const signature = JSON.stringify(CHUNK_FTS_CONFIG);
-        let needsRebuild = true;
         try {
             const indices = await this.#table.listIndices();
-            const hasFts = indices.some(idx => Array.isArray(idx.columns)
-                ? idx.columns.includes('chunkText') : idx.column === 'chunkText');
-            if (hasFts) {
-                const prev = await fs.promises.readFile(sigPath, 'utf8').catch(() => null);
-                needsRebuild = prev !== signature;
+            const fts = indices.find(idx => Array.isArray(idx.columns) && idx.columns.includes('chunkText'));
+            if (fts?.name) {
+                await this.#table.dropIndex(fts.name);
+                debug(`dropped unused chunkText FTS index (${fts.name}) on ${this.#tableName}`);
             }
         } catch (e) {
-            debug(`ensureChunkFtsIndex: listIndices failed: ${e.message}`);
+            debug(`dropChunkTextIndex: ${e.message}`);
         }
-        if (!needsRebuild) { return; }
-        try {
-            await this.#table.createIndex('chunkText', { config: lancedb.Index.fts(CHUNK_FTS_CONFIG), replace: true });
-            await fs.promises.writeFile(sigPath, signature, 'utf8').catch(() => {});
-        } catch (e) {
-            if (!e.message?.includes('already exists')) { debug(`ensureChunkFtsIndex: ${e.message}`); }
-        }
+        // Remove the stale signature file left by the previous ensure logic.
+        try { await fs.promises.unlink(path.join(this.#rootPath, `.${this.#tableName}-fts-signature`)); } catch (_) { /* absent */ }
     }
 }

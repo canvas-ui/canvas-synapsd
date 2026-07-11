@@ -66,6 +66,26 @@ const SCHEMA_VERSION_KEY = 'internal/schemaVersion';
 // from doc state on every write, so it is derived and can never drift.
 const COMMENT_BITMAP_KEY = 'feature/has-comment';
 
+// Per-MIME-type presence bitmaps, derived from a doc's metadata.contentType. Two
+// keys per doc: the top-level type ('data/mime/image') for modality-scoped scans
+// (e.g. image-only reembed = iterate this bitmap instead of re-scanning every doc)
+// and the full type ('data/mime/image/jpeg') for granular filtering. Like the
+// comment bitmap these are derived from doc state each write (no synapse reverse
+// index), so a backfill (reindexMimeBitmaps) reconstructs them for existing docs.
+// The generic inline-JSON default is skipped: notes/tabs/emails are all
+// application/json, so it would only shadow the schema bitmaps with no new signal.
+const MIME_BITMAP_PREFIX = 'data/mime/';
+const GENERIC_MIME = 'application/json';
+function mimeBitmapKeys(doc) {
+    const raw = typeof doc?.metadata?.contentType === 'string' ? doc.metadata.contentType : '';
+    const clean = raw.split(';')[0].trim().toLowerCase(); // drop '; charset=...' params
+    if (!clean || clean === GENERIC_MIME) { return []; }
+    const slash = clean.indexOf('/');
+    if (slash <= 0 || slash >= clean.length - 1) { return []; } // not a valid type/subtype
+    const type = clean.slice(0, slash);
+    return normalizeBitmapKeys([`${MIME_BITMAP_PREFIX}${type}`, `${MIME_BITMAP_PREFIX}${clean}`]);
+}
+
 // Union extra locations into a document by url (used by in-batch content dedup,
 // where two identical blobs carry different file:// locations). Mutates target.
 function mergeDocumentLocations(target, extraLocations) {
@@ -824,6 +844,8 @@ class SynapsD extends EventEmitter {
                         await this.#removeStaleDeviceMembership(parsed.id, prevLocations || [], parsed.locations, docFeatures);
                     }
                     await this.#applyMembership(parsed.hasComment ? 'tick' : 'untick', parsed.id, [COMMENT_BITMAP_KEY]);
+                    const mimeKeys = mimeBitmapKeys(parsed);
+                    if (mimeKeys.length) { await this.#applyMembership('tick', parsed.id, mimeKeys); }
                 }
             });
 
@@ -1708,6 +1730,8 @@ class SynapsD extends EventEmitter {
                     await this.#removeStaleDeviceMembership(parsedDocument.id, storedDocument.locations, parsedDocument.locations, featureBitmaps);
                 }
                 await this.#applyMembership(parsedDocument.hasComment ? 'tick' : 'untick', parsedDocument.id, [COMMENT_BITMAP_KEY]);
+                const mimeKeys = mimeBitmapKeys(parsedDocument);
+                if (mimeKeys.length) { await this.#applyMembership('tick', parsedDocument.id, mimeKeys); }
             });
         } catch (error) {
             throw new Error('Error inserting document atomically: ' + error.message);
@@ -2389,6 +2413,8 @@ class SynapsD extends EventEmitter {
         // Capture locations before update() mutates storedDocument in place, so we can
         // untick device tags for any copy this write dropped.
         const previousLocations = Array.isArray(storedDocument.locations) ? [...storedDocument.locations] : [];
+        // MIME presence keys before update(), so a contentType change unticks stale ones.
+        const previousMimeKeys = mimeBitmapKeys(storedDocument);
 
         const updatedDocument = storedDocument.update(updateData);
         updatedDocument.validate();
@@ -2412,6 +2438,12 @@ class SynapsD extends EventEmitter {
                 await this.#removeStaleDeviceMembership(updatedDocument.id, previousLocations, updatedDocument.locations, featureBitmaps);
                 // Presence bitmap tracks comment state; untick when cleared on this edit.
                 await this.#applyMembership(updatedDocument.hasComment ? 'tick' : 'untick', updatedDocument.id, [COMMENT_BITMAP_KEY]);
+                // MIME presence bitmaps: tick current type keys, untick any the
+                // contentType change left behind (derived from doc state, can't drift).
+                const newMimeKeys = mimeBitmapKeys(updatedDocument);
+                const staleMimeKeys = previousMimeKeys.filter(k => !newMimeKeys.includes(k));
+                if (staleMimeKeys.length) { await this.#applyMembership('untick', updatedDocument.id, staleMimeKeys); }
+                if (newMimeKeys.length) { await this.#applyMembership('tick', updatedDocument.id, newMimeKeys); }
             });
 
             this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument, ...(provenance || {}) }));
@@ -3905,6 +3937,57 @@ class SynapsD extends EventEmitter {
         }
 
         debug(`reindexCrudTimelines: scanned ${counts.scanned}, created ${counts.created}, updated ${counts.updated}`);
+        return counts;
+    }
+
+    /**
+     * Rebuild the per-MIME-type presence bitmaps (data/mime/*) from stored docs.
+     * Like the comment bitmap these are derived-on-write with no synapse backing,
+     * so this backfills them for a corpus indexed before mime bitmaps existed (e.g.
+     * blobs). Drops every existing data/mime/* bitmap first (so ids from removed
+     * docs don't linger), then re-ticks from each doc's metadata.contentType.
+     * @returns {Promise<{scanned:number, ticked:number, keys:number}>}
+     */
+    async reindexMimeBitmaps({ batchSize = 1000, onProgress = null } = {}) {
+        if (!this.isRunning()) { throw new Error('Database is not running'); }
+
+        // 1. Drop stale data/mime/* bitmaps for a clean rebuild.
+        let dropped = 0;
+        for (const key of await this.bitmapIndex.listBitmaps(MIME_BITMAP_PREFIX)) {
+            try { await this.bitmapIndex.deleteBitmap(key); dropped++; } catch (_) { /* ignore */ }
+        }
+
+        // 2. Collect every document id.
+        const ids = [];
+        for await (const { key } of this.documents.getRange()) {
+            const id = Number(key);
+            if (Number.isInteger(id) && id > 0) { ids.push(id); }
+        }
+
+        // 3. Re-tick mime keys in id batches, buffered per batch.
+        const counts = { scanned: 0, ticked: 0, dropped, total: ids.length };
+        const touchedKeys = new Set();
+        for (let i = 0; i < ids.length; i += batchSize) {
+            const slice = ids.slice(i, i + batchSize);
+            const docs = this.#safeParseDocuments(await this.documents.getMany(slice));
+
+            await this.#withDeferredMembership(async () => {
+                for (const doc of docs) {
+                    counts.scanned++;
+                    const keys = mimeBitmapKeys(doc);
+                    if (keys.length) {
+                        await this.#applyMembership('tick', doc.id, keys);
+                        counts.ticked++;
+                        for (const k of keys) { touchedKeys.add(k); }
+                    }
+                }
+            });
+
+            if (onProgress) { onProgress({ ...counts }); }
+        }
+
+        counts.keys = touchedKeys.size;
+        debug(`reindexMimeBitmaps: scanned ${counts.scanned}, ticked ${counts.ticked} docs across ${counts.keys} mime bitmap(s) (dropped ${dropped})`);
         return counts;
     }
 

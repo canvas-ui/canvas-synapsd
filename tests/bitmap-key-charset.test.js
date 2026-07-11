@@ -29,9 +29,13 @@ describe('bitmap key charset (@ and : allowed) + legacy key migration', () => {
         if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
     });
 
-    test('normalizeBitmapKey keeps @ and : (backend addresses stay readable)', () => {
+    test('normalizeBitmapKey keeps @ : and + (backend addresses + MIME subtypes stay readable)', () => {
         expect(normalizeBitmapKey('data/backend/imap/user@domain.tld')).toBe('data/backend/imap/user@domain.tld');
         expect(normalizeBitmapKey('data/backend/workspace:home')).toBe('data/backend/workspace:home');
+        // '+' survives mid-key so MIME subtypes round-trip (svg+xml, ld+json) — it's
+        // only a query sigil in leading position (splitSigil slices the first char).
+        expect(normalizeBitmapKey('data/mime/image/svg+xml')).toBe('data/mime/image/svg+xml');
+        expect(normalizeBitmapKey('data/mime/application/ld+json')).toBe('data/mime/application/ld+json');
         // everything else outside the charset still squashes to '_'
         expect(normalizeBitmapKey('tag/hello world!')).toBe('tag/hello_world_');
         expect(normalizeBitmapKey('data/Backend/IMAP/User@Domain.TLD')).toBe('data/backend/imap/user@domain.tld');
