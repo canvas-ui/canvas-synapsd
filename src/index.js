@@ -267,13 +267,17 @@ class SynapsD extends EventEmitter {
             return out;
         }
 
-        // Per-space stats for every INITIALIZED vector space (text always; image
-        // once it's been embedded/queried). Reports dim + chunkRows + embeddedDocs
-        // so the image space (768-d CLIP) is visible, not just text (384-d).
+        // Per-space stats for every CONFIGURED vector space (text + image), not
+        // just the ones lazily initialized so far — otherwise the image space
+        // disappears from the summary until something embeds/queries it. Lazily
+        // opens each (embeddedDocs comes from the persistent presence bitmap, so
+        // the count is right even for a freshly-opened table).
         const vectorSpaces = {};
-        for (const [name, vi] of this.#vectorSpaces) {
-            try { vectorSpaces[name] = await vi.stats(); }
-            catch (e) { vectorSpaces[name] = { ready: false, error: e.message }; }
+        for (const name of Object.keys(this.#semanticConfig.spaces || {})) {
+            try {
+                const vi = await this.#getVectorSpace(name);
+                vectorSpaces[name] = vi ? await vi.stats() : { ready: false };
+            } catch (e) { vectorSpaces[name] = { ready: false, error: e.message }; }
         }
 
         out.semantic = {
