@@ -22,15 +22,18 @@ export function normalizeBitmapKey(key) {
 
     const isNegated = key.startsWith('!');
     const rawKey = isNegated ? key.slice(1) : key;
-    // Allowed charset: a-z 0-9 _ - . / @ : — '@' and ':' are kept so backend
-    // addresses stay readable (data/backend/imap/user@domain.tld,
-    // data/backend/workspace:home). '!' (negation), '/' (hierarchy/range
-    // scans) and whitespace stay reserved.
+    // Allowed charset: a-z 0-9 _ - . / @ : + — '@' and ':' keep backend addresses
+    // readable (data/backend/imap/user@domain.tld, data/backend/workspace:home);
+    // '+' keeps MIME subtypes intact (data/mime/image/svg+xml, application/ld+json)
+    // so there's no vocabulary translation between a doc's contentType and its
+    // bitmap key. '+' is only a query sigil in LEADING position (spec.js splitSigil
+    // slices the first char only), so mid-key '+' never collides. '!' (negation),
+    // '/' (hierarchy/range scans) and whitespace stay reserved.
     const normalized = rawKey
         .replace(/\\/g, '/')
         .replace(/\s+/g, '_')
         .toLowerCase()
-        .replace(/[^a-z0-9_\-./@:]/g, '_')
+        .replace(/[^a-z0-9_\-./@:+]/g, '_')
         .replace(/_+/g, '_')
         .replace(/\/+/g, '/');
 

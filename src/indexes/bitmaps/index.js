@@ -99,6 +99,10 @@ class BitmapIndex {
 
     async listBitmaps(prefix = '', { includeInternal = false } = {}) {
         prefix = BitmapIndex.normalizeKey(prefix);
+        // `prefix` is a namespace prefix, so a trailing slash is redundant \u2014 strip
+        // it so listBitmaps('feature/') === listBitmaps('feature'). Otherwise the
+        // range below becomes 'feature//\u2026' and matches nothing.
+        if (prefix) { prefix = prefix.replace(/\/+$/, ''); }
         if (prefix) {
             // If prefix provided, use range query (internal/* reachable this way)
             const keys = [];

@@ -1,8 +1,8 @@
 # Notes
 
-## Urgent
+To eval
+https://docs.lancedb.com/geneva/udfs/providers/sentence-transformers
 
-- Add mimetype bitmaps!
 
 RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval
 https://arxiv.org/html/2401.18059v1
