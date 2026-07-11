@@ -147,6 +147,8 @@ export function parseSpec(rawSpec = {}) {
             // fusion. 0 = identical, 2 = opposite. Omit for no floor.
             minDistance: pick('minDistance'),
             maxDistance: pick('maxDistance'),
+            // Calibration: attach raw (unfloored) image kNN distances to the result.
+            debug: pick('debug'),
         },
     };
 }
