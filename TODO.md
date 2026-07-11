@@ -1,5 +1,9 @@
 # Notes
 
+## Urgent
+
+- Add mimetype bitmaps!
+
 RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval
 https://arxiv.org/html/2401.18059v1
 
