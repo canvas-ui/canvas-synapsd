@@ -90,28 +90,6 @@ data/relation/installed-on
 Specially generated semantic anchors/chunks and summaries with several sub-layers (more on that later)
 Hierarchical semantic tree(s) on top of semantic layers
 
-
-## baseDocument: `comment` field
-
-Optional, user-authored, free-text `comment: string` on baseDocument ("sofa from the cozmo
-bar in Košice") — context that cannot be inferred from content/exif. Survives every schema
-migration/re-index unconditionally; it is the one text class that can never be regenerated.
-
-- Naming: `comment`, NOT `description` (captioning pipelines will want that name) and NOT
-  `annotation` (ML labeling / W3C structured connotation). Precedent: xattr `user.comment`,
-  Finder comments. Singular string, no `annotations[]` ceremony.
-- **Provenance rule: user-editable only.** Categorizer/caption/summary pipelines never write
-  this field — that's what keeps it a high-trust ranking signal. Generated captions get their
-  own field/doc later.
-- Indexing: always FTS. Embed as its own dedicated chunk row (reserved chunkId, e.g. `comment`)
-  so it keeps provenance at the vector layer and can be weighted in fusion. Rule: any doc with
-  a non-empty comment gets at least that one vector regardless of `embeddableSchemas` — makes
-  blob-backed docs (photos/files, which carry no content text) semantically searchable.
-- Presence bitmap `document/hasComment` (non-internal, so usable as a raw bitmap key in
-  `filters` — "show everything I bothered to annotate"). Maintained transactionally in
-  `put()`: tick when non-empty, untick when cleared — derived from doc state, can't drift.
-  Bonus: `hasComment AND NOT <vector-coverage>` = the lazy-embedding work queue, one bitmap op.
-
 ## Spatial GeoIndex (S2)
 
 - A lossy spatial index for candidate sets only — display/rendering reads raw GPS coords from
@@ -170,13 +148,6 @@ Do the simplest thing that works; aim to delete more than you add.
 
 ! Do NOT use `bitmapIndex.untickAll` (`indexes/bitmaps/index.js:415`): O(all-bitmaps) per delete, that's why it's dead. The bitmap side is already cleaned precisely and cheaply by `clearSynapses` (`indexes/inverted/Synapses.js:144`) via the reverse index. Leave `untickAll` dead.
 
-### Prereq
-- [x] Split `query()` into two stages, both stateless and pure. No caching inside synapsd: the operand cache is the session's job, the db stays stateless.
-      - `resolveCandidates(spec) -> { bitmap, keys }`  (paths ∩ features ∩ filters). `keys` = the bitmap keys the operand actually read, so a session can invalidate precisely instead of dirtying everything.
-      - `rank(bitmap, match, {mode,limit,offset}) -> page`  (fts/vector/hybrid; expensive). With `match=null` it degrades to slice+fetch, so `list(spec)` == `rank(resolveCandidates(spec).bitmap, null, …)` — one materializer, not three.
-      `query(match, spec)` becomes `rank(resolveCandidates(spec).bitmap, match, …)`.
-      Bonus: this seam dedupes today's copy-pasted candidate-building in `list` vs `search` (index.js:1725-1771 vs index.js:1881+). Land it right after the spec parser.
-- [x] Cacheability is conditional. Path/feature operands have stable keys and cache cleanly. Relative timeframes do NOT: `t:crud:updated:thisWeek` is wall-clock dependent. Resolve relative timeframes to absolute bounds at call time; whether those bounds freeze or slide is the session-mode decision below.
 
 ### Target surface
 
