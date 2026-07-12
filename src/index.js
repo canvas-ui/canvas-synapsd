@@ -233,15 +233,35 @@ class SynapsD extends EventEmitter {
             // table + bitmap key so existing data is not orphaned.
             spaces: sem.spaces || {
                 text: { table: 'vec_text', dim: sem.dim || 384, bitmapKey: 'internal/lance/vectors' },
-                image: { table: 'vec_image', dim: 768, bitmapKey: 'internal/lance/vectors/image' },
+                // annIndex:false — image search is CROSS-MODAL (text query vector vs
+                // photo vectors) with a tight distance floor. Lance's quantized ANN
+                // indexes (SQ/PQ) train on the stored (image) distribution; a text
+                // query lands far outside it and gets back wrong neighbours with
+                // wildly inflated distances (measured: true 0.96 → ANN 1.49), which
+                // the imageMaxDistance floor then rejects wholesale → zero results.
+                // Exact scan is correct and fast at this scale once compacted.
+                image: { table: 'vec_image', dim: 768, bitmapKey: 'internal/lance/vectors/image', annIndex: false },
             },
             // Image search relevance floor (cosine distance, 0 = identical). CLIP
             // image kNN returns its top-K for ANY query, so without a cap every
-            // search folds in unrelated photos. 0.97 is a sane default for the
-            // default SigLIP model (empirically usable across car/table/wine
-            // queries); live-tunable per workspace (setSearchTuning) and
+            // search folds in unrelated photos. 0.945 calibrated against SigLIP
+            // base fp32 (embedd's default dtype): true matches measured at
+            // 0.90–0.94 across car/wine/table/audi known-item queries, noise
+            // floor starts ~0.95. (The old 0.97 default was calibrated on q8
+            // vectors.) Live-tunable per workspace (setSearchTuning) and
             // env-overridable (CANVAS_IMAGE_MAX_DISTANCE). null/0 = no floor.
-            imageMaxDistance: typeof sem.imageMaxDistance === 'number' ? sem.imageMaxDistance : 0.97,
+            imageMaxDistance: typeof sem.imageMaxDistance === 'number' ? sem.imageMaxDistance : 0.945,
+            // Hybrid RRF fusion weights. fts > dense: text kNN has no relevance
+            // floor, so its rank-0 hit on an irrelevant corpus would otherwise tie
+            // a rank-0 EXACT lexical match. image == fts: image kNN IS floored
+            // (imageMaxDistance), so a photo that clears the floor is as much a
+            // "real match" as a filename hit — "red car" should surface the red
+            // car photo alongside red-car.pdf, not below every ngram coincidence.
+            searchWeights: {
+                fts: sem.searchWeights?.fts ?? 2,
+                dense: sem.searchWeights?.dense ?? 1,
+                image: sem.searchWeights?.image ?? 2,
+            },
         };
 
         this.contextBitmapCollection = null;
@@ -311,6 +331,7 @@ class SynapsD extends EventEmitter {
             spaces: Object.keys(this.#semanticConfig.spaces || {}),
             // Tunable search knobs (surfaced so the UI can show/edit current values).
             imageMaxDistance: this.#semanticConfig.imageMaxDistance,
+            searchWeights: { ...this.#semanticConfig.searchWeights },
             // Back-compat: `vector` stays the text space; `vectorSpaces` breaks it
             // out per space (text, image, …) so image embedding is observable.
             vector: vectorSpaces.text || (this.#vectorIndex ? await this.#vectorIndex.stats().catch(e => ({ ready: false, error: e.message })) : { ready: false }),
@@ -320,15 +341,26 @@ class SynapsD extends EventEmitter {
     }
 
     /**
-     * Live-tunable search knobs (no restart). Currently the image relevance floor.
-     * @param {{imageMaxDistance?: number|null}} tuning
+     * Live-tunable search knobs (no restart): the image relevance floor and the
+     * hybrid RRF fusion weights.
+     * @param {{imageMaxDistance?: number|null, searchWeights?: {fts?:number, dense?:number, image?:number}}} tuning
      */
     setSearchTuning(tuning = {}) {
         if (Object.prototype.hasOwnProperty.call(tuning, 'imageMaxDistance')) {
             const v = tuning.imageMaxDistance;
             this.#semanticConfig.imageMaxDistance = (v === null || Number.isFinite(v)) ? v : this.#semanticConfig.imageMaxDistance;
         }
-        return { imageMaxDistance: this.#semanticConfig.imageMaxDistance };
+        if (tuning.searchWeights && typeof tuning.searchWeights === 'object') {
+            const w = this.#semanticConfig.searchWeights;
+            for (const k of ['fts', 'dense', 'image']) {
+                const v = tuning.searchWeights[k];
+                if (Number.isFinite(v) && v >= 0) { w[k] = v; }
+            }
+        }
+        return {
+            imageMaxDistance: this.#semanticConfig.imageMaxDistance,
+            searchWeights: { ...this.#semanticConfig.searchWeights },
+        };
     }
 
     get db() { return this.#db; } // For testing only
@@ -1127,6 +1159,7 @@ class SynapsD extends EventEmitter {
                 dim: cfg.dim,
                 vectorBitmapKey: cfg.bitmapKey,
                 bitmapIndex: this.bitmapIndex,
+                annIndex: cfg.annIndex,
             });
             await vi.initialize();
             this.#vectorSpaces.set(space, vi);
@@ -2242,7 +2275,7 @@ class SynapsD extends EventEmitter {
                 const embedQuery = this.#semanticConfig.embedQuery;
                 queryVector = embedQuery ? await embedQuery(queryString, 'text') : null;
             } catch (e) {
-                debug(`rank: query embedding failed (${e.message}); falling back to fts`);
+                console.warn(`synapsd: rank query embedding failed, falling back to fts: ${e.message}`);
             }
             // CLIP/SigLIP image fan-out: embed the query with the image space's
             // text encoder and kNN the photo vectors (shared space), so "red car"
@@ -2251,7 +2284,7 @@ class SynapsD extends EventEmitter {
             try {
                 imgIds = await this.#imageVectorSearch(queryString, scopedIds, depth);
             } catch (e) {
-                debug(`rank: image search failed (${e.message})`);
+                console.warn(`synapsd: rank image kNN failed, continuing without image results: ${e.message}`);
             }
             if (!queryVector && imgIds.length === 0) {
                 ({ pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit, offset }));
@@ -2266,31 +2299,37 @@ class SynapsD extends EventEmitter {
                         : Promise.resolve({ pageIds: [], error: null }),
                     this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit: depth, offset: 0 }),
                 ]);
-                // Weight lexical above dense: vector kNN always returns its top-K
-                // nearest neighbours with no absolute-similarity floor, so on a
-                // small/irrelevant embedded corpus a rank-0 vector hit would
-                // otherwise tie a rank-0 EXACT lexical hit and pollute the top.
-                // FTS weight 2 keeps exact matches on top while dense still
-                // contributes (semantic recall). Image kNN gets weight 1 too — for
-                // photos it's the only signal, but it can't outrank exact lexical.
+                // Weights: see semanticConfig.searchWeights — fts outranks the
+                // floor-less text kNN, while floored image kNN fuses at parity
+                // with lexical (a photo that clears imageMaxDistance is as real
+                // a match as a filename hit).
+                const w = this.#semanticConfig.searchWeights;
                 const operands = [
-                    { ids: fts.pageIds || [], weight: 2 },
-                    { ids: vec.pageIds || [], weight: 1 },
+                    { ids: fts.pageIds || [], weight: w.fts },
+                    { ids: vec.pageIds || [], weight: w.dense },
                 ];
-                if (imgIds.length) { operands.push({ ids: imgIds, weight: 1 }); }
+                if (imgIds.length) { operands.push({ ids: imgIds, weight: w.image }); }
                 const fused = this.#rrfMerge(operands);
                 totalCount = fused.length;
                 pageIds = fused.slice(offset, offset + limit);
-                error = vec.error || fts.error || null;
+                // Hybrid degrades, it doesn't fail: a transient dense-side error
+                // (e.g. Lance mid-compaction during ingest) must not blank a
+                // search the lexical side answered. Only surface an error when
+                // BOTH legs failed.
+                if (vec.error || fts.error) {
+                    console.warn(`synapsd: hybrid search leg failed (fts: ${fts.error || 'ok'}, vector: ${vec.error || 'ok'})`);
+                }
+                error = (vec.error && fts.error) ? `${fts.error}; ${vec.error}` : null;
             } else {
                 // Pure vector mode: fuse text + image kNN (both dense, equal weight).
                 const vec = queryVector
                     ? await this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit: depth, offset: 0, minDistance: options.minDistance, maxDistance: options.maxDistance })
                     : { pageIds: [], error: null };
                 if (imgIds.length) {
+                    const wv = this.#semanticConfig.searchWeights;
                     const fused = this.#rrfMerge([
-                        { ids: vec.pageIds || [], weight: 1 },
-                        { ids: imgIds, weight: 1 },
+                        { ids: vec.pageIds || [], weight: wv.dense },
+                        { ids: imgIds, weight: wv.image },
                     ]);
                     totalCount = fused.length;
                     pageIds = fused.slice(offset, offset + limit);

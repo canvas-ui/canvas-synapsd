@@ -37,6 +37,7 @@ export default class VectorIndex {
     #dim;
     #vectorBitmapKey;
     #bitmapIndex;
+    #annIndex;
 
     constructor(options = {}) {
         this.#rootPath = options.rootPath;
@@ -44,6 +45,8 @@ export default class VectorIndex {
         this.#dim = options.dim || 384;
         this.#vectorBitmapKey = options.vectorBitmapKey || 'internal/lance/vectors';
         this.#bitmapIndex = options.bitmapIndex || null;
+        // annIndex:false pins the space to exact scans (see ensureVectorIndex).
+        this.#annIndex = options.annIndex !== false;
     }
 
     get isReady() { return !!this.#table; }
@@ -135,7 +138,9 @@ export default class VectorIndex {
             await this.#table.delete(`id = ${docId}`);
             if (rows.length > 0) { await this.#table.add(rows); }
         } catch (e) {
-            debug(`upsertChunks failed for ${docId}: ${e.message}`);
+            // Not just noise: the doc silently loses its vectors until the next
+            // reconcile backfill — keep this visible outside DEBUG runs.
+            console.warn(`synapsd: vector upsert failed (table=${this.#tableName}, doc=${docId}): ${e.message}`);
             return;
         }
 
@@ -251,7 +256,7 @@ export default class VectorIndex {
             }
             rows = await q.select(['id']).limit(fetchLimit).toArray();
         } catch (e) {
-            debug(`${label} search failed: ${e.message}`);
+            console.warn(`synapsd: ${label} search failed (table=${this.#tableName}): ${e.message}`);
             return { pageIds: [], totalCount: 0, error: e.message };
         }
 
@@ -313,10 +318,29 @@ export default class VectorIndex {
      */
     async ensureVectorIndex() {
         if (!this.#table) { return; }
+        // Space configured for exact scans (cross-modal retrieval + distance
+        // floors need true distances; quantized ANN returns inflated ones). Drop
+        // any index a previous version built so it stops poisoning results.
+        if (!this.#annIndex) {
+            try {
+                const indices = await this.#table.listIndices();
+                const vecIdx = indices.find(idx => (Array.isArray(idx.columns) ? idx.columns.includes('vector') : idx.column === 'vector'));
+                if (vecIdx?.name) {
+                    await this.#table.dropIndex(vecIdx.name);
+                    debug(`ensureVectorIndex: dropped ANN index on ${this.#tableName} (space pinned to exact scan)`);
+                }
+            } catch (e) { debug(`ensureVectorIndex: drop failed: ${e.message}`); }
+            return;
+        }
         try {
             const count = await this.#table.countRows();
             if (count < 256) { return; }
-            await this.#table.createIndex('vector', { config: lancedb.Index.hnswSq(), replace: true });
+            // The metric MUST match the query path, which forces cosine for the
+            // distanceRange relevance floor (#search). hnswSq() defaults to L2:
+            // with an L2 index the floor compares against squared-L2 (~2−2·cos on
+            // normalized vectors, so ~1.9+ for typical matches) and silently
+            // excludes every hit.
+            await this.#table.createIndex('vector', { config: lancedb.Index.hnswSq({ distanceType: 'cosine' }), replace: true });
             debug(`ensureVectorIndex: built HNSW index over ${count} rows`);
         } catch (e) {
             if (!e.message?.includes('already exists')) { debug(`ensureVectorIndex: ${e.message}`); }
