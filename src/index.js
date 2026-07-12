@@ -1344,29 +1344,35 @@ class SynapsD extends EventEmitter {
             return result;
         }
 
-        // Emit events for all successfully linked docs
-        const treeType = contextSpec ? 'context' : (directorySpec ? 'directory' : null);
-        const treeSpec = contextSpec ?? directorySpec;
-        for (const { index, id, docFeatures } of toProcess) {
+        for (const { index, id } of toProcess) {
             result.successful.push({ index, id });
-            try {
-                if (treeType && treeSpec) {
-                    const { tree } = this.#resolveTreeSelection(treeType, treeSpec, treeType === 'context' ? '/' : null);
-                    tree.emit(EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
-                        documentId: id,
-                        contextSpec,
-                        directorySpec,
-                        source: 'tree',
-                    }));
-                }
+        }
+
+        // One event per op, not per document: a lone doc gets a single event,
+        // many docs collapse into batch events. Linking a folder of 1300 docs
+        // otherwise emitted ~2600 socket messages and froze the browser.
+        try {
+            const ids = toProcess.map((e) => e.id);
+            if (ids.length === 1) {
                 this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
-                    id,
-                    memberships: { context: contextSpec, directory: directorySpec, features: docFeatures },
+                    id: ids[0],
+                    memberships: { context: contextSpec, directory: directorySpec },
                     ...(normSpec.provenance || {}),
                 }));
-            } catch (eventError) {
-                debug(`linkMany: Failed to emit events for doc ${id}: ${eventError.message}`);
+            } else if (ids.length > 1) {
+                this.emit(EVENTS.DOCUMENT_UPDATED_BATCH, createEvent(EVENTS.DOCUMENT_UPDATED_BATCH, {
+                    ids,
+                    memberships: { context: contextSpec, directory: directorySpec },
+                    ...(normSpec.provenance || {}),
+                }));
             }
+
+            // Tree-scoped events drive the web UI content refresh + browser
+            // extension. Batch helper handles the single/none cases internally.
+            this.#emitTreeDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'context', contextSpec, ids);
+            this.#emitTreeDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'directory', directorySpec, ids);
+        } catch (eventError) {
+            debug(`linkMany: Failed to emit events: ${eventError.message}`);
         }
 
         return result;
