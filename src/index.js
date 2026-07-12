@@ -2115,9 +2115,9 @@ class SynapsD extends EventEmitter {
     async #buildPathsBitmap(entries = [], keys = [], collectionKeys = null) {
         if (!Array.isArray(entries) || entries.length === 0) { return null; }
         let result = null;
-        for (const { type, path, tree } of entries) {
+        for (const { type, path, tree, recursive } of entries) {
             keys.push(`${type}:${path}`);
-            const selector = tree ? { tree, path } : { path };
+            const selector = { path, ...(tree ? { tree } : {}), ...(recursive ? { recursive: true } : {}) };
             const bm = type === 'directory'
                 ? await this.#buildDirectorySelectorBitmap(selector, collectionKeys)
                 : await this.#buildContextSelectorBitmap(selector, collectionKeys);
@@ -3859,6 +3859,11 @@ class SynapsD extends EventEmitter {
             return null;
         }
 
+        // Node-exact by default (folder listings); recursive widens to the whole
+        // subtree (searches — docs tick only their leaf node, so a node-exact
+        // scope at an ancestor folder would match nothing).
+        const recursive = directorySpec?.recursive === true;
+
         let resultBitmap = null;
         let sawExistingPath = false;
         for (const directoryPath of directoryPaths) {
@@ -3868,14 +3873,16 @@ class SynapsD extends EventEmitter {
 
             sawExistingPath = true;
             // find() reads exactly the path's own node bitmap (non-recursive) — the
-            // same node a doc inserted at this path ticks. Record that collection key
-            // so a write to this path precisely invalidates the operand.
+            // same node a doc inserted at this path ticks. Record the consulted
+            // collection keys so a write to this scope precisely invalidates the operand.
             if (collectionKeys) {
-                for (const nodeId of tree.getNodeIdsForPath(directoryPath, { recursive: false })) {
+                for (const nodeId of tree.getNodeIdsForPath(directoryPath, { recursive })) {
                     collectionKeys.push(collection.makeKey(nodeId));
                 }
             }
-            const directoryBitmap = await tree.find(directoryPath);
+            const directoryBitmap = recursive
+                ? await tree.findRecursive(directoryPath)
+                : await tree.find(directoryPath);
             if (!directoryBitmap || directoryBitmap.isEmpty) {
                 continue;
             }

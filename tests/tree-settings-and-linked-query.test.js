@@ -149,4 +149,32 @@ describe('tree settings bag + linkContextRoot + linked/unlinked query', () => {
         expect(docs.count).toBe(1);
         expect(docs.documents[0].id).toBe(unfiledId);
     });
+
+    test('directory selector with recursive:true scopes queries to the whole subtree', async () => {
+        await createMirrorTree();
+        const inboxId = await db.put(note('recursive inbox doc'), {
+            context: null,
+            directory: { tree: 'mirror', path: '/imap/me@idnc.sk/Inbox' },
+        });
+        const archiveId = await db.put(note('recursive archive doc'), {
+            context: null,
+            directory: { tree: 'mirror', path: '/imap/me@idnc.sk/Archive' },
+        });
+
+        // Node-exact (default): docs tick only their leaf node, an ancestor
+        // folder scope matches nothing.
+        const exact = await db.list({ directory: { tree: 'mirror', path: '/imap' } });
+        expect(exact.map((d) => d.id)).toEqual([]);
+
+        // Recursive: the ancestor folder covers the whole subtree.
+        const recursive = await db.list({ directory: { tree: 'mirror', path: '/imap', recursive: true } });
+        expect(recursive.map((d) => d.id).sort((a, b) => a - b))
+            .toEqual([inboxId, archiveId].sort((a, b) => a - b));
+
+        // Scoped to one branch stays scoped.
+        const branch = await db.list({
+            directory: { tree: 'mirror', path: '/imap/me@idnc.sk/Inbox', recursive: true },
+        });
+        expect(branch.map((d) => d.id)).toEqual([inboxId]);
+    });
 });
