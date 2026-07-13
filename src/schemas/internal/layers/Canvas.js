@@ -43,6 +43,7 @@ export default class Canvas extends Layer {
             features: null,
             filters: [],
             query: null,
+            sort: null,
         };
         if (!spec || typeof spec !== 'object') { return out; }
 
@@ -68,6 +69,16 @@ export default class Canvas extends Layer {
         const query = spec.query ?? spec.search ?? spec.q;
         if (typeof query === 'string' && query.trim()) {
             out.query = query.trim();
+        }
+
+        // Saved view order: { sortBy: <timeline name>, order: 'asc'|'desc' }.
+        // sortBy AND-composes nothing — it only reorders the composed result set
+        // (applied in Workspace.#composeCanvasForScope). Empty sortBy = no sort.
+        if (spec.sort && typeof spec.sort === 'object') {
+            const sortBy = typeof spec.sort.sortBy === 'string' ? spec.sort.sortBy.trim() : '';
+            if (sortBy) {
+                out.sort = { sortBy, order: spec.sort.order === 'asc' ? 'asc' : 'desc' };
+            }
         }
 
         return out;
