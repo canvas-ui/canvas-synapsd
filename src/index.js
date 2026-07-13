@@ -30,6 +30,7 @@ import BaseDocument from './schemas/BaseDocument.js';
 import BitmapIndex from './indexes/bitmaps/index.js';
 import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimelineIndex from './indexes/inverted/Timeline.js';
+import GeoIndex from './indexes/inverted/GeoIndex.js';
 import Synapses from './indexes/inverted/Synapses.js';
 import Relations from './indexes/inverted/Relations.js';
 import LanceIndex from './indexes/lance/index.js';
@@ -43,7 +44,7 @@ import DirectoryTree from './views/DirectoryTree.js';
 
 // Extracted utilities
 import { parseContextSpecForInsert, parseBitmapArray } from './utils/parsing.js';
-import { parseFilters, applyTimelineFilter } from './utils/filters.js';
+import { parseFilters, applyTimelineFilter, applyGeoFilter } from './utils/filters.js';
 import { parseSpec } from './utils/spec.js';
 import { parseDocumentData, initializeDocument, parseInitializeDocument } from './utils/document.js';
 import QuerySession from './session/QuerySession.js';
@@ -132,6 +133,7 @@ class SynapsD extends EventEmitter {
     // Inverted Indexes
     #checksumIndex;
     #timelineIndex;
+    #geoIndex;
     #synapses;
     #relations;
 
@@ -212,6 +214,7 @@ class SynapsD extends EventEmitter {
 
         this.#checksumIndex = new ChecksumIndex(this.#db.createDataset('checksums'));
         this.#timelineIndex = null;
+        this.#geoIndex = null;
         this.#semantic = new SemanticEngine({ db: this });
 
         // Semantic / dense-vector config. Disabled => fts-only (vector + hybrid
@@ -368,6 +371,7 @@ class SynapsD extends EventEmitter {
     // Inverted indexes
     get checksumIndex() { return this.#checksumIndex; }
     get timeline() { return this.#timelineIndex; }
+    get geo() { return this.#geoIndex; }
     get synapses() { return this.#synapses; }
     get relations() { return this.#relations; }
     get semantic() { return this.#semantic; }
@@ -382,7 +386,10 @@ class SynapsD extends EventEmitter {
             // Initialize deletedDocumentsBitmap here
             this.deletedDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/gc/deleted');
 
-            this.#timelineIndex = new TimelineIndex(this.bitmapIndex);
+            // 'tasks' (Todo due dates) is a point-event axis — instants, not
+            // intervals — so it gets the cheaper single-BSI storage.
+            this.#timelineIndex = new TimelineIndex(this.bitmapIndex, { pointTimelines: ['tasks'] });
+            this.#geoIndex = new GeoIndex(this.bitmapIndex);
 
             // Initialize Synapses inverted index
             this.#synapses = new Synapses(
@@ -876,6 +883,7 @@ class SynapsD extends EventEmitter {
                     if (parsed.updatedAt) await this.#timelineIndex.insert('crud:updated', parsed.id, parsed.updatedAt);
                     if (existing && prevTimelineState) await this.#removeDocumentTimelines(parsed.id, prevTimelineState, parsed);
                     await this.#indexDocumentTimelines(parsed.id, parsed);
+                    await this.#indexDocumentGeo(parsed.id, parsed);
                     await this.#indexDocument(parsed.id, contextSpec, directorySpec, docFeatures);
                     if (existing) {
                         await this.#removeStaleDeviceMembership(parsed.id, prevLocations || [], parsed.locations, docFeatures);
@@ -1296,6 +1304,7 @@ class SynapsD extends EventEmitter {
                     await this.#timelineIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
                     if (parsed.updatedAt) await this.#timelineIndex.insert('crud:updated', parsed.id, parsed.updatedAt);
                     await this.#indexDocumentTimelines(parsed.id, parsed);
+                    await this.#indexDocumentGeo(parsed.id, parsed);
                     // One doc can be linked under multiple directory paths (folded dups).
                     for (const directorySpec of directorySpecs) {
                         await this.#indexDocument(parsed.id, null, directorySpec, docFeatures);
@@ -1622,6 +1631,7 @@ class SynapsD extends EventEmitter {
                     await this.#applyMembership('untick', id, clearedLayers);
                     await this.#relations.clearRelations(id);
                     await this.#timelineIndex.removeFromAll(id);
+                    if (await this.#geoIndex.has(id)) { await this.#geoIndex.remove(id); }
                     await this.#checksumIndex.deleteArray(document.checksumArray);
                     // Free-pool admission deferred until after lance cleanup (below).
                     await this.#timelineIndex.insert('crud:deleted', id, document.updatedAt || now);
@@ -1793,6 +1803,7 @@ class SynapsD extends EventEmitter {
                 if (parsedDocument.updatedAt) await this.#timelineIndex.insert('crud:updated', parsedDocument.id, parsedDocument.updatedAt);
                 if (storedDocument) await this.#removeDocumentTimelines(parsedDocument.id, storedDocument, parsedDocument);
                 await this.#indexDocumentTimelines(parsedDocument.id, parsedDocument);
+                await this.#indexDocumentGeo(parsedDocument.id, parsedDocument);
                 await this.#indexDocument(parsedDocument.id, contextSpec, directorySpec, featureBitmaps);
                 if (storedDocument) {
                     await this.#removeStaleDeviceMembership(parsedDocument.id, storedDocument.locations, parsedDocument.locations, featureBitmaps);
@@ -2134,7 +2145,7 @@ class SynapsD extends EventEmitter {
         }
 
         if (filters.length > 0) {
-            const { bitmapFilters, timelineFilters } = parseFilters(filters);
+            const { bitmapFilters, timelineFilters, geoFilters } = parseFilters(filters);
             if (bitmapFilters.length > 0) {
                 const filterKeys = normalizeBitmapKeys(bitmapFilters);
                 keys.push(...filterKeys);
@@ -2150,6 +2161,15 @@ class SynapsD extends EventEmitter {
                 // a write does not tick a key we can intersect. Mark coarse.
                 coarse = true;
                 if (bitmap) { bitmap.andInPlace(timelineBitmap); } else { bitmap = timelineBitmap; }
+                constrained = true;
+            }
+            if (geoFilters.length > 0) {
+                const geoBitmap = await this.#combineGeoFilters(geoFilters);
+                keys.push(...geoFilters.map((f) => `geo:${f.kind}`));
+                // Spatial filters live in the S2 BSI — same no-stable-key story
+                // as temporal ones. Mark coarse.
+                coarse = true;
+                if (bitmap) { bitmap.andInPlace(geoBitmap); } else { bitmap = geoBitmap; }
                 constrained = true;
             }
         }
@@ -2190,22 +2210,31 @@ class SynapsD extends EventEmitter {
         return result;
     }
 
-    // Sigil algebra over timeline filters: AND(allOf) ∩ OR(anyOf) \ OR(noneOf).
-    // Returns a bitmap (never null) when given a non-empty filter set.
     async #combineTimelineFilters(timelineFilters) {
+        return await this.#combineSigilFilters(timelineFilters, (f) => applyTimelineFilter(f, this.#timelineIndex));
+    }
+
+    async #combineGeoFilters(geoFilters) {
+        return await this.#combineSigilFilters(geoFilters, (f) => applyGeoFilter(f, this.#geoIndex));
+    }
+
+    // Shared sigil algebra for BSI-backed filter families (timeline, geo):
+    // AND(allOf) ∩ OR(anyOf) \ OR(noneOf). Returns a bitmap (never null) when
+    // given a non-empty filter set.
+    async #combineSigilFilters(filters, apply) {
         const bySigil = { allOf: [], anyOf: [], noneOf: [] };
-        for (const filter of timelineFilters) { bySigil[filter.sigil].push(filter); }
+        for (const filter of filters) { bySigil[filter.sigil].push(filter); }
 
         const orOf = async (list) => {
             const result = new RoaringBitmap32();
-            for (const filter of list) { result.orInPlace(await applyTimelineFilter(filter, this.#timelineIndex)); }
+            for (const filter of list) { result.orInPlace(await apply(filter)); }
             return result;
         };
 
         let positive = null;
         if (bySigil.allOf.length > 0) {
             for (const filter of bySigil.allOf) {
-                const bm = await applyTimelineFilter(filter, this.#timelineIndex);
+                const bm = await apply(filter);
                 if (positive) { positive.andInPlace(bm); } else { positive = bm; }
             }
         }
@@ -2747,6 +2776,7 @@ class SynapsD extends EventEmitter {
                 if (updatedDocument.updatedAt) await this.#timelineIndex.insert('crud:updated', updatedDocument.id, updatedDocument.updatedAt);
                 await this.#removeDocumentTimelines(updatedDocument.id, previousTimelineState, updatedDocument);
                 await this.#indexDocumentTimelines(updatedDocument.id, updatedDocument);
+                await this.#indexDocumentGeo(updatedDocument.id, updatedDocument);
 
                 // Index across all views using shared helper
                 await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
@@ -2920,6 +2950,7 @@ class SynapsD extends EventEmitter {
 
                 // Remove document from all custom and CRUD timelines before recording deletion.
                 await this.#timelineIndex.removeFromAll(docId);
+                if (await this.#geoIndex.has(docId)) { await this.#geoIndex.remove(docId); }
                 debug(`delete: Document ${docId} removed from timeline indices`);
 
                 // Delete document checksums from inverted index
@@ -3817,6 +3848,22 @@ class SynapsD extends EventEmitter {
         const asserted = new Set((Array.isArray(assertedFeatures) ? assertedFeatures : []).map(normalizeBitmapKey));
         const stale = previous.filter((tag) => !current.has(tag) && !asserted.has(tag));
         if (stale.length > 0) { await this.#removeDocumentMembership(docId, stale); }
+    }
+
+    // Geo membership is fully derived from metadata.geo (lat/lon — populated by
+    // stored-ingest / embed-time EXIF extraction): valid coords → (re)index the
+    // S2 cell, coords gone → drop. The ebm probe keeps the no-geo common case
+    // at one cached-bitmap lookup instead of 65 slice unticks.
+    async #indexDocumentGeo(docId, document) {
+        if (!this.#geoIndex) { return; }
+        const geo = document?.metadata?.geo;
+        const lat = Number(geo?.lat);
+        const lon = Number(geo?.lon);
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            await this.#geoIndex.insert(docId, lat, lon);
+        } else if (await this.#geoIndex.has(docId)) {
+            await this.#geoIndex.remove(docId);
+        }
     }
 
     async #indexDocumentTimelines(docId, document) {

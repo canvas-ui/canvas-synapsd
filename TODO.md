@@ -92,6 +92,14 @@ Hierarchical semantic tree(s) on top of semantic layers
 
 ## Spatial GeoIndex (S2)
 
+**IMPLEMENTED 2026-07-13** as designed below (preferred shape): `indexes/inverted/GeoIndex.js`,
+single point-BSI `internal/geo/s2` over level-21 cell ids (nodes2ts, pure JS, BigInt-native —
+unsigned face-4/5 ids verified), derived from `metadata.geo` on put/update/delete (ebm probe
+guards the no-geo common case), `geo:bbox:` / `geo:near:` / `geo:cell:` filter tokens through
+the shared sigil combiner. Tests: `tests/geo-index.test.js`. Deferred from the notes below:
+polygon coverings (viewport bbox covers the mapbox case; nodes2ts has no S2Polygon), the
+`geo/hasLocation` prefilter micro-opt (ebm already serves that role).
+
 - A lossy spatial index for candidate sets only — display/rendering reads raw GPS coords from
   the doc (exif → OSM etc.); the index never needs to reproduce coordinates.
 - **Preferred shape: single BSI over the S2 cellId, not per-level membership bitmaps.** Store
@@ -183,7 +191,7 @@ Surface is uniform `t:<name>:<spec>`; the parser splits internally. Sigil algebr
 Spec forms:
 - Content point: `t:wikipedia:1996`
 - Content range: `t:wikipedia:1996..1999` (`..`, since `:` is the segment delimiter); relative ages parse too (`t:geology:541mya..252mya`)
-- Lifecycle (reserved `crud`): `t:crud:<action>:<timeframe|range>`, e.g. `t:crud:updated:thisWeek`. Named timeframes stay crud-only (wall-clock relative; meaningless on a content axis).
+- Lifecycle (reserved `crud`): `t:crud:<action>:<timeframe|range>`, e.g. `t:crud:updated:thisWeek`. ~~Named timeframes stay crud-only~~ *(revised 2026-07-13: named timeframes resolve on ANY timeline — `t:tasks:today` = "due today"; deep-time axes simply never match them.)*
 
 Overlay = multiple anyOf `t:` items, canonical form is one line per timeline (composes when ranges differ):
 
