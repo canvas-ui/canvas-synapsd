@@ -264,6 +264,11 @@ Filters share the sigil algebra and dispatch on a type prefix:
 - `t:<name>:<spec>` - temporal. Reserved lifecycle form `t:crud:<action>:<timeframe|range>`
   (e.g. `t:crud:updated:thisWeek`, `t:crud:created:2026-01-01..2026-05-10`); content
   timelines use `t:<name>:<point|range>` (e.g. `t:wikipedia:1996`, `t:wikipedia:1996..1999`).
+  Named timeframes (`today`, `thisWeek`, …) resolve on **any** timeline — `t:tasks:today`
+  is "due today"; deep-time axes simply never match them.
+- `geo:<kind>:<args>` - spatial (S2 index, see **Spatial index** below):
+  `geo:bbox:minLat,minLon,maxLat,maxLon`, `geo:near:lat,lon,radius[m|km]`,
+  `geo:cell:s2CellId[,...]`.
 - `g:<glob>` and `re:<regexp>` - recognised but **not yet implemented** (throw).
 
 Anything without a recognised prefix is treated as a raw bitmap key (ANDed).
@@ -550,6 +555,12 @@ Or programmatically: `await db.reindexCrudTimelines()`. Note: `crud:deleted` is 
 
 ### Custom Timelines
 
+Reserved content-timeline conventions on top of the machinery below: **`content`** — when
+the content itself came into existence (EXIF capture date for photos; written by stored
+ingest and embed-time extraction), and **`tasks`** — Todo due dates (point-mode, derived
+from `data.dueDate` by the Todo schema; `t:tasks:today` = "due today", `sortBy: 'tasks'`
+orders by due date).
+
 Use `db.timeline` for custom source/domain timelines.
 
 ```js
@@ -731,6 +742,40 @@ linearly (~2 µs/doc). Memory-wise a fully populated second-scale tier over 20 k
 docs is ~100 roaring bitmaps totalling **under 1 MB** serialized — the sort reads
 existing index state and allocates nothing beyond the key map.
 
+## Spatial index (S2)
+
+Documents with GPS coordinates (`metadata.geo.lat/lon` — populated by stored-ingest or
+embed-time EXIF extraction) are indexed into a single bit-sliced index over their **S2 cell
+id** at level 21 (~5 m — GPS accuracy is 3–10 m, finer would be fake precision). Fully
+derived state: coordinates appear → indexed; coordinates removed / doc deleted → dropped.
+
+The trick that keeps this one BSI instead of a per-cell bitmap zoo: S2 ids are hierarchical,
+so every ancestor cell covers one **contiguous id range** of its descendants — "in cell X"
+at any zoom level is a single `BETWEEN` range query. A region query (map viewport, radius)
+runs the S2 region coverer (≤20 cells) and ORs the per-cell ranges. Bitmap population is
+fixed at the slice width (~65) regardless of data density, precision, or query zoom.
+
+```js
+// Map viewport (bbox), composed with anything else:
+const inView = await db.list({
+    features: ['data/abstraction/file'],
+    filters: ['geo:bbox:47.5,15.5,48.8,17.8', 't:content:2023-01-01..2023-12-31'],
+    sortBy: 'content',
+});
+
+// Radius ("within 5 km of here"), sigils apply:
+const nearby = await db.list({ filters: ['+geo:near:48.1486,17.1077,5km', '!tag/private'] });
+
+// Programmatic (returns RoaringBitmap32):
+await db.geo.queryBBox(minLat, minLon, maxLat, maxLon);
+await db.geo.queryRadius(lat, lon, radiusMeters);
+await db.geo.queryCells([cellId, ...]);
+```
+
+Candidate-set semantics, deliberately lossy: coverings may slightly overshoot the region
+boundary. Precise containment (and rendering) is the client's job via the raw
+`metadata.geo` coordinates — the index never reproduces coordinates.
+
 ## Bitmap index
 
 Roaring bitmaps back every membership lookup. Keys use typed prefixes - validated in `indexes/bitmaps/lib/keys.js`:
@@ -745,6 +790,7 @@ Roaring bitmaps back every membership lookup. Keys use typed prefixes - validate
 Notable `internal/*` keys:
 
 - `internal/ts/<timeline>/<scale>/start|end` - timeline Dual-BSI tiers
+- `internal/geo/s2/*` - spatial S2 cell-id BSI slices (see **Spatial index**)
 - `internal/lance/fts`, `internal/lance/vectors` - Lance search index coverage
 - `internal/gc/deleted` - soft-deleted document set
 
