@@ -116,9 +116,9 @@ describe('todo schema + tasks timeline', () => {
 
         const res = await db.list({
             features: ['data/abstraction/todo'],
-            // Raw bitmap keys are ANDed by default (no sigil grammar); '+' only
-            // applies to t:/geo: filter families.
-            filters: ['data/status/pending', `+t:tasks:${iso(inDays(0)).slice(0, 10)}..${iso(inDays(7)).slice(0, 10)}`],
+            // '+' on a raw bitmap key is stripped to the AND default (regression:
+            // it used to leak into the key and silently match nothing).
+            filters: ['+data/status/pending', `+t:tasks:${iso(inDays(0)).slice(0, 10)}..${iso(inDays(7)).slice(0, 10)}`],
             sortBy: 'tasks',
             limit: 0,
         });
