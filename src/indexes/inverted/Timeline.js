@@ -264,6 +264,52 @@ export default class TimelineIndex {
         return union.toArray();
     }
 
+    /**
+     * Sort keys for a candidate id set: id -> BigInt comparable across scale
+     * tiers (ms since epoch; coarse tiers key on their period start, so "1984"
+     * sorts before "1984-06-15" — stable and correct for ordering). Instant
+     * timelines read the single ts BSI; interval timelines sort by start. Ids
+     * with no value in any tier are absent from the map — the caller decides
+     * where unsortable docs land.
+     *
+     * @param {string} timelineName
+     * @param {RoaringBitmap32} idsBitmap - candidate document ids
+     * @returns {Promise<Map<number, BigInt>>}
+     */
+    async getSortKeys(timelineName, idsBitmap) {
+        this.#assertTimelineName(timelineName);
+        const keys = new Map();
+        // Coarse → fine, so when an id carries values in several tiers the
+        // finest (most precise) key wins.
+        for (const scale of SCALES) {
+            const tier = this.#getTier(timelineName, scale);
+            const bsi = tier.point || tier.start;
+            const values = await bsi.getValues(idsBitmap);
+            for (const [id, encoded] of values) {
+                keys.set(id, this.#sortKeyMs(scale, encoded - SIGNED_OFFSET));
+            }
+        }
+        return keys;
+    }
+
+    // Convert a tier-scale value to an ms-scale BigInt sort key (period start
+    // for coarse scales). Purely for comparison in JS — never re-encoded into a
+    // BSI, so deep-time keys may exceed the 64-bit window without harm.
+    #sortKeyMs(scale, value) {
+        // Open-interval sentinels are already the numeric extremes; keep them.
+        if (value === OPEN_START_VALUE || value === OPEN_END_VALUE) { return value; }
+        if (scale === 'ms') { return value; }
+        if (scale === 'ns') { return this.#floorDiv(value, 1000000n); }
+        // Deep-time tiers collapse to years first, then take the period start.
+        let fromScale = scale;
+        let fromValue = value;
+        if (scale === 'Gyr') { fromScale = 'year'; fromValue = value * 1000000000n; }
+        else if (scale === 'Myr') { fromScale = 'year'; fromValue = value * 1000000n; }
+        else if (scale === 'Kyr') { fromScale = 'year'; fromValue = value * 1000n; }
+        const ms = this.#convertCalendarBoundary(fromScale, 'ms', fromValue, 'start');
+        return ms !== null ? ms : fromValue;
+    }
+
     // ========================================
     // Timeframe Utilities
     // ========================================

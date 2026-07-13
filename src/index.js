@@ -2213,6 +2213,35 @@ class SynapsD extends EventEmitter {
             // GC id-reuse makes this approximate for reused ids).
             const descending = options.order === 'desc';
 
+            // Timeline sort: order the candidate set by its values on a named
+            // timeline (BSI value extraction), THEN paginate — the whole point is
+            // that page 1 of a 1300-photo gallery is already in capture order.
+            const sortTimeline = this.#normalizeSortBy(options.sortBy);
+            if (sortTimeline && this.#timelineIndex) {
+                const base = bitmap === null ? await this.#buildAllDocumentsBitmap() : bitmap;
+                if (base.isEmpty) { return this.#emptyResult(); }
+                const keyMap = await this.#timelineIndex.getSortKeys(sortTimeline, base);
+                const keyed = [];
+                const missing = [];
+                for (const id of base) { (keyMap.has(id) ? keyed : missing).push(id); }
+                keyed.sort((a, b) => {
+                    const d = keyMap.get(a) - keyMap.get(b);
+                    return d < 0n ? -1 : d > 0n ? 1 : a - b;
+                });
+                if (descending) { keyed.reverse(); missing.reverse(); }
+                // Docs without a value on the timeline are unsortable — they
+                // always trail (in id order) rather than polluting the sequence.
+                const ids = keyed.concat(missing);
+                const totalCount = ids.length;
+                const slicedIds = limit === 0 ? ids : ids.slice(offset, offset + limit);
+                const docs = await this.documents.getMany(slicedIds);
+                const resultArray = parseDocuments ? this.#safeParseDocuments(docs) : docs;
+                resultArray.count = resultArray.length;
+                resultArray.totalCount = totalCount;
+                resultArray.error = null;
+                return resultArray;
+            }
+
             if (bitmap === null) {
                 const totalCount = await this.documents.getCount();
                 const pagedDocs = [];
@@ -2385,6 +2414,16 @@ class SynapsD extends EventEmitter {
         return empty;
     }
 
+    // sortBy accepts 'content', 't:content', 'crud:created', or { timeline }.
+    #normalizeSortBy(sortBy) {
+        const raw = typeof sortBy === 'string'
+            ? sortBy
+            : (sortBy && typeof sortBy === 'object' ? sortBy.timeline : null);
+        if (typeof raw !== 'string') { return null; }
+        const name = raw.trim().replace(/^t:/, '');
+        return name.length > 0 ? name : null;
+    }
+
     async query(match = null, spec = {}) {
         const parsed = parseSpec(spec);
         const { bitmap } = await this.#resolveParsed(parsed);
@@ -2502,12 +2541,14 @@ class SynapsD extends EventEmitter {
         // Canonical update signature accepts a selector/options object.
         let directorySpec = null;
         let provenance = null;
+        let emitEvent = true;
         if (this.#isDocumentOperationOptions(contextSpec)) {
             const opts = contextSpec;
             contextSpec = opts.context ?? null;
             directorySpec = opts.directory ?? null;
             featureBitmapArray = opts.features ?? featureBitmapArray;
             provenance = this.#normalizeProvenance(opts.provenance);
+            emitEvent = opts.emitEvent !== false;
         }
 
         const docId = docIdentifier;
@@ -2566,7 +2607,9 @@ class SynapsD extends EventEmitter {
                 if (newMimeKeys.length) { await this.#applyMembership('tick', updatedDocument.id, newMimeKeys); }
             });
 
-            this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument, ...(provenance || {}) }));
+            if (emitEvent) {
+                this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument, ...(provenance || {}) }));
+            }
 
             // Best-effort Lance upsert
             try {
