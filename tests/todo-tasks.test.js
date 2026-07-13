@@ -79,6 +79,58 @@ describe('todo schema + tasks timeline', () => {
         expect(later.map((d) => d.id)).toEqual([id]);
     });
 
+    test('status is queryable via derived data/status/* bitmaps', async () => {
+        const pending = await db.put({ schema: TODO_SCHEMA, data: { title: 'open item' } });
+        const done = await db.put({ schema: TODO_SCHEMA, data: { title: 'closed item', status: 'completed' } });
+
+        const pendingIds = await db.list({ filters: ['data/status/pending'], limit: 0 });
+        expect(pendingIds.map((d) => d.id)).toEqual([pending]);
+        const doneIds = await db.list({ filters: ['data/status/completed'], limit: 0 });
+        expect(doneIds.map((d) => d.id)).toEqual([done]);
+    });
+
+    test('status change unticks the stale bitmap (update path)', async () => {
+        const id = await db.put({ schema: TODO_SCHEMA, data: { title: 'flip me' } });
+        await db.put({ id, schema: TODO_SCHEMA, data: { title: 'flip me', status: 'completed' } });
+
+        const pendingIds = await db.list({ filters: ['data/status/pending'], limit: 0 });
+        expect(pendingIds.map((d) => d.id)).toEqual([]);
+        const doneIds = await db.list({ filters: ['data/status/completed'], limit: 0 });
+        expect(doneIds.map((d) => d.id)).toEqual([id]);
+    });
+
+    test('status change through putMany batch also unticks stale keys', async () => {
+        const id = await db.put({ schema: TODO_SCHEMA, data: { title: 'batch flip' } });
+        await db.putMany([{ id, schema: TODO_SCHEMA, data: { title: 'batch flip', status: 'cancelled' } }]);
+
+        const pendingIds = await db.list({ filters: ['data/status/pending'], limit: 0 });
+        expect(pendingIds.map((d) => d.id)).toEqual([]);
+        const cancelledIds = await db.list({ filters: ['data/status/cancelled'], limit: 0 });
+        expect(cancelledIds.map((d) => d.id)).toEqual([id]);
+    });
+
+    test('the agent probe: pending todos due this week, zero-fetch composable', async () => {
+        const hit = await db.put({ schema: TODO_SCHEMA, data: { title: 'due soon', dueDate: iso(inDays(1)) } });
+        await db.put({ schema: TODO_SCHEMA, data: { title: 'done already', status: 'completed', dueDate: iso(inDays(1)) } });
+        await db.put({ schema: TODO_SCHEMA, data: { title: 'far future', dueDate: iso(inDays(30)) } });
+
+        const res = await db.list({
+            features: ['data/abstraction/todo'],
+            // Raw bitmap keys are ANDed by default (no sigil grammar); '+' only
+            // applies to t:/geo: filter families.
+            filters: ['data/status/pending', `+t:tasks:${iso(inDays(0)).slice(0, 10)}..${iso(inDays(7)).slice(0, 10)}`],
+            sortBy: 'tasks',
+            limit: 0,
+        });
+        expect(res.map((d) => d.id)).toEqual([hit]);
+    });
+
+    test('non-todo docs with a data.status string do not pollute the axis', async () => {
+        await db.put({ schema: 'data/abstraction/note', data: { title: 'note', content: 'x', status: 'pending' } });
+        const pendingIds = await db.list({ filters: ['data/status/pending'], limit: 0 });
+        expect(pendingIds).toHaveLength(0);
+    });
+
     test('priority validates the RFC 5545 1..9 scale', () => {
         expect(() => Todo.validateData({ schema: TODO_SCHEMA, data: { title: 'x', priority: 5 } })).not.toThrow();
         expect(() => Todo.validateData({ schema: TODO_SCHEMA, data: { title: 'x', priority: 0 } })).toThrow();

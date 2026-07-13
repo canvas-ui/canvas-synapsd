@@ -87,6 +87,25 @@ function mimeBitmapKeys(doc) {
     return normalizeBitmapKeys([`${MIME_BITMAP_PREFIX}${type}`, `${MIME_BITMAP_PREFIX}${clean}`]);
 }
 
+// Lifecycle-facet bitmaps: data/status/<status>, derived from data.status
+// ("who says so?" — the document; controlled vocabulary, always rederivable).
+// Gated per-schema so foreign data.status vocabularies don't pollute the axis;
+// generalize to indexOptions.facetFields with the schema registration facility.
+const STATUS_BITMAP_PREFIX = 'data/status/';
+const STATUS_FACET_SCHEMAS = new Set(['data/abstraction/todo']);
+function statusBitmapKeys(doc) {
+    if (!STATUS_FACET_SCHEMAS.has(doc?.schema)) { return []; }
+    const status = typeof doc?.data?.status === 'string' ? doc.data.status.trim().toLowerCase() : '';
+    if (!status) { return []; }
+    return normalizeBitmapKeys([`${STATUS_BITMAP_PREFIX}${status}`]);
+}
+
+// Derived facet keys (mime + status) for one doc — ticked on every write, with
+// stale keys from the previous doc state unticked, so they can't drift.
+function facetBitmapKeys(doc) {
+    return [...mimeBitmapKeys(doc), ...statusBitmapKeys(doc)];
+}
+
 // Union extra locations into a document by url (used by in-batch content dedup,
 // where two identical blobs carry different file:// locations). Mutates target.
 function mergeDocumentLocations(target, extraLocations) {
@@ -750,6 +769,7 @@ class SynapsD extends EventEmitter {
                 let prevLocations = null;
                 let prevComment = null;
                 let prevTimelineState = null;
+                let prevFacetKeys = null;
 
                 // Dedup priority: a supplied id that exists is an UPDATE — the id
                 // is the stable key every bitmap/timeline/checksum reference hangs
@@ -775,6 +795,7 @@ class SynapsD extends EventEmitter {
                                 ? existing.timelines.map(entry => ({ ...entry }))
                                 : [],
                         };
+                        prevFacetKeys = facetBitmapKeys(existing);
                         // Merge input onto existing (preserves locations, metadata,
                         // parentId chain; regenerates checksums when data changed).
                         parsed = existing.update(doc);
@@ -803,6 +824,7 @@ class SynapsD extends EventEmitter {
                                 ? existing.timelines.map(entry => ({ ...entry }))
                                 : [],
                         };
+                        prevFacetKeys = facetBitmapKeys(existing);
                     }
                 }
 
@@ -825,7 +847,7 @@ class SynapsD extends EventEmitter {
                     docFeatures.push(parsed.schema);
                 }
 
-                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevTimelineState, docFeatures };
+                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevTimelineState, prevFacetKeys, docFeatures };
                 prepared.push(entry);
                 if (!isUpdate) {
                     const primaryChecksum = parsed.getPrimaryChecksum();
@@ -865,7 +887,7 @@ class SynapsD extends EventEmitter {
 
         try {
             await this.#withDeferredMembership(async () => {
-                for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, docFeatures } of prepared) {
+                for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, prevFacetKeys, docFeatures } of prepared) {
                     await this.documents.put(parsed.id, parsed);
 
                     // Re-point the checksum index: drop checksums the edit dropped
@@ -889,8 +911,12 @@ class SynapsD extends EventEmitter {
                         await this.#removeStaleDeviceMembership(parsed.id, prevLocations || [], parsed.locations, docFeatures);
                     }
                     await this.#applyMembership(parsed.hasComment ? 'tick' : 'untick', parsed.id, [COMMENT_BITMAP_KEY]);
-                    const mimeKeys = mimeBitmapKeys(parsed);
-                    if (mimeKeys.length) { await this.#applyMembership('tick', parsed.id, mimeKeys); }
+                    // Facet bitmaps (mime + status): tick current, untick whatever
+                    // this batch-update left behind (contentType/status change).
+                    const facetKeys = facetBitmapKeys(parsed);
+                    const staleFacetKeys = (prevFacetKeys || []).filter((k) => !facetKeys.includes(k));
+                    if (staleFacetKeys.length) { await this.#applyMembership('untick', parsed.id, staleFacetKeys); }
+                    if (facetKeys.length) { await this.#applyMembership('tick', parsed.id, facetKeys); }
                 }
             });
 
@@ -1809,8 +1835,14 @@ class SynapsD extends EventEmitter {
                     await this.#removeStaleDeviceMembership(parsedDocument.id, storedDocument.locations, parsedDocument.locations, featureBitmaps);
                 }
                 await this.#applyMembership(parsedDocument.hasComment ? 'tick' : 'untick', parsedDocument.id, [COMMENT_BITMAP_KEY]);
-                const mimeKeys = mimeBitmapKeys(parsedDocument);
-                if (mimeKeys.length) { await this.#applyMembership('tick', parsedDocument.id, mimeKeys); }
+                // Facet bitmaps (mime + status): tick current, untick stale from
+                // the pre-write doc state when this put replaced an existing doc.
+                const facetKeys = facetBitmapKeys(parsedDocument);
+                const staleFacetKeys = storedDocument
+                    ? facetBitmapKeys(storedDocument).filter((k) => !facetKeys.includes(k))
+                    : [];
+                if (staleFacetKeys.length) { await this.#applyMembership('untick', parsedDocument.id, staleFacetKeys); }
+                if (facetKeys.length) { await this.#applyMembership('tick', parsedDocument.id, facetKeys); }
             });
         } catch (error) {
             throw new Error('Error inserting document atomically: ' + error.message);
@@ -2757,8 +2789,9 @@ class SynapsD extends EventEmitter {
         // Capture locations before update() mutates storedDocument in place, so we can
         // untick device tags for any copy this write dropped.
         const previousLocations = Array.isArray(storedDocument.locations) ? [...storedDocument.locations] : [];
-        // MIME presence keys before update(), so a contentType change unticks stale ones.
-        const previousMimeKeys = mimeBitmapKeys(storedDocument);
+        // Facet keys (mime + status) before update(), so a contentType/status
+        // change unticks stale ones.
+        const previousFacetKeys = facetBitmapKeys(storedDocument);
 
         const updatedDocument = storedDocument.update(updateData);
         updatedDocument.validate();
@@ -2783,12 +2816,12 @@ class SynapsD extends EventEmitter {
                 await this.#removeStaleDeviceMembership(updatedDocument.id, previousLocations, updatedDocument.locations, featureBitmaps);
                 // Presence bitmap tracks comment state; untick when cleared on this edit.
                 await this.#applyMembership(updatedDocument.hasComment ? 'tick' : 'untick', updatedDocument.id, [COMMENT_BITMAP_KEY]);
-                // MIME presence bitmaps: tick current type keys, untick any the
-                // contentType change left behind (derived from doc state, can't drift).
-                const newMimeKeys = mimeBitmapKeys(updatedDocument);
-                const staleMimeKeys = previousMimeKeys.filter(k => !newMimeKeys.includes(k));
-                if (staleMimeKeys.length) { await this.#applyMembership('untick', updatedDocument.id, staleMimeKeys); }
-                if (newMimeKeys.length) { await this.#applyMembership('tick', updatedDocument.id, newMimeKeys); }
+                // Facet bitmaps (mime + status): tick current keys, untick any the
+                // contentType/status change left behind (derived from doc state, can't drift).
+                const newFacetKeys = facetBitmapKeys(updatedDocument);
+                const staleFacetKeys = previousFacetKeys.filter(k => !newFacetKeys.includes(k));
+                if (staleFacetKeys.length) { await this.#applyMembership('untick', updatedDocument.id, staleFacetKeys); }
+                if (newFacetKeys.length) { await this.#applyMembership('tick', updatedDocument.id, newFacetKeys); }
             });
 
             if (emitEvent) {
@@ -4346,7 +4379,7 @@ class SynapsD extends EventEmitter {
             await this.#withDeferredMembership(async () => {
                 for (const doc of docs) {
                     counts.scanned++;
-                    const keys = mimeBitmapKeys(doc);
+                    const keys = facetBitmapKeys(doc);
                     if (keys.length) {
                         await this.#applyMembership('tick', doc.id, keys);
                         counts.ticked++;

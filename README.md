@@ -787,6 +787,17 @@ Roaring bitmaps back every membership lookup. Keys use typed prefixes - validate
 | `tag/`, `data/`, `device/`, `custom/`, … | Feature/schema filters (also usable in query `filters`) |
 | `internal/...` | Engine-managed indexes - hidden from default listings |
 
+Prefix semantics follow the **"who says so?"** rule: `data/*` — the document says so
+(derived facts: `data/abstraction/*` ← schema, `data/mime/*` ← contentType,
+`data/status/*` ← `data.status` for schemas with a status vocabulary — currently todo);
+`feature/*` — the engine observes presence (`feature/has-comment`); `tag/*` — the user
+says so, free-form flat labels; `custom/<axis>/<value>` — the user says so, structured.
+Derived facet bitmaps (mime, status) are re-ticked and stale-unticked on every write from
+doc state, so they can never drift — e.g. completing a todo moves it from
+`data/status/pending` to `data/status/completed` atomically with the doc write, and an
+agent's "any pending todos here?" is a zero-fetch bitmap probe:
+`list({ features: ['data/abstraction/todo'], filters: ['data/status/pending'] })`.
+
 Notable `internal/*` keys:
 
 - `internal/ts/<timeline>/<scale>/start|end` - timeline Dual-BSI tiers

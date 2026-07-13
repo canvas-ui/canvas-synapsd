@@ -284,6 +284,25 @@ per-doc attribute reads stop being a reverse scan over the whole feature vocabul
 Rule of thumb: `features[]` holds only keys that are *asserted* and *not derivable* from other
 doc state. Derived keys stay computed (single source of truth); view membership stays bitmap-only.
 
+**Prefix semantics — the "who says so?" rule (decided 2026-07-13):**
+- `data/*` — the DOCUMENT says so: facts derived from doc state (`data/abstraction` ← schema,
+  `data/mime` ← contentType, `data/backend` ← locations, `data/status` ← data.status). Controlled
+  vocabularies, always rederivable, never asserted.
+- `feature/*` — the ENGINE observes presence: boolean has-X flags (`feature/has-comment`).
+  Presence flags only — multi-valued facets go under `data/*`.
+- `tag/*` — the USER says so, free-form flat labels. Uncontrolled vocabulary; must NEVER share
+  a namespace with controlled ones (a user tagging `pending` must stay distinguishable from
+  `data/status/pending` — the cognitive layer disagreeing with the data layer is a feature).
+- `custom/<axis>/<value>` — the USER says so, structured attributes (`custom/urgency/high`).
+- [x] Consolidate `custom/tag/*` → `tag/*` (DONE 2026-07-13 — writers only, no data migration
+      needed pre-deploy: CLI docbuilders, seed hook example, hook meta template).
+- [x] Todo status bitmaps (DONE 2026-07-13): derived `data/status/<status>` via facetBitmapKeys
+      (mime + status unified; tick current / untick stale in putMany/#putOne/#updateOne +
+      reindex backfill). Gated on STATUS_FACET_SCHEMAS (todo only; generalize to
+      `indexOptions.facetFields` with the schema registration facility). Also FIXED a latent
+      putMany bug on the way: batch id-updates never unticked stale mime keys (prev-state must
+      snapshot BEFORE existing.update(doc) mutates in place). Tests in todo-tasks.test.js.
+
 **Write-path gotchas (all have existing precedent):**
 - [ ] Feature edits must NOT regenerate checksums (dedup forks) — same treatment as `comment`
       (outside the `dataUpdated` path in `BaseDocument.update()`).
