@@ -143,6 +143,34 @@ export default class BitSlicedIndex {
         }
     }
 
+    /**
+     * Reconstruct stored values for a set of document IDs.
+     * One pass over the slices (each ANDed against the candidate set) instead of
+     * per-id probing — this is the sort/extraction primitive.
+     *
+     * @param {RoaringBitmap32} ids - Candidate document IDs
+     * @returns {Promise<Map<number, BigInt>>} id -> raw stored value; ids absent
+     *          from the existence bitmap are omitted
+     */
+    async getValues(ids) {
+        const ebm = await this.bitmapIndex.getBitmap(this.ebmKey, false);
+        if (!ebm || ebm.isEmpty) { return new Map(); }
+        const present = RoaringBitmap32.and(ids, ebm);
+        if (present.isEmpty) { return new Map(); }
+
+        const values = new Map();
+        for (const id of present) { values.set(id, 0n); }
+        for (let i = 0; i < this.bitDepth; i++) {
+            const slice = await this._getSlice(i);
+            if (slice.isEmpty) { continue; }
+            const hits = RoaringBitmap32.and(present, slice);
+            if (hits.isEmpty) { continue; }
+            const weight = 1n << BigInt(i);
+            for (const id of hits) { values.set(id, values.get(id) + weight); }
+        }
+        return values;
+    }
+
     // ==========================================
     // Internal BSI Logic
     // ==========================================

@@ -142,8 +142,12 @@ export function parseSpec(rawSpec = {}) {
         options: {
             mode: (pick('mode') || 'hybrid').toLowerCase(),
             // Listing order (no-match path only): 'asc' (id/insertion order,
-            // default) or 'desc' (newest ids first).
+            // default) or 'desc' (newest ids first). With sortBy, order applies
+            // to the timeline sort key instead of the id.
             order: (String(pick('order') || 'asc').toLowerCase() === 'desc') ? 'desc' : 'asc',
+            // Timeline to sort a listing by (e.g. 'content', 'crud:created').
+            // Docs with no value on that timeline always trail the sorted ones.
+            sortBy: pick('sortBy'),
             limit: pick('limit'),
             offset: pick('offset'),
             page: pick('page'),
