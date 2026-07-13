@@ -1078,9 +1078,18 @@ class SynapsD extends EventEmitter {
      * text encoder — the joint space means "red car" lands near matching photos.
      * Returns [] (and loads no model) unless photos are actually embedded, so
      * text-only searches never pay for the image model.
+     *
+     * Two floor modes:
+     * - absolute (default): drop hits beyond imageMaxDistance. Right for global
+     *   queries, where the floor separates "is a match at all" from noise.
+     * - relative (`opts.relativeFloor`, refinement stages): the scope already
+     *   established relevance (e.g. 40 car photos), so an absolute floor is wrong —
+     *   "red" over car photos peaks around 0.95+, above the global floor, yet the
+     *   reddest cars ARE the answer. Keep everything within REFINE_MARGIN of the
+     *   scope's best hit instead: adaptive, narrows to the closest cluster.
      * @returns {Promise<number[]>} candidate docIds, best-first
      */
-    async #imageVectorSearch(queryString, scopedIds, depth) {
+    async #imageVectorSearch(queryString, scopedIds, depth, opts = {}) {
         const cfg = this.#semanticConfig.spaces?.image;
         const embedQuery = this.#semanticConfig.embedQuery;
         if (!cfg || typeof embedQuery !== 'function') { return []; }
@@ -1090,10 +1099,22 @@ class SynapsD extends EventEmitter {
         if (!vi || !vi.isReady) { return []; }
         const qv = await embedQuery(queryString, 'image');
         if (!qv) { return []; }
+        if (opts.relativeFloor) {
+            const envMargin = Number(process.env.CANVAS_IMAGE_REFINE_MARGIN);
+            const margin = Number.isFinite(envMargin) && envMargin > 0 ? envMargin : 0.035;
+            const res = await vi.vectorSearch(qv, scopedIds, { limit: depth, offset: 0, minDistance: 0, maxDistance: 2, withDistances: true });
+            const ids = res.pageIds || [];
+            if (ids.length === 0) { return []; }
+            const dist = res.distances || {};
+            const best = dist[ids[0]];
+            if (!Number.isFinite(best)) { return ids; }
+            return ids.filter((id) => Number.isFinite(dist[id]) && dist[id] <= best + margin);
+        }
         // Relevance floor (cosine distance cap, 0 = identical; smaller = stricter):
         // image kNN otherwise returns its top-K for ANY query, so every search folds
-        // in unrelated photos. Precedence: env override → workspace setting → 0.97
-        // default. A non-positive value disables the floor (legacy top-K behaviour).
+        // in unrelated photos. Precedence: env override → workspace setting →
+        // fp32-calibrated default. A non-positive value disables the floor
+        // (legacy top-K behaviour).
         const envMax = process.env.CANVAS_IMAGE_MAX_DISTANCE;
         const cfgMax = (envMax != null && envMax !== '') ? Number(envMax) : this.#semanticConfig.imageMaxDistance;
         const maxDistance = Number.isFinite(cfgMax) && cfgMax > 0 ? cfgMax : undefined;
@@ -1107,12 +1128,15 @@ class SynapsD extends EventEmitter {
      * floor). Used by searchRefined's intermediate fold: FTS alone can never match
      * a photo (blobs have no text), so refining "library" then "table" over images
      * needs the image side here. Not a ranking — just membership, for AND-ing.
+     * `opts.relativeImageFloor` switches the image side to the scope-adaptive
+     * cutoff (see #imageVectorSearch) — used for refinement stages, where the
+     * scope already established relevance and the absolute floor would empty out.
      * @returns {Promise<number[]>}
      */
-    async #queryMatchSet(queryString, scopeIds, limit) {
+    async #queryMatchSet(queryString, scopeIds, limit, opts = {}) {
         const [fts, img] = await Promise.all([
             this.#lanceIndex.ftsQuery(queryString, scopeIds, { limit, offset: 0 }).catch(() => ({ pageIds: [] })),
-            this.#imageVectorSearch(queryString, scopeIds, limit).catch(() => []),
+            this.#imageVectorSearch(queryString, scopeIds, limit, { relativeFloor: !!opts.relativeImageFloor }).catch(() => []),
         ]);
         const ids = new Set(fts.pageIds || []);
         for (const id of img) { ids.add(id); }
@@ -2276,6 +2300,36 @@ class SynapsD extends EventEmitter {
             throw new ArgumentError('Query must be a string', 'query');
         }
 
+        if (bitmap !== null && bitmap.isEmpty) { return this.#emptyResult(); }
+        const scopedIds = bitmap ? bitmap.toArray() : [];
+        const { pageIds, totalCount, error } = await this.#rankIds(scopedIds, queryString, options);
+
+        const docs = pageIds.length > 0 ? await this.documents.getMany(pageIds) : [];
+        const result = this.#safeParseDocuments(docs);
+        result.count = result.length;
+        result.totalCount = totalCount;
+        result.error = error;
+        // Calibration aid: when debug is requested, attach the raw (unfloored)
+        // image kNN distances for this query so a caller can pick imageMaxDistance
+        // from real numbers. Best-effort; never fails the search.
+        if (options.debug) {
+            try { result.debug = { imageDistances: await this.#imageDistances(queryString, scopedIds, 25) }; }
+            catch (e) { result.debug = { imageDistances: [], error: e.message }; }
+        }
+        return result;
+    }
+
+    /**
+     * The id-producing core of rank(): FTS/vector/hybrid ranking within a scope,
+     * returning ranked doc ids without fetching documents — reused by rank()
+     * (which hydrates a page) and searchCompound() (which fuses per-line
+     * rankings before hydrating anything).
+     * `options.imageRelativeFloor` switches the image kNN leg to the
+     * scope-adaptive cutoff (refinement chains — see #imageVectorSearch).
+     * @param {number[]} scopedIds  candidate ids ([] = unscoped)
+     * @returns {Promise<{pageIds:number[], totalCount:number, error:string|null}>}
+     */
+    async #rankIds(scopedIds, queryString, options = {}) {
         // fts (BM25) | vector (kNN) | hybrid (RRF); vector/hybrid degrade to fts
         // when the dense stack is unavailable.
         let mode = (options.mode || 'hybrid').toLowerCase();
@@ -2284,16 +2338,11 @@ class SynapsD extends EventEmitter {
             mode = 'fts';
         }
         if (mode === 'fts' && (!this.#lanceIndex || !this.#lanceIndex.isReady)) {
-            const empty = this.#emptyResult();
-            empty.error = 'FTS not initialized';
-            return empty;
+            return { pageIds: [], totalCount: 0, error: 'FTS not initialized' };
         }
 
         const limit = Number.isFinite(options.limit) ? Math.max(0, Number(options.limit)) : 50;
         const offset = Math.max(0, Number.isFinite(options.offset) ? Number(options.offset) : 0);
-
-        if (bitmap !== null && bitmap.isEmpty) { return this.#emptyResult(); }
-        const scopedIds = bitmap ? bitmap.toArray() : [];
 
         let pageIds, totalCount, error;
         if (mode === 'vector' || mode === 'hybrid') {
@@ -2311,7 +2360,7 @@ class SynapsD extends EventEmitter {
             // matches pictures. No-op (and no model load) unless photos are embedded.
             let imgIds = [];
             try {
-                imgIds = await this.#imageVectorSearch(queryString, scopedIds, depth);
+                imgIds = await this.#imageVectorSearch(queryString, scopedIds, depth, { relativeFloor: !!options.imageRelativeFloor });
             } catch (e) {
                 console.warn(`synapsd: rank image kNN failed, continuing without image results: ${e.message}`);
             }
@@ -2373,19 +2422,7 @@ class SynapsD extends EventEmitter {
             ({ pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit, offset }));
         }
 
-        const docs = pageIds.length > 0 ? await this.documents.getMany(pageIds) : [];
-        const result = this.#safeParseDocuments(docs);
-        result.count = result.length;
-        result.totalCount = totalCount;
-        result.error = error;
-        // Calibration aid: when debug is requested, attach the raw (unfloored)
-        // image kNN distances for this query so a caller can pick imageMaxDistance
-        // from real numbers. Best-effort; never fails the search.
-        if (options.debug) {
-            try { result.debug = { imageDistances: await this.#imageDistances(queryString, scopedIds, 25) }; }
-            catch (e) { result.debug = { imageDistances: [], error: e.message }; }
-        }
-        return result;
+        return { pageIds: pageIds || [], totalCount: totalCount ?? 0, error: error ?? null };
     }
 
     // Weighted Reciprocal Rank Fusion of ranked id lists → one ranking. A doc's
@@ -2495,22 +2532,139 @@ class SynapsD extends EventEmitter {
         // Fold all but the last query into a scope bitmap. Intermediate steps need
         // the FULL matching id set (not a page), so request a large internal limit;
         // scoped fts fetches every candidate, so the AND is exact for query 2+.
+        const scope = await this.#foldQueryScope(texts.slice(0, -1), base);
+        if (scope && scope.isEmpty) { return this.#emptyResult(); }
+
+        // Final query ranks + paginates within the folded scope. The scope came
+        // from a text stage, so the image leg switches to the scope-adaptive
+        // cutoff — the absolute floor already did its job in stage one.
+        return await this.rank(scope, texts[texts.length - 1], { ...options, imageRelativeFloor: true });
+    }
+
+    /**
+     * Fold an ordered list of text queries into a scope bitmap by CHAINING: stage
+     * i's match set is computed within stage i-1's ids (Lance candidateIds
+     * pushdown), so each query narrows the previous survivors. Match across FTS
+     * ∪ image kNN (not FTS-only) so refinement narrows by photos too — otherwise
+     * "library" folds to text docs and image refine is impossible. Stage one uses
+     * the absolute image floor (global query — floor separates match from noise);
+     * later stages use the scope-adaptive cutoff (see #imageVectorSearch).
+     * Returns null only when texts is empty and base is null (unconstrained).
+     * @param {string[]} texts
+     * @param {RoaringBitmap32|null} base  structured scope (null = all docs)
+     * @returns {Promise<RoaringBitmap32|null>}
+     */
+    async #foldQueryScope(texts, base) {
         const FOLD_LIMIT = 1_000_000;
         let scope = base; // RoaringBitmap32 | null (null = all docs)
-        for (let i = 0; i < texts.length - 1; i++) {
+        for (let i = 0; i < texts.length; i++) {
+            if (scope && scope.isEmpty) { return scope; }
             const scopeIds = scope ? scope.toArray() : [];
-            // Match across FTS ∪ image kNN (not FTS-only) so refinement narrows by
-            // photos too — otherwise "library" folds to text docs and image refine
-            // is impossible. The image floor makes each set meaningful (else every
-            // photo matches every query and the AND is a no-op).
-            const matchedIds = await this.#queryMatchSet(texts[i], scopeIds, FOLD_LIMIT);
+            const matchedIds = await this.#queryMatchSet(texts[i], scopeIds, FOLD_LIMIT, { relativeImageFloor: i > 0 });
             const matched = new RoaringBitmap32(matchedIds);
             scope = scope ? RoaringBitmap32.and(scope, matched) : matched;
-            if (scope.isEmpty) { return this.#emptyResult(); }
+        }
+        return scope;
+    }
+
+    /**
+     * Compound query: OR/AND of independent refinement chains ("lines"). Each
+     * line is an ordered query chain over an optional per-line structured spec
+     * (merged over the shared base spec); lines combine by set semantics —
+     * 'or' = union, 'and' = intersection. Ranking: per-line ranked lists (the
+     * line's last query ranks within its folded scope) fused via RRF, so a doc
+     * matching several lines floats up; members beyond any line's ranking depth
+     * trail in id order rather than being dropped. Max two levels by design —
+     * lines of chains, no nesting.
+     *
+     *   searchCompound([
+     *     { queries: ['car', 'red', 'volvo'] },
+     *     { queries: ['boat', 'blue'], filters: ['t:thisYear'] },
+     *   ], { op: 'or', baseSpec: { context: { path: '/Inbox' } }, limit: 50 })
+     *
+     * @param {{queries?: string[], filters?: string[], context?: object, features?: string[]}[]} lines
+     * @param {{op?: 'or'|'and', baseSpec?: object|null, limit?, offset?, mode?}} options
+     * @returns docs[] with .count/.totalCount/.error/.lines (per-line totals)
+     */
+    async searchCompound(lines = [], options = {}) {
+        const op = (options.op || 'or').toLowerCase() === 'and' ? 'and' : 'or';
+        const baseSpec = options.baseSpec || null;
+        const list = (Array.isArray(lines) ? lines : [lines]).filter((l) => l && typeof l === 'object');
+        if (list.length === 0) { return this.#emptyResult(); }
+
+        // Ranked lists are capped: fusion only needs the head, membership (counts,
+        // set ops) uses the full bitmaps.
+        const FUSE_DEPTH = 500;
+
+        const evaluated = await Promise.all(list.map(async (line) => {
+            const texts = (Array.isArray(line.queries) ? line.queries : [])
+                .filter((q) => typeof q === 'string' && q.trim().length > 0);
+            // Per-line structured pieces AND-compose over the shared base spec.
+            const spec = { ...(baseSpec || {}) };
+            for (const key of ['filters', 'features', 'context', 'directory', 'attributes']) {
+                if (line[key] !== undefined) {
+                    spec[key] = Array.isArray(spec[key]) && Array.isArray(line[key])
+                        ? [...spec[key], ...line[key]]
+                        : line[key];
+                }
+            }
+            const hasSpec = Object.keys(spec).length > 0;
+            const base = hasSpec ? (await this.#resolveParsed(parseSpec(spec))).bitmap : null;
+
+            if (texts.length === 0) {
+                // Filters-only line: membership is the structured scope itself.
+                const bitmap = base ?? await this.#buildAllDocumentsBitmap();
+                return { bitmap, rankedIds: [], error: null };
+            }
+            const scope = await this.#foldQueryScope(texts.slice(0, -1), base);
+            if (scope && scope.isEmpty) { return { bitmap: scope, rankedIds: [], error: null }; }
+
+            const last = texts[texts.length - 1];
+            const scopeIds = scope ? scope.toArray() : [];
+            const relative = texts.length > 1;
+            // Membership (full match set of the last stage) and ranking (its head)
+            // in parallel — same stage, two views.
+            const [memberIds, ranked] = await Promise.all([
+                this.#queryMatchSet(last, scopeIds, 1_000_000, { relativeImageFloor: relative }),
+                this.#rankIds(scopeIds, last, { mode: options.mode, minDistance: options.minDistance, maxDistance: options.maxDistance, limit: FUSE_DEPTH, offset: 0, imageRelativeFloor: relative }),
+            ]);
+            const bitmap = new RoaringBitmap32(memberIds);
+            return { bitmap, rankedIds: (ranked.pageIds || []).filter((id) => bitmap.has(id)), error: ranked.error };
+        }));
+
+        // Set semantics across lines.
+        let members = null;
+        for (const line of evaluated) {
+            members = members === null
+                ? line.bitmap.clone()
+                : (op === 'and' ? RoaringBitmap32.and(members, line.bitmap) : RoaringBitmap32.or(members, line.bitmap));
+        }
+        const lineCounts = evaluated.map((l) => ({ count: l.bitmap.size }));
+
+        if (!members || members.isEmpty) {
+            const empty = this.#emptyResult();
+            empty.lines = lineCounts;
+            return empty;
         }
 
-        // Final query ranks + paginates within the folded scope.
-        return await this.rank(scope, texts[texts.length - 1], options);
+        // Ranking: RRF across the per-line ranked heads (agreement floats up),
+        // restricted to the combined member set; members past every line's
+        // ranking depth trail in id order (still reachable by paging).
+        const fused = this.#rrfMerge(evaluated.map((l) => l.rankedIds)).filter((id) => members.has(id));
+        const inFused = new Set(fused);
+        const orderedIds = fused.concat(members.toArray().filter((id) => !inFused.has(id)));
+
+        const limit = Number.isFinite(options.limit) ? Math.max(0, Number(options.limit)) : 50;
+        const offset = Math.max(0, Number.isFinite(options.offset) ? Number(options.offset) : 0);
+        const pageIds = limit === 0 ? orderedIds : orderedIds.slice(offset, offset + limit);
+
+        const docs = pageIds.length > 0 ? await this.documents.getMany(pageIds) : [];
+        const result = this.#safeParseDocuments(docs);
+        result.count = result.length;
+        result.totalCount = orderedIds.length;
+        result.error = evaluated.every((l) => l.error) ? evaluated.map((l) => l.error).join('; ') : null;
+        result.lines = lineCounts;
+        return result;
     }
 
     /**
