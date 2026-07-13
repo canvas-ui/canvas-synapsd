@@ -121,7 +121,7 @@ This is pure text so the current embedding model should be sufficient, dataset a
 - embedding path: ensure wikipedia text lands in a server-embeddable schema (derived `document`/`note`, registered in `embeddableSchemas`) - as `data/abstraction/file` you'd embed `locationUrls`, not the article.
 - [Input Chunk] ➔ [Qwen3-VL (64d)] ➔ [PCA (e.g., 16d or 32d)] ➔ [Scalar Quantizer (Bands)] ➔ [Roaring Bitmap Index]
 
-### Semantic dimension trees (reuse ContextTree)
+### Semantic dimension trees (reuse ContextTree test)
 
 The anchor layer is NOT a new index — it's tree construction. Reuse the existing tree module:
 one internal context-type tree per semantic dimension (topic, visual, episode, …), anchors are
@@ -240,6 +240,65 @@ query(
 ### Perf & storage
 - [ ] Audit `#buildAllDocumentsBitmap()` callers (`noneOf`-only features, `excludeTree`, `excludeContext`, root-source): each is a full scan, short-circuit when the positive set is already bounded (index.js:3412). *(deferred: needs design.)*
 - [ ] Lift `indexOptions` (esp. `embeddingOptions`) out of per-document `toJSON()` to schema level: GBs of identical config across 7M rows. *(deferred: per-abstraction config, not per-doc storage; needs design + back-compat sign-off.)*
+
+## Doc-declared features (`features: []` on the document)
+
+**Decision (2026-07-13): do it — fold into the schema refactor rev, not standalone.**
+
+Custom features (`tag/*`, `custom/*`) are the last membership state that exists ONLY in
+bitmaps — i.e. the last state with no rebuild source if a bitmap corrupts. Everything else
+already follows "the document declares, the index derives": `doc.timelines[]` → timeline BSIs,
+`metadata.contentType` → mime bitmaps, `hasComment` → `feature/has-comment`, `locations[]` →
+`device/*`. A root-level `features: []` completes the pattern: doc = source of truth, feature
+bitmaps = derived cache, full reindex-from-docs becomes possible engine-wide. Bonus: synced doc
+JSON is self-contained (offline clients see tags without bitmap access, see client-spec), and
+per-doc attribute reads stop being a reverse scan over the whole feature vocabulary
+(O(keys × page) today, free once in the doc).
+
+**Prefix classification (REVIEW ME — full list from `indexes/bitmaps/lib/keys.js`):**
+
+| Prefix | Class | Verdict |
+|---|---|---|
+| `tag/` | user-asserted | → `doc.features` (the whole point) |
+| `custom/` | user-asserted | → `doc.features` |
+| `data/abstraction/*` | derived from `doc.schema` | stays computed, NEVER in `features[]` |
+| `data/mime/*` | derived from `metadata.contentType` | stays computed |
+| `data/backend/*` | derivable from `locations[]` (stored:// backend) | stays computed? verify all writers |
+| `data/source/*` | stamped at ingest, NOT derivable from doc | → `doc.features`? or `metadata`? decide |
+| `feature/*` | derived (has-comment, …) | stays computed |
+| `device/*` | derived from `locations[]` | stays computed |
+| `client/`, `server/`, `user/` | insert-time provenance from client/server context arrays (`client/os/linux`, `client/app/firefox`, `client/user/john.doe` — Context.js `#clientContextArray`) | assertable + not derivable → `features[]` as provenance tags |
+| `nested/` | DEAD — only keys.js + one test reference it, no writer found | drop from ALLOWED_BITMAP_PREFIXES |
+| `context/`, `vfs/` | view membership (doc-in-N-views is the point) | bitmap-only, NEVER in doc |
+| `rel/` | relations, reverse-indexed via Synapses | separate mechanism, untouched |
+| `internal/` | engine | untouched |
+
+Rule of thumb: `features[]` holds only keys that are *asserted* and *not derivable* from other
+doc state. Derived keys stay computed (single source of truth); view membership stays bitmap-only.
+
+**Write-path gotchas (all have existing precedent):**
+- [ ] Feature edits must NOT regenerate checksums (dedup forks) — same treatment as `comment`
+      (outside the `dataUpdated` path in `BaseDocument.update()`).
+- [ ] Feature-only updates must NOT untick the embed seen-ledger in `#updateOne` (or bulk-tagging
+      a photo gallery re-CLIPs it) and should reuse `emitEvent`-style event control.
+- [ ] Tick/untick derived by diffing prev vs new `features[]` per doc — exactly the
+      `mimeBitmapKeys` / `prevTimelineState` / `#removeStaleDeviceMembership` pattern.
+- [ ] Batch path: `linkMany`-equivalent that rewrites N docs in ONE LMDB tx (feature edits become
+      doc writes; 10k-doc tag = one tx, not 10k puts). Keep pure-bitmap `linkMany` for
+      context/vfs membership — that stays view-layer.
+- [ ] Decide `updatedAt` semantics for feature-only edits (bump = clients can sync-detect,
+      but interacts with seen-ledger fix above; maybe bump + skip untick).
+- [ ] GC/id-reuse: doc-declared features die with the doc naturally; today's bitmap-only tags on
+      a reused id are a phantom-membership hazard — this refactor closes it.
+
+**Migration:** one-time reverse scan — for each `tag/*`/`custom/*` (+ whatever the review adds)
+bitmap, walk its ids, append the key to each doc's `features[]`; after that, feature bitmaps are
+derived state forever (rebuildable, droppable).
+
+**Rejected alternative (consciously):** separate `id → [featureKeys]` LMDB dbi (forward index
+beside the inverted bitmaps). Cheaper writes, O(1) reads, but splits truth into a third place,
+doesn't ride along in doc sync/export, no rebuild-from-docs property. Only revisit if feature
+write volume ever makes doc rewrites measurably hurt.
 
 ## Session support
 
