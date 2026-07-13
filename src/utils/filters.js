@@ -117,7 +117,12 @@ export function parseFilters(filterArray) {
             const kind = body.startsWith('g:') ? 'glob' : 'regexp';
             throw new Error(`Filter "${kind}" is not yet implemented`);
         } else {
-            bitmapFilters.push(filter);
+            // Raw bitmap keys: '!' negation is honored downstream (bitmapIndex.AND
+            // splits negatives), and '+' is the AND default already — pass the
+            // sigil-stripped body (prefixed back for noneOf) so a leading '+'
+            // can't leak into the key and silently match nothing. Full sigil
+            // algebra (anyOf) for raw keys is a refactor-v3 grammar item.
+            bitmapFilters.push(sigil === 'noneOf' ? `!${body}` : body);
         }
     }
 

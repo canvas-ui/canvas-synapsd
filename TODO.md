@@ -201,6 +201,18 @@ filters: ['+t:crud:updated:thisWeek', 't:wikipedia:1996', 't:personal:1996']
 ```
 
 - [ ] `t:`/`g:`/`re:` prefix dispatch in `parseFilters` (replaces the `datetime:`-only check, filters.js:18); timeline name comes from the token, drop the hardcoded `crud:${action}` (filters.js:103). Today `filters` object only knows `timeline` -> `datetime:updated:<v>` (index.js:3196). *(`t:` shipped; `g:`/`re:` deferred to db schema refactor.)*
+- [ ] **Sigil asymmetry on raw bitmap-key filters** (found 2026-07-13): `t:`/`geo:` tokens get
+      the full sigil algebra via `splitSigil`, but raw keys pass through verbatim to
+      `bitmapIndex.AND`. Current actual behavior: `!key` WORKS (AND splits negatives and
+      subtracts; negative-only starts from the full id range — original scope honored), but
+      `+key` was recognized by NO layer — the leading `+` survived `normalizeBitmapKey` into the
+      key itself and the filter silently matched nothing. *Cheap fix SHIPPED 2026-07-13:
+      parseFilters now pushes the sigil-stripped body for raw keys ('+' → AND default no-op,
+      '!' re-prefixed for the downstream negative split); regression test in
+      todo-tasks.test.js.* Fix proper in
+      the refactor-v3 grammar pass: uniform sigil algebra for raw keys too (default anyOf-OR
+      within the bucket? — decide; today raw keys AND while t:/geo: default to anyOf, which is
+      itself an inconsistency worth resolving in one sweep).
 - [x] Sigil-aware filter combiner: partition `t:` items into allOf/anyOf/noneOf, resolve each via `queryInterval`, combine `AND(allOf) ∩ OR(anyOf) \ OR(noneOf)`. Replaces the "AND everything" filter loop in `list`/`search` (index.js:1742, index.js:1905).
 - [ ] `groupBy: 'timeline'` result option: union still drives retrieval, response is bucketed per timeline (`{ wikipedia:[...], personal:[...] }`) via `queryInterval` `mode:'layers'`.
 
