@@ -470,6 +470,20 @@ Functional requirements:
 
 ### Generic
 
+- [ ] **`hasByChecksumString` silently drops its `features` arg** (found 2026-07-14, README pass):
+      `hasByChecksumString(checksum, treeSelector = null, features = [])` (index.js:3161) forwards
+      all three to `has(id, treeSelector, features)`, but `has(id, spec = {})` (index.js:718) takes
+      TWO args, so `features` is dropped on the floor. The result is a `true` that is broader than
+      asked for: the feature gate never applies.
+      - The 2-arg spec form (`hasByChecksumString(checksum, { context, features })`) is correct and
+        is what the README documents (the spec object lands on `has()` as `spec`).
+      - **Live 3-arg caller exists**: `ContextTree.hasByChecksumString(checksum, contextSpec,
+        featureBitmapArray)` (views/ContextTree.js:1104) passes the feature array third, so that
+        whole path ignores its feature filter today. Verify blast radius before changing behavior:
+        a checksum+context dedup probe that starts honoring features may start returning `false`
+        where it returned `true`.
+      - Fix: collapse to `hasByChecksumString(checksum, spec = {})`, fold `features` into the spec
+        at the ContextTree call site, add a regression test asserting the gate actually filters.
 - [] Ensure all batch methods are using the accompanied backend(LMDB/Lance) batch methods too whereever it makes sense
 - [] Add backup/restore or dump/import functionality internally
 - [] Add DB snapshot/restore option(on top of versioning? fetaures) to enable undo/redo ops || db op logs + traversal
