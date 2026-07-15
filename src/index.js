@@ -35,7 +35,7 @@ import Synapses from './indexes/inverted/Synapses.js';
 import Relations from './indexes/inverted/Relations.js';
 import LanceIndex from './indexes/lance/index.js';
 import VectorIndex from './indexes/lance/VectorIndex.js';
-import { normalizeBitmapKeys, normalizeBitmapKey } from './indexes/bitmaps/lib/keys.js';
+import { normalizeBitmapKeys, normalizeBitmapKey, validateBitmapKey } from './indexes/bitmaps/lib/keys.js';
 import SemanticEngine from './semantic/index.js';
 
 // Views / Abstractions
@@ -98,6 +98,29 @@ function statusBitmapKeys(doc) {
     const status = typeof doc?.data?.status === 'string' ? doc.data.status.trim().toLowerCase() : '';
     if (!status) { return []; }
     return normalizeBitmapKeys([`${STATUS_BITMAP_PREFIX}${status}`]);
+}
+
+// A document's `metadata.features` array is DECLARATIVE and authoritative: the
+// document JSON says what it is, and bitmaps follow it 1:1 (features are
+// distinguished by prefix — tag/, data/, device/, …). Every write path derives
+// its tick set from this, so a feature stored on the document is always indexed
+// — storing it IS the way to create/update the bitmap.
+//
+// Invalid keys are skipped rather than thrown: a document written by an older or
+// third-party client must not turn every subsequent re-put into a hard failure.
+function documentFeatureKeys(doc) {
+    const features = doc?.metadata?.features;
+    if (!Array.isArray(features)) { return []; }
+    const keys = [];
+    for (const feature of features) {
+        try {
+            validateBitmapKey(feature);
+            keys.push(feature);
+        } catch {
+            debug(`Skipping document feature "${feature}" — not a valid bitmap key`);
+        }
+    }
+    return keys;
 }
 
 // Derived facet keys (mime + status) for one doc — ticked on every write, with
@@ -770,6 +793,7 @@ class SynapsD extends EventEmitter {
                 let prevComment = null;
                 let prevTimelineState = null;
                 let prevFacetKeys = null;
+                let prevFeatureKeys = null;
 
                 // Dedup priority: a supplied id that exists is an UPDATE — the id
                 // is the stable key every bitmap/timeline/checksum reference hangs
@@ -796,6 +820,7 @@ class SynapsD extends EventEmitter {
                                 : [],
                         };
                         prevFacetKeys = facetBitmapKeys(existing);
+                        prevFeatureKeys = documentFeatureKeys(existing);
                         // Merge input onto existing (preserves locations, metadata,
                         // parentId chain; regenerates checksums when data changed).
                         parsed = existing.update(doc);
@@ -825,6 +850,7 @@ class SynapsD extends EventEmitter {
                                 : [],
                         };
                         prevFacetKeys = facetBitmapKeys(existing);
+                        prevFeatureKeys = documentFeatureKeys(existing);
                     }
                 }
 
@@ -842,12 +868,18 @@ class SynapsD extends EventEmitter {
                     }
                 }
 
+                // Per-doc declarative features unioned with the batch-level list
+                // (which applies to every doc) — this is what lets one putMany
+                // batch carry different tags per document.
                 const docFeatures = [...featureBitmaps];
+                for (const key of documentFeatureKeys(parsed)) {
+                    if (!docFeatures.includes(key)) { docFeatures.push(key); }
+                }
                 if (!docFeatures.includes(parsed.schema)) {
                     docFeatures.push(parsed.schema);
                 }
 
-                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevTimelineState, prevFacetKeys, docFeatures };
+                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevTimelineState, prevFacetKeys, prevFeatureKeys, docFeatures };
                 prepared.push(entry);
                 if (!isUpdate) {
                     const primaryChecksum = parsed.getPrimaryChecksum();
@@ -887,8 +919,14 @@ class SynapsD extends EventEmitter {
 
         try {
             await this.#withDeferredMembership(async () => {
-                for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, prevFacetKeys, docFeatures } of prepared) {
+                for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, prevFacetKeys, prevFeatureKeys, docFeatures } of prepared) {
                     await this.documents.put(parsed.id, parsed);
+
+                    // Features this write dropped from the document — untick, or a
+                    // removed tag would linger in its bitmap forever. Snapshot was
+                    // taken before update() mutated `existing` in place.
+                    const staleFeatureKeys = (prevFeatureKeys || []).filter((k) => !docFeatures.includes(k));
+                    if (staleFeatureKeys.length) { await this.#applyMembership('untick', parsed.id, staleFeatureKeys); }
 
                     // Re-point the checksum index: drop checksums the edit dropped
                     // (empty diff for checksum-matched re-indexes), insert current.
@@ -1297,6 +1335,9 @@ class SynapsD extends EventEmitter {
                 }
 
                 const docFeatures = [...featureBitmaps];
+                for (const key of documentFeatureKeys(parsed)) {
+                    if (!docFeatures.includes(key)) { docFeatures.push(key); }
+                }
                 if (!docFeatures.includes(parsed.schema)) {
                     docFeatures.push(parsed.schema);
                 }
@@ -1414,6 +1455,9 @@ class SynapsD extends EventEmitter {
             }
             const doc = parseInitializeDocument(docData);
             const docFeatures = [...featureBitmaps];
+            for (const key of documentFeatureKeys(doc)) {
+                if (!docFeatures.includes(key)) { docFeatures.push(key); }
+            }
             if (!docFeatures.includes(doc.schema)) {
                 docFeatures.push(doc.schema);
             }
@@ -1816,14 +1860,26 @@ class SynapsD extends EventEmitter {
 
         parsedDocument.validate();
 
-        // Ensure schema is in features
+        // The document's own features are declarative — bitmaps follow them, so
+        // union them with any caller-supplied ones (tree/insert-time + device
+        // tags). Schema is always among them (BaseDocument guarantees it); the
+        // explicit push covers pre-built Document instances.
+        for (const key of documentFeatureKeys(parsedDocument)) {
+            if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
+        }
         if (!featureBitmaps.includes(parsedDocument.schema)) {
             featureBitmaps.push(parsedDocument.schema);
         }
+        // A re-put that drops a feature must untick its bitmap, or removals would
+        // never take (same reasoning as the facet keys below).
+        const staleFeatureKeys = storedDocument
+            ? documentFeatureKeys(storedDocument).filter((k) => !featureBitmaps.includes(k))
+            : [];
 
         try {
             await this.#withDeferredMembership(async () => {
                 await this.documents.put(parsedDocument.id, parsedDocument);
+                if (staleFeatureKeys.length) { await this.#applyMembership('untick', parsedDocument.id, staleFeatureKeys); }
                 await this.#checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
                 await this.#timelineIndex.insert('crud:created', parsedDocument.id, parsedDocument.createdAt || new Date());
                 if (parsedDocument.updatedAt) await this.#timelineIndex.insert('crud:updated', parsedDocument.id, parsedDocument.updatedAt);
@@ -2792,14 +2848,22 @@ class SynapsD extends EventEmitter {
         // Facet keys (mime + status) before update(), so a contentType/status
         // change unticks stale ones.
         const previousFacetKeys = facetBitmapKeys(storedDocument);
+        // Same for declarative features: captured before update() mutates the
+        // document in place, so an edit that removes a tag can untick it.
+        const previousFeatureKeys = documentFeatureKeys(storedDocument);
 
         const updatedDocument = storedDocument.update(updateData);
         updatedDocument.validate();
 
-        // Ensure schema is in features
+        // Bitmaps follow the document's features — union the updated document's
+        // own array with any caller-supplied keys.
+        for (const key of documentFeatureKeys(updatedDocument)) {
+            if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
+        }
         if (!featureBitmaps.includes(updatedDocument.schema)) {
             featureBitmaps.push(updatedDocument.schema);
         }
+        const staleFeatureKeys = previousFeatureKeys.filter((k) => !featureBitmaps.includes(k));
 
         try {
             await this.#withDeferredMembership(async () => {
@@ -2811,6 +2875,9 @@ class SynapsD extends EventEmitter {
                 await this.#indexDocumentTimelines(updatedDocument.id, updatedDocument);
                 await this.#indexDocumentGeo(updatedDocument.id, updatedDocument);
 
+                // Untick features this edit removed (e.g. a tag deleted in the UI)
+                // BEFORE re-indexing, so a case-only change re-ticks correctly.
+                if (staleFeatureKeys.length) { await this.#applyMembership('untick', updatedDocument.id, staleFeatureKeys); }
                 // Index across all views using shared helper
                 await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
                 await this.#removeStaleDeviceMembership(updatedDocument.id, previousLocations, updatedDocument.locations, featureBitmaps);
