@@ -4,6 +4,21 @@ SynapsD is a small KV database built on top of `LMDB` with `roaring-bitmap` and 
 
 This module is meant to index all data from configured data sources of a Workspace (files, emails, notes, browser tabs, github repos, dotfiles etc), and provide a unified virtual fs-like tree abstraction on top that should ideally mimick whatever mental model you need to make work with your data more efficient.
 
+## Architecture at a glance
+
+SynapsD is one of three deliberately separated services, and stays honest about what it is **not**:
+
+- **SynapsD** (this module) is the index and JSON document store: roaring bitmaps for membership, bit-sliced indexes for time and space, LanceDB for lexical (BM25) and dense-vector search. It holds document *metadata and structure*, never blob bytes, and **owns no embedding model**.
+- **[StoreD](../stored)** owns the bytes: a cache-first blob store with content-addressable identity (checksums), pluggable backends (file, cacache, http, s3), and `stored://<backend>/<key>` URLs as the canonical fetch form. A synapsd `file` document carries `locations[]` pointing at StoreD; the blob itself lives there.
+- **[Embedd](../embedd)** owns the models: a single shared embedding service (one model runtime across all workspaces) with pluggable providers (local ONNX via fastembed, Ollama, CLIP/SigLIP via transformers.js) and a content router that maps schema/contentType/modality to a vector *space*. It pulls the embedding backlog from synapsd, embeds off the main thread, and pushes chunk vectors back in.
+
+This split buys a few properties that show up everywhere in the API:
+
+- **Documents are the source of truth; indexes are derived cache.** Timelines, mime facets, device presence, geo cells — all re-derived from document state on every write, so they cannot drift and can be rebuilt (`reindex*` methods) if a bitmap is ever lost. The v3 refactor extends this to user tags (see **Roadmap**).
+- **Membership is cheap and plural.** A document is stored once; appearing in ten trees, five tags, and three timelines costs bitmap bits, not copies.
+- **The dense stack is optional.** No embedd service (or `semantic.enabled: false`) means vector/hybrid queries degrade gracefully to FTS; nothing else changes.
+- **Crash-resumable ingestion.** The embedding work-ledger is a persistent bitmap diff (`getUnembeddedDocIds`), so an external embedder can resume after a restart without rescanning a single document.
+
 ## What it is good for
 
 Everything below composes into a single query spec, which is the point of the whole design:
@@ -495,59 +510,72 @@ Zero or one query degrades to a plain list or single search. The web UI exposes 
 
 `query()` defaults to `mode: 'hybrid'`: dense-vector kNN fused with BM25 via RRF. The candidate bitmap (`paths AND features AND filters`) still scopes retrieval first, and ranking runs only on survivors. `vector` and `hybrid` degrade to `fts` when the dense stack is unavailable, and `list()` (`match = null`) never embeds.
 
-Dense vectors live in a LanceDB `vec_text` table at chunk granularity (one row per `(docId, chunkId)`). Coverage is tracked by the `internal/lance/vectors` bitmap.
+### SynapsD owns no embedding model
 
-### What gets embedded
+Embedding is fully externalized: synapsd stores and searches vectors, nothing more.
 
-Only schemas in `embeddableSchemas` (default `['data/abstraction/note']`) are embedded by the server. For those, it reads the schema's `vectorEmbeddingFields`, chunks the text, and embeds the chunks. Everything else is FTS-only unless the app ships its own vectors.
+- **Document vectors arrive from outside** via `storeDocumentEmbeddings(docId, schema, updatedAt, chunks, { space })`. In canvas-server the [embedd service](../embedd) is the producer, but any app can push vectors the same way.
+- **Query embedding is an injected callback**: `semantic.embedQuery(text, space)`. When absent, `vector` and `hybrid` queries degrade to FTS.
+- **The durable work-ledger stays in synapsd**: a per-space "seen" presence bitmap plus `getUnembeddedDocIds(space, schemas)` — a pure bitmap diff (embeddable-schemas OR minus seen) that survives restarts. The external embedder pulls this gap and drains it, so ingestion is resumable after a crash with zero document scans.
 
-Files (`data/abstraction/file`) are **not** embedded: a file document carries only `locationUrls` (the `stored://` blob refs), not content. To make text searchable by vector, ingest it as a `note` or `document` (which hold inline `data`), not as a blob.
+### Vector spaces
 
-### How it runs
+Vectors live in one LanceDB table per embedding model/dim (a *space*), at chunk granularity (one row per `(docId, chunkId)`):
 
-- **Model**: local in-process ONNX via `fastembed`, `bge-small-en-v1.5` (384-dim). The worker thread is spawned lazily on first embed or query; the model is cached under `<root>/lance/models` (first use downloads ~130 MB).
-- **Async and resumable**: `put` / `putMany` enqueue embeddable documents and the `EmbeddingQueue` embeds them off the main thread. The presence bitmap lets it skip already-embedded documents, and `start()` backfills the unfinished tail after a crash or restart.
-- **Query time**: the query string is embedded once, then vector/hybrid searched.
+| Space | Table | Dim | Filled by | Coverage bitmap |
+|-------|-------|-----|-----------|-----------------|
+| `text` | `vec_text` | 384 | ONNX `bge-small-en-v1.5` (notes, emails, plain-text blobs) | `internal/lance/vectors` |
+| `image` | `vec_image` | 768 | CLIP/SigLIP (`Xenova/siglip-base-patch16-224`) | `internal/lance/vectors/image` |
+
+The `image` space is **cross-modal**: photos are embedded from bytes, and at query time the *text* query is embedded by the same encoder family into the same joint space, so "red car" matches photos of red cars with no captions involved. Two consequences baked into the defaults:
+
+- The image space runs **exact kNN, no ANN index**: Lance's quantized ANN indexes train on the stored (image) distribution; a text query vector lands outside it and comes back with wildly inflated distances that the relevance floor then rejects wholesale (silent zero results). Exact scan is correct and fast at this scale once compacted.
+- Image kNN returns its top-K for *any* query, so a cosine-distance relevance floor (`imageMaxDistance`, default `0.945`, calibrated against SigLIP fp32) keeps unrelated photos out of every search.
+
+### The embedd companion service
+
+How vectors are actually produced in canvas-server, in one paragraph: embedd is a singleton (one model runtime shared by all workspaces). A workspace registers a small adapter (`resolveInput(docId)` / `storeVectors(...)`) and enqueues document ids on `put`/`putMany` events. The queue resolves each doc's embeddable input (inline text for notes and emails, blob bytes fetched from StoreD for images), routes it through **content-router rules** (`schema` / `contentType` / `modality` → space + provider + model — adding a modality is config, not code), embeds in **batches** (up to N images per ONNX run), and pushes chunk vectors back through the adapter. Per-doc errors are isolated, and a queue-drain hook triggers Lance compaction and ANN rebuild per workspace.
+
+This also means blobs *are* embeddable now: image files get CLIP vectors even though synapsd itself never reads blob content. Text you want vector-searchable should still be ingested as a `note`/`document` (inline `data`) or matched by an embedd router rule (`text/*` blobs are covered by default).
 
 ### App-provided vectors
 
-For blobs and media the server cannot read, compute vectors in the app and store them directly, bypassing the queue:
+To bypass embedd entirely (media the router doesn't cover, precomputed vectors):
 
 ```js
 await db.storeDocumentEmbeddings(docId, schema, updatedAt, [
     { chunkId: 0, text: 'caption or transcript', vector: [/* dim floats */] },
-]);
+], { space: 'text' });
 ```
 
 ### Config and introspection
 
-Semantic options are passed at construction (Workspace uses the defaults):
+Semantic options are passed at construction; canvas-server wires `embedQuery` from the embedd service:
 
 ```js
 const db = new SynapsD({
     path: '...',
     semantic: {
-        enabled: true,                              // false => fts-only, no worker
-        model: 'bge-small-en-v1.5',
-        dim: 384,                                   // must match the model
-        maxLength: 512,
-        cacheDir: '/path/to/models',                // default <root>/lance/models
-        embeddableSchemas: ['data/abstraction/note'],
+        enabled: true,                                // false => fts-only
+        dim: 384,                                     // text-space vector dimension
+        embedQuery: (text, space) => embedd.embedQuery(text, space),
+        embeddableSchemas: ['data/abstraction/note'], // default work-ledger candidates
+        // spaces: { ... }                            // override the text/image defaults
     },
 });
 ```
 
 | Option (`semantic.*`) | Default | Role |
 |-----------------------|---------|------|
-| `enabled` | `true` | Spin up the dense stack; `false` is FTS-only |
-| `model` | `bge-small-en-v1.5` | fastembed model id |
-| `dim` | `384` | Vector dimension (must match the model) |
-| `maxLength` | `512` | Max tokens per chunk passed to the model |
-| `cacheDir` | `<root>/lance/models` | On-disk model store |
-| `embeddableSchemas` | `['data/abstraction/note']` | Schemas the server embeds |
-| `imageMaxDistance` | `0.945` | Cosine floor for the image kNN leg |
+| `enabled` | `true` | Open the dense stack; `false` is FTS-only |
+| `dim` | `384` | Text-space vector dimension |
+| `embedQuery` | `null` | Injected query embedder `(text, space) => vector`; absent → FTS fallback |
+| `embeddableSchemas` | `['data/abstraction/note']` | Default candidate schemas for the unembedded-gap ledger (embedd normally supplies per-space schemas) |
+| `spaces` | text + image (above) | Per-space `{ table, dim, bitmapKey, annIndex }` |
+| `imageMaxDistance` | `0.945` | Cosine floor for the image kNN leg (`CANVAS_IMAGE_MAX_DISTANCE` env override; `null`/`0` = no floor) |
+| `searchWeights` | `{ fts: 2, dense: 1, image: 2 }` | Hybrid RRF fusion weights. FTS outweighs dense because text kNN has no relevance floor; image ties FTS because it *is* floored |
 
-`setSearchTuning({ imageMaxDistance, searchWeights })` adjusts the image floor and the fts/dense/image fusion weights at runtime. `await db.getStats()` returns a `.semantic` block (`model`, `dim`, `embeddableSchemas`, plus `vector`, `embedder`, and `queue` sub-status) for diagnostics UIs.
+`setSearchTuning({ imageMaxDistance, searchWeights })` adjusts the image floor and fusion weights at runtime. `await db.getStats()` returns a `.semantic` block (`embedder: 'external'`, `embedQuery` presence, `spaces`, per-space `vectorSpaces` sub-status, current tuning) for diagnostics UIs.
 
 ## Timelines and intervals
 
@@ -919,26 +947,38 @@ Canonical strings, with the `EVENTS` constant in parentheses:
 - `document.updated` (`DOCUMENT_UPDATED`)
 - `document.removed` (`DOCUMENT_REMOVED`)
 - `document.deleted` (`DOCUMENT_DELETED`)
-- `document.removed.batch` (`DOCUMENT_REMOVED_BATCH`), one event for a bulk remove, avoiding N emits
-- `document.deleted.batch` (`DOCUMENT_DELETED_BATCH`), one event for a bulk delete/purge
+
+**Document CRUD, batch variants** — one event per bulk op, so a 1000-doc insert does not fan out into 1000 socket emits:
+
+- `document.inserted.batch` (`DOCUMENT_INSERTED_BATCH`): `{ ids, count, context, directory }`
+- `document.updated.batch` (`DOCUMENT_UPDATED_BATCH`): `{ ids, count, ... }` (also emitted by `linkMany` with a `memberships` payload)
+- `document.removed.batch` (`DOCUMENT_REMOVED_BATCH`), bulk remove
+- `document.deleted.batch` (`DOCUMENT_DELETED_BATCH`), bulk delete/purge
+
+Back-compat: insert/update batches *also* emit the singular event once with `{ ids, batch: true }` for consumers that predate the batch names (the ws bridge, embedd enqueue). Batch-aware consumers (workspace hooks) should match on the `.batch` names.
 
 **Membership**:
 
+- `document.linked` (`DOCUMENT_LINKED`) and `document.unlinked` (`DOCUMENT_UNLINKED`): first-class membership events carrying the **full document** plus what changed (`memberships: { context, directory, features }` on link; `contextArray` / `directoryArray` / `featureArray` / `recursive` on unlink). The full document is the point: automation (workspace hooks/rules) can match on *content*, which the membership-only `document.updated`/`document.removed` payloads cannot support. `unlink` emits it only while the document still exists (unlink never deletes). Back-compat: `link`/`unlink` also emit `document.updated`/`document.removed` with membership-only payloads.
 - `membership.changed` (`MEMBERSHIP_CHANGED`), emitted post-commit with the exact collection bitmap keys ticked or unticked: `{ changes: [{ docId, op: 'tick'|'untick', keys }] }`. Drives precise live invalidation in `QuerySession` (intersect against an operand's `collectionKeys`). Fires before the corresponding `document.*` event, so a session re-resolves against already-committed bitmaps.
 
 **Tree management**: `tree.created` (`TREE_CREATED`), `tree.deleted` (`TREE_DELETED`), `tree.renamed` (`TREE_RENAMED`)
 
 **Tree path (structural)**: `tree.path.inserted`, `tree.path.moved`, `tree.path.copied`, `tree.path.removed`, `tree.path.locked`, `tree.path.unlocked`
 
-**Tree layer**: `tree.layer.merged` (`TREE_LAYER_MERGED`), `tree.layer.subtracted` (`TREE_LAYER_SUBTRACTED`)
+**Tree layer**: `tree.layer.merged` (`TREE_LAYER_MERGED`), `tree.layer.subtracted` (`TREE_LAYER_SUBTRACTED`), `tree.layer.converted` (`TREE_LAYER_CONVERTED`), `tree.layer.updated` (`TREE_LAYER_UPDATED`)
 
-**Tree document**: `tree.document.inserted`, `tree.document.inserted.batch`, `tree.document.removed`, `tree.document.removed.batch`, `tree.document.deleted`, `tree.document.deleted.batch`
+**Tree document**: `tree.document.inserted`, `tree.document.inserted.batch`, `tree.document.removed`, `tree.document.removed.batch`, `tree.document.deleted`, `tree.document.deleted.batch`. These are tree-scoped mirrors of the document events (with `treeId`/`treeName`/`treeType` filled in) and drive the web UI content refresh and browser extension. `putMany` and `linkMany` emit the `.batch` forms per affected tree.
 
 **Tree lifecycle**: `tree.recalculated`, `tree.saved`, `tree.loaded`, `tree.error`
 
-Payloads are wrapped with `SynapsDEvent` (or the helpers `createEvent` / `createTreeEvent`). The envelope always carries `event`, `eventId` (unique per emit, usable as an idempotency key), `source` (`db`, `tree`, or caller), an ISO `timestamp`, and optional `treeId`, `treeName`, `treeType`. Remaining keys come from the detail object without clobbering those fields. `createTreeEvent` fills tree metadata from a tree object and sets `source` to `tree`.
+Payloads are wrapped with `SynapsDEvent` (or the helpers `createEvent` / `createTreeEvent`). The envelope always carries:
 
-Writes carry caller-supplied `provenance` through to the emitted event, so automation layers can detect and bound their own cascades. See **The write spec**.
+- `event`, `eventId` (unique per emit, usable as an idempotency key), `source` (`db`, `tree`, or caller), an ISO `timestamp`
+- **provenance**: `origin` (`user` | `hook` | `rule` | `agent` | `backfill` | `replay`, default `user`), `causedBy` (the `eventId` of the event whose automation caused this write, or `null`), and `depth` (automation cascade depth, `0` = direct write)
+- `treeId`, `treeName`, `treeType` on tree-scoped events (`createTreeEvent` fills them and sets `source` to `tree`)
+
+Remaining keys come from the detail object without clobbering those fields. The provenance triple is what lets automation layers (workspace hooks and rules) detect and bound their own cascades — a rule that inserts documents in response to `document.inserted` can stop when `depth` exceeds its budget or when it recognizes its own `causedBy` chain. Callers supply it via the write spec's `provenance` field; see **The write spec**.
 
 ## Errors (`src/utils/errors.js`)
 
@@ -992,13 +1032,36 @@ Legacy method names like `findDocuments`, `ftsQuery`, `insertDocument`, and frie
 |--------|-------|
 | `getStats()` | Async stats including FTS and dense-vector internals |
 | `setSearchTuning(tuning)` | `{ imageMaxDistance, searchWeights }` at runtime |
-| `storeDocumentEmbeddings(docId, schema, updatedAt, chunks)` | App-provided vectors |
+| `storeDocumentEmbeddings(docId, schema, updatedAt, chunks, opts?)` | Externally-computed vectors; `opts = { space }` (default `text`) |
+| `getUnembeddedDocIds(space?, schemas?)` | The embedding work-ledger: ids matching the candidate schemas with no vectors in `space`. Pure bitmap read, restart-safe |
 | `reindexCrudTimelines(opts?)` | `{ scanned, created, updated }`; rebuild `crud:*` timelines |
 | `reindexSearchIndex(opts?)` | `{ indexed, totalDocs, alreadyIndexed }`; backfill FTS, idempotent |
-| `reindexEmbeddings()` | `{ enqueued, totalEmbeddable, queued }`; enqueue missing dense vectors |
+| `reindexEmbeddings(opts?)` | `{ space, unembedded, totalEmbeddable, embeddableSchemas }`; reports the embedding gap for the admin/reindex route to hand to embedd (synapsd runs no queue itself) |
 | `reindexMimeBitmaps(opts?)` | Rebuild derived `data/mime/*` facets |
 
 Sub-index handles: `db.timeline`, `db.geo`, `db.bitmapIndex`, `db.checksumIndex`, `db.synapses`, `db.relations`, `db.semantic`.
+
+## Roadmap: the v3 refactor
+
+An API and schema consolidation pass is planned (working title *Refactor v3*, guiding principle: *do the simplest thing that works; aim to delete more than you add*). The query spec documented above **is already the v3 shape** — new code should target it. What changes:
+
+**Surface shrinks.** The public read surface converges on `list()` + `query()` (plus trivial `get`/`has`); writes on `put` / `putMany` / `link`. Legacy names (`findDocuments`, `ftsQuery`, `insertDocument`, ...) are already dead and will be removed. Session/recall features stay a thin layer on the `resolveCandidates` + `rank` seam, not a parallel API.
+
+**Filter grammar completes.** `g:<glob>` and `re:<regexp>` filters (currently parse-time throws) land with the schema refactor. The sigil algebra also gets unified for raw bitmap keys: today raw keys AND together while `t:`/`geo:` tokens default to anyOf-OR — a known inconsistency that will be resolved in one sweep.
+
+**Documents declare their features.** User-asserted keys (`tag/*`, `custom/*`) are today the last membership state living *only* in bitmaps — the one thing with no rebuild source if a bitmap corrupts. A root-level `features: []` on the document completes the "document declares, index derives" pattern that timelines, mime facets, geo, and device presence already follow. Payoff: full engine-wide reindex-from-docs, self-contained synced JSON (offline clients see tags without bitmap access), O(1) per-doc attribute reads, and it closes the phantom-membership hazard when a GC'd document id is reused. Derived keys (`data/*`, `feature/*`, `device/*`) stay computed; view membership (`context/*`, `vfs/*`) stays bitmap-only.
+
+**Schemas become registrations.** The hard-coded schema registry still carries app abstractions (email, tab, note, todo, ...) that leaked in when synapsd was extracted from canvas-server. The db only needs three things per schema — a zod `dataSchema`, `indexOptions`, and (de)serialization — so those move behind a `db.registerSchema('data/abstraction/email', { ... })` API called by the app at boot. Builtin core shrinks to schema-agnostic primitives (`document`, `blob`/`file`, `bucket`, `link`). The cutover is migration-free: schema id strings are persisted in docs and bitmaps either way, so abstractions move one at a time. Per-abstraction `indexOptions` also lift out of per-document `toJSON()` (GBs of identical config at 7M-row scale).
+
+**Tree mountpoints.** Context/directory trees gain intra-workspace mounts, so a `project` layer like `/projects/dc-migration/dc/frankfurt` can mount the existing `/infra/dc` subtree instead of replicating it — mounted children resolve in origin context, writes through the mount tick the origin path, mounts lock their source, and a reachability check at mount time keeps the mount graph a DAG. This gives Project/Task abstractions "for free" from the existing layer-type machinery.
+
+**Tree names become unique per workspace** (DB-level constraint on create/rename), so name-based deep links (`/workspaces/:ws/trees/:treeName/...`) resolve unambiguously instead of falling back to ids.
+
+**Semantic anchor trees** (further out): machine-built, engine-owned context trees per semantic dimension (topic, visual, episode), queried alongside user trees via the same multi-spec AND. Because ticking along a path makes ancestor bitmaps supersets of descendants, walking root-ward widens the candidate set *semantically* — graded recall on the same bitmap machinery, with anchor-construction strategies swappable as tree builders. Multimodal `match: { text?, image? }` carried end-to-end lands alongside.
+
+### Known caveats
+
+- `hasByChecksumString(checksum, treeSelector, features)` — the legacy **3-arg** form silently drops the `features` argument (it forwards three args to the 2-arg `has()`), so its answer can be broader than asked. Use the documented 2-arg spec form (`hasByChecksumString(checksum, { context, features })`), which applies the gate correctly. Fix (collapsing to the spec form) is queued.
 
 ## Notes
 
