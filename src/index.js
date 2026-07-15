@@ -3892,7 +3892,14 @@ class SynapsD extends EventEmitter {
         const geo = document?.metadata?.geo;
         const lat = Number(geo?.lat);
         const lon = Number(geo?.lon);
-        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        // Reject out-of-range and exact (0,0): `Number(null)` is 0 and finite, so
+        // a { lat: null, lon: null } record would otherwise be indexed on "Null
+        // Island" off the Gulf of Guinea and answer bbox queries covering it.
+        // That's sentinel data meaning "no location", not a fix at the equator.
+        const usable = Number.isFinite(lat) && Number.isFinite(lon)
+            && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
+            && !(lat === 0 && lon === 0);
+        if (usable) {
             await this.#geoIndex.insert(docId, lat, lon);
         } else if (await this.#geoIndex.has(docId)) {
             await this.#geoIndex.remove(docId);
