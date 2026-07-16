@@ -265,6 +265,59 @@ export default class TimelineIndex {
     }
 
     /**
+     * Per-bucket document counts for one or more timelines — the data behind a
+     * density rail / histogram UI. Buckets are caller-supplied intervals (the
+     * UI already knows its visible periods), so no calendar math lives here.
+     *
+     * @param {string|string[]} timelineNames - names, or '*' for all
+     * @param {Array<{start, end}>} buckets - same value grammar as insert/queryInterval
+     * @param {RoaringBitmap32|null} filterBitmap - optional candidate set (context/
+     *        feature/filter scope) each bucket count is intersected with
+     * @returns {Promise<Array<{start, end, counts: Object<string, number>, total: number}>>}
+     *          one entry per input bucket (order preserved); zero-count timelines
+     *          are omitted from `counts`
+     */
+    async histogram(timelineNames, buckets = [], filterBitmap = null) {
+        const names = await this.#resolveTimelineNames(timelineNames);
+        const results = buckets.map((b) => ({ start: b.start, end: b.end, counts: {}, total: 0 }));
+
+        for (const name of names) {
+            // Only scan tiers that exist on disk — otherwise every bucket fans
+            // across all 9 scales for a timeline that typically has 1-2 tiers.
+            const scales = this.#existingScales(name);
+            if (scales.length === 0) { continue; }
+
+            for (let i = 0; i < buckets.length; i++) {
+                let range;
+                try {
+                    range = this.#normalizeInterval({ start: buckets[i].start, end: buckets[i].end });
+                } catch {
+                    continue; // malformed bucket → counts stay empty for it
+                }
+                const bitmaps = await Promise.all(scales.map((scale) => this.#queryIntervalBitmap(name, scale, range)));
+                const union = new RoaringBitmap32();
+                for (const bitmap of bitmaps) { union.orInPlace(bitmap); }
+                if (filterBitmap) { union.andInPlace(filterBitmap); }
+                if (union.size > 0) {
+                    results[i].counts[name] = union.size;
+                    results[i].total += union.size;
+                }
+            }
+        }
+
+        return results;
+    }
+
+    // Scale tiers a timeline actually has data for (point ts or interval start).
+    #existingScales(name) {
+        this.#assertTimelineName(name);
+        const key = this.#timelineKey(name);
+        return SCALES.filter((scale) =>
+            this.bitmapIndex.hasBitmap(`internal/ts/${key}/${scale}/start/ebm`)
+            || this.bitmapIndex.hasBitmap(`internal/ts/${key}/${scale}/ts/ebm`));
+    }
+
+    /**
      * Sort keys for a candidate id set: id -> BigInt comparable across scale
      * tiers (ms since epoch; coarse tiers key on their period start, so "1984"
      * sorts before "1984-06-15" — stable and correct for ordering). Instant
