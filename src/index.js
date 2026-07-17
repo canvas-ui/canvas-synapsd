@@ -457,8 +457,9 @@ class SynapsD extends EventEmitter {
                     const textSpace = this.#semanticConfig.spaces.text || { table: 'vec_text', dim: this.#semanticConfig.dim, bitmapKey: 'internal/lance/vectors' };
                     this.#vectorIndex = new VectorIndex({
                         rootPath: path.join(this.#rootPath, 'lance'),
-                        tableName: textSpace.table,
+                        tableName: this.#vectorTableName('text', textSpace),
                         dim: textSpace.dim,
+                        model: textSpace.model,
                         vectorBitmapKey: textSpace.bitmapKey,
                         bitmapIndex: this.bitmapIndex,
                     });
@@ -1243,6 +1244,18 @@ class SynapsD extends EventEmitter {
      * Lazily create + initialize the VectorIndex for a named space. Returns null
      * if the semantic stack is disabled or the space is unknown.
      */
+    // Lance table name for a vector space. A space that declares its model is
+    // keyed by (space, model, dim) — `vec_text__qwen3-embedding-0.6b__1024` —
+    // so a model/dim change lands in its OWN table instead of colliding with
+    // (and destroying) another config's vectors; two models coexist and stay
+    // independently queryable. Model-less legacy spaces keep their fixed
+    // `cfg.table` name so existing vec_text/vec_image data stays attached.
+    #vectorTableName(space, cfg) {
+        if (!cfg?.model) { return cfg.table; }
+        const slug = String(cfg.model).toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
+        return `vec_${space}__${slug}__${cfg.dim}`;
+    }
+
     async #getVectorSpace(space) {
         if (!this.#semanticConfig.enabled) { return null; }
         if (this.#vectorSpaces.has(space)) { return this.#vectorSpaces.get(space); }
@@ -1251,8 +1264,9 @@ class SynapsD extends EventEmitter {
         try {
             const vi = new VectorIndex({
                 rootPath: path.join(this.#rootPath, 'lance'),
-                tableName: cfg.table,
+                tableName: this.#vectorTableName(space, cfg),
                 dim: cfg.dim,
+                model: cfg.model,
                 vectorBitmapKey: cfg.bitmapKey,
                 bitmapIndex: this.bitmapIndex,
                 annIndex: cfg.annIndex,
@@ -1276,14 +1290,15 @@ class SynapsD extends EventEmitter {
      * @param {string} schema
      * @param {string} updatedAt
      * @param {{chunkId:number, text?:string, vector:number[]}[]} chunks
-     * @param {{space?:string}} [opts] target embedding space (default 'text')
+     * @param {{space?:string, model?:string}} [opts] target embedding space (default
+     *   'text') + provenance model label stamped on the rows
      */
     async storeDocumentEmbeddings(docId, schema, updatedAt, chunks, opts = {}) {
         const space = opts.space || 'text';
         const vi = await this.#getVectorSpace(space);
         if (!vi) { return false; }
         // upsertChunks ticks the presence bitmap when chunks>0 (unticks otherwise).
-        await vi.upsertChunks(docId, schema, updatedAt, chunks);
+        await vi.upsertChunks(docId, schema, updatedAt, chunks, { model: opts.model });
         // Always mark the doc as processed in the ledger — even a deliberate skip
         // (0 chunks) must leave the unembedded gap, or reconcile re-fetches it forever.
         try { await this.bitmapIndex.tick(this.#seenKey(space), Number(docId)); } catch (_) { }
