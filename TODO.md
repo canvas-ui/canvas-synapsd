@@ -296,7 +296,7 @@ query(
 ```
 
 ### Perf & storage
-- [ ] Audit `#buildAllDocumentsBitmap()` callers (`noneOf`-only features, `excludeTree`, `excludeContext`, root-source): each is a full scan, short-circuit when the positive set is already bounded (index.js:3412). *(deferred: needs design.)*
+- [x] Audit `#buildAllDocumentsBitmap()` callers: done (verified 2026-07-17). All callers now gate on the positive set and only full-scan when the query is genuinely unconstrained (noneOf-only, no positive filters). `excludeTree`/`excludeContext` are gone (replaced by `paths.not` selectors). Optional follow-up: maintain a persistent all-docs bitmap to kill the remaining unconstrained-path scan.
 - [ ] Lift `indexOptions` (esp. `embeddingOptions`) out of per-document `toJSON()` to schema level: GBs of identical config across 7M rows. *(deferred: per-abstraction config, not per-doc storage; needs design + back-compat sign-off.)*
 
 ## Doc-declared features (`features: []` on the document)
@@ -958,20 +958,8 @@ as-is, and the clutter has no runtime/security/perf cost, only maintainability.
 ## Tests
 
 - [ ] Add a proper test suite for the current API
-- [ ] Add tests for `list(spec)`:
-  - [ ] attributes `allOf`
-  - [ ] attributes `anyOf`
-  - [ ] attributes `noneOf`
-  - [ ] context-only
-  - [ ] directory-only
-  - [ ] timeline filters
-  - [ ] glob/regexp filters
-  - [ ] pagination
-- [ ] Add tests for `search(spec)`:
-  - [ ] global search
-  - [ ] context-filtered search
-  - [ ] attribute-filtered search
-  - [ ] timeline-filtered search
-- [ ] Add workspace integration tests against new API translation layer.
-- [ ] Regression: `subtractFromMany`/`applyToMany` when the source key is also in the targets (self-aliasing must not zero the shared cached source mid-loop)
 
+
+## Optional
+
+- [ ] BitmapIndex cache is an unbounded Map (every bitmap ever touched stays resident) - fine at KB sizes, needs a cap/eviction before wikipedia-scale ingest.
