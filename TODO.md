@@ -375,16 +375,15 @@ stale-diff, tick/untick and batch wiring stay. **Do not ship it long-term as-is*
 ticks derived keys out of an asserted-array, harmless only because `schema` is the sole derived
 key in there.
 
-**Dead code this refactor should delete (all verified zero-caller):**
-- [ ] `BaseDocument.addFeature` / `removeFeature` / `hasFeature` / `getFeaturesByPrefix` (:641-664)
+**Dead code this refactor should delete (all verified zero-caller):** — **ALL DELETED 2026-07-17**
+- [x] `BaseDocument.addFeature` / `removeFeature` / `hasFeature` / `getFeaturesByPrefix`
       — the whole imperative feature API. Zero callers; everything flows declaratively.
-- [ ] `setDocumentArrayFeatures` / `unsetDocumentArrayFeatures` (index.js:3263, :3318) — zero callers.
-- [ ] `metadata.contextUUIDs` + `metadata.contextPath` (:122-123, :202-203) with their
-      `addContext`/`removeContext` helpers (:619-635) — **100% dead**: always `[]` (verified live),
-      no writer, no reader. They are the fossil of view-membership-on-the-document, the exact thing
-      the `context/`/`vfs/` row forbids. `abstractions/Link.js:18-19` re-declares both inside `data`,
-      duplicating a field that was already dead.
-- [ ] `nested/`, `user/`, `server/` from `ALLOWED_BITMAP_PREFIXES` (+ the `nested/` entry in the web's
+- [x] `setDocumentArrayFeatures` / `unsetDocumentArrayFeatures` — zero callers.
+- [x] `metadata.contextUUIDs` + `metadata.contextPath` with their
+      `addContext`/`removeContext` helpers — **100% dead**: always `[]` (verified live),
+      no writer, no reader. Link.js duplicate declarations removed too. (Contact's linkSchema
+      `contextPath` left alone — dies wholesale in the contact→identity fold.)
+- [x] `nested/`, `user/`, `server/` from `ALLOWED_BITMAP_PREFIXES` (+ the `nested/` entry in the web's
       `EXCLUDED_BITMAP_PREFIXES`).
 
 **Bugs found during the review (independent of the refactor, fix or ticket separately):**
@@ -608,22 +607,18 @@ Functional requirements:
 - Synapsd must expose the origin path of any resolved node
 - All project and task metadata(timelines, milestones, deadlines, dates) live as the app concern in the layers `metadata` object, db does not care here
 
+--------------
+
+
 ### Generic
 
-- [ ] **`hasByChecksumString` silently drops its `features` arg** (found 2026-07-14, README pass):
-      `hasByChecksumString(checksum, treeSelector = null, features = [])` (index.js:3161) forwards
-      all three to `has(id, treeSelector, features)`, but `has(id, spec = {})` (index.js:718) takes
-      TWO args, so `features` is dropped on the floor. The result is a `true` that is broader than
-      asked for: the feature gate never applies.
-      - The 2-arg spec form (`hasByChecksumString(checksum, { context, features })`) is correct and
-        is what the README documents (the spec object lands on `has()` as `spec`).
-      - **Live 3-arg caller exists**: `ContextTree.hasByChecksumString(checksum, contextSpec,
-        featureBitmapArray)` (views/ContextTree.js:1104) passes the feature array third, so that
-        whole path ignores its feature filter today. Verify blast radius before changing behavior:
-        a checksum+context dedup probe that starts honoring features may start returning `false`
-        where it returned `true`.
-      - Fix: collapse to `hasByChecksumString(checksum, spec = {})`, fold `features` into the spec
-        at the ContextTree call site, add a regression test asserting the gate actually filters.
+- [x] **`hasByChecksumString` silently drops its `features` arg** — **FIXED 2026-07-17.**
+      Collapsed to `hasByChecksumString(checksum, spec = {})`. Blast radius verified nil: every
+      live caller routes through `Workspace.hasByChecksumString`, which already passed a proper
+      spec object as arg 2 (so those feature gates were honored all along). The broken 3-arg path
+      was `ContextTree.has`/`ContextTree.hasByChecksumString` — themselves zero-caller wrappers
+      that ALSO passed their `{tree, path}` selector unwrapped (so tree scope was dropped too);
+      both DELETED. Regression test in query-and-membership.test.js asserts the gate filters.
 - [] Ensure all batch methods are using the accompanied backend(LMDB/Lance) batch methods too whereever it makes sense
 - [] Add backup/restore or dump/import functionality internally
 - [] Add DB snapshot/restore option(on top of versioning? fetaures) to enable undo/redo ops || db op logs + traversal
@@ -636,11 +631,6 @@ LMDB copy/snapshot - mdb_copy (or the env .copy() API) gives a consistent point-
   - Ids
   - metadata portion only 
   - full document
-
-### "!tag" shorthand (optional sugar)
-
-* If a string in `allOf/anyOf` starts with `!`, move it to `none` internally.
-* Keeps compatibility with quick one-liners.
 
 ## Canonical V2 API leftovers
 
@@ -715,13 +705,12 @@ answers exactly one question, and each has exactly one writer class.
       keeps old `checksumFields` forever); registry-keyed rules make changing `checksumFields` an
       explicit, versioned migration — which is what it always was.
 - [ ] **`embeddingOptions` -> off the document entirely** (see below).
-- [ ] **`embeddingsArray`** — zero writers (only BaseDocument + web type mirrors). Dead.
-- [x] **DECIDED 2026-07-15 — drop versioning.** `parentId` / `versions` / `versionNumber` /
-      `latestVersion` + all SEVEN empty-stub methods (`addVersion`/`listVersions`/`getVersion`/
-      `removeVersion`/`getLatestVersion`/`getPreviousVersion`/`getNextVersion`,
-      BaseDocument.js:388-400). No caller outside web type mirrors. Four fields shipped on every row
-      for a feature that does not exist. Re-add with a real implementation (see "DB snapshot/restore"
-      above), not before.
+- [x] **`embeddingsArray`** — zero writers (only BaseDocument + web type mirrors). Dead.
+      **DELETED 2026-07-17** (schema, constructor, update(), toJSON(), web type mirrors).
+- [x] **DECIDED 2026-07-15 — drop versioning. DELETED 2026-07-17.** `parentId` / `versions` /
+      `versionNumber` / `latestVersion` + all SEVEN empty-stub methods removed from BaseDocument,
+      web type mirrors and web version-display UI (document lists, object-card tabs, sort column).
+      Re-add with a real implementation (see "DB snapshot/restore" above), not before.
 - [ ] `metadata.contextUUIDs` / `metadata.contextPath` + `addContext`/`removeContext` — dead (see
       the feature review above).
 - [ ] `metadata.features` -> root `features[]` (see the feature review above).
@@ -745,11 +734,10 @@ answers exactly one question, and each has exactly one writer class.
       previously indexed for existing docs, the same switch forks every document.** Stale sha1 index
       entries are harmless (dropped on the doc's next `#updateOne`, which `deleteArray`s the old
       array).
-- [ ] **`indexOptions.primaryChecksumAlgorithm` is dead twice over** — (a) never read
-      (`getPrimaryChecksum()` uses `checksumArray[0]`), and (b) not even in the zod `indexOptions`
-      shape (declared BaseDocument.js:165, absent from :79-95; survives only because zod strips
-      unknown keys instead of throwing). Delete it, or make `getPrimaryChecksum()` actually honor it.
-      Deleting is right: array position already encodes primacy.
+- [x] **`indexOptions.primaryChecksumAlgorithm`** — dead twice over (never read; not in the zod
+      shape). **DELETED 2026-07-17** from BaseDocument defaults, File.js, web type mirrors; the
+      web's three `getPrimaryChecksum()` helpers now use `checksumArray[0]` (position = primacy,
+      matching synapsd) instead of a prefix-match against the field with an 'sha1' fallback.
 
 Result for the measured note: **1129 B -> ~620 B (−45%)**, with `data` rising from 3.7% to ~7% of
 the row.
@@ -882,8 +870,8 @@ tab (identity = url)  ──rel/snapshot-of──>  file (identity = content has
   relation hangs off.
 - **Payoff.** As a real `file` doc the snapshot inherits FTS, embedding, CLIP, dedup, blob backends
   and range streaming — all already built. Inside `data` it gets none of them.
-- [ ] **Delete `Link.data.previews[]`** (schemas/abstractions/Link.js:23-30) — zero writers, zero
-      readers, and it is a half-built version of exactly this. Build the relation instead.
+- [x] **Delete `Link.data.previews[]`** — zero writers, zero readers, a half-built version of
+      exactly this. **DELETED 2026-07-17.** Build the relation instead.
 
 Generalizes beyond tabs — email→attachment, note→embedded image, application→installer blob,
 photo→identity. This is the L2 relation layer earning its keep (`data/relation/generated-from` is

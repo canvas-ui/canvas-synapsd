@@ -186,6 +186,19 @@ describe('SynapsD query and membership invariants', () => {
         expect(ids(await db.list({ filters: ['!t:crud:created:today'] }))).toEqual([]);
     });
 
+    test('hasByChecksumString honors the feature gate in its spec', async () => {
+        const { alphaId } = await seed();
+        const alpha = await db.get(alphaId);
+        const checksum = alpha.checksumArray[0];
+
+        expect(await db.hasByChecksumString(checksum)).toBe(true);
+        expect(await db.hasByChecksumString(checksum, { context: { path: '/Projects/Alpha' } })).toBe(true);
+        expect(await db.hasByChecksumString(checksum, { context: { path: '/Projects/Alpha' }, features: ['tag/red'] })).toBe(true);
+        // The old 3-arg form dropped features on the floor — these two assert the gate filters.
+        expect(await db.hasByChecksumString(checksum, { context: { path: '/Projects/Alpha' }, features: ['tag/blue'] })).toBe(false);
+        expect(await db.hasByChecksumString(checksum, { context: { path: '/Projects/Beta' } })).toBe(false);
+    });
+
     test('searches globally and with context, attribute, and timeline filters', async () => {
         const { alphaId, betaId } = await seed();
 

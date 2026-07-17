@@ -3240,11 +3240,13 @@ class SynapsD extends EventEmitter {
         return await this.#getById(id, options);
     }
 
-    async hasByChecksumString(checksumString, treeSelector = null, features = []) {
+    // spec: { context?, directory?, features?, attributes? } — same shape as has().
+    // (The old 3-arg form silently dropped its features argument: has() takes two.)
+    async hasByChecksumString(checksumString, spec = {}) {
         if (!checksumString) { throw new Error('Checksum string required'); }
         const id = await this.#checksumIndex.checksumStringToId(checksumString);
         if (!id) { return false; }
-        return await this.has(id, treeSelector, features);
+        return await this.has(id, spec);
     }
 
     /**
@@ -3273,116 +3275,6 @@ class SynapsD extends EventEmitter {
                 error: error.message,
             };
         }
-    }
-
-    async setDocumentArrayFeatures(docIdArray, featureBitmapArray) {
-        if (!Array.isArray(docIdArray)) {
-            throw new Error('Document ID array must be an array');
-        }
-        if (!Array.isArray(featureBitmapArray) || featureBitmapArray.length === 0) {
-            throw new Error('Feature bitmap array must be a non-empty array');
-        }
-        // Ensure all features are strings
-        if (!featureBitmapArray.every(f => typeof f === 'string')) {
-            throw new Error('All items in feature bitmap array must be strings');
-        }
-        debug(`setDocumentArrayFeatures: Setting features [${featureBitmapArray.join(', ')}] for ${docIdArray.length} documents`);
-
-        const result = {
-            successful: [], // Array of { index: number, id: number }
-            failed: [],    // Array of { index: number, id: number, error: string }
-            count: docIdArray.length,
-        };
-
-        // Validate IDs upfront, separate valid from invalid
-        const validEntries = [];
-        for (let i = 0; i < docIdArray.length; i++) {
-            const id = docIdArray[i];
-            if (typeof id !== 'number') {
-                result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
-            } else {
-                validEntries.push({ index: i, id });
-            }
-        }
-
-        // Single tickMany call with all valid IDs
-        if (validEntries.length > 0) {
-            try {
-                const featureKeys = normalizeBitmapKeys(featureBitmapArray);
-                await this.#withDeferredMembership(async () => {
-                    for (const { id } of validEntries) {
-                        await this.#addDocumentMembership(id, featureKeys);
-                    }
-                });
-                for (const { index, id } of validEntries) {
-                    result.successful.push({ index, id });
-                }
-                debug(`setDocumentArrayFeatures: Successfully set features for ${validEntries.length} documents.`);
-            } catch (error) {
-                debug(`setDocumentArrayFeatures: Batch tick failed. Error: ${error.message}`);
-                for (const { index, id } of validEntries) {
-                    result.failed.push({ index, id, error: error.message || 'Unknown error' });
-                }
-            }
-        }
-
-        debug(`setDocumentArrayFeatures: Processed ${result.count} requests. Successful: ${result.successful.length}, Failed: ${result.failed.length}`);
-        return result;
-    }
-
-    async unsetDocumentArrayFeatures(docIdArray, featureBitmapArray) {
-        if (!Array.isArray(docIdArray)) {
-            throw new Error('Document ID array must be an array');
-        }
-        if (!Array.isArray(featureBitmapArray) || featureBitmapArray.length === 0) {
-            throw new Error('Feature bitmap array must be a non-empty array');
-        }
-        // Ensure all features are strings
-        if (!featureBitmapArray.every(f => typeof f === 'string')) {
-            throw new Error('All items in feature bitmap array must be strings');
-        }
-        debug(`unsetDocumentArrayFeatures: Unsetting features [${featureBitmapArray.join(', ')}] for ${docIdArray.length} documents`);
-
-        const result = {
-            successful: [], // Array of { index: number, id: number }
-            failed: [],    // Array of { index: number, id: number, error: string }
-            count: docIdArray.length,
-        };
-
-        // Validate IDs upfront, separate valid from invalid
-        const validEntries = [];
-        for (let i = 0; i < docIdArray.length; i++) {
-            const id = docIdArray[i];
-            if (typeof id !== 'number') {
-                result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
-            } else {
-                validEntries.push({ index: i, id });
-            }
-        }
-
-        // Single untickMany call with all valid IDs
-        if (validEntries.length > 0) {
-            try {
-                const featureKeys = normalizeBitmapKeys(featureBitmapArray);
-                await this.#withDeferredMembership(async () => {
-                    for (const { id } of validEntries) {
-                        await this.#removeDocumentMembership(id, featureKeys);
-                    }
-                });
-                for (const { index, id } of validEntries) {
-                    result.successful.push({ index, id });
-                }
-                debug(`unsetDocumentArrayFeatures: Successfully unset features for ${validEntries.length} documents.`);
-            } catch (error) {
-                debug(`unsetDocumentArrayFeatures: Batch untick failed. Error: ${error.message}`);
-                for (const { index, id } of validEntries) {
-                    result.failed.push({ index, id, error: error.message || 'Unknown error' });
-                }
-            }
-        }
-
-        debug(`unsetDocumentArrayFeatures: Processed ${result.count} requests. Successful: ${result.successful.length}, Failed: ${result.failed.length}`);
-        return result;
     }
 
     /**

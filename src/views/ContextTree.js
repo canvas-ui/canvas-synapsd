@@ -1092,18 +1092,6 @@ class ContextTree extends EventEmitter {
         });
     }
 
-    has(id, contextSpec = '/', featureBitmapArray = []) {
-        const normalizedContextSpec = this.#normalizePath(contextSpec);
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.has(id, this.#buildContextSelector(normalizedContextSpec), featureBitmapArray);
-    }
-
-    hasByChecksumString(checksum, contextSpec = null, featureBitmapArray = []) {
-        const normalizedContextSpec = this.#normalizePath(contextSpec);
-        if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        return this.#db.hasByChecksumString(checksum, this.#buildContextSelector(normalizedContextSpec), featureBitmapArray);
-    }
-
     /**
      * ============================================================================
      * Utils and Private Methods

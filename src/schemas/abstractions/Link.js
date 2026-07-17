@@ -15,19 +15,9 @@ const linkPayloadSchema = Document.extendDataSchema(
         type: z.string().optional(),
         scheme: z.string().optional(),
         category: z.string().optional(),
-        contextPath: z.string().optional(),
-        contextUUIDs: z.array(z.string()).optional(),
         tags: z.array(z.string()).optional(),
         properties: z.record(z.any()).optional(),
         lastAccessedAt: z.string().datetime().optional(),
-        previews: z.array(
-            z.object({
-                type: z.string(),
-                uri: z.string().optional(),
-                title: z.string().optional(),
-                metadata: z.record(z.any()).optional(),
-            }).strict(),
-        ).optional(),
     }).passthrough(),
 );
 
