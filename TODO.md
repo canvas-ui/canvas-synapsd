@@ -217,46 +217,53 @@ filters: ['+t:crud:updated:thisWeek', 't:wikipedia:1996', 't:personal:1996']
 - [ ] `groupBy: 'timeline'` result option: union still drives retrieval, response is bucketed per timeline (`{ wikipedia:[...], personal:[...] }`) via `queryInterval` `mode:'layers'`.
 
 ### Vectors & modalities
-- [ ] Multimodal vector search: text + image now, (streaming) video/audio later. Carry `match` as `{ text?, image? }` end-to-end.
-- [ ] External embedding connectors besides local ONNX (ollama, openai, anthropic) behind one provider interface.
+
+We are moving towards a separate embedding provider based on `https://github.com/StarlightSearch/EmbedAnything`, It should be possible to seamlessly add new embedding models per modality + fine-tune their settings, revert back to a previous model or remove all vectors for a superseeded model.
+
+This item relates to the "## Refactor `embedd` (coupled to the workspace runtime)" from `TODO.md` in the root of canvas-server (the main repo)
+
+- [ ] Multimodal vector search: text + image now, (streaming) video/audio. Carry `match` as `{ text?, image? }` end-to-end.
+- [ ] External embedding connectors besides local ONNX (ollama, openai, anthropic) behind one provider interface, maybe we should completely remove ONNX from synapsd and solely rely on an external provider but this is up for a discussion first
 
 #### Vector provenance + per-(model,dim) spaces — **NEEDED SOON** (qwen VL / matryoshka tests)
 
 Not cosmetics. Blocks the upcoming qwen-VL / Matryoshka (MRL) embedding tests (user, 2026-07-15).
 
-**⚠️ LANDMINE — a dim mismatch SILENTLY DROPS THE TABLE.** `VectorIndex.initialize()`
-(indexes/lance/VectorIndex.js:92-97): if the on-disk `vector` field width != the configured
-`#dim`, it runs `dropTable` + `createEmptyTable` — **every vector in that space is destroyed** —
-and it is announced with `debug()` only, so at default log levels nothing is printed. Point a
-1024d qwen-VL model at the 384d `vec_text` space and all note/email vectors vanish on startup.
-**Matryoshka hits the exact same path**: truncating 1024 → 256 *is* a dim change. Do not run those
-tests against a space holding data you care about until this is addressed.
+**⚠️ LANDMINE — DEFUSED 2026-07-17.** ~~a dim mismatch SILENTLY DROPS THE TABLE~~
+`VectorIndex.initialize()` now refuses loudly (`console.warn`) instead of dropping when the
+on-disk `vector` width != configured `#dim` AND the table is non-empty: data stays on disk, the
+space goes offline, `stats()` reports the mismatch. An EMPTY table under a mismatch still
+recreates (that path is safe and keeps the original vec_image 512→768 self-heal). Tests:
+`tests/vector-provenance.test.js`.
 
-**The row carries no provenance.** Schema is `id, chunkId, schema, updatedAt, chunkText, vector`
-(VectorIndex.js:55-64) — **no model, no dim, no embeddedAt**. Consequences today: you cannot tell
-which rows came from which model, cannot detect drift, and cannot re-embed a subset — the only
-recovery is "drop everything and re-embed". This is precisely the gap that per-document
-`indexOptions.embeddingOptions` was pretending to cover while being unreadable by anything (see
-"BaseDocument v3" above).
+~~**The row carries no provenance.**~~ **SHIPPED 2026-07-17**: rows now carry `model`, `dim`,
+`embeddedAt`; legacy tables are backfilled on open via `addColumns` (legacy rows get `model:''`
+= honestly unknown). embedd ships `rule.model` with every `storeVectors` push, so provenance is
+stamped end-to-end. "Re-embed everything vectorized with X" is now a Lance query.
 
-- [ ] **Key the Lance table by `(space, model, dim)`** instead of mutating one table's dim, e.g.
-      `vec_text__bge-small-en-v1.5__384`, `vec_text__qwen3-embedding-0.6b__1024`. This makes the
-      silent-drop hazard *structurally impossible* (each config owns its own table, so a mismatch
-      can never occur), and gives A/B for free: two models coexist and stay independently queryable
-      instead of one clobbering the other. MRL truncations become sibling tables
-      (`…__qwen__256` / `__512` / `__1024`), each with its own ANN index.
-- [ ] **Add `model`, `dim`, `embeddedAt` columns to the row** anyway — the table name handles
-      cross-model separation, these handle *within*-table drift (a model version bump under the same
-      name) and make "re-embed everything vectorized with X" a query rather than an archaeology
-      exercise.
-- [ ] **Make the dim guard loud and non-destructive**: `warn`, not `debug`, and refuse rather than
-      drop when the table is non-empty (once tables are keyed by dim this should be unreachable —
-      keep it as an assertion).
-- [ ] **MRL note**: a truncated Matryoshka vector must be **re-normalized (L2)** before cosine/dot,
-      or similarity is silently wrong. Decide where that lives — embedd (at write) vs synapsd (at
-      query). Recommend embedd: synapsd owns no model semantics (index.js:263).
-- [ ] Cross-check `#semanticConfig.dim` (index.js, default 384) — a single global dim that must not
-      outlive per-space dims once spaces are keyed by model.
+- [x] **Key the Lance table by `(space, model, dim)`** — SHIPPED 2026-07-17, opt-in per space:
+      a space config that declares `model` gets `vec_<space>__<model-slug>__<dim>`
+      (`#vectorTableName`, index.js); MRL truncations become sibling tables for free. Model-less
+      legacy spaces keep their fixed `cfg.table` names (`vec_text`/`vec_image`) so existing data
+      stays attached — zero migration. For the qwen-VL / MRL tests: add the space WITH a model
+      name and the keying (plus the non-destructive guard) makes clobbering impossible.
+      Follow-up for the embedd runtime split: derive synapsd space configs (incl. `model`) from
+      the embedd router rules so the keying becomes the default rather than opt-in.
+- [x] **Add `model`, `dim`, `embeddedAt` columns to the row** — SHIPPED 2026-07-17 (see above).
+- [x] **Make the dim guard loud and non-destructive** — SHIPPED 2026-07-17 (see above).
+- [x] **MRL note — DECIDED 2026-07-17: embedd, at write.** A truncated Matryoshka vector must be
+      **re-normalized (L2)** before cosine/dot, or similarity is silently wrong. embedd owns it
+      because truncation-awareness is model semantics (synapsd disclaims those, index.js:263),
+      write-side normalization happens once instead of on every query, and stored vectors stay
+      valid for any future consumer. Applies to both document vectors and `embedQuery` outputs.
+      Implement in the EmbedAnything/provider layer when the MRL test spaces land.
+- [x] Cross-check `#semanticConfig.dim` — verified 2026-07-17: it is only (a) the fallback dim for
+      the default text space when no `spaces` override is passed and (b) reported in `getStats()`.
+      Per-space `cfg.dim` is authoritative everywhere else. Safe as-is; retire the global when
+      space configs start coming from the embedd router.
+
+
+----------
 
 ### Examples
 
@@ -770,7 +777,8 @@ per-doc field — and set-selection is the one thing this engine is best at. Spl
 A different model almost always means different dimensions, which means a different Lance
 table/space regardless — so an A/B is naturally "second space + router rule", never a doc field.
 
-- [ ] Add model/dim provenance to the Lance row (the actual missing capability).
+- [x] Add model/dim provenance to the Lance row (the actual missing capability) — SHIPPED
+      2026-07-17, see "Vector provenance + per-(model,dim) spaces" above.
 - [ ] Per-workspace embedd router rules (already tracked in canvas-server TODO "Refactor embedd") are
       the config surface; a feature/filter-scoped rule is the experiment mechanism.
 

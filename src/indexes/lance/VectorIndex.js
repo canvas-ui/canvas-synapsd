@@ -35,14 +35,20 @@ export default class VectorIndex {
     #rootPath;
     #tableName;
     #dim;
+    #model;
     #vectorBitmapKey;
     #bitmapIndex;
     #annIndex;
+    #dimMismatch = null; // { tableDim, configuredDim, rows } when init refused a non-empty table
 
     constructor(options = {}) {
         this.#rootPath = options.rootPath;
         this.#tableName = options.tableName || 'vec_text';
         this.#dim = options.dim || 384;
+        // Space-level model label, stamped as row provenance (upsert opts.model
+        // overrides per push). synapsd still owns no model semantics — this is
+        // a passive provenance string supplied by the embedd service / caller.
+        this.#model = options.model || '';
         this.#vectorBitmapKey = options.vectorBitmapKey || 'internal/lance/vectors';
         this.#bitmapIndex = options.bitmapIndex || null;
         // annIndex:false pins the space to exact scans (see ensureVectorIndex).
@@ -60,6 +66,13 @@ export default class VectorIndex {
             new Field('updatedAt', new Utf8()),
             new Field('chunkText', new Utf8()),
             new Field('vector', new FixedSizeList(this.#dim, new Field('item', new Float32(), true))),
+            // Provenance: which model produced the vector, at what width, when.
+            // The table separates models across configs; these columns catch
+            // WITHIN-table drift (model version bump under the same name) and make
+            // "re-embed everything vectorized with X" a query instead of a full wipe.
+            new Field('model', new Utf8(), true),
+            new Field('dim', new Int32(), true),
+            new Field('embeddedAt', new Utf8(), true),
         ]);
     }
 
@@ -87,17 +100,33 @@ export default class VectorIndex {
                 this.#table = await this.#db.openTable(this.#tableName);
                 // Guard against a stale table built for a different embedding dim
                 // (e.g. vec_image created at 512 before the CLIP/SigLIP 768 model was
-                // wired). A vector added under the wrong dim throws, so recreate the
-                // table to match the configured dim. Callers re-embed to refill it.
+                // wired). Recreating is only safe when the table holds nothing: a
+                // non-empty table under a dim mismatch means real vectors would be
+                // destroyed, so REFUSE loudly and take the space offline instead —
+                // the data stays on disk for the operator to migrate or drop.
                 const existingDim = await this.#tableVectorDim();
                 if (existingDim !== null && existingDim !== this.#dim) {
-                    debug(`VectorIndex '${this.#tableName}': dim ${existingDim} != configured ${this.#dim}; recreating`);
+                    let rows = 0;
+                    try { rows = await this.#table.countRows(); } catch (_) { }
+                    if (rows > 0) {
+                        this.#dimMismatch = { tableDim: existingDim, configuredDim: this.#dim, rows };
+                        this.#table = null;
+                        console.warn(
+                            `synapsd: VectorIndex '${this.#tableName}' REFUSING to open: on-disk dim ${existingDim} != configured ${this.#dim} ` +
+                            `and the table holds ${rows} vector row(s). Recreating would destroy them. The space is offline; ` +
+                            `point the config back at ${existingDim}d, use a differently-keyed table for the new model, or drop the table explicitly.`,
+                        );
+                        return;
+                    }
+                    console.warn(`synapsd: VectorIndex '${this.#tableName}': dim ${existingDim} != configured ${this.#dim}; table is empty, recreating`);
                     await this.#db.dropTable(this.#tableName);
                     this.#table = await this.#db.createEmptyTable(this.#tableName, this.#schema());
                 }
             } catch (_) {
                 this.#table = await this.#db.createEmptyTable(this.#tableName, this.#schema());
             }
+
+            await this.#ensureProvenanceColumns();
 
             await this.#dropChunkTextIndex();
 
@@ -113,16 +142,40 @@ export default class VectorIndex {
         }
     }
 
+    // Backfill the provenance columns on tables created before they existed.
+    // Legacy rows get model='' (unknown) — honest: we genuinely can't tell which
+    // model produced them. Best-effort; the write path tolerates their absence.
+    async #ensureProvenanceColumns() {
+        if (!this.#table) { return; }
+        try {
+            const schema = await this.#table.schema();
+            const names = new Set((schema?.fields || []).map((f) => f.name));
+            const missing = [];
+            if (!names.has('model')) { missing.push({ name: 'model', valueSql: "''" }); }
+            if (!names.has('dim')) { missing.push({ name: 'dim', valueSql: `CAST(${this.#dim} AS INT)` }); }
+            if (!names.has('embeddedAt')) { missing.push({ name: 'embeddedAt', valueSql: "''" }); }
+            if (missing.length > 0) {
+                await this.#table.addColumns(missing);
+                debug(`VectorIndex '${this.#tableName}': backfilled provenance column(s) ${missing.map(m => m.name).join(', ')}`);
+            }
+        } catch (e) {
+            debug(`ensureProvenanceColumns failed on '${this.#tableName}' (continuing without): ${e.message}`);
+        }
+    }
+
     /**
      * Replace all chunk rows for a document.
      * @param {number} docId
      * @param {string} schema
      * @param {string} updatedAt
      * @param {{chunkId:number, text:string, vector:number[]}[]} chunks
+     * @param {{model?:string}} [opts] provenance override for this push
      */
-    async upsertChunks(docId, schema, updatedAt, chunks) {
+    async upsertChunks(docId, schema, updatedAt, chunks, opts = {}) {
         if (!this.#table || !docId || !Array.isArray(chunks)) { return; }
 
+        const model = typeof opts.model === 'string' && opts.model ? opts.model : this.#model;
+        const embeddedAt = new Date().toISOString();
         const rows = chunks
             .filter(c => Array.isArray(c.vector) && c.vector.length === this.#dim)
             .map(c => ({
@@ -132,6 +185,9 @@ export default class VectorIndex {
                 updatedAt: updatedAt || new Date().toISOString(),
                 chunkText: c.text || '',
                 vector: c.vector,
+                model,
+                dim: this.#dim,
+                embeddedAt,
             }));
 
         try {
@@ -283,7 +339,11 @@ export default class VectorIndex {
 
     /** Vector-table health/size snapshot for diagnostics UIs. */
     async stats() {
-        if (!this.#table) { return { ready: false, dim: this.#dim }; }
+        if (!this.#table) {
+            return this.#dimMismatch
+                ? { ready: false, dim: this.#dim, error: `dim mismatch: table=${this.#dimMismatch.tableDim}d config=${this.#dim}d (${this.#dimMismatch.rows} rows preserved, space offline)` }
+                : { ready: false, dim: this.#dim };
+        }
         let chunkRows = 0;
         try { chunkRows = await this.#table.countRows(); } catch (_) { }
         let embeddedDocs = 0;
@@ -295,7 +355,7 @@ export default class VectorIndex {
             const indices = await this.#table.listIndices();
             annIndex = indices.some(idx => Array.isArray(idx.columns) ? idx.columns.includes('vector') : idx.column === 'vector');
         } catch (_) { }
-        return { ready: true, dim: this.#dim, chunkRows, embeddedDocs, annIndex };
+        return { ready: true, dim: this.#dim, model: this.#model || undefined, chunkRows, embeddedDocs, annIndex };
     }
 
     // Compact fragments AND prune old dataset versions. reindex:true re-embeds
