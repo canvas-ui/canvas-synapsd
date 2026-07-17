@@ -7,11 +7,8 @@ export const ALLOWED_BITMAP_PREFIXES = [
     'feature/',
     'device/',
     'client/',
-    'server/',
-    'user/',
     'tag/',
     'data/',
-    'nested/',
     'custom/',
     'rel/', // Typed directed document<->document relations (see indexes/inverted/Relations.js)
 ];

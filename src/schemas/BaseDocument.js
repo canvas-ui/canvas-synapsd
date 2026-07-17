@@ -18,7 +18,6 @@ import { generateChecksum } from '../utils/crypto.js';
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/document';
 const DOCUMENT_SCHEMA_VERSION = '2.2';
 const DOCUMENT_DATA_CHECKSUM_ALGORITHMS = ['sha1', 'sha256'];
-const DOCUMENT_DATA_CHECKSUM_ALGORITHM_DEFAULT = DOCUMENT_DATA_CHECKSUM_ALGORITHMS[0];
 const DOCUMENT_DATA_CHECKSUM_FIELDS = ['data'];
 const DOCUMENT_DATA_FTS_SEARCH_FIELDS = ['data'];
 const DOCUMENT_DATA_VECTOR_EMBEDDING_FIELDS = ['data'];
@@ -120,20 +119,11 @@ const documentSchema = z.object({
     metadata: z.object({
         contentType: z.string().optional(),
         contentEncoding: z.string().optional(),
-        contextUUIDs: z.array(z.string()).optional(),
-        contextPath: z.array(z.string()).optional(),
         features: z.array(z.string()).optional(),
     }).catchall(z.any()).optional(), // Allow additional metadata fields
 
     // Checksums
     checksumArray: z.array(z.string()).optional(),
-    embeddingsArray: z.array(z.string()).optional(),
-
-    // Versioning — parentId/versions reference document ids, which are numeric
-    parentId: z.number().int().positive().nullable().optional(),
-    versions: z.array(z.number().int().positive()).optional(),
-    versionNumber: z.number().int().positive().optional(),
-    latestVersion: z.number().int().positive().optional(),
 });
 
 /**
@@ -161,8 +151,6 @@ class BaseDocument {
         // Internal index configuration
         this.indexOptions = {
             checksumAlgorithms: options.indexOptions?.checksumAlgorithms || DOCUMENT_DATA_CHECKSUM_ALGORITHMS,
-            // Maybe we should just take the first one in the array?
-            primaryChecksumAlgorithm: options.indexOptions?.primaryChecksumAlgorithm || DOCUMENT_DATA_CHECKSUM_ALGORITHM_DEFAULT,
             checksumFields: options.indexOptions?.checksumFields || DOCUMENT_DATA_CHECKSUM_FIELDS,
             ftsSearchFields: options.indexOptions?.ftsSearchFields || DOCUMENT_DATA_FTS_SEARCH_FIELDS,
             vectorEmbeddingFields: options.indexOptions?.vectorEmbeddingFields || DOCUMENT_DATA_VECTOR_EMBEDDING_FIELDS,
@@ -199,8 +187,6 @@ class BaseDocument {
         this.metadata = {
             contentType: meta.contentType || DEFAULT_DOCUMENT_DATA_TYPE,
             contentEncoding: meta.contentEncoding || DEFAULT_DOCUMENT_DATA_ENCODING,
-            contextUUIDs: meta.contextUUIDs || [],
-            contextPath: meta.contextPath || [],
             features: meta.features || [],
             ...meta,
         };
@@ -217,17 +203,9 @@ class BaseDocument {
 
         // Checksums/embeddings
         this.checksumArray = options.checksumArray || this.generateChecksumStrings();
-        this.embeddingsArray = options.embeddingsArray || [];
-
         // Timestamps
         this.createdAt = options.createdAt ?? new Date().toISOString();
         this.updatedAt = options.updatedAt ?? new Date().toISOString();
-
-        // Versioning
-        this.parentId = normalizeDocumentId(options.parentId);
-        this.versions = options.versions || [];
-        this.versionNumber = options.versionNumber || 1;
-        this.latestVersion = options.latestVersion || 1;
     }
 
     /**
@@ -308,18 +286,8 @@ class BaseDocument {
             this.checksumArray = this.generateChecksumStrings();
         }
 
-        if (data.embeddingsArray) {
-            this.embeddingsArray = data.embeddingsArray;
-        }
-
         // Always update the updatedAt timestamp
         this.updatedAt = data.updatedAt ?? new Date().toISOString();
-
-        // Update versioning information if provided
-        if (data.parentId) { this.parentId = normalizeDocumentId(data.parentId); }
-        if (data.versions) { this.versions = data.versions; }
-        if (data.versionNumber) { this.versionNumber = data.versionNumber; }
-        if (data.latestVersion) { this.latestVersion = data.latestVersion; }
 
         return this;
     }
@@ -379,25 +347,6 @@ class BaseDocument {
     static validateData(data) {
         return BaseDocument.dataSchema.parse(data);
     }
-
-
-    /**
-     * Versioning
-     */
-
-    addVersion(data = {}) { /* TODO: Implement */ }
-
-    listVersions() {}
-
-    getVersion(version) { /* TODO: Implement */ }
-
-    removeVersion(version) { /* TODO: Implement */ }
-
-    getLatestVersion() { /* TODO: Implement */ }
-
-    getPreviousVersion() { /* TODO: Implement */ }
-
-    getNextVersion() { /* TODO: Implement */ }
 
 
     /**
@@ -577,11 +526,6 @@ class BaseDocument {
             createdAt: this.createdAt,
             updatedAt: this.updatedAt,
             checksumArray: this.checksumArray,
-            embeddingsArray: this.embeddingsArray,
-            parentId: this.parentId,
-            versions: this.versions,
-            versionNumber: this.versionNumber,
-            latestVersion: this.latestVersion,
         };
     }
 
@@ -610,57 +554,6 @@ class BaseDocument {
             data: shape.passthrough(),
             metadata: z.any().optional(),
         });
-    }
-
-    /**
-     * -------- Context management helpers --------
-     */
-
-    addContext(uuid, pathArray = undefined) {
-        if (!uuid) { return; }
-        if (!Array.isArray(this.metadata.contextUUIDs)) {
-            this.metadata.contextUUIDs = [];
-        }
-        if (!this.metadata.contextUUIDs.includes(uuid)) {
-            this.metadata.contextUUIDs.push(uuid);
-        }
-        if (pathArray && Array.isArray(pathArray)) {
-            this.metadata.contextPath = pathArray;
-        }
-    }
-
-    removeContext(uuid) {
-        if (!uuid || !Array.isArray(this.metadata.contextUUIDs)) { return; }
-        this.metadata.contextUUIDs = this.metadata.contextUUIDs.filter(id => id !== uuid);
-    }
-
-    /**
-     * -------- Feature helpers --------
-     */
-
-    addFeature(feature) {
-        if (!feature) { return; }
-        if (!Array.isArray(this.metadata.features)) {
-            this.metadata.features = [];
-        }
-        if (!this.metadata.features.includes(feature)) {
-            this.metadata.features.push(feature);
-        }
-    }
-
-    removeFeature(feature) {
-        if (!feature || !Array.isArray(this.metadata.features)) { return; }
-        this.metadata.features = this.metadata.features.filter(f => f !== feature);
-    }
-
-    hasFeature(feature) {
-        if (!feature || !Array.isArray(this.metadata.features)) { return false; }
-        return this.metadata.features.includes(feature);
-    }
-
-    getFeaturesByPrefix(prefix) {
-        if (!prefix || !Array.isArray(this.metadata.features)) { return []; }
-        return this.metadata.features.filter(f => f.startsWith(prefix));
     }
 
 }

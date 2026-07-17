@@ -40,7 +40,6 @@ export default class File extends BaseDocument {
             // Checksums are computed upstream by `stored` (content-addressed blob);
             // declare the real algorithms so the doc doesn't report Base's sha1 default.
             checksumAlgorithms: ['sha256', 'md5'],
-            primaryChecksumAlgorithm: 'sha256',
             // Names live in the location URLs (one blob, many aliases) — index those.
             ftsSearchFields: ['locationUrls'],
             vectorEmbeddingFields: ['locationUrls'],
