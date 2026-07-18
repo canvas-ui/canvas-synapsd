@@ -69,6 +69,14 @@ describe('datasets: virtual default, selection algebra, lifecycle', () => {
             context: { path: '/edu/math' },
             features: { anyOf: ['data/dataset/wikipedia'], noneOf: ['data/dataset/default'] },
         }))).toEqual([wikiId]);
+
+        // allOf 'default' = only unstamped docs (virtual — resolves via the
+        // selection, not a physical bitmap AND).
+        expect(ids(await db.list({ context: { path: '/edu/math' }, features: { allOf: ['data/dataset/default'] } })))
+            .toEqual([plainId]);
+        // allOf default + a named dataset is a contradiction — empty.
+        expect(ids(await db.list({ features: { allOf: ['data/dataset/default', 'data/dataset/wikipedia'] } })))
+            .toEqual([]);
     });
 
     test('dataset anyOf does not bypass other feature filters', async () => {
