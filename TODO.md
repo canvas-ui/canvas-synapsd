@@ -63,7 +63,7 @@ If you'd like, we can look deeper into how topological data analysis (TDA) was u
 ### L0 "storage" centric
 Resources, where the physical bits of the full objects are stored and can be retrieved from
 data/resource/blob or file or url/uri? - points to a local or remote resource (immutable)
-data/resource/referene - points to a external source(db, s3)
+data/resource/reference - points to a external source(db, s3)
 
 ### L1 Semantics 
 data/entity/file ? (blob)
@@ -213,6 +213,12 @@ filters: ['+t:crud:updated:thisWeek', 't:wikipedia:1996', 't:personal:1996']
       the refactor-v3 grammar pass: uniform sigil algebra for raw keys too (default anyOf-OR
       within the bucket? — decide; today raw keys AND while t:/geo: default to anyOf, which is
       itself an inconsistency worth resolving in one sweep).
+      **Grammar spec addendum (datasets, 2026-07-17 — deliberate, keep in the sweep):**
+      `data/dataset/*` keys have SELECTION semantics, not constraint semantics — anyOf ADDS the
+      dataset to the mix (default stays selected), allOf restricts to it, noneOf deselects
+      (incl. the virtual `data/dataset/default`). They are partitioned out of the generic
+      anyOf/noneOf buckets in `#resolveParsed`. Sigil mapping: bare = add, `+` = only, `!` =
+      deselect. This prefix-dependent anyOf is intentional spec, not an accident.
 - [x] Sigil-aware filter combiner: partition `t:` items into allOf/anyOf/noneOf, resolve each via `queryInterval`, combine `AND(allOf) ∩ OR(anyOf) \ OR(noneOf)`. Replaces the "AND everything" filter loop in `list`/`search` (index.js:1742, index.js:1905).
 - [ ] `groupBy: 'timeline'` result option: union still drives retrieval, response is bucketed per timeline (`{ wikipedia:[...], personal:[...] }`) via `queryInterval` `mode:'layers'`.
 
@@ -303,7 +309,7 @@ query(
 ```
 
 ### Perf & storage
-- [x] Audit `#buildAllDocumentsBitmap()` callers: done (verified 2026-07-17). All callers now gate on the positive set and only full-scan when the query is genuinely unconstrained (noneOf-only, no positive filters). `excludeTree`/`excludeContext` are gone (replaced by `paths.not` selectors). Optional follow-up: maintain a persistent all-docs bitmap to kill the remaining unconstrained-path scan.
+- [x] Audit `#buildAllDocumentsBitmap()` callers: done (verified 2026-07-17). All callers now gate on the positive set and only full-scan when the query is genuinely unconstrained (noneOf-only, no positive filters). `excludeTree`/`excludeContext` are gone (replaced by `paths.not` selectors). *Follow-up DONE 2026-07-18: maintained `internal/docs/all` bitmap — #buildAllDocumentsBitmap is now an O(1) clone (see tests/all-docs-bitmap.test.js).*
 - [ ] Lift `indexOptions` (esp. `embeddingOptions`) out of per-document `toJSON()` to schema level: GBs of identical config across 7M rows. *(deferred: per-abstraction config, not per-doc storage; needs design + back-compat sign-off.)*
 
 ## Doc-declared features (`features: []` on the document)
@@ -431,6 +437,10 @@ key in there.
 **Write-path gotchas (all have existing precedent):**
 - [ ] Feature edits must NOT regenerate checksums (dedup forks) — same treatment as `comment`
       (outside the `dataUpdated` path in `BaseDocument.update()`).
+- [ ] **Dataset stamps must survive user feature edits** (2026-07-17): `data/dataset/*` entries
+      are ingest provenance (`data/*` = not user-asserted). A client resending a doc's feature
+      array without the stamp must NOT untick it via the stale-diff — preserve `data/dataset/*`
+      entries on feature-only updates (same preserved bucket as the derived-prefix exclusion).
 - [ ] Feature-only updates must NOT untick the embed seen-ledger in `#updateOne` (or bulk-tagging
       a photo gallery re-CLIPs it) and should reuse `emitEvent`-style event control.
 - [ ] Tick/untick derived by diffing prev vs new `features[]` per doc — exactly the
