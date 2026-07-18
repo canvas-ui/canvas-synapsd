@@ -2301,14 +2301,27 @@ class SynapsD extends EventEmitter {
         // generic feature buckets — a plain anyOf union would let dataset docs
         // bypass the caller's other feature filters.
         const DATASET_PREFIX = 'data/dataset/';
+        const DEFAULT_DATASET_KEY = `${DATASET_PREFIX}default`;
         const isDatasetKey = (key) => normalizeBitmapKey(key)?.startsWith(DATASET_PREFIX);
-        const selectedDatasets = new Set([`${DATASET_PREFIX}default`]);
+        const selectedDatasets = new Set([DEFAULT_DATASET_KEY]);
+        // allOf 'default' means "only unstamped docs" — there is no physical
+        // bitmap to AND (default is virtual), so it resolves as the selection
+        // {default} alone. Combined with an allOf NAMED dataset the result is
+        // correctly empty (a doc cannot be both stamped and unstamped).
+        const allOfDefault = features.allOf.some((key) => normalizeBitmapKey(key) === DEFAULT_DATASET_KEY);
         for (const key of [...features.allOf, ...features.anyOf].filter(isDatasetKey)) {
             selectedDatasets.add(normalizeBitmapKey(key));
         }
         for (const key of features.noneOf.filter(isDatasetKey)) {
             selectedDatasets.delete(normalizeBitmapKey(key));
         }
+        if (allOfDefault) {
+            selectedDatasets.clear();
+            selectedDatasets.add(DEFAULT_DATASET_KEY);
+        }
+        // Named allOf keys stay in the bucket (the feature AND constrains);
+        // 'default' has no physical bitmap and must not reach bitmapIndex.AND.
+        features.allOf = features.allOf.filter((key) => normalizeBitmapKey(key) !== DEFAULT_DATASET_KEY);
         features.anyOf = features.anyOf.filter((key) => !isDatasetKey(key));
         features.noneOf = features.noneOf.filter((key) => !isDatasetKey(key));
 
