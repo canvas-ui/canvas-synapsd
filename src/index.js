@@ -428,6 +428,13 @@ class SynapsD extends EventEmitter {
             // Initialize deletedDocumentsBitmap here
             this.deletedDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/gc/deleted');
 
+            // Live-document membership: ticked on every put, unticked on delete
+            // (regardless of free-pool admission, so failed lance cleanup can't
+            // leave phantoms). Makes #buildAllDocumentsBitmap O(1) — the base for
+            // unconstrained noneOf-only queries and the virtual 'default' dataset.
+            this.allDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/docs/all');
+            await this.#backfillAllDocumentsBitmap();
+
             // 'tasks' (Todo due dates) is a point-event axis — instants, not
             // intervals — so it gets the cheaper single-BSI storage.
             this.#timelineIndex = new TimelineIndex(this.bitmapIndex, { pointTimelines: ['tasks'] });
@@ -920,6 +927,7 @@ class SynapsD extends EventEmitter {
 
         try {
             await this.#withDeferredMembership(async () => {
+                await this.bitmapIndex.tick(this.allDocumentsBitmap.key, prepared.map((p) => p.parsed.id));
                 for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, prevFacetKeys, prevFeatureKeys, docFeatures } of prepared) {
                     await this.documents.put(parsed.id, parsed);
 
@@ -1380,6 +1388,7 @@ class SynapsD extends EventEmitter {
 
         try {
             await this.#withDeferredMembership(async () => {
+                await this.bitmapIndex.tick(this.allDocumentsBitmap.key, prepared.map((p) => p.parsed.id));
                 for (const { parsed, docFeatures, directorySpecs } of prepared) {
                     await this.documents.put(parsed.id, parsed);
                     await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
@@ -1663,6 +1672,50 @@ class SynapsD extends EventEmitter {
         return result;
     }
 
+    /**
+     * Datasets — path-independent ingest provenance (data/dataset/<name>),
+     * stamped at ingest via spec.features. Every query intersects with the
+     * dataset selection (virtual 'default' = unstamped docs, selected unless
+     * deselected); see #resolveParsed. Dataset views are ordinary canvas
+     * layers saving data/dataset/* keys in their querySpec features.
+     */
+
+    /** List dataset names with document counts. */
+    async listDatasets() {
+        const keys = await this.bitmapIndex.listBitmaps('data/dataset/');
+        const out = [];
+        for (const key of keys) {
+            const bitmap = await this.bitmapIndex.getBitmap(key, false);
+            out.push({ name: key.slice('data/dataset/'.length), key, documentCount: bitmap ? bitmap.size : 0 });
+        }
+        return out;
+    }
+
+    /**
+     * Drop a dataset: delete every document stamped with it (unless
+     * dropDocuments:false — then only the stamp/bitmap is removed) and remove
+     * the protected bitmap. Safe to re-create by simply stamping again.
+     * @param {string} name dataset name (or full data/dataset/<name> key)
+     * @returns {{name, documentsDeleted, failed}}
+     */
+    async deleteDataset(name, { dropDocuments = true } = {}) {
+        if (!name) { throw new Error('Dataset name required'); }
+        const key = normalizeBitmapKey(String(name).startsWith('data/dataset/') ? String(name) : `data/dataset/${name}`);
+        const bitmap = await this.bitmapIndex.getBitmap(key, false);
+        const ids = bitmap ? bitmap.toArray() : [];
+        let documentsDeleted = 0;
+        let failed = [];
+        if (dropDocuments && ids.length > 0) {
+            const result = await this.deleteMany(ids);
+            documentsDeleted = result.successful.length;
+            failed = result.failed;
+        }
+        // deleteMany untick paths may have already emptied it; remove regardless.
+        await this.bitmapIndex.deleteBitmap(key, { force: true });
+        this.emit('dataset.deleted', createEvent('dataset.deleted', { name: key.slice('data/dataset/'.length), key, documentsDeleted }));
+        return { name: key.slice('data/dataset/'.length), documentsDeleted, failed };
+    }
+
     async deleteMany(ids, options = {}) {
         if (!Array.isArray(ids)) {
             throw new Error('Document ID array must be an array');
@@ -1729,11 +1782,18 @@ class SynapsD extends EventEmitter {
             return result;
         }
 
+        const deletedIds = toDelete.map(({ id }) => id);
+        // Live-membership untick is UNCONDITIONAL (unlike free-pool admission
+        // below): even if lance cleanup fails and the ids leak, the docs are
+        // gone from the store and must leave internal/docs/all.
+        try { await this.bitmapIndex.untick(this.allDocumentsBitmap.key, deletedIds); } catch (e) {
+            debug(`deleteMany: internal/docs/all untick failed: ${e.message}`);
+        }
+
         // Best-effort Lance cleanup (outside transaction — separate system).
         // Bulk delete is all-or-nothing, so free-pool admission is batch-wide:
         // recycle the ids only if both fts and vector cleanup succeed; otherwise
         // they leak (stay allocated) rather than risk reuse with stale residue.
-        const deletedIds = toDelete.map(({ id }) => id);
         let lanceClean = true;
         try {
             lanceClean = await this.#lanceIndex.deleteMany(deletedIds);
@@ -1894,6 +1954,7 @@ class SynapsD extends EventEmitter {
         try {
             await this.#withDeferredMembership(async () => {
                 await this.documents.put(parsedDocument.id, parsedDocument);
+                await this.bitmapIndex.tick(this.allDocumentsBitmap.key, parsedDocument.id);
                 if (staleFeatureKeys.length) { await this.#applyMembership('untick', parsedDocument.id, staleFeatureKeys); }
                 await this.#checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
                 await this.#timelineIndex.insert('crud:created', parsedDocument.id, parsedDocument.createdAt || new Date());
@@ -2231,6 +2292,26 @@ class SynapsD extends EventEmitter {
         let bitmap = null;
         let constrained = false;
 
+        // Datasets (data/dataset/*) get their own algebra bucket. Every doc
+        // implicitly belongs to the VIRTUAL 'default' dataset (= stamped with no
+        // dataset); the candidate set is intersected with OR(selected datasets),
+        // and 'default' starts selected. So: anyOf data/dataset/X ADDS the
+        // dataset to the mix, allOf shows only it (the feature AND constrains),
+        // noneOf deselects. anyOf/noneOf dataset keys are pulled OUT of the
+        // generic feature buckets — a plain anyOf union would let dataset docs
+        // bypass the caller's other feature filters.
+        const DATASET_PREFIX = 'data/dataset/';
+        const isDatasetKey = (key) => normalizeBitmapKey(key)?.startsWith(DATASET_PREFIX);
+        const selectedDatasets = new Set([`${DATASET_PREFIX}default`]);
+        for (const key of [...features.allOf, ...features.anyOf].filter(isDatasetKey)) {
+            selectedDatasets.add(normalizeBitmapKey(key));
+        }
+        for (const key of features.noneOf.filter(isDatasetKey)) {
+            selectedDatasets.delete(normalizeBitmapKey(key));
+        }
+        features.anyOf = features.anyOf.filter((key) => !isDatasetKey(key));
+        features.noneOf = features.noneOf.filter((key) => !isDatasetKey(key));
+
         const includeBitmap = await this.#buildPathsBitmap(paths.in, keys, collectionKeys);
         if (includeBitmap) {
             bitmap = includeBitmap;
@@ -2285,6 +2366,33 @@ class SynapsD extends EventEmitter {
                 bitmap = base;
                 constrained = true;
             }
+        }
+
+        // Apply the dataset selection: candidate ∩ (default ∪ OR(selected named)).
+        // 'default' is virtual — candidate \ OR(all named dataset bitmaps). Until
+        // the first dataset exists this is a no-op, preserving the bitmap:null
+        // fast path for unconstrained listings.
+        const allDatasetKeys = await this.bitmapIndex.listBitmaps(DATASET_PREFIX);
+        const defaultSelected = selectedDatasets.has(`${DATASET_PREFIX}default`);
+        const namedSelected = [...selectedDatasets].filter((key) => key !== `${DATASET_PREFIX}default` && allDatasetKeys.includes(key));
+        if (allDatasetKeys.length > 0 && !(defaultSelected && namedSelected.length === allDatasetKeys.length)) {
+            collectionKeys.push(...allDatasetKeys);
+            const base = bitmap || await this.#buildAllDocumentsBitmap();
+            const selectedUnion = namedSelected.length > 0 ? await this.bitmapIndex.OR(namedSelected) : null;
+            if (defaultSelected) {
+                // (candidate \ all-datasets) ∪ (candidate ∩ selected-datasets)
+                const keep = selectedUnion ? RoaringBitmap32.and(base, selectedUnion) : null;
+                base.andNotInPlace(await this.bitmapIndex.OR(allDatasetKeys));
+                if (keep) { base.orInPlace(keep); }
+            } else if (selectedUnion) {
+                // default deselected: only the selected datasets remain
+                base.andInPlace(selectedUnion);
+            } else {
+                // nothing selected at all
+                base.andInPlace(new RoaringBitmap32());
+            }
+            bitmap = base;
+            constrained = true;
         }
 
         return {
@@ -2883,6 +2991,8 @@ class SynapsD extends EventEmitter {
         try {
             await this.#withDeferredMembership(async () => {
                 await this.documents.put(updatedDocument.id, updatedDocument);
+                // Idempotent self-heal: updates re-assert live membership.
+                await this.bitmapIndex.tick(this.allDocumentsBitmap.key, updatedDocument.id);
                 await this.#checksumIndex.deleteArray(storedDocument.checksumArray);
                 await this.#checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
                 if (updatedDocument.updatedAt) await this.#timelineIndex.insert('crud:updated', updatedDocument.id, updatedDocument.updatedAt);
@@ -3054,6 +3164,9 @@ class SynapsD extends EventEmitter {
             await this.#withDeferredMembership(async () => {
                 // Delete document from main database
                 await this.documents.delete(docId);
+                // Unconditional (unlike free-pool admission): the doc is gone
+                // from the store, it must leave internal/docs/all either way.
+                await this.bitmapIndex.untick(this.allDocumentsBitmap.key, docId);
                 debug(`delete: Document ${docId} deleted from main store`);
 
                 // Delete document from all bitmaps AND Reverse Index via Synapses
@@ -3556,13 +3669,21 @@ class SynapsD extends EventEmitter {
         if (features == null) {
             return [];
         }
+        let keys;
         if (Array.isArray(features)) {
-            return normalizeBitmapKeys(features);
+            keys = normalizeBitmapKeys(features);
+        } else if (typeof features === 'object') {
+            keys = normalizeBitmapKeys(features.allOf ?? features.features ?? []);
+        } else {
+            keys = normalizeBitmapKeys(features);
         }
-        if (typeof features === 'object') {
-            return normalizeBitmapKeys(features.allOf ?? features.features ?? []);
+        // 'default' is the VIRTUAL dataset (docs stamped with no dataset,
+        // computed at query time) — stamping it physically would make those
+        // docs permanently invisible to the dataset selection.
+        if (keys.includes('data/dataset/default')) {
+            throw new Error('"default" is a reserved dataset name (the virtual unstamped-documents dataset); pick another name');
         }
-        return normalizeBitmapKeys(features);
+        return keys;
     }
 
     #normalizeQueryFeatures(features) {
@@ -4238,7 +4359,14 @@ class SynapsD extends EventEmitter {
         return featureBitmap || new RoaringBitmap32();
     }
 
+    // O(1): clone of the maintained live-document bitmap (internal/docs/all).
+    // Callers mutate the result in place, hence the clone. Falls back to the
+    // full document-store scan only if the maintained bitmap is unavailable.
     async #buildAllDocumentsBitmap() {
+        if (this.allDocumentsBitmap) {
+            const bm = await this.bitmapIndex.getBitmap(this.allDocumentsBitmap.key, false);
+            if (bm) { return new RoaringBitmap32(bm); }
+        }
         const ids = [];
         for await (const { key } of this.documents.getRange()) {
             const id = Number(key);
@@ -4247,6 +4375,23 @@ class SynapsD extends EventEmitter {
             }
         }
         return new RoaringBitmap32(ids);
+    }
+
+    // One-time backfill for stores created before internal/docs/all existed:
+    // an empty maintained bitmap alongside a non-empty document store means the
+    // bitmap predates the feature — rebuild it from the store keys.
+    async #backfillAllDocumentsBitmap() {
+        const bitmap = this.allDocumentsBitmap;
+        if (!bitmap || !bitmap.isEmpty) { return; }
+        const ids = [];
+        for await (const { key } of this.documents.getRange()) {
+            const id = Number(key);
+            if (Number.isInteger(id) && id > 0) { ids.push(id); }
+        }
+        if (ids.length > 0) {
+            await this.bitmapIndex.tick(bitmap.key, ids);
+            debug(`Backfilled internal/docs/all with ${ids.length} live document id(s)`);
+        }
     }
 
     /**

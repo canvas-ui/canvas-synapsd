@@ -60,6 +60,13 @@ class BitmapIndex {
      */
 
     async createBitmap(key, oidArrayOrBitmap = [], options = {}) {
+        // 'default' is the VIRTUAL dataset (docs stamped with no dataset,
+        // computed at query time). A physical bitmap under this name would make
+        // its members permanently invisible: the dataset selection subtracts
+        // them with the named datasets but never re-adds them.
+        if (BitmapIndex.normalizeKey(key) === 'data/dataset/default') {
+            throw new Error('"default" is a reserved dataset name (the virtual unstamped-documents dataset); pick another name');
+        }
         BitmapIndex.validateKey(key);
         key = BitmapIndex.normalizeKey(key);
         debug(`createBitmap(): Creating bitmap with key ID "${key}", options: ${JSON.stringify(options)}`);
@@ -215,9 +222,14 @@ class BitmapIndex {
         return true;
     }
 
-    async deleteBitmap(key) {
+    async deleteBitmap(key, { force = false } = {}) {
         BitmapIndex.validateKey(key);
         key = BitmapIndex.normalizeKey(key);
+        // data/dataset/* bitmaps are protected ingest provenance — deletable only
+        // through the dataset lifecycle (SynapsD.deleteDataset passes force).
+        if (!force && key.startsWith('data/dataset/')) {
+            throw new Error(`Bitmap "${key}" is a protected dataset bitmap; use deleteDataset() to remove it`);
+        }
         debug(`Deleting bitmap "${key}"`);
         this.cache.delete(key);
         try {
