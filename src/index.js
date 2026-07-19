@@ -2120,6 +2120,46 @@ class SynapsD extends EventEmitter {
         return layerKeys.filter((key) => key.startsWith(normalizedPrefix));
     }
 
+    /**
+     * Copy a document's placement memberships (context-tree + directory-tree
+     * bitmaps) onto a successor document — the placement-migration primitive
+     * for in-place file edits, where same-path-new-content means a new doc id
+     * under content identity and curated placements must follow the successor.
+     *
+     * Only placement bitmaps are copied:
+     *   context/<treeId>/<layerId>   context tree memberships
+     *   vfs/<treeId>/<nodeId>        directory tree placements
+     * Feature/facet/device/timeline state is deliberately NOT copied — the
+     * successor derives its own from its document body. Trees in
+     * `excludeTrees` (name or id — e.g. the backends mirror tree, whose paths
+     * the successor writes itself) are skipped.
+     *
+     * @returns {Promise<string[]>} the copied bitmap keys
+     */
+    async migrateDocumentMemberships(fromId, toId, { excludeTrees = [] } = {}) {
+        if (!fromId || !toId) { throw new Error('fromId and toId are required'); }
+        const from = Number(fromId);
+        const to = Number(toId);
+        if (from === to) { return []; }
+
+        const excludedPrefixes = excludeTrees
+            .map((t) => this.getTree(t))
+            .filter(Boolean)
+            .flatMap((tree) => [
+                BitmapIndex.normalizeKey(this.#directoryBitmapCollectionForTree(tree.id).prefix),
+                BitmapIndex.normalizeKey(this.#contextBitmapCollectionForTree(tree.id).prefix),
+            ]);
+
+        const layerKeys = await this.#synapses.listSynapses(from);
+        const placementKeys = layerKeys.filter((key) =>
+            (key.startsWith('context/') || key.startsWith('vfs/'))
+            && !excludedPrefixes.some((prefix) => key.startsWith(prefix)));
+        if (placementKeys.length === 0) { return []; }
+
+        await this.#applyMembership('tick', to, placementKeys);
+        return placementKeys;
+    }
+
     async listDocumentTreePaths(id, treeNameOrId) {
         if (!id) { throw new Error('Document ID required'); }
         const tree = this.getTree(treeNameOrId);
