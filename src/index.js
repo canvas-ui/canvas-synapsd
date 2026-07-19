@@ -1907,7 +1907,7 @@ class SynapsD extends EventEmitter {
         if (this.#isDocumentOperationOptions(contextSpec)) {
             const opts = contextSpec;
             // Preserve an explicit null context (consistent with #updateOne /
-            // putMany / link): a directory-only insert into /.backends should NOT
+            // putMany / link): a directory-only insert into the backends tree should NOT
             // tick the context root — see #resolveDocumentMembershipKeys, which
             // skips root for backends directory paths when contextSpec is falsy.
             contextSpec = opts.context ?? null;

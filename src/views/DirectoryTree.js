@@ -15,7 +15,7 @@ const INHERITED_LOCK_METADATA_KEY = 'inheritedLocks';
 // `system:*` locks (e.g. system:backends, system:backend:<name>) protect a
 // SINGLE node from structural ops (remove/rename/move) — they are NOT subtree
 // locks and must not cascade to children. Without this, every backend-ingested
-// subfolder under /.backends inherited the root lock and could never be deleted.
+// subfolder under the backends subtree inherited the root lock and could never be deleted.
 const SYSTEM_LOCK_PREFIX = 'system:';
 const isSystemLock = (lock) => String(lock).startsWith(SYSTEM_LOCK_PREFIX);
 
