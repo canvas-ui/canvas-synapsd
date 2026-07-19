@@ -96,6 +96,10 @@ const documentSchema = z.object({
     // Timestamps
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
+    // Orphan lifecycle: set when the document lost its last resolvable location
+    // (data/no-location feature). null = not orphaned. Cleared on re-bind, read
+    // by the retention GC. A state marker, not a deletion.
+    orphanedAt: z.string().datetime().nullable().optional(),
 
     // Document data/payload
     data: z.record(z.any()),
@@ -206,6 +210,8 @@ class BaseDocument {
         // Timestamps
         this.createdAt = options.createdAt ?? new Date().toISOString();
         this.updatedAt = options.updatedAt ?? new Date().toISOString();
+        // Orphan lifecycle marker (null = has locations / never orphaned)
+        this.orphanedAt = options.orphanedAt ?? null;
     }
 
     /**
@@ -284,6 +290,12 @@ class BaseDocument {
         } else if (dataUpdated) {
             // Regenerate checksums if data was updated
             this.checksumArray = this.generateChecksumStrings();
+        }
+
+        // Orphan marker: explicit undefined-check — null is a meaningful value
+        // (clears the marker on re-bind).
+        if (data.orphanedAt !== undefined) {
+            this.orphanedAt = data.orphanedAt;
         }
 
         // Always update the updatedAt timestamp
@@ -525,6 +537,7 @@ class BaseDocument {
             indexOptions: this.indexOptions,
             createdAt: this.createdAt,
             updatedAt: this.updatedAt,
+            orphanedAt: this.orphanedAt,
             checksumArray: this.checksumArray,
         };
     }
