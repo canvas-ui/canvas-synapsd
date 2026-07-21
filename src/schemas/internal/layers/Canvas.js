@@ -85,9 +85,12 @@ export default class Canvas extends Layer {
     }
 
     setQuerySpec(spec) {
-        if (this.isLocked) {
-            throw new Error('Layer is locked');
-        }
+        // No lock guard here: a canvas's querySpec (search/filter refinement) is
+        // presentation, not structure. LayerIndex.updateLayer already gates locked
+        // layers to the presentation allowlist (querySpec/metadata/color) and
+        // DirectoryTree applies querySpec on locked nodes the same way — a lock
+        // (e.g. a public share) keeps the canvas's identity/path stable for the
+        // share URL, but the owner must still be able to save filter changes.
         this.querySpec = Canvas.normalizeQuerySpec(spec);
         return this;
     }
