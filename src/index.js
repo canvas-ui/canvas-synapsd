@@ -144,6 +144,66 @@ function mergeDocumentLocations(target, extraLocations) {
     }
 }
 
+// ── Embedding ledger keys ────────────────────────────────────────────────────
+// Two per-space ledgers, both under `internal/embed/`:
+//   internal/embed/vectors/<space>/<model-slug>  — presence ("this doc has vectors")
+//   internal/embed/seen/<space>/<model-slug>     — processed (incl. deliberate skips)
+//
+// ALWAYS model-keyed, and the model segment is ALWAYS the leaf. A namespace must
+// never also be a key: listBitmaps() range-scans `prefix + '/' .. prefix + '/￿'`,
+// so a bare `internal/embed/vectors/text` sitting above
+// `internal/embed/vectors/text/<slug>` would be invisible to a prefix query of its
+// own namespace. That is exactly what the legacy `internal/lance/vectors` key did:
+// it was the text presence bitmap AND the parent path of the image one, so
+// listing `internal/lance/vectors` returned image and silently omitted text.
+const VECTOR_PRESENCE_PREFIX = 'internal/embed/vectors';
+const VECTOR_SEEN_PREFIX = 'internal/embed/seen';
+
+function vectorModelSlug(model) {
+    return String(model || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
+}
+function vectorPresenceKey(space, model) { return `${VECTOR_PRESENCE_PREFIX}/${space}/${vectorModelSlug(model)}`; }
+function vectorSeenKey(space, model) { return `${VECTOR_SEEN_PREFIX}/${space}/${vectorModelSlug(model)}`; }
+
+// Baseline models — the ones every pre-config workspace is running.
+const BASELINE_TEXT_MODEL = 'bge-small-en-v1.5';
+const BASELINE_IMAGE_MODEL = 'Xenova/siglip-base-patch16-224';
+
+// Pre-config key layout, migrated once at start (idempotent, no-op when absent).
+// These keys described the BASELINE models, so they migrate to the baseline slug
+// regardless of what is configured now — a workspace that upgrades straight onto
+// a new model keeps its old vectors correctly attributed to the old one, and
+// reachable again if it reverts.
+const LEGACY_EMBED_BITMAP_KEYS = [
+    { legacy: 'internal/lance/vectors', canonical: vectorPresenceKey('text', BASELINE_TEXT_MODEL) },
+    { legacy: 'internal/lance/vectors/image', canonical: vectorPresenceKey('image', BASELINE_IMAGE_MODEL) },
+    { legacy: 'internal/embed/seen/text', canonical: vectorSeenKey('text', BASELINE_TEXT_MODEL) },
+    { legacy: 'internal/embed/seen/image', canonical: vectorSeenKey('image', BASELINE_IMAGE_MODEL) },
+];
+
+/** Default vector spaces when no embedd service supplies them. */
+function defaultVectorSpaces(dim = 384) {
+    return {
+        text: {
+            table: 'vec_text', model: BASELINE_TEXT_MODEL, dim,
+            bitmapKey: vectorPresenceKey('text', BASELINE_TEXT_MODEL),
+            seenKey: vectorSeenKey('text', BASELINE_TEXT_MODEL),
+        },
+        // annIndex:false — image search is CROSS-MODAL (text query vector vs
+        // photo vectors) with a tight distance floor. Lance's quantized ANN
+        // indexes (SQ/PQ) train on the stored (image) distribution; a text query
+        // lands far outside it and gets back wrong neighbours with wildly
+        // inflated distances (measured: true 0.96 → ANN 1.49), which the
+        // imageMaxDistance floor then rejects wholesale → zero results. Exact
+        // scan is correct and fast at this scale once compacted.
+        image: {
+            table: 'vec_image', model: BASELINE_IMAGE_MODEL, dim: 768, annIndex: false,
+            bitmapKey: vectorPresenceKey('image', BASELINE_IMAGE_MODEL),
+            seenKey: vectorSeenKey('image', BASELINE_IMAGE_MODEL),
+        },
+    };
+}
+
 /**
  * Inverse of SynapsD#vectorTableName — recover (space, slug, dim) from a
  * model-keyed table name so a superseded model's leftovers can be identified
@@ -288,19 +348,10 @@ class SynapsD extends EventEmitter {
             // passes none. embedd normally supplies per-space candidate schemas.
             embeddableSchemas: new Set(sem.embeddableSchemas || ['data/abstraction/note']),
             // Vector "spaces": one LanceDB table per embedding model/dim. The
-            // embedd service pushes vectors keyed by space; text keeps the legacy
-            // table + bitmap key so existing data is not orphaned.
-            spaces: sem.spaces || {
-                text: { table: 'vec_text', dim: sem.dim || 384, bitmapKey: 'internal/lance/vectors' },
-                // annIndex:false — image search is CROSS-MODAL (text query vector vs
-                // photo vectors) with a tight distance floor. Lance's quantized ANN
-                // indexes (SQ/PQ) train on the stored (image) distribution; a text
-                // query lands far outside it and gets back wrong neighbours with
-                // wildly inflated distances (measured: true 0.96 → ANN 1.49), which
-                // the imageMaxDistance floor then rejects wholesale → zero results.
-                // Exact scan is correct and fast at this scale once compacted.
-                image: { table: 'vec_image', dim: 768, bitmapKey: 'internal/lance/vectors/image', annIndex: false },
-            },
+            // embedd service pushes vectors keyed by space and supplies these; the
+            // defaults describe the baseline models so a workspace running without
+            // embedd still reads and writes the same ledgers.
+            spaces: sem.spaces || defaultVectorSpaces(sem.dim || 384),
             // Image search relevance floor (cosine distance, 0 = identical). CLIP
             // image kNN returns its top-K for ANY query, so without a cap every
             // search folds in unrelated photos. 0.945 calibrated against SigLIP
@@ -472,10 +523,14 @@ class SynapsD extends EventEmitter {
             await this.#lanceIndex.initialize();
             await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
 
-            // Dense-vector stack (best-effort: failure leaves fts-only search intact)
+            // Dense-vector stack (best-effort: failure leaves fts-only search intact).
+            // The ledger-key migration runs FIRST: VectorIndex latches its presence
+            // bitmap key at construction, so migrating afterwards would leave it
+            // writing to the canonical key while the legacy one still held the data.
             if (this.#semanticConfig.enabled) {
                 try {
-                    const textSpace = this.#semanticConfig.spaces.text || { table: 'vec_text', dim: this.#semanticConfig.dim, bitmapKey: 'internal/lance/vectors' };
+                    await this.#migrateEmbedBitmapKeys();
+                    const textSpace = this.#semanticConfig.spaces.text || defaultVectorSpaces(this.#semanticConfig.dim).text;
                     this.#vectorIndex = new VectorIndex({
                         rootPath: path.join(this.#rootPath, 'lance'),
                         tableName: this.#vectorTableName('text', textSpace),
@@ -1118,14 +1173,38 @@ class SynapsD extends EventEmitter {
     /**
      * Per-space "seen" bitmap key — docs the embedder has processed (incl. skips).
      *
-     * A space that declares its own `seenKey` (model-keyed spaces — see embedd's
-     * spaceConfigs) gets a ledger scoped to THAT model. That is what makes a model
-     * swap reversible: the new model embeds into its own table with its own empty
-     * ledger, and switching back finds the previous model's vectors AND its
-     * "already embedded" bookkeeping intact, so nothing is re-embedded.
+     * Scoped to the space's MODEL, which is what makes a model swap reversible:
+     * the new model embeds into its own table with its own empty ledger, and
+     * switching back finds the previous model's vectors AND its "already embedded"
+     * bookkeeping intact, so nothing is re-embedded.
      */
     #seenKey(space) {
-        return this.#semanticConfig.spaces?.[space]?.seenKey || `internal/embed/seen/${space}`;
+        const cfg = this.#semanticConfig.spaces?.[space];
+        return cfg?.seenKey || vectorSeenKey(space, cfg?.model);
+    }
+
+    /**
+     * One-time migration of the pre-config embedding ledger keys. Idempotent and
+     * cheap (a no-op once the legacy keys are gone), so it runs on every start
+     * rather than behind a version gate.
+     *
+     * Beyond tidiness this fixes a real defect: the legacy text presence bitmap
+     * lived at `internal/lance/vectors`, which was ALSO the parent path of the
+     * image one. listBitmaps() range-scans strictly below `prefix + '/'`, so
+     * listing `internal/lance/vectors` returned the image bitmap and silently
+     * omitted text — including through `GET /workspaces/:id/bitmaps/...`.
+     */
+    async #migrateEmbedBitmapKeys() {
+        let migrated = 0;
+        for (const { legacy, canonical } of LEGACY_EMBED_BITMAP_KEYS) {
+            try {
+                if (await this.bitmapIndex.migrateKey(legacy, canonical)) { migrated++; }
+            } catch (e) {
+                debug(`embed bitmap key migration ${legacy} -> ${canonical} failed: ${e.message}`);
+            }
+        }
+        if (migrated > 0) { debug(`migrated ${migrated} legacy embedding ledger bitmap(s)`); }
+        return migrated;
     }
 
     /**
@@ -1177,11 +1256,11 @@ class SynapsD extends EventEmitter {
         const db = await lancedb.connect(path.join(this.#rootPath, 'lance'));
         await db.dropTable(name);
 
-        // Bitmap keys for a model-keyed table are derivable from its name (embedd
-        // and #vectorTableName agree on the slug), so the ledger goes with it.
+        // Ledger keys for a model-keyed table are derivable from its name (the
+        // slug is the same one #vectorTableName wrote), so both go with it.
         const cleared = [];
         if (entry.space && entry.slug) {
-            for (const key of [`internal/lance/vectors/${entry.space}/${entry.slug}`, `internal/embed/seen/${entry.space}/${entry.slug}`]) {
+            for (const key of [`${VECTOR_PRESENCE_PREFIX}/${entry.space}/${entry.slug}`, `${VECTOR_SEEN_PREFIX}/${entry.space}/${entry.slug}`]) {
                 try { await this.bitmapIndex.deleteBitmap(key); cleared.push(key); }
                 catch (e) { debug(`dropVectorTable: could not clear bitmap ${key}: ${e.message}`); }
             }
@@ -1338,16 +1417,17 @@ class SynapsD extends EventEmitter {
      * Lazily create + initialize the VectorIndex for a named space. Returns null
      * if the semantic stack is disabled or the space is unknown.
      */
-    // Lance table name for a vector space. A space that declares its model is
-    // keyed by (space, model, dim) — `vec_text__qwen3-embedding-0.6b__1024` —
-    // so a model/dim change lands in its OWN table instead of colliding with
-    // (and destroying) another config's vectors; two models coexist and stay
-    // independently queryable. Model-less legacy spaces keep their fixed
-    // `cfg.table` name so existing vec_text/vec_image data stays attached.
+    // Lance table name for a vector space. An explicit `cfg.table` pins the space
+    // to an existing table — baseline spaces keep vec_text/vec_image so making the
+    // model configurable orphans nothing. Otherwise the table is keyed by
+    // (space, model, dim) — `vec_text__qwen3-embedding-0.6b__1024` — so a model or
+    // dim change lands in its OWN table instead of colliding with (and destroying)
+    // another config's vectors; two models coexist and stay independently
+    // queryable.
     #vectorTableName(space, cfg) {
-        if (!cfg?.model) { return cfg.table; }
-        const slug = String(cfg.model).toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
-        return `vec_${space}__${slug}__${cfg.dim}`;
+        if (cfg?.table) { return cfg.table; }
+        if (!cfg?.model) { return `vec_${space}`; }
+        return `vec_${space}__${vectorModelSlug(cfg.model)}__${cfg.dim}`;
     }
 
     async #getVectorSpace(space) {
