@@ -49,7 +49,10 @@ export default class VectorIndex {
         // overrides per push). synapsd still owns no model semantics — this is
         // a passive provenance string supplied by the embedd service / caller.
         this.#model = options.model || '';
-        this.#vectorBitmapKey = options.vectorBitmapKey || 'internal/lance/vectors';
+        // Presence ledger key. Callers supply it (always model-keyed — see the
+        // embedding ledger key notes in SynapsD); this fallback only covers a
+        // bare VectorIndex constructed without one.
+        this.#vectorBitmapKey = options.vectorBitmapKey || 'internal/embed/vectors/text/unknown';
         this.#bitmapIndex = options.bitmapIndex || null;
         // annIndex:false pins the space to exact scans (see ensureVectorIndex).
         this.#annIndex = options.annIndex !== false;
