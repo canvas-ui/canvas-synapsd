@@ -2391,6 +2391,33 @@ class SynapsD extends EventEmitter {
         return Array.from(new Set(paths));
     }
 
+    /**
+     * Document ids under a tree path, for scoping a bulk operation to part of a
+     * workspace — "re-embed just this project" rather than all 23k photos.
+     *
+     * `scope` is `ctx://<path>` / `dir://<path>` (the default context and
+     * directory trees), or `<treeName>://<path>` for a named tree. Returns null
+     * when the scope names no tree, so callers can tell "no such tree" from
+     * "tree is empty".
+     */
+    async documentIdsUnderScope(scope) {
+        if (typeof scope !== 'string' || scope.length === 0) { return null; }
+        const m = scope.match(/^([a-zA-Z0-9_-]+):\/\/?(.*)$/);
+        const alias = m ? m[1].toLowerCase() : null;
+        const rawPath = m ? m[2] : scope;
+        const path = `/${String(rawPath || '').replace(/^\/+/, '')}`;
+
+        let tree = null;
+        if (alias === 'ctx' || alias === 'context') { tree = this.getTree(this.#defaultTreeIds.context); }
+        else if (alias === 'dir' || alias === 'directory') { tree = this.getTree(this.#defaultTreeIds.directory); }
+        else if (alias) { tree = this.getTree(m[1]); }
+        else { tree = this.getTree(this.#defaultTreeIds.context); }
+        if (!tree) { return null; }
+
+        const bitmap = await tree.findRecursive(path);
+        return bitmap ? bitmap.toArray() : [];
+    }
+
     async hasDocumentTreeMembership(id, treeNameOrId) {
         if (!id) { throw new Error('Document ID required'); }
         const tree = this.getTree(treeNameOrId);
