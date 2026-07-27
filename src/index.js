@@ -35,6 +35,7 @@ import Synapses from './indexes/inverted/Synapses.js';
 import Relations from './indexes/inverted/Relations.js';
 import LanceIndex from './indexes/lance/index.js';
 import VectorIndex from './indexes/lance/VectorIndex.js';
+import * as lancedb from '@lancedb/lancedb';
 import { normalizeBitmapKeys, normalizeBitmapKey, validateBitmapKey } from './indexes/bitmaps/lib/keys.js';
 import SemanticEngine from './semantic/index.js';
 
@@ -141,6 +142,19 @@ function mergeDocumentLocations(target, extraLocations) {
             seen.add(loc.url);
         }
     }
+}
+
+/**
+ * Inverse of SynapsD#vectorTableName — recover (space, slug, dim) from a
+ * model-keyed table name so a superseded model's leftovers can be identified
+ * and its bitmap keys derived. Legacy `vec_text` / `vec_image` carry no model,
+ * so only the space comes back.
+ */
+function parseVectorTableName(name) {
+    const keyed = String(name).match(/^vec_([^_]+)__(.+)__(\d+)$/);
+    if (keyed) { return { space: keyed[1], slug: keyed[2], model: keyed[2], dim: Number(keyed[3]) }; }
+    const legacy = String(name).match(/^vec_(.+)$/);
+    return legacy ? { space: legacy[1], slug: null, model: null, dim: null } : { space: null, slug: null, model: null, dim: null };
 }
 
 /**
@@ -1101,8 +1115,80 @@ class SynapsD extends EventEmitter {
         return out;
     }
 
-    /** Per-space "seen" bitmap key — docs the embedder has processed (incl. skips). */
-    #seenKey(space) { return `internal/embed/seen/${space}`; }
+    /**
+     * Per-space "seen" bitmap key — docs the embedder has processed (incl. skips).
+     *
+     * A space that declares its own `seenKey` (model-keyed spaces — see embedd's
+     * spaceConfigs) gets a ledger scoped to THAT model. That is what makes a model
+     * swap reversible: the new model embeds into its own table with its own empty
+     * ledger, and switching back finds the previous model's vectors AND its
+     * "already embedded" bookkeeping intact, so nothing is re-embedded.
+     */
+    #seenKey(space) {
+        return this.#semanticConfig.spaces?.[space]?.seenKey || `internal/embed/seen/${space}`;
+    }
+
+    /**
+     * Every dense-vector table in this workspace's Lance store, with the spaces
+     * currently bound to them. Model-keyed tables (`vec_<space>__<slug>__<dim>`)
+     * left behind by a model swap show up here as `active: false` — they still
+     * hold their vectors (that is the point: switching back is free), and this is
+     * how an operator finds the ones worth reclaiming.
+     */
+    async listVectorTables() {
+        const spaces = this.#semanticConfig.spaces || {};
+        const activeByTable = new Map();
+        for (const [space, cfg] of Object.entries(spaces)) {
+            activeByTable.set(this.#vectorTableName(space, cfg), { space, model: cfg.model || null, dim: cfg.dim });
+        }
+
+        let names = [];
+        try {
+            const db = await lancedb.connect(path.join(this.#rootPath, 'lance'));
+            names = (await db.tableNames()).filter((n) => n.startsWith('vec_'));
+        } catch (e) {
+            debug(`listVectorTables failed: ${e.message}`);
+            return { tables: [], error: e.message };
+        }
+
+        const tables = names.map((name) => {
+            const active = activeByTable.get(name) || null;
+            return { name, active: !!active, ...(active || parseVectorTableName(name)) };
+        });
+        return { tables };
+    }
+
+    /**
+     * Drop a superseded model's vectors: the Lance table plus the presence/seen
+     * bitmaps derived from its name. Refuses a table that a space is currently
+     * bound to — dropping the live one is what `clearSpace` is for, and doing it
+     * here would silently wipe the vectors search is using.
+     * @param {string} name  table name from listVectorTables()
+     */
+    async dropVectorTable(name) {
+        const { tables, error } = await this.listVectorTables();
+        if (error) { return { dropped: false, error }; }
+        const entry = tables.find((t) => t.name === name);
+        if (!entry) { return { dropped: false, error: `unknown vector table '${name}'` }; }
+        if (entry.active) {
+            return { dropped: false, error: `'${name}' is the live table for space '${entry.space}' — switch the model first, or use clearSpace to re-embed it` };
+        }
+
+        const db = await lancedb.connect(path.join(this.#rootPath, 'lance'));
+        await db.dropTable(name);
+
+        // Bitmap keys for a model-keyed table are derivable from its name (embedd
+        // and #vectorTableName agree on the slug), so the ledger goes with it.
+        const cleared = [];
+        if (entry.space && entry.slug) {
+            for (const key of [`internal/lance/vectors/${entry.space}/${entry.slug}`, `internal/embed/seen/${entry.space}/${entry.slug}`]) {
+                try { await this.bitmapIndex.deleteBitmap(key); cleared.push(key); }
+                catch (e) { debug(`dropVectorTable: could not clear bitmap ${key}: ${e.message}`); }
+            }
+        }
+        debug(`dropped vector table '${name}' (${cleared.length} bitmap(s) cleared)`);
+        return { dropped: true, name, bitmaps: cleared };
+    }
 
     /**
      * The durable embedding work-ledger: docIds that match `schemas` but have not
