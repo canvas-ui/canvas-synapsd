@@ -1430,6 +1430,37 @@ class SynapsD extends EventEmitter {
         return `vec_${space}__${vectorModelSlug(cfg.model)}__${cfg.dim}`;
     }
 
+    /**
+     * Swap the vector spaces at runtime — what a model change needs.
+     *
+     * Nothing structural pins them: `#getVectorSpace` builds a VectorIndex
+     * lazily from `#semanticConfig.spaces` and caches it, so replacing the
+     * config and dropping the cache is enough. The old handles are plain
+     * references to Lance tables that stay on disk (that is what makes a revert
+     * free) and are simply released.
+     *
+     * The CALLER must quiesce writes first — pause the workspace's embedding
+     * queue and let the in-flight batch finish — or a batch can straddle the
+     * swap and scatter half its chunks into the outgoing table.
+     */
+    async setVectorSpaces(spaces = {}) {
+        if (!this.#semanticConfig.enabled) { return { applied: false, reason: 'semantic stack disabled' }; }
+        if (!spaces || Object.keys(spaces).length === 0) { return { applied: false, reason: 'no spaces supplied' }; }
+
+        this.#semanticConfig.spaces = spaces;
+        this.#vectorSpaces.clear();
+        this.#vectorIndex = null;
+
+        // Re-open the text space eagerly: it drives search, and rank() checks
+        // #vectorIndex directly rather than going through #getVectorSpace.
+        this.#vectorIndex = await this.#getVectorSpace('text');
+        const applied = Object.fromEntries(
+            Object.entries(spaces).map(([name, cfg]) => [name, this.#vectorTableName(name, cfg)]),
+        );
+        debug(`vector spaces swapped: ${JSON.stringify(applied)}`);
+        return { applied: true, tables: applied, textReady: !!this.#vectorIndex };
+    }
+
     async #getVectorSpace(space) {
         if (!this.#semanticConfig.enabled) { return null; }
         if (this.#vectorSpaces.has(space)) { return this.#vectorSpaces.get(space); }
