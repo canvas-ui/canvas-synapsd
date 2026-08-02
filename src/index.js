@@ -37,6 +37,7 @@ import LanceIndex from './indexes/lance/index.js';
 import VectorIndex from './indexes/lance/VectorIndex.js';
 import * as lancedb from '@lancedb/lancedb';
 import { normalizeBitmapKeys, normalizeBitmapKey, validateBitmapKey } from './indexes/bitmaps/lib/keys.js';
+import { deviceFacetsFromData } from './utils/device-facets.js';
 import SemanticEngine from './semantic/index.js';
 
 // Views / Abstractions
@@ -94,6 +95,9 @@ function mimeBitmapKeys(doc) {
 // generalize to indexOptions.facetFields with the schema registration facility.
 const STATUS_BITMAP_PREFIX = 'data/status/';
 const STATUS_FACET_SCHEMAS = new Set(['data/abstraction/todo']);
+
+// Device documents are the source of truth for the derived device/os|type facets.
+const DEVICE_SCHEMA_NAME = 'data/abstraction/device';
 function statusBitmapKeys(doc) {
     if (!STATUS_FACET_SCHEMAS.has(doc?.schema)) { return []; }
     const status = typeof doc?.data?.status === 'string' ? doc.data.status.trim().toLowerCase() : '';
@@ -252,6 +256,9 @@ class SynapsD extends EventEmitter {
     #geoIndex;
     #synapses;
     #edges;
+
+    // deviceId -> { os, type }, projected from data/abstraction/device documents.
+    #deviceFacets = new Map();
 
     // Active deferred-membership buffer. Bitmap ticks/unticks are NOT bound to the
     // LMDB transaction (they mutate a shared, never-evicting in-memory cache via
@@ -510,6 +517,10 @@ class SynapsD extends EventEmitter {
                 this.#db.createDataset('synapses'),
                 this.bitmapIndex
             );
+
+            // Device facets (os/type) are derived onto every document present on a
+            // device, so the registry has to be warm before any write happens.
+            await this.#loadDeviceFacets();
 
             // Typed doc<->doc edges. dupSort adjacency on the shared root env —
             // sorted, deduped, O(1)-ish degree. Document-unaware by design: it
@@ -4242,18 +4253,36 @@ class SynapsD extends EventEmitter {
         const features = Array.isArray(featureBitmaps) ? [...featureBitmaps] : [];
         try {
             const stored = await this.documents.get(docId);
+            // A Device document defines the os/type facets other documents derive.
+            // Runs before the derivation below so a device's own write sees itself.
+            if (stored?.schema === DEVICE_SCHEMA_NAME) { await this.#syncDeviceFacets(stored); }
             for (const tag of this.#deviceFeaturesFromLocations(stored?.locations)) {
                 if (!features.includes(tag)) { features.push(tag); }
             }
-        } catch (_) { /* best-effort: presence tags must never block indexing */ }
+        } catch (error) {
+            // Best-effort: presence tags must never block indexing. But LOG it —
+            // this catch silently ate a TypeError for several debugging rounds on
+            // 2026-08-03, which looked exactly like "the feature derivation is
+            // wrong" rather than "the derivation threw and never ran".
+            debug(`Device feature derivation failed for doc ${docId}: ${error.message}`);
+        }
 
         const allSynapseKeys = await this.#resolveDocumentMembershipKeys(contextSpec, directorySpec, features);
         await this.#addDocumentMembership(docId, allSynapseKeys);
     }
 
     /**
-     * Derive device-presence feature tags from a document's locations.
-     * Returns ['device/id/<deviceId>', …] for each distinct device-local copy.
+     * Derive device feature tags from a document's locations:
+     *   device/id/<deviceId>   — presence, one per distinct device-local copy
+     *   device/os/<os>         — the OS of each device it is present on
+     *   device/type/<type>     — the type (laptop/desktop/server/…) of each
+     *
+     * os/type are resolved through the device's own `data/abstraction/device`
+     * document (the single source of truth) via #deviceFacets, so
+     * "all applications available on Windows" is a plain bitmap AND rather than
+     * a join. An unregistered device contributes only its id — the facets appear
+     * once its Device document lands and #syncDeviceFacets reconciles.
+     *
      * @param {Array<{url:string}>} locations
      * @returns {string[]}
      */
@@ -4261,15 +4290,101 @@ class SynapsD extends EventEmitter {
         const tags = new Set();
         for (const loc of Array.isArray(locations) ? locations : []) {
             const parsed = parseLocationUrl(loc?.url);
-            if (!parsed || parsed.scheme !== 'file') { continue; }
+            // file://<deviceId>/<path> — the bytes live at a known path on a device.
+            // device://<deviceId>      — present on the device with no portable path
+            //                            (flatpak/snap/system installs). Without this
+            //                            arm, exactly the pathless install types are
+            //                            invisible to "what's on device X".
+            if (!parsed || (parsed.scheme !== 'file' && parsed.scheme !== 'device')) { continue; }
             const authority = parsed.backend;
             // Skip {WORKSPACE_ROOT}/{VAR} placeholders — workspace-relative, not a device.
             if (!authority || /^\{.*\}$/.test(authority)) { continue; }
             // Normalize to the bitmap-key form the index actually stores (lowercased,
             // sanitized) so derivation, add, and untick all compare apples-to-apples.
-            tags.add(normalizeBitmapKey(`device/id/${authority}`));
+            const idKey = normalizeBitmapKey(`device/id/${authority}`);
+            tags.add(idKey);
+
+            const facets = this.#deviceFacets.get(idKey.slice('device/id/'.length));
+            if (facets?.os) { tags.add(normalizeBitmapKey(`device/os/${facets.os}`)); }
+            if (facets?.type) { tags.add(normalizeBitmapKey(`device/type/${facets.type}`)); }
         }
         return [...tags];
+    }
+
+    /**
+     * Load every registered device's queryable facets into memory.
+     *
+     * Small by construction (a workspace has devices, not documents-worth of
+     * them), and read on every write, so it is a Map rather than a lookup.
+     */
+    async #loadDeviceFacets() {
+        this.#deviceFacets.clear();
+        try {
+            const result = await this.list({ features: [DEVICE_SCHEMA_NAME] });
+            const docs = Array.isArray(result) ? result : (result?.data ?? []);
+            for (const doc of docs) { this.#cacheDeviceFacets(doc); }
+            debug(`Loaded facets for ${this.#deviceFacets.size} device(s)`);
+        } catch (error) {
+            debug(`Device facet preload skipped: ${error.message}`);
+        }
+    }
+
+    #cacheDeviceFacets(deviceDoc) {
+        const deviceId = deviceDoc?.data?.deviceId;
+        if (!deviceId) { return null; }
+        // Key by the normalized form, matching how it appears in device/id/<x>.
+        const key = normalizeBitmapKey(`device/id/${deviceId}`).slice('device/id/'.length);
+        const facets = deviceFacetsFromData(deviceDoc.data);
+        this.#deviceFacets.set(key, facets);
+        return { key, facets };
+    }
+
+    /**
+     * Keep derived device facets truthful when a Device document changes.
+     *
+     * The accepted cost of deriving os/type into stored bitmaps (rather than
+     * expanding them at query time) is drift: reinstall a laptop from Windows to
+     * Linux and every document on it carries a stale device/os/windows tick. This
+     * closes that hole at the only moment it can open — the `device/id/<x>` bitmap
+     * names the affected set exactly, so the repair is proportional to the
+     * documents on that one device, not to the corpus.
+     *
+     * Called from #indexDocument, which every write path already goes through.
+     */
+    async #syncDeviceFacets(deviceDoc) {
+        const deviceId = deviceDoc?.data?.deviceId;
+        if (!deviceId) { return; }
+
+        const key = normalizeBitmapKey(`device/id/${deviceId}`).slice('device/id/'.length);
+        const previous = this.#deviceFacets.get(key) ?? null;
+        const { facets } = this.#cacheDeviceFacets(deviceDoc) ?? {};
+        if (!facets) { return; }
+
+        if (previous && previous.os === facets.os && previous.type === facets.type) { return; }
+        debug(`Device ${key} facets changed: ${JSON.stringify(previous)} -> ${JSON.stringify(facets)}`);
+
+        // Recompute per affected document rather than blanket-swapping keys: a
+        // document may sit on several devices, and another of them may still
+        // legitimately imply the old os/type.
+        const idKey = `device/id/${key}`;
+        const bitmap = await this.bitmapIndex.getBitmap(idKey, false);
+        if (!bitmap || bitmap.isEmpty) { return; }
+
+        const staleKeys = [];
+        if (previous?.os && previous.os !== facets.os) { staleKeys.push(normalizeBitmapKey(`device/os/${previous.os}`)); }
+        if (previous?.type && previous.type !== facets.type) { staleKeys.push(normalizeBitmapKey(`device/type/${previous.type}`)); }
+
+        for (const docId of bitmap.toArray()) {
+            // NB: documents.get() is SYNCHRONOUS (lmdb-js returns the value, not a
+            // promise) — do not attach .catch() to it.
+            const stored = await this.documents.get(docId);
+            if (!stored) { continue; }
+            const current = new Set(this.#deviceFeaturesFromLocations(stored.locations));
+            const drop = staleKeys.filter((k) => !current.has(k));
+            if (drop.length) { await this.#applyMembership('untick', docId, drop); }
+            const add = [...current].filter((k) => k.startsWith('device/os/') || k.startsWith('device/type/'));
+            if (add.length) { await this.#applyMembership('tick', docId, add); }
+        }
     }
 
     /**

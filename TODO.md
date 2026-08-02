@@ -420,9 +420,14 @@ key in there.
       `EXCLUDED_BITMAP_PREFIXES`).
 
 **Bugs found during the review (independent of the refactor, fix or ticket separately):**
-- [ ] **`enforceClientTags` coverage is asymmetric** → device tags silently not merged on
-      `PUT /workspaces/:id/documents` (workspaces/documents.js:664) and `POST /workspaces/:id/dotfiles`
-      (dotfiles.js:129), while both context routes and `POST /workspaces/:id/documents` do merge them.
+- [x] **`enforceClientTags` coverage is asymmetric** — **FIXED 2026-08-03.** Was: device tags not
+      merged on `PUT /workspaces/:id/documents` and `POST /workspaces/:id/dotfiles`. Resolved
+      together with the device-semantics decision — `device/*` is engine-DERIVED from `locations[]`
+      (`device/*` = "present on", never "written by"), so these routes no longer *merge* anything:
+      they **strip** client-supplied `device/*`, which would otherwise sit underived and
+      un-untickable. Now applied on all four write paths (`workspaces/documents.js:670`,
+      `workspaces/dotfiles.js:130`, `contexts/dotfiles.js:135,:180`). `client/*` stays optional and
+      untouched — consumers tag it or not, as they choose. See TODO.refactor-v3.md Phase 2b.
 - [ ] **`data/abstraction/document` is registered at two versions**: `BaseDocument.js:18-19` says 2.2,
       `abstractions/Document.js:6-7` says 2.0 and is what the registry returns — so docs are stamped
       2.0 while validating against the 2.2 zod shape.

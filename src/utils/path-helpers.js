@@ -45,6 +45,23 @@ export function deviceFileUrl(deviceId, localPath) {
 }
 
 /**
+ * Build a pathless device presence URL.
+ *
+ * Some things are genuinely present on a device without living at a filesystem
+ * path we know: a flatpak/snap/system package is "installed on device X" with no
+ * portable path at all. Those still have to tick `device/id/<deviceId>`, or
+ * "what is on this device" silently under-reports exactly the install types that
+ * have no path.
+ *
+ * @param {string} deviceId
+ * @returns {string|null} e.g. "device://abc123"
+ */
+export function deviceUrl(deviceId) {
+    if (!deviceId) { return null; }
+    return `device://${deviceId}`;
+}
+
+/**
  * Parse a `locations[].url` into its parts. Covers the canvas URL grammar:
  *   stored://<backend>/<key>            backend may contain ':' (e.g. workspace:data)
  *   file://{WORKSPACE_ROOT}/<path>      authority is the literal {WORKSPACE_ROOT} token

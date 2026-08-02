@@ -274,7 +274,7 @@ devices ticks 3 `device/id/*` bitmaps today. "Everything on device X" is one bit
 
 **The four gaps to close:**
 
-- [ ] **Pathless installs are invisible** (correctness bug). `Application.#buildLocations`
+- [x] **Pathless installs are invisible** (correctness bug) — ✅ SHIPPED 2026-08-02. `Application.#buildLocations`
       (Application.js:~236) only emits a location `if (state?.path)` — so a flatpak / snap /
       system install with `status:'available'` and no path produces **no location and therefore no
       device presence at all**. Exactly the install types with no filesystem path are the ones
@@ -283,38 +283,140 @@ devices ticks 3 `device/id/*` bitmaps today. "Everything on device X" is one bit
       accept `scheme === 'device'` alongside `'file'` in `#deviceFeaturesFromLocations`
       (index.js:4228). ~3 lines in the derivation, one branch in the schema. Everything downstream
       (tick, stale-diff, query) works unchanged because it all keys off the derived tag.
-      ⚠️ Both schemas rebuild `locations` in the CONSTRUCTOR only (`Dotfile.js:83`,
-      `Application.js:114`) while `BaseDocument.update()` overwrites `data` without re-deriving —
-      the drift bug already logged in TODO.md's review findings. Fixing presence without fixing
-      that means a device dropped from `data.installs` via a generic `update({data})` never
-      unticks. Fix both together or the stale-diff is decorative.
-- [ ] **No query surface** (cheapest win in this file). Nothing in routes, CLI or UI ever
-      constructs a `device/id/<x>` filter — verified zero hits across the parent repo. The
-      capability has existed for months and is unreachable; `dot/actions/devices.js:25` iterates
-      `doc.data.links` per-document instead of intersecting the bitmap. Expose it: a device filter
-      on the documents routes (the generic `attributes.allOf` param already accepts the key — it
-      just needs a caller and a UI affordance), and switch the CLI dot/app device views to the
-      bitmap.
-- [ ] **Presence cannot express state.** `device/id/*` means "a location exists on this device" —
-      an install with `status:'missing'` or `'error'` still reads as present. Add a status facet
-      alongside presence rather than overloading it, following the existing todo-status precedent
-      (`data/status/<status>` via `facetBitmapKeys`, tick-current / untick-stale, already built
-      and tested — TODO.md, DONE 2026-07-13). Presence and health stay orthogonal and compose:
-      `device/id/x ∩ !data/status/missing`. This is also the natural first customer for
-      generalizing `STATUS_FACET_SCHEMAS` into `indexOptions.facetFields` at schema registration
-      (Phase 3), instead of the current todo-only hardcode.
-- [ ] **Two producers, one namespace, no documented rule.** `device/id/*` is written both by
-      synapsd (derived from `locations[]`) and by the parent's `buildDeviceFeatureTags`
-      (`src/utils/device-features.js:25`, asserted from `request.client` on the documents write
-      routes), which additionally emits `device/os/*` and `device/type/*` that **nothing derives
-      and nothing reads**. `#removeStaleDeviceMembership` already has to special-case the asserted
-      set to avoid unticking the writing client's own tag (index.js:4253) — that special case is
-      the smell. Decide and write it down: derived-only, asserted-only, or derived + a documented
-      asserted overlay; drop `device/os/*` and `device/type/*` if they stay unread (they belong on
-      the Device *document*, which is where an os/type query should resolve from anyway).
-      Note also `enforceClientTags` coverage is already asymmetric — device tags are silently not
-      merged on `PUT /workspaces/:id/documents` and `POST /workspaces/:id/dotfiles` (open bug in
-      TODO.md). Settle the ownership rule first, then that bug has an obvious right answer.
+      Implemented as `deviceUrl()` in path-helpers + a `scheme === 'device'` arm in
+      `#deviceFeaturesFromLocations`; `Application.deriveLocations()` now emits
+      `device://<deviceId>` for installs with no `state.path`.
+- [x] **Constructor-only locations drift** — ✅ SHIPPED 2026-08-02, and **narrower than described**.
+      Fixed generically: `BaseDocument.deriveLocations()` is now an overridable hook called at the
+      end of `update()`, and `Dotfile`/`Application` override it instead of deriving privately in
+      their constructors. Any future deriving schema inherits the correct behaviour.
+
+      Two things the investigation corrected, worth keeping so nobody re-derives the wrong
+      mental model:
+      1. **Schema-ful updates were never affected.** `#updateOne:3276` calls
+         `parseInitializeDocument(updateData)` whenever the payload carries a `schema`, which
+         re-runs the subclass constructor and derives locations *before* `update()` sees them.
+         Only a **schema-less** `put({id, data})` reached the broken path.
+      2. **The symptom is invisible in `locations`.** `db.get()` rebuilds the document through
+         the constructor, so a READ re-derives and looks correct even when the stored row is
+         stale. Only the write-time bitmaps showed it: without the fix, dropping a device left
+         its `device/id/*` ticked forever. Regression tests therefore assert on **bitmap
+         membership**, never on `doc.locations` — a locations-based assertion passes either way.
+- [~] **Query surface** — the API side is DONE and was never actually missing:
+      `db.list({features:['device/id/<x>']})` works (now covered by a cross-schema test), and
+      `GET /workspaces/:id/documents?allOf=device/id/<x>` already passes through unstripped
+      (`routes/workspaces/documents.js:192-195`; `stripDeviceFeatureTags` is a WRITE-path guard
+      only). What is missing is a **consumer**, not an endpoint: nothing in the web UI or CLI ever
+      constructs such a filter, and `dot/actions/devices.js:25` still iterates `doc.data.links`
+      per-document instead of intersecting the bitmap. Remaining work is UI/CLI, in the parent
+      repo — and note the web UI has no dotfile/application surface at all today, so this is a
+      feature, not a wiring fix.
+- [x] **Presence vs. state — ✅ SOLVED 2026-08-03 by porting `stored`'s contract. No status axis
+      was needed at all.**
+
+      The resolution came from `stored`, which had the same document × location problem and
+      answers it by keeping **presence truthful** rather than adding state to the namespace:
+      a vanished file has its `locations[]` entry **removed**
+      (`WorkspaceStoredIndex#reconcileRemovedLocations`), state lives in `locations[].metadata`,
+      and the only state-ish bitmap is the degenerate `data/no-location` (cardinality zero).
+      There is no `data/backend/<x>/<state>` key anywhere in the codebase.
+
+      Ported: `Application.deriveLocations()` now emits a location **only for installs that are
+      actually present** — `PRESENT_INSTALL_STATUSES = {available, unknown}`. `installing` is not
+      there yet, `error` failed and is not usable, `missing` is gone; `unknown` is the schema
+      default and counts as present-but-unverified, matching stored's carry-forward stance.
+
+      Consequences: `device/id/A` now means "usable on A", the false positive **disappears**, and
+      "apps missing on device A" is `{allOf:['data/abstraction/application'], noneOf:['device/id/A']}`
+      — plain set algebra on keys that already exist, already supported by the routes. Per-install
+      detail stays authoritative in `data.installs` + `locations[].metadata.status`.
+
+      Two designs explicitly rejected: doc-level `data/status/*` (false-positives across devices —
+      `{A:available, B:missing}` collapses to one key) and `device/status/<deviceId>/<status>`
+      (unnecessary once presence is truthful, and compound state keys risk the
+      namespace-is-also-a-key trap documented at index.js:147-159, where a bare parent above its
+      own children is invisible to a prefix scan of its own namespace — `data/backend/imap` vs
+      `data/backend/imap/<account>` is already that shape).
+
+      Todo keeps its doc-level `data/status/*` facet — its status genuinely is per-document.
+      Generalizing `STATUS_FACET_SCHEMAS` → `indexOptions.facetFields` (Phase 3) is orthogonal and
+      still worth doing.
+- [x] **`device/os/*` and `device/type/*` are now DERIVED — ✅ SHIPPED 2026-08-03.** They were
+      written only by the parent's `buildDeviceFeatureTags` from `request.client`, i.e. asserted
+      by the writing client *about itself*, which made them provenance ("written from a Windows
+      box") rather than the wanted fact ("available on Windows") — and stale forever if a machine
+      was reinstalled with another OS.
+
+      Now derived: `#deviceFeaturesFromLocations` resolves each device id through its own
+      `data/abstraction/device` document (`#deviceFacets`, a small in-memory Map preloaded in
+      `start()` via `#loadDeviceFacets`) and emits `device/os/<os>` + `device/type/<type>`
+      alongside `device/id/<x>`. So "all applications available on Windows" is a plain bitmap AND:
+      `{allOf:['data/abstraction/application','device/os/windows']}` — the CLI/Tauri-client
+      use-case.
+
+      **Drift is closed, not merely accepted.** Deriving into stored bitmaps normally means a
+      device reinstalled Windows→Linux leaves stale ticks. `#syncDeviceFacets` (called from
+      `#indexDocument`, which every write path already goes through) fires when a Device document's
+      os/type changes and repairs the affected set — and `device/id/<x>` names that set *exactly*,
+      so the repair is proportional to the documents on that one device, not to the corpus. It
+      recomputes per document rather than blanket-swapping keys, because a document may sit on
+      several devices and another may still legitimately imply the old facet.
+
+      Normalization mirrors the parent's `device-features.js` (`win32`→`windows`, `darwin`→`mac`)
+      in `src/utils/device-facets.js` — synapsd is a standalone package and cannot import it.
+      ⚠️ **Keep the two in sync**: a divergence puts a client-asserted tag and a derived tag for
+      the same machine into different bitmaps.
+- [x] **Two producers reconciled — ✅ SHIPPED 2026-08-03. The rule: `device/*` means PRESENT ON,
+      never "written by."**
+
+      Stated by the user 2026-08-03, and it is the project's founding use case: this started
+      USB-run / roaming-profile centric, where `deviceId` answers *"which machine did I leave
+      customer-foo.xlsx on"*. "Written by obsidian on Windows" is a note-metadata or `tag/*`
+      concern — it is not a device fact.
+
+      Making os/type derived (previous item) turned the old client assertion into an active bug:
+      the parent asserted `device/os/<writing client's OS>` on every routed write, so an
+      application installed only on Linux boxes but added from a Windows laptop answered to
+      `device/os/windows`. Permanently — `#removeStaleDeviceMembership` never unticks a tag the
+      caller asserted in the same write, so the derivation could not clean it up.
+
+      **Fix (final shape, user-directed 2026-08-03): the server asserts NOTHING on a document's
+      behalf, and mandates nothing of consumers.**
+
+      - `device/*` is engine-owned and **fully derived**. A client registers (or maps to) a
+        device and indexes a local file as `file://<deviceId>/<path>` (or
+        `file://<deviceAlias>/<path>`); `device/id`, `device/os` and `device/type` all fall out
+        of that. `enforceClientTags` in both document routes is now a **strip, not a merge** —
+        it removes client-supplied `device/*` (which would be indistinguishable from a derived
+        value while being immune to cleanup) and injects nothing. `mergeDeviceFeatureTags` is
+        deleted.
+      - `client/*` is the **consumer's own namespace and entirely optional**. An application MAY
+        tag `client/app/firefox`, `client/device/os/windows`, `client/device/platform/*` on
+        insert; nothing here mandates, injects or strips it. Precedent: the browser extension
+        already opts into `client/app/*` on its own terms
+        (`extensions/.../tab-manager.js:146-157`) — no server policy made it do that, and none
+        should. Recording provenance is the consumer's call.
+      - `buildDeviceFeatureTags` survives for its one legitimate caller,
+        `core/device/Registry.js`, which tags a Device DOCUMENT with its own identity —
+        self-referential and correct, and what keeps "show me my Windows devices" resolvable.
+      - `ENGINE_DEVICE_PREFIXES = ['device/']` replaces the old four-prefix strip list;
+        `client/device/id/` is no longer stripped, because it is consumer-owned like the rest of
+        `client/*`.
+
+      Tests: `tests/utils/device-features.test.js` (parent, 6 tests) — including that the whole
+      `client/*` namespace passes through untouched and that a write with no features stays empty.
+
+      This also **closes the "is client-asserted device/id wrong?" question** raised earlier: yes,
+      and it is gone. "Written by obsidian on Windows" is note-metadata or `tag/*`, not a device
+      fact.
+
+      **Route coverage gap CLOSED 2026-08-03** (the long-standing asymmetry logged in TODO.md).
+      Every write path that accepts a client feature array now strips engine-owned `device/*`:
+      `PUT /workspaces/:id/documents` (`workspaces/documents.js:670`),
+      `POST /workspaces/:id/dotfiles` (`workspaces/dotfiles.js:130`), and both context dotfile
+      routes (`contexts/dotfiles.js:135,:180`), joining the paths that already did. Without this
+      a client could smuggle a `device/*` key in through the uncovered routes, where it would sit
+      underived and un-untickable.
 
 **Also note:** `normalizeBitmapKey` lowercases and sanitizes, so `device/id/<x>` is not reversible
 to the raw `deviceId` when it contained uppercase or chars outside `a-z0-9_-./@:+`. Queries match
@@ -570,6 +672,42 @@ assert the NEGATIVE case, a positive-only test passes even when the untick never
 ✅ **Test-port cost under D1(c): near zero.** The 24-of-29 suites referencing `data/abstraction/*`
 ids keep working untouched — that entire cost was the rename's, and it is deferred with it. New
 tests are additive (kind, registry, relations).
+
+### The `data/*` facet family — consolidate while `kind` is being added (raised 2026-08-03)
+
+Phase 3 introduces `data/kind/*` into a namespace that already has several derived facets. Take
+one pass over the whole family rather than bolting a new prefix beside the old ones:
+
+```
+data/abstraction/<schema>     schema id            (kept under D1(c); the kind axis supersedes it for queries)
+data/kind/<v>                 NEW in Phase 3
+data/mime/<type>[/<subtype>]  metadata.contentType (parent + child both ticked — deliberate roll-up)
+data/backend/<name>           locations[]
+data/source/<provider>        backend descriptor   (Phase 3 moves it to locations[].metadata.provider)
+data/status/<status>          data.status          (gated to todo only)
+data/dataset/<name>           ingest provenance    (SELECTION semantics, not constraint — see TODO.md)
+data/no-location              zero locations       (orphan marker; keep in data/ for delete protection)
+```
+
+- **A `data/type/*` prefix is probably NOT needed — `kind` already is that axis.** Several schemas
+  carry a `data.type` discriminator that is exactly a subtype-of-entity: application
+  (`appimage|flatpak|snap|portable|system|local`), identity (`person|organization|service|bot`),
+  the new event (`calendar|alert|activity`), dotfile (`file|folder`). Rather than a second
+  prefix, let `registerSchema` name the field — `kindField: 'data.type'` — so
+  `data/kind/flatpak` falls out of the existing derivation. "All flatpaks on device A" then
+  becomes `{allOf:['data/kind/flatpak','device/id/A']}` with no new machinery.
+  ⚠️ Watch the vocabulary collision: `kind` values would then share one flat namespace across
+  schemas (`file` means dotfile-is-a-folder's sibling AND nothing else). Either scope the key
+  (`data/kind/<schema>/<v>`) or accept a controlled global vocabulary — decide before stamping,
+  since these ids are persisted.
+- **`data/source/*` vs `data/backend/*` look like dedup candidates.** `data/backend/imap/<account>`
+  already encodes provider-ish structure, and once `source` derives from
+  `locations[].metadata.provider` the two are both pure projections of `locations[]`. Check
+  whether `source` survives as a distinct axis or collapses into `backend`.
+- **`data/status/*` may only ever serve todo.** Application status stopped being a bitmap in
+  Phase 2b (truthful presence replaced it), so `STATUS_FACET_SCHEMAS` has exactly one member. If
+  no second customer appears, fold it into the generalized `indexOptions.facetFields` rather than
+  keeping a bespoke status axis.
 
 ## Phase 4 — ingest derivation of asserted edges
 
