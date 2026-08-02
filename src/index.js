@@ -32,7 +32,7 @@ import ChecksumIndex from './indexes/inverted/Checksum.js';
 import TimelineIndex from './indexes/inverted/Timeline.js';
 import GeoIndex from './indexes/inverted/GeoIndex.js';
 import Synapses from './indexes/inverted/Synapses.js';
-import Relations from './indexes/inverted/Relations.js';
+import EdgeIndex from './indexes/edges/index.js';
 import LanceIndex from './indexes/lance/index.js';
 import VectorIndex from './indexes/lance/VectorIndex.js';
 import * as lancedb from '@lancedb/lancedb';
@@ -251,7 +251,7 @@ class SynapsD extends EventEmitter {
     #timelineIndex;
     #geoIndex;
     #synapses;
-    #relations;
+    #edges;
 
     // Active deferred-membership buffer. Bitmap ticks/unticks are NOT bound to the
     // LMDB transaction (they mutate a shared, never-evicting in-memory cache via
@@ -480,7 +480,7 @@ class SynapsD extends EventEmitter {
     get timeline() { return this.#timelineIndex; }
     get geo() { return this.#geoIndex; }
     get synapses() { return this.#synapses; }
-    get relations() { return this.#relations; }
+    get edges() { return this.#edges; }
     get semantic() { return this.#semantic; }
 
     /**
@@ -511,9 +511,15 @@ class SynapsD extends EventEmitter {
                 this.bitmapIndex
             );
 
-            // Typed doc<->doc relations (rel/* bitmaps; reuses bitmapIndex,
-            // delegates membership inheritance to Synapses).
-            this.#relations = new Relations(this.bitmapIndex, this.#synapses);
+            // Typed doc<->doc edges. dupSort adjacency on the shared root env —
+            // sorted, deduped, O(1)-ish degree. Document-unaware by design: it
+            // speaks node ids and predicates only, so membership inheritance
+            // lives on the SynapsD facade (relate/unrelate) rather than here.
+            this.#edges = new EdgeIndex(
+                this.#db.createDataset('edges_fwd', { dupSort: true, encoding: 'ordered-binary' }),
+                this.#db.createDataset('edges_inv', { dupSort: true, encoding: 'ordered-binary' }),
+                this.#db.createDataset('edge_meta'),
+            );
 
             // Initialize LanceDB under workspace root (rootPath/lance)
             this.#lanceIndex = new LanceIndex({
@@ -818,6 +824,37 @@ class SynapsD extends EventEmitter {
     async has(id, spec = {}) {
         if (!id) { throw new Error('Document id required'); }
         return await this.#hasOne(id, this.#normalizeDocumentOperationSpec(spec));
+    }
+
+    /**
+     * Create a typed edge between two documents.
+     *
+     * This is the DOCUMENT-AWARE facade over `this.edges` (EdgeIndex), which is
+     * deliberately document-unaware. Membership inheritance is exactly the kind
+     * of row-shaped concern that must not leak into the graph layer, so it
+     * lives here.
+     *
+     * @param {number} fromId
+     * @param {string} predicate see indexes/edges/predicates.js
+     * @param {number} toId
+     * @param {{inheritMemberships?: boolean, meta?: {src:string, conf?:number}}} [options]
+     *        meta: OMIT for asserted edges (derived from a doc's data.relations);
+     *        pass {src:'extractor:<name>'} for derived ones.
+     */
+    async relate(fromId, predicate, toId, options = {}) {
+        this.#edges.link(fromId, predicate, toId, options.meta ?? null);
+
+        if (options.inheritMemberships) {
+            await this.#synapses.createSynapsesFromDocs(Number(toId), [Number(fromId)]);
+        }
+        return true;
+    }
+
+    /**
+     * Remove a typed edge between two documents (both mirrors + meta).
+     */
+    async unrelate(fromId, predicate, toId) {
+        return this.#edges.unlink(fromId, predicate, toId);
     }
 
     async unlink(idOrIds, spec = {}) {
@@ -1964,7 +2001,7 @@ class SynapsD extends EventEmitter {
                     await this.documents.delete(id);
                     const clearedLayers = await this.#synapses.clearSynapses(id, { syncBitmaps: false });
                     await this.#applyMembership('untick', id, clearedLayers);
-                    await this.#relations.clearRelations(id);
+                    this.#edges.deleteNode(id);
                     await this.#timelineIndex.removeFromAll(id);
                     if (await this.#geoIndex.has(id)) { await this.#geoIndex.remove(id); }
                     await this.#checksumIndex.deleteArray(document.checksumArray);
@@ -3450,8 +3487,8 @@ class SynapsD extends EventEmitter {
                 // await this.bitmapIndex.untickAll(docId);
                 const clearedLayers = await this.#synapses.clearSynapses(docId, { syncBitmaps: false });
                 await this.#applyMembership('untick', docId, clearedLayers);
-                await this.#relations.clearRelations(docId);
-                debug(`delete: Document ${docId} removed from all bitmaps and Synapses index`);
+                this.#edges.deleteNode(docId);
+                debug(`delete: Document ${docId} removed from all bitmaps, Synapses index and edge plane`);
 
                 // Remove document from all custom and CRUD timelines before recording deletion.
                 await this.#timelineIndex.removeFromAll(docId);

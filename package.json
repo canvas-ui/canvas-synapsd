@@ -11,7 +11,7 @@
     "debug": "^4.4.3",
     "eventemitter2": "^6.4.9",
     "fastembed": "^2.1.0",
-    "lmdb": "^3.5.2",
+    "lmdb": "3.5.6",
     "mkdirp": "^3.0.1",
     "nodes2ts": "^4.0.2",
     "roaring": "^2.7.0",
