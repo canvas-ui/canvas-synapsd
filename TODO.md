@@ -152,6 +152,34 @@ ordinary layers, queried alongside user trees via multi-spec AND:
 
 ## Refactor v3
 
+> **The implementation plan lives in [`TODO.refactor-v3.md`](./TODO.refactor-v3.md)** (7 phases +
+> Phase 2b). Reviewed 2026-08-02.
+>
+> **DECIDED 2026-08-02 (D1): schema ids stay `data/abstraction/*`.** The rename to `data/entity/*`
+> is deferred to its own rev — it cost ~272 occurrences across five sibling submodules, a public
+> route path and the installed browser extension, while delivering none of v3's value. v3 ships
+> the *model* (`kind`, runtime registry, `data.relations` + dupsort edges, `indexOptions` off the
+> row); `kind` is the incremental migration path for consumers, and the rename rev's entry
+> criterion is that they read `data/kind/*` instead. Consequence: **no document changes its schema
+> id**, the ~2600 tabs are never rewritten, and the 24-of-29 test-suite port disappears.
+>
+> **DECIDED 2026-08-02 (D2): root-level `features[]` folds into Phase 3 + Phase 6.** The
+> declarative mechanism already shipped (2026-07-15 interim fix); the move is only about where the
+> field lives, and Phase 6's pass already rewrites every row to drop `indexOptions` — so it rides
+> along free rather than costing a second full-table scan. Brings `data/source/*` derivation and
+> the `indexOptions` merge-order fix with it. The sequencing section below (steps 1–5) is the
+> detail; step 5 "separate rev" no longer applies.
+>
+> **No open decisions remain — Phase 3 is executable as written.**
+>
+> A **Supersedes** list in that file names the sections *below* it overrides: schema inheritance /
+> ancestor-chain ticking ("Decision 2"), `link`/`bucket` as core primitives, and the
+> `rel/snapshot-of` · `rel/depicts` · `rel/authored-by` predicates. Read that file first; treat
+> the superseded sections here as historical rationale, not as the plan.
+>
+> This file remains the authoritative backlog for everything NOT in v3 (tree mountpoints, sessions,
+> semantic layer, geo, vectors).
+
 Do the simplest thing that works; aim to delete more than you add.
 
 ! Do NOT use `bitmapIndex.untickAll` (`indexes/bitmaps/index.js:415`): O(all-bitmaps) per delete, that's why it's dead. The bitmap side is already cleaned precisely and cheaply by `clearSynapses` (`indexes/inverted/Synapses.js:144`) via the reverse index. Leave `untickAll` dead.
