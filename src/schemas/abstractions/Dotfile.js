@@ -80,7 +80,7 @@ export default class Dotfile extends Document {
 
         // Derive locations from the per-device link map.
         // Always recomputed from data so toJSON() stays in sync.
-        this.locations = this.#buildLocations();
+        this.locations = this.deriveLocations();
     }
 
     /* --------------------
@@ -100,7 +100,7 @@ export default class Dotfile extends Document {
     addLink(deviceId, localPath) {
         if (!deviceId || !localPath) { return this; }
         this.data.links[deviceId] = normalizeHomePlaceholder(localPath);
-        this.locations = this.#buildLocations();
+        this.locations = this.deriveLocations();
         this.updatedAt = new Date().toISOString();
         return this;
     }
@@ -108,7 +108,7 @@ export default class Dotfile extends Document {
     removeLink(deviceId) {
         if (!deviceId) { return this; }
         delete this.data.links[deviceId];
-        this.locations = this.#buildLocations();
+        this.locations = this.deriveLocations();
         this.updatedAt = new Date().toISOString();
         return this;
     }
@@ -179,7 +179,7 @@ export default class Dotfile extends Document {
      * Private
      * ------------------*/
 
-    #buildLocations() {
+    deriveLocations() {
         // deviceId is encoded in the URL authority (file://<deviceId>/<localPath>).
         return Object.entries(this.data.links || {}).map(([deviceId, localPath]) => ({
             url: deviceFileUrl(deviceId, localPath),

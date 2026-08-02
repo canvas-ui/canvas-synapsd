@@ -298,11 +298,34 @@ class BaseDocument {
             this.orphanedAt = data.orphanedAt;
         }
 
+        // Re-derive locations for schemas that own them.
+        //
+        // MUST run after both the `data` and the `locations` assignments above:
+        // for a deriving schema, `data` is the source of truth and a caller-supplied
+        // locations array is stale by definition. Before this hook existed, Dotfile
+        // and Application rebuilt locations in their CONSTRUCTOR only, so a generic
+        // update({data}) left locations — and therefore the device/id/* presence
+        // bitmaps derived from them — pointing at the previous device set.
+        const derived = this.deriveLocations();
+        if (derived) { this.locations = derived; }
+
         // Always update the updatedAt timestamp
         this.updatedAt = data.updatedAt ?? new Date().toISOString();
 
         return this;
     }
+
+    /**
+     * Hook for schemas whose `locations` are DERIVED from `data` rather than
+     * supplied by the caller (Dotfile.data.links, Application.data.installs).
+     *
+     * Return an array to take ownership of `locations`, or null (the default) to
+     * leave them caller-owned. Overriding this is the ONLY correct way to derive
+     * locations — deriving in a constructor alone silently drifts on update.
+     *
+     * @returns {Array<{url:string, metadata?:object}>|null}
+     */
+    deriveLocations() { return null; }
 
     /**
      * Validates the document structure and data

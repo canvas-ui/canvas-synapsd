@@ -19,13 +19,19 @@
 
 import Document, { documentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
-import { pathPattern, normalizeHomePlaceholder, deviceFileUrl } from '../../utils/path-helpers.js';
+import { pathPattern, normalizeHomePlaceholder, deviceFileUrl, deviceUrl } from '../../utils/path-helpers.js';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/application';
 const DOCUMENT_SCHEMA_VERSION = '1.1';
 
 const applicationTypeSchema = z.enum(['appimage', 'flatpak', 'snap', 'portable', 'system', 'local']);
 const installStatusSchema = z.enum(['available', 'missing', 'installing', 'error', 'unknown']);
+
+// Which install states mean "the app is on this device". Only these produce a
+// location entry, and therefore only these tick device/id/<deviceId>.
+// 'installing' is not there yet; 'error' failed and is not usable; 'missing' is
+// gone. 'unknown' is the schema default and counts as present-but-unverified.
+const PRESENT_INSTALL_STATUSES = new Set(['available', 'unknown']);
 
 /*******************
  * Sub-schemas     *
@@ -111,7 +117,7 @@ export default class Application extends Document {
 
         // Derive locations from available installs (and source URL if present).
         // Always recomputed from data so toJSON() stays in sync.
-        this.locations = this.#buildLocations();
+        this.locations = this.deriveLocations();
     }
 
     /* --------------------
@@ -133,7 +139,7 @@ export default class Application extends Document {
     setInstall(deviceId, installState = {}) {
         if (!deviceId) { return this; }
         this.data.installs[deviceId] = installStateSchema.parse(installState);
-        this.locations = this.#buildLocations();
+        this.locations = this.deriveLocations();
         this.updatedAt = new Date().toISOString();
         return this;
     }
@@ -141,7 +147,7 @@ export default class Application extends Document {
     removeInstall(deviceId) {
         if (!deviceId) { return this; }
         delete this.data.installs[deviceId];
-        this.locations = this.#buildLocations();
+        this.locations = this.deriveLocations();
         this.updatedAt = new Date().toISOString();
         return this;
     }
@@ -220,19 +226,36 @@ export default class Application extends Document {
      * Private
      * ------------------*/
 
-    #buildLocations() {
+    deriveLocations() {
         const locations = [];
 
-        // One location entry per device where the app is installed.
-        // deviceId is encoded in the URL authority (file://<deviceId>/…); status is
-        // install-specific so it stays in metadata.
+        // One location entry per device where the app is ACTUALLY PRESENT.
+        //
+        // A location means "it is here" — the same contract `stored` uses for
+        // bytes, where a vanished file has its location entry removed rather than
+        // flagged (WorkspaceStoredIndex#reconcileRemovedLocations). Keeping that
+        // contract truthful is what makes `device/id/<x>` answer "usable on x"
+        // without a second status axis: an app missing on a device simply has no
+        // location there, so "missing on A" is `noneOf:['device/id/A']` — plain
+        // set algebra, no compound <device>/<status> keys (which would also trip
+        // the namespace-is-also-a-key rule; see index.js listBitmaps notes).
+        //
+        // 'unknown' counts as present, matching stored's present-but-unverified
+        // stance: it is the schema default, so a freshly-declared install must
+        // tick presence before anything has verified it.
+        //
+        // A path yields file://<deviceId>/<path>. WITHOUT a path we still emit
+        // device://<deviceId> — a flatpak/snap/system package is genuinely present
+        // on that device, and skipping it (as this did until 2026-08-02) made
+        // exactly the pathless install types invisible to "what's on device X".
+        //
+        // Per-install detail (including why something is absent) stays where it is
+        // authoritative: `data.installs` and `locations[].metadata.status`.
         for (const [deviceId, state] of Object.entries(this.data.installs || {})) {
-            if (state?.path) {
-                locations.push({
-                    url: deviceFileUrl(deviceId, state.path),
-                    metadata: { status: state.status },
-                });
-            }
+            if (!state) { continue; }
+            if (!PRESENT_INSTALL_STATUSES.has(state.status ?? 'unknown')) { continue; }
+            const url = state.path ? deviceFileUrl(deviceId, state.path) : deviceUrl(deviceId);
+            if (url) { locations.push({ url, metadata: { status: state.status } }); }
         }
 
         // Source URL as a location entry (for reinstall/discovery); not device-local.
