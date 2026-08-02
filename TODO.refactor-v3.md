@@ -83,12 +83,15 @@ registry.
 
 ## Verified platform facts (do not re-litigate)
 
-`lmdb` supports `dupSort: true` via `openDB` on the existing root env. Verified behavior on
-3.5.2 specifically — ⚠️ **package.json:16 declares `"^3.5.2"`, a caret range, NOT a pin.** Since
-the caveats below (notably the reverse-iteration `start` bug) are version-specific observations,
-pin it exactly as the first commit of Phase 1, or these "do not re-litigate" facts silently stop
-being facts on the next `npm install`. Nothing in `src/` passes `dupSort` today — this is a
-genuinely new storage primitive, not a re-use.
+`lmdb` supports `dupSort: true` via `openDB` on the existing root env.
+
+**Version reality, corrected during Phase 1 implementation (2026-08-02):** both this package and
+the parent declared `"^3.5.2"`, but the actually-installed (hoisted, deduped) copy was **3.5.6** —
+so everything below was verified on 3.5.6, not 3.5.2. Both `package.json`s are now pinned to
+`3.5.6`. ⚠️ Pinning **only** the submodule would have been actively harmful: it is an npm
+workspace member sharing one hoisted `node_modules/lmdb`, so a divergent exact pin forces a second
+*native* LMDB build into the same process. Pin both or neither. Nothing in `src/` passed `dupSort`
+before this — a genuinely new storage primitive, not a re-use.
 
 - `put(key, value)` into a dup set is sorted, deduped (repeat key/value = no-op ⇒
   idempotent edge writes).
@@ -100,12 +103,31 @@ genuinely new storage primitive, not a re-use.
   `ordered-binary` array keys.
 - Caveats: dupsort values inherit key-class size limits (~8KB) — fine for int ids,
   but edge payloads must NOT go in dup values; reverse `getValues` iteration had a
-  historical `start`-ignoring bug — use forward iteration only; use
-  `snapshot:false` for long scans.
+  historical `start`-ignoring bug — use forward iteration only.
+- ❌ **CORRECTED 2026-08-02 (caught by `tests/edges.test.js`): `snapshot:false` is REFUSED on
+  dupSort stores** — lmdb throws *"Can not disable snapshot on a dupSort data store"*. The earlier
+  "use `snapshot:false` for long scans" advice holds only for the plain `edge_meta` DBI. Practical
+  consequence: scans of `edges_fwd`/`edges_inv` always pin a read txn, so
+  **drain-then-mutate is mandatory, not merely tidy** — `deleteNode` materializes its work list
+  before writing for exactly this reason.
 
 ---
 
-## Phase 1 — EdgeIndex (new storage primitive)
+## Phase 1 — EdgeIndex (new storage primitive) — ✅ SHIPPED 2026-08-02
+
+Landed as `src/indexes/edges/{index.js,predicates.js}` + `tests/edges.test.js` (17 tests).
+Deviations from the sketch below, all deliberate:
+
+- **`outgoing(id, p, opts)` / `incoming(id, p, opts)` take a REQUIRED predicate**, not the
+  optional one sketched. Optional would force a polymorphic yield shape (bare ids with a
+  predicate, `{p, to}` pairs without) — a callsite bug factory. `edgesOf(id)` is the
+  all-predicates view and returns arrays.
+- **Backend change was zero lines** as predicted; `createDataset` passthrough carried
+  `{dupSort:true, encoding:'ordered-binary'}` straight through.
+- Prefix scans use `{start:[id], end:[id+1]}` rather than `[id, Infinity]` — avoids relying on
+  `Infinity` surviving ordered-binary encoding, same range.
+- `link()` **throws** on an explicit `{src:'doc'}`: the asserted-edge convention is the *absence*
+  of a meta row, so passing it as a value would create an ambiguous second representation.
 
 **New:** `src/indexes/edges/index.js` (+ `src/indexes/edges/predicates.js`)
 
@@ -202,7 +224,14 @@ asserted, throws on `src:'doc'` and on empty selector; predicate rejection for
 unknown names and for any inverse-style name (`mentioned-by` must throw, not
 resolve).
 
-## Phase 2 — kill bitmap relations
+## Phase 2 — kill bitmap relations — ✅ SHIPPED 2026-08-02
+
+`Relations.js` deleted; `'rel/'` removed from `ALLOWED_BITMAP_PREFIXES`; both `clearRelations`
+call sites now `edges.deleteNode(id)`. `db.relations` is replaced by **two** surfaces, not one:
+`db.edges` (the pure primitive) and `db.relate()/db.unrelate()` on SynapsD — the document-aware
+facade, which is where `inheritMemberships` now lives so that row-shaped concerns stay out of the
+graph layer. One straggler found outside the submodule and fixed: `Workspace.js:1707` carried a
+guard refusing to delete `rel/*` bitmaps, now unreachable by construction.
 
 Blast radius, measured 2026-08-02 — **smaller than this plan assumed**. `Relations.js` is 138
 lines and there are **zero production `relate()`/`unrelate()`/`getRelated()` call sites**: edge

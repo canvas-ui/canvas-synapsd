@@ -10,7 +10,10 @@ export const ALLOWED_BITMAP_PREFIXES = [
     'tag/',
     'data/',
     'custom/',
-    'rel/', // Typed directed document<->document relations (see indexes/inverted/Relations.js)
+    // NOTE: 'rel/' is deliberately absent. Typed document<->document edges moved
+    // to dupsort adjacency (indexes/edges/) in refactor-v3; keeping the prefix
+    // out of this list makes any straggler bitmap write throw instead of
+    // silently creating a second, stale relation store.
 ];
 
 export function normalizeBitmapKey(key) {
