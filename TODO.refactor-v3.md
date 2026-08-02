@@ -1,25 +1,94 @@
 # synapsd v3 refactor — implementation plan
 
-Starting point for Claude Code. Grounded against `canvas-ui/canvas-synapsd@9f74f50`
-(2026-08-02). Companion design doc: `synapsd-schema-v3-l0-l3.md` (L0–L3 spec) — this
-file is the *how*, that file is the *why*. No backward compatibility anywhere: no
-alias tables, no dual-namespace reads, one migration command, hard break.
+Starting point for Claude Code. Grounded against `canvas-ui/canvas-synapsd@9f74f50`, re-verified
+against `505cc93` on 2026-08-02. Companion design doc: `synapsd-schema-v3-l0-l3.md` (L0–L3 spec)
+— this file is the *how*, that file is the *why*. No backward compatibility shims anywhere: no
+alias tables, no dual-namespace reads, one migration command. **Schema *id strings* are exempt —
+they stay `data/abstraction/*` (see D1 below); that is id stability, not a compat shim, and it is
+what keeps the hard break confined to a single store.**
 
 ## Architecture recap (1 paragraph)
 
 synapsd is an index; `stored`/backends own bytes. L0 = storage facts as row fields
 (`checksumArray`, `locations[]` — already top-level in BaseDocument.js:108–130, orphan
-lifecycle already landed). L1 = entity documents under a new `data/entity/*`
-namespace with subtype-as-`kind`, minimal core set + runtime-registered app schemas.
+lifecycle already landed). L1 = entity documents keeping their `data/abstraction/*`
+ids, with subtype-as-`kind`, minimal core set + runtime-registered app schemas.
 L2 = asserted edges declared in `data.relations`, mirrored into dupsort adjacency
 DBIs. L3 = derived plane (extracted edges, kind/mime bitmaps, embeddings, timeline,
 checksums) — deletable, recomputable from rows. Rebuild invariant: rows + extractors
 reproduce every index structure.
 
+## Decisions (raised in review 2026-08-02 — both now RESOLVED)
+
+**D1 — RESOLVED 2026-08-02: option (c). The `data/abstraction/*` ids stay; only the model
+changes.** ~~Rename to `data/entity/*`.~~ Measured cost of the rename: ~272 occurrences outside
+synapsd across **five sibling git submodules** — `ui/web` (47), `browser-extensions` (33),
+`ui/fuse` (25, Rust), `ui/cli` (20), `ui/shell` (6) — plus a **public HTTP route path**
+(`src/transports/routes/schemas.js:27`, `/data/abstraction/:abstraction`), the embedd router
+(`src/services/embedd/src/router.js:34,38,110,117`) and a **shipped config file**
+(`server/config/embedd.example.json`). The decisive case was the **browser extension**: installed
+in users' browsers, not atomically upgradable with the server, so it keeps writing
+`data/abstraction/tab` after any cutover — a hard break there is a support incident, not a
+migration. Rejected alternatives: (a) hard break + forced extension update; (b) a route-level
+translation shim (keeps the DB alias-free but adds a permanent seam for no gain).
+
+Consequences, applied throughout this document: Phase 3 is now "model v3", not "namespace v3";
+Phase 6's migration shrinks to a derivation replay (no row rewrite); Phase 7's sweep no longer
+greps `data/abstraction` to zero; the 24-of-29 test-suite port cost disappears. `kind` becomes the
+incremental migration path for consumers — see Phase 3. **The rename is deferred, not cancelled:
+it becomes its own rev gated on a coordinated submodule release.**
+
+**D2 — RESOLVED 2026-08-02: fold root-level `features[]` into Phase 3 + Phase 6.**
+
+Scope clarification, because the name oversells it: **the declarative mechanism already exists and
+works.** `documentFeatureKeys()` (src/index.js:112) reads the array, validates each key, and every
+write path ticks/unticks from it with a prev-state stale-diff — shipped 2026-07-15 as the interim
+fix. Its own comment states the contract: *"DECLARATIVE and authoritative: the document JSON says
+what it is, and bitmaps follow it 1:1."* D2 is therefore **only about where the field lives**, not
+about whether features are doc-declared.
+
+Why fold rather than defer: Phase 6's pass **already rewrites every row** to drop `indexOptions`
+(461 B, 41% of a measured note) and stamp `kind`/`mime`. The marginal cost of moving one more
+field in that same pass is close to zero, whereas deferring means running an identical
+full-table pass twice and doing the BaseDocument surgery twice.
+
+Why the move is right on its own merits (TODO.md, 2026-07-15): `metadata` holds EXTRACTED facts
+written by derivers; `features` holds ASSERTED membership written by humans/clients. Today they
+share a container, and `BaseDocument.update()` merges metadata as a **single shallow spread**
+(:299-301) — so an EXIF enrichment patch and a user tag edit take the same code path at wildly
+different write frequencies and trust levels. `comment` is the precedent to copy line for line:
+top-level, outside `checksumFields`, own `update()` branch outside the `dataUpdated` path, drives
+a derived bitmap (BaseDocument.js:104-108, :282-287).
+
+Two related TODO.md items handed to this rev, now also owned by Phase 3: `data/source/*` → derive
+from `locations[].metadata.provider` (today it is stamped from the backend descriptor and is
+genuinely NOT rebuildable from doc state — it breaks the rebuild-from-docs property this refactor
+exists for), and the `indexOptions` merge-order inconsistency (half the schemas silently discard a
+caller's `ftsSearchFields`), which becomes load-bearing the moment resolution moves to the
+registry.
+
+## Supersedes (decisions in TODO.md this plan overrides — delete or annotate those sections)
+
+- **Schema inheritance / ancestor-chain ticking** (TODO.md "Decision 2": `tab extends link`, a tab
+  ticks both `data/abstraction/tab` and `data/abstraction/link`). This plan replaces it with flat
+  `kind`. Consequence to state explicitly: "all links finds tabs" becomes a `kind` query, and the
+  `extends` key in the registry-shape sketch there is dead.
+- **`link` and `bucket` as synapsd core primitives** (TODO.md "Registry shape" / "Schema
+  registration facility"). Here `link` is app-level `document kind:link` and `bucket` is deleted
+  outright (folders are tree nodes).
+- **`rel/snapshot-of`, `rel/depicts`, `rel/authored-by`** referenced by TODO.md's tab→snapshot and
+  contact→identity designs are not in this plan's closed five-predicate registry. Either map them
+  onto existing predicates (`snapshot-of` ≈ `derived-from`) or add ids — but decide now, since ids
+  are append-only.
+
 ## Verified platform facts (do not re-litigate)
 
-`lmdb@3.5.2` (pinned in package.json) supports `dupSort: true` via `openDB` on the
-existing root env. Verified behavior on this exact version:
+`lmdb` supports `dupSort: true` via `openDB` on the existing root env. Verified behavior on
+3.5.2 specifically — ⚠️ **package.json:16 declares `"^3.5.2"`, a caret range, NOT a pin.** Since
+the caveats below (notably the reverse-iteration `start` bug) are version-specific observations,
+pin it exactly as the first commit of Phase 1, or these "do not re-litigate" facts silently stop
+being facts on the next `npm install`. Nothing in `src/` passes `dupSort` today — this is a
+genuinely new storage primitive, not a re-use.
 
 - `put(key, value)` into a dup set is sorted, deduped (repeat key/value = no-op ⇒
   idempotent edge writes).
@@ -59,15 +128,27 @@ call (`outgoing`/`incoming`) or a `dir` parameter, never by a string. (An earlie
 draft had an ALIASES map resolving `mentioned-by → mentions`; rejected — it erases
 direction at the callsite and produces silently-wrong forward scans.)
 
+**No `installed-on` predicate — device presence is NOT an edge** (evaluated and rejected
+2026-08-02; do not re-propose). "Which dotfiles/apps/files are on device X" is already answered by
+the `device/id/*` bitmap derivation, schema-agnostically, for every schema at once — see
+"Phase 2b — device presence" below for the full mechanism. An edge would be a second answer to a
+solved question, and the weaker one: a bitmap drops straight into the `paths ∩ features ∩ filters`
+pipeline, whereas the edge needs the Phase 5 rel-bucket to materialize an array into an ephemeral
+bitmap to reach the same place, plus a `deviceId -> device doc id` resolution step and a
+migrate-devices-first ordering constraint. Rule of thumb for this registry: **edges are for
+document-to-document facts with no derivable location; anything expressible as "these bytes live
+here" stays in `locations[]` and its derived bitmaps.**
+
 Naming: **kebab-case is the wire/persisted form** — predicate strings appear in
 `data.relations` payloads and query specs alongside the codebase's existing
 kebab-cased data strings (`derived-from`, `t:crud:updated`). JS-internal constants
 may be whatever; anything serialized is kebab. Ids are persisted in keys ⇒
 append-only; never renumber. Adding a predicate is a code change by design.
 
-Datasets (same env, via `LmdbBackend.createDataset` with dupsort passthrough — small
-change in `src/backends/lmdb/index.js:~138` to forward `dupSort`/`keyEncoding`/
-`encoding` options):
+Datasets (same env, via `LmdbBackend.createDataset` — **no backend change needed**, verified
+2026-08-02: `src/backends/lmdb/index.js:129` already spreads `...options` straight into `openDB`
+with no whitelist, defaulting only `strictAsyncOrder`. All six existing callers pass no options,
+so this is the first use of the passthrough):
 
 ```
 edges_fwd   dupSort, keys [fromId, predId] (ordered-binary), values toId
@@ -123,8 +204,14 @@ resolve).
 
 ## Phase 2 — kill bitmap relations
 
-- Delete `src/indexes/inverted/Relations.js`; re-point every consumer (grep
-  `relate(`, `unrelate(`, `getRelated(`, `rel/` across `src/` and `src/index.js`) to
+Blast radius, measured 2026-08-02 — **smaller than this plan assumed**. `Relations.js` is 138
+lines and there are **zero production `relate()`/`unrelate()`/`getRelated()` call sites**: edge
+creation is exercised only by `tests/relations.test.js`. The entire live surface is
+`clearRelations(docId)` at `src/index.js:1967` (bulk/layer clear) and `:3453` (`#deleteOne`), the
+import at `:35`, the instantiation at `:514-516`, and `'rel/'` at `keys.js:13`. So Phase 2 is
+~4 lines plus a test port — it can land the same day as Phase 1.
+
+- Delete `src/indexes/inverted/Relations.js`; re-point the consumers listed above to
   EdgeIndex. Keep the public method names on the SynapsD class stable if convenient,
   but the `rel/` bitmap namespace dies: remove `'rel/'` from
   `src/indexes/bitmaps/lib/keys.js` allowed prefixes so any straggler write throws.
@@ -135,37 +222,220 @@ resolve).
 **Tests:** existing relations tests ported 1:1 to EdgeIndex semantics; a canary test
 asserting `bitmapIndex` refuses `rel/` keys.
 
-## Phase 3 — schema namespace v3 (`data/entity/*`)
+## Phase 2b — device presence (independent; can land before or after 1–2)
 
-Mapping (registry-level; delete files where noted):
+Devices are special: they are the one entity where the interesting question is *presence of other
+documents on them*, not the document itself. That question is **already answered** — this phase
+closes the holes rather than building anything new. Fully independent of the schema rename; no
+migration except a reindex.
+
+**The existing mechanism (verified 2026-08-02 — do not rebuild it):**
 
 ```
-data/abstraction/document     → data/entity/document
-data/abstraction/file         → data/entity/file
-data/abstraction/message      → data/entity/message           (schema kept; platform enum → data.type)
-data/abstraction/email        → data/entity/message  kind:email      (Email.js: fold zod into message
-                                                                      email-variant validator, delete file)
-data/abstraction/todo         → data/entity/task               (rename Todo.js → Task.js)
-data/abstraction/contact      → data/entity/identity type:person     (rename/generalize Contact.js)
-data/abstraction/device       → data/entity/device
-data/abstraction/application  → data/entity/application
-data/abstraction/note         → data/entity/document kind:note        (app-level; see registry split)
-data/abstraction/tab          → data/entity/document kind:browser-tab (app-level)
-data/abstraction/link         → data/entity/document kind:link        (app-level)
-data/abstraction/dotfile      → data/entity/file     kind:dotfile     (app-level)
-data/abstraction/bucket       → DELETED (folders are tree nodes; DirectoryTree covers it)
-+ NEW data/entity/event       (type: calendar | alert | activity)
+data.links / data.installs / stored mount   (per-schema)
+  → locations[] entries  file://<deviceId>/<path>     Dotfile.js:182, Application.js:223,
+                                                      WorkspaceStoredIndex.js:1498
+  → #deviceFeaturesFromLocations   index.js:4223      parses authority, ticks device/id/<authority>
+  → #indexDocument                 index.js:4196      unions into features on EVERY write path
+  → #removeStaleDeviceMembership   index.js:4249      pre/post-write location diff unticks
 ```
+
+Schema-agnostic, already correct, already has a stale-diff lifecycle. A dotfile mapped to 3
+devices ticks 3 `device/id/*` bitmaps today. "Everything on device X" is one bitmap AND.
+
+**The four gaps to close:**
+
+- [ ] **Pathless installs are invisible** (correctness bug). `Application.#buildLocations`
+      (Application.js:~236) only emits a location `if (state?.path)` — so a flatpak / snap /
+      system install with `status:'available'` and no path produces **no location and therefore no
+      device presence at all**. Exactly the install types with no filesystem path are the ones
+      missing from "what's on this device". Fix, staying schema-agnostic and inside the one
+      mechanism: emit `{url: 'device://<deviceId>', metadata:{status}}` for pathless installs, and
+      accept `scheme === 'device'` alongside `'file'` in `#deviceFeaturesFromLocations`
+      (index.js:4228). ~3 lines in the derivation, one branch in the schema. Everything downstream
+      (tick, stale-diff, query) works unchanged because it all keys off the derived tag.
+      ⚠️ Both schemas rebuild `locations` in the CONSTRUCTOR only (`Dotfile.js:83`,
+      `Application.js:114`) while `BaseDocument.update()` overwrites `data` without re-deriving —
+      the drift bug already logged in TODO.md's review findings. Fixing presence without fixing
+      that means a device dropped from `data.installs` via a generic `update({data})` never
+      unticks. Fix both together or the stale-diff is decorative.
+- [ ] **No query surface** (cheapest win in this file). Nothing in routes, CLI or UI ever
+      constructs a `device/id/<x>` filter — verified zero hits across the parent repo. The
+      capability has existed for months and is unreachable; `dot/actions/devices.js:25` iterates
+      `doc.data.links` per-document instead of intersecting the bitmap. Expose it: a device filter
+      on the documents routes (the generic `attributes.allOf` param already accepts the key — it
+      just needs a caller and a UI affordance), and switch the CLI dot/app device views to the
+      bitmap.
+- [ ] **Presence cannot express state.** `device/id/*` means "a location exists on this device" —
+      an install with `status:'missing'` or `'error'` still reads as present. Add a status facet
+      alongside presence rather than overloading it, following the existing todo-status precedent
+      (`data/status/<status>` via `facetBitmapKeys`, tick-current / untick-stale, already built
+      and tested — TODO.md, DONE 2026-07-13). Presence and health stay orthogonal and compose:
+      `device/id/x ∩ !data/status/missing`. This is also the natural first customer for
+      generalizing `STATUS_FACET_SCHEMAS` into `indexOptions.facetFields` at schema registration
+      (Phase 3), instead of the current todo-only hardcode.
+- [ ] **Two producers, one namespace, no documented rule.** `device/id/*` is written both by
+      synapsd (derived from `locations[]`) and by the parent's `buildDeviceFeatureTags`
+      (`src/utils/device-features.js:25`, asserted from `request.client` on the documents write
+      routes), which additionally emits `device/os/*` and `device/type/*` that **nothing derives
+      and nothing reads**. `#removeStaleDeviceMembership` already has to special-case the asserted
+      set to avoid unticking the writing client's own tag (index.js:4253) — that special case is
+      the smell. Decide and write it down: derived-only, asserted-only, or derived + a documented
+      asserted overlay; drop `device/os/*` and `device/type/*` if they stay unread (they belong on
+      the Device *document*, which is where an os/type query should resolve from anyway).
+      Note also `enforceClientTags` coverage is already asymmetric — device tags are silently not
+      merged on `PUT /workspaces/:id/documents` and `POST /workspaces/:id/dotfiles` (open bug in
+      TODO.md). Settle the ownership rule first, then that bug has an obvious right answer.
+
+**Also note:** `normalizeBitmapKey` lowercases and sanitizes, so `device/id/<x>` is not reversible
+to the raw `deviceId` when it contained uppercase or chars outside `a-z0-9_-./@:+`. Queries match
+because they run through the same normalizer, but resolving a bitmap key back to a `Device`
+document (`data.deviceId`, the checksum field — Device.js:13,39) needs a normalized comparison,
+not raw equality. Either document that or normalize `deviceId` at registration
+(`Registry.#requireDeviceId` currently only trims — `src/core/device/Registry.js:202`).
+
+**Tests:** dotfile/application with N device links tick N `device/id/*` keys; pathless install
+ticks presence via `device://`; removing a device from `data.links`/`data.installs` through a
+generic `update({data})` unticks (this fails today); status facet composes with presence; a
+document with only `stored://` / `https://` locations ticks nothing.
+
+## Phase 3 — schema model v3 (`kind` + registry; **ids stay `data/abstraction/*`**)
+
+**D1 RESOLVED 2026-08-02 — option (c): keep the `data/abstraction/*` id strings.** The L1 model
+(kind, runtime registry, `data.relations`, `indexOptions` off the row) lands in full; only the
+*id rename* is deferred. Rationale: the rename carried ~272 cross-repo occurrences over five
+sibling submodules, a public route path and a shipped config, and delivered **none** of v3's
+actual value — the value is in the model, and the model is orthogonal to the strings.
+
+**`kind` is the migration path, not just a field.** Stamping `kind` on documents that keep their
+existing ids means consumers can migrate their queries from `data/abstraction/tab` to
+`data/kind/browser-tab` incrementally, per submodule, on their own release cadence. When every
+consumer reads `kind`, the eventual id consolidation becomes a no-op for them. Do the rename as
+its own rev, gated on a coordinated submodule release — not here.
+
+Mapping — **id column unchanged**; the work is the `kind` stamp + registry placement:
+
+```
+id (UNCHANGED)                kind          registry     note
+data/abstraction/document     —             core
+data/abstraction/file         —             core
+data/abstraction/message      —             core         REGISTER it (see bugs below); platform enum → data.type
+data/abstraction/email        email         core-variant fold Email.js zod into the message email-variant validator
+data/abstraction/todo         —             core         (Task.js rename deferred with the id)
+data/abstraction/device       —             core
+data/abstraction/application  —             core
+data/abstraction/note         note          app-level
+data/abstraction/tab          browser-tab   app-level
+data/abstraction/link         link          app-level
+data/abstraction/dotfile      dotfile       app-level    stays its OWN entity — NOT a file (see below)
++ NEW data/abstraction/event  —             core         (type: calendar | alert | activity)
+```
+
+**Correction 2026-08-02 — `dotfile` is NOT a `file`.** An earlier draft mapped
+`dotfile → file kind:dotfile`. That is wrong on two independent counts, both verified:
+
+1. **A dotfile can be a directory.** `Dotfile.data.type` is `z.enum(['file','folder'])`
+   (Dotfile.js:40) — `~/.ssh`, `~/.config/nvim` are ordinary, arguably the common case. A folder
+   has no bytes and no content checksum, so it cannot be a `file` entity at all.
+2. **Identity is a path, not content.** `Dotfile` sets `checksumFields: ['data.repoPath']`
+   (Dotfile.js:73) — identity is "which entry in the dotfiles repo", unique per workspace by
+   `repoPath`. `File` identity is the **content hash** (`File` deliberately does not set
+   `checksumFields`, relying on an external `checksumArray` — File.js:46). Folding them would put
+   two incompatible identity rules under one entity, which is exactly the class of mistake
+   TODO.md's tab-vs-file analysis rejects for the snapshot case.
+
+What a dotfile actually is: a **mapping** between one repo path and N per-device local paths
+(`data.links`), whose payload lives in the dotfiles repo. Neither a file nor a folder-as-tree-node
+— the `bucket → DELETED, folders are tree nodes` reasoning does not transfer, because a dotfile
+folder is a *synced unit*, not a navigational container. It keeps its own entity and its own
+`kind:dotfile`. If a `type` axis is wanted for querying, derive `data/kind/dotfile` plus a facet
+from `data.type` (`file|folder`) — same facet machinery as the status work in Phase 2b, not a
+second entity.
+
+Consequence for Phase 2b: presence derivation is already directory-safe —
+`file://<deviceId>/$HOME/.ssh` parses identically to a file path and ticks `device/id/*` the same
+way. No change needed there, but do not "optimize" the derivation on a files-only assumption.
+
+### Dotfile identity — `data.repoPath` is unsafe; replace with a URI (decided 2026-08-02)
+
+Driver: dotfiles must be able to reference **external git repos**, not just the one implicit
+workspace repo. `repoPath` cannot express that — and it is already unsafe today, at 0 documents.
+Verified problems, all live:
+
+1. **No normalization.** `repoPath` is a bare `z.string().min(1)` (Dotfile.js:38) — no trim, no
+   leading-`/` strip, no `//` collapse, no `../` rejection. Only the CLI strips leading slashes
+   (`dot/actions/add.js:38`) and the REST body schema validates nothing
+   (`routes/workspaces/dotfiles.js:104-114`). Since identity is
+   `sha*(JSON.stringify(data.repoPath))`, `shell/bashrc` · `./shell/bashrc` · `shell//bashrc` ·
+   `shell/bashrc/` are **four documents for one repo file**.
+2. **One implicit repo is a hardcoded invariant**, not a modelled fact:
+   `<workspace.rootPath>/git/bare.git` (WorkspaceGitRepo.js), and the CLI can only ever target
+   the Canvas server (`dot/lib/paths.js:26-29`). There is **no repo field in the schema at all**,
+   so `shell/bashrc` in two different repos is one document the moment external repos land.
+3. **Whole-document replacement wipes device links.** On the checksum-match path
+   (index.js:914-930) the incoming doc *replaces* the stored one (only `id`/`createdAt`/
+   `updatedAt` carry over). The CLI compensates by fetch-and-merge client-side (`add.js:60-63`);
+   a direct `POST` with a partial `links` map destroys the other devices' mappings. No
+   server-side merge exists.
+4. **Rename orphans.** No rename action exists in the 14-action `dot` module; `dot add` to a new
+   path creates a new document and strands the old one *with its device links*.
+   `migrateDocumentMemberships` (index.js:2336) is wired for File succession only
+   (WorkspaceStoredIndex.js:842,939).
+
+**Target shape** — a single normalized URI, `checksumFields: ['data.url']`:
+
+```js
+data: {
+  url:   'git+ssh://git@github.com/me/dotfiles#shell/bashrc',   // external repo
+  //     'workspace:dotfiles#shell/bashrc'                       // the workspace's own repo
+  type:  'file' | 'folder',
+  links: { '<deviceId>': '$HOME/.bashrc' },
+  description?, priority,
+}
+```
+
+`url` (not `uri`) per TODO.md Decision 1, and consistent with `locations[].url` already carrying
+`file://` · `stored://` · `imap://` · `s3://`. One field ⇒ one checksum field ⇒ no composite
+field-ordering question; repo namespacing falls out of the scheme+authority.
+
+- **Normalize in a zod `.transform()`**, so every client is covered rather than just the CLI:
+  trim, collapse `//` in the fragment, reject `..` traversal, NFC-normalize, lowercase
+  scheme+host (leave the path fragment case-sensitive). This is the fix that actually closes
+  problem 1 — schema-level, not route-level.
+- ⚠️ **Do NOT embed the workspace id** in the workspace-local form. The synapsd DB is already
+  per-workspace, so the id adds nothing to uniqueness while making identity break on workspace
+  rename/move. `workspace:dotfiles#<path>` is deliberately id-free.
+- **Blast radius is the CLI only** (0 documents, web UI unwired): `dot` actions add/list/link/
+  remove and `dot/lib/paths.js` `repoFilePath()` (`join(dotfilesDir, repoPath)`) must parse the
+  path out of the fragment. Do it in the same commit — `dot` is the only writer.
+- Server-side **merge on the checksum-match path** for `links` (problem 3) so a partial POST
+  cannot delete another device's mapping. Related: give dotfiles a rename that preserves the id
+  (the `PUT` path already migrates checksums correctly at index.js:1011-1015 — nothing just calls
+  it), or accept rename = new doc and say so explicitly.
+- `Dotfile.conflictsWith()` (Dotfile.js:133-142) is dead code — delete it in the sweep.
+
+**Free consolidations — do these now, they have zero cross-repo cost** (measured 2026-08-02:
+`document`, `bucket`, `contact`, `application` have **0** occurrences anywhere outside synapsd,
+and TODO.md confirms 0 documents exist for contact/bucket):
+
+- `data/abstraction/contact` → `data/abstraction/identity` (`type: person|organization|service|bot`),
+  rename/generalize Contact.js. 0 docs, 0 external references — pure code change.
+- `data/abstraction/bucket` → **DELETED** (folders are tree nodes; DirectoryTree covers it).
+
+Everything else keeps its id **and its file** for now. Before folding any *other* id (email→message,
+note/tab/link→document, todo→task — but never dotfile→file), run the per-directory occurrence check —
+`email` alone has 31 external hits, `tab` 83, `note` 60 — and confirm which land in submodules
+that ship independently.
 
 Registry split (`src/schemas/SchemaRegistry.js`):
 
-- Core set hardcoded: document, file, message, event, task, identity, device,
-  application. All `schemaVersion: '3.0'`.
+- Core set hardcoded: document, file, message, email, event, todo, identity, device,
+  application — all under their existing `data/abstraction/*` ids, all `schemaVersion: '3.0'`.
 - `registerSchema(id, { dataSchema, kind?, indexOptions?, relationsMap? })` runtime
-  API for app schemas (Note/Tab/Link/Dotfile variants register from canvas-server;
+  API for app schemas (note/tab/link/dotfile register from canvas-server;
   ship a `examples/` registration or keep them in a `src/schemas/contrib/` loaded
   explicitly by tests until canvas-server lands its side).
-- Delete `'BaseDocument'` alias and every `data/abstraction/*` id in the same commit.
+- Delete the `'BaseDocument'` alias (see below). The `data/abstraction/*` ids **stay**.
 
 Row shape changes (`src/schemas/BaseDocument.js`):
 
@@ -175,14 +445,102 @@ Row shape changes (`src/schemas/BaseDocument.js`):
 - **Add top-level `kind` and `mime`** (optional strings), stamped at ingest;
   mirrored to `data/kind/<v>` and `data/mime/<type>/<subtype>` bitmaps (prefixes
   already exist? verify in `keys.js`; add if missing).
-- Feature auto-injection at BaseDocument.js:198–204 keeps mirroring the (new)
-  schema id.
+- Feature auto-injection at BaseDocument.js:198–206 keeps mirroring the schema id
+  (unchanged strings — one fewer thing to touch under D1(c)).
 - `data.relations` (optional array of `{p, to}`) accepted by the base zod schema;
   excluded from `checksumFields` and embedding fields defaults.
+- **Move `metadata.features` → root `features[]`** (D2). Model on `comment`, line for line:
+  root zod entry, its own `update()` branch **outside** the `dataUpdated` path, excluded from
+  `checksumFields` (a tag edit must never fork dedup or trigger re-embed).
+  - `documentFeatureKeys()` (index.js:112) changes `doc?.metadata?.features` → `doc?.features`
+    and gains a **derived-prefix exclusion**. It currently ticks derived keys out of an
+    asserted-only array — harmless today only because `schema` is the sole derived key in there.
+  - **Drop the schema unshift** at BaseDocument.js:198-206 (it unconditionally injects
+    `this.schema` into `metadata.features` on every construct; triple-redundant, since the client
+    sends it too and `#putOne` re-adds it). Derived keys stay computed: `data/abstraction/*`,
+    `data/mime/*`, `data/backend/*`, `data/source/*`, `data/kind/*`, `feature/*`, `device/*`
+    are NEVER written into `features[]`. Asserted-only: `tag/*`, `custom/*`, `client/*`.
+  - **Preserve `data/dataset/*` across feature-only updates** — ingest provenance must survive a
+    client resending the array without the stamp (same preserved bucket as the derived exclusion).
+  - Feature-only updates must not untick the embed seen-ledger (else bulk-tagging a gallery
+    re-CLIPs it); decide `updatedAt` semantics (bump for sync detection vs. seen-ledger
+    interaction); batch path rewrites N docs in ONE txn so a 10k-doc tag is one tx.
+  - ⚠️ **PITFALL, cost a cycle on 2026-07-15 and will bite here identically:** in `putMany`,
+    `existing.update(doc)` **mutates in place and returns the same instance**. The `prevFeatureKeys`
+    snapshot MUST be taken BEFORE that call, alongside the existing
+    `prevChecksums`/`prevLocations`/`prevComment`/`prevTimelineState`/`prevFacetKeys`. Compute it
+    after and the stale set is silently always empty — the untick never fires and every
+    positive-case test still passes.
+- **`data/source/*` becomes derivable** (handed over from TODO.md): carry the provider in
+  `locations[].metadata.provider` and derive it like `data/backend/*`, instead of stamping it from
+  the backend descriptor in `WorkspaceStoredIndex.js:1076`. Without this, `data/source/*` is the
+  one bitmap class that cannot be rebuilt from rows — which contradicts the rebuild invariant in
+  the architecture recap.
+- **Scope checksum dedup by schema** (decided 2026-08-02). Today the checksum carries no schema
+  prefix and `getByChecksumString` (index.js:3621) does no schema filtering, while the checksum
+  index is global per workspace DB — so any two schemas whose `checksumFields` serialize to the
+  same string collide, and the incoming document **silently overwrites the other's id**. Live
+  exposure: `Dotfile['data.repoPath']`, `Link['data.uri']`, `Tab['data.url']`,
+  `Device['data.deviceId']`. Fix on the **lookup**, not the stored value:
 
-**Tests:** registry resolves all core ids and rejects `data/abstraction/*`;
-registerSchema round-trip incl. indexOptions resolution; kind/mime stamped and
-bitmap-mirrored; checksum stability when only `data.relations` changes.
+  ```js
+  // src/index.js:909-930, the no-id dedup path
+  const existing = await this.getByChecksumString(
+      parsed.getPrimaryChecksum(),
+      { schema: parsed.schema },   // NEW
+  );
+  ```
+
+  Deliberately NOT prefixing the checksum input with the schema id: that changes every
+  document's identity, forcing a full re-dedup — strictly riskier than the sha1→sha256 switch
+  TODO.md analysed, and that one was only safe because every algorithm was already indexed.
+  Scoping the lookup leaves all stored checksums untouched: no migration, no identity fork.
+  ⚠️ Verify the *other* `getByChecksumString` callers first (`Workspace.hasByChecksumString`
+  and the stored reconciliation path) — cross-schema matching may be load-bearing for
+  blob dedup, where the SAME bytes legitimately arrive under different schemas. If so, make the
+  filter opt-in on the dedup path only, not a default on the method.
+- **Settle the `indexOptions` merge order** while moving resolution to the registry:
+  Bucket/Link/Contact/Application spread caller options LAST (caller wins);
+  Document/Note/Email/Tab/Todo/File/Dotfile/Device spread them FIRST then hard-override the field
+  lists (**caller's `ftsSearchFields`/`checksumFields` silently discarded**). Two opposite
+  conventions for one knob; registry resolution makes the ambiguity unshippable.
+
+Two pre-existing registry bugs this phase inherits and should close in the same commit:
+
+- `Message.js` declares `data/abstraction/message` but is **not registered**
+  (SchemaRegistry.js:34-60) — `getSchema()` on it throws today, while the parent's
+  `core/workspace/services/chat/index.js:211,294` refers to it. Only 2 external occurrences, so
+  registering it is cheap and fixes a live bug independent of any fold.
+- `document` is registered at two versions: `BaseDocument.js:19` says `2.2`, `abstractions/
+  Document.js:7` says `2.0` and is what the registry returns — docs are stamped 2.0 while
+  validating against the 2.2 zod shape. Setting all core schemas to `'3.0'` fixes it by
+  construction; note it so the fix is deliberate rather than accidental.
+- `'BaseDocument'` alias exists at SchemaRegistry.js:38, commented "used in tests and older code" —
+  confirm which tests before deleting.
+
+**Tests:** registry resolves every core id (still `data/abstraction/*`); registerSchema round-trip
+incl. indexOptions resolution; kind/mime stamped and bitmap-mirrored; `data/kind/<v>` queries
+return the same set as the equivalent `data/abstraction/<x>` feature query (this is the property
+that lets consumers migrate incrementally); checksum stability when only `data.relations` changes;
+`contact` and `bucket` ids are gone.
+
+**Tests (dotfile identity + checksum scoping):** the four un-normalized `repoPath` spellings all
+resolve to ONE document via the URI transform; `..` traversal is rejected; a workspace-local and
+an external-repo dotfile with the same path fragment are DISTINCT documents; a folder dotfile
+round-trips (no content checksum required); a partial `POST` does not delete another device's
+`links` entry; two schemas whose checksumFields serialize identically no longer collide (assert
+the pre-fix behaviour is gone — a Dotfile and a Link with the same string keep separate ids).
+
+**Tests (D2 / `features[]`):** checksum and embedding stability when ONLY `features[]` changes (the
+`comment` precedent test is the template); a construct no longer injects the schema id into
+`features[]`; derived keys supplied by a client in `features[]` are ignored, not ticked;
+`data/dataset/*` survives a client re-put that omits it; a feature-only update does not untick the
+embed seen-ledger; `putMany` unticks stale feature keys (the prev-snapshot-ordering regression —
+assert the NEGATIVE case, a positive-only test passes even when the untick never fires).
+
+✅ **Test-port cost under D1(c): near zero.** The 24-of-29 suites referencing `data/abstraction/*`
+ids keep working untouched — that entire cost was the rename's, and it is deferred with it. New
+tests are additive (kind, registry, relations).
 
 ## Phase 4 — ingest derivation of asserted edges
 
@@ -226,52 +584,112 @@ intersected (SynapsD.query/list internals), lift each rel entry's sorted int arr
 via `RoaringBitmap32.deserialize`-free construction (`new RoaringBitmap32(array)` is
 fine — arrays arrive sorted) and AND/OR/ANDNOT per `op`.
 
+**QuerySession interaction — do not skip.** `src/session/QuerySession.js` (432 lines, not
+previously mentioned in this plan) caches each cue's operand from `db.resolveCandidates()` and
+invalidates it by watching the bitmap keys that cue touched (`membership.changed`). A `rel`
+operand has **no stable bitmap key** — it is an ephemeral bitmap built from a dupsort scan, so a
+`link()`/`unlink()` fires no membership event and the cached operand goes stale silently. Mark rel
+operands **coarse** (re-resolve on read), exactly as TODO.md's invalidation section already
+specifies for temporal / glob / regexp operands. Cheapest correct version: have
+`resolveCandidates` report rel-derived operands as unkeyed so the existing coarse path picks them
+up — no new machinery.
+
 **Tests:** rel-only query; rel ∧ context path; rel ∧ features noneOf; empty
-adjacency ⇒ empty result fast-path; `dir:'in'` equals swapped-DBI scan.
+adjacency ⇒ empty result fast-path; `dir:'in'` equals swapped-DBI scan; a QuerySession cue with a
+rel bucket re-resolves after `link()`/`unlink()` (fails if the operand is treated as keyed).
 
 ## Phase 6 — migration + rebuild command
 
 `scripts/migrate-v3.js` (or extend existing scripts/):
 
-1. Env version gate: write `internal/version = 3` marker; refuse v2 opens without
-   `--migrate` (check `metadata`/`internal` dataset conventions at
-   src/index.js:235–247).
-2. Single pass over `documents`: rewrite `schema` per mapping table (incl.
-   email→message+kind), stamp `kind`/`mime` (registry-driven detection), move any
-   schema-specific edge-ish fields into `data.relations` (email attachments if
-   modeled, tab→offline-file derivations — audit per schema), drop `indexOptions`,
-   normalize `metadata.features` (old schema id out, new in).
-3. Drop all `rel/` bitmap keys; drop feature bitmaps keyed by old schema ids.
+1. Env version gate — **reuse the existing one, do not invent `internal/version`.** There already
+   is a versioned migration hook: `SCHEMA_VERSION = 1` / `SCHEMA_VERSION_KEY =
+   'internal/schemaVersion'` (src/index.js:63-64), read in `start()` at :562-568, which dispatches
+   `#migrateBitmapKeys()` (:4139) when the stored value is stale and then writes the current
+   version back. Bump `SCHEMA_VERSION` to 2 and hang the v3 migration off that same branch; refuse
+   the open without `--migrate` there. (The marker lives in the `internal` dataset, :314 — this
+   plan's earlier citation of src/index.js:235–247 was wrong, that range is private field
+   declarations. Note also the separate *unversioned* `#migrateEmbedBitmapKeys()` at :1197,
+   invoked at :532 — fold it into the versioned scheme while you are here.)
+2. Single pass over `documents`. **Under D1(c) this is no longer a schema rewrite** — `doc.schema`
+   is untouched for every id except `contact`→`identity` (0 docs) and `bucket` (0 docs), so in
+   practice **no document changes its schema id at all**. What the pass actually does: stamp
+   `kind`/`mime` (registry-driven detection), move any schema-specific edge-ish fields into
+   `data.relations` (email attachments if modeled, tab→offline-file derivations — audit per
+   schema), drop `indexOptions`, and **move `metadata.features` → root `features[]`** (D2),
+   stripping derived keys on the way (the schema id, and any `data/mime|backend|source/*` that
+   leaked in) while preserving `tag/*`, `custom/*`, `client/*` and `data/dataset/*`. The array
+   needs no schema-id *remapping* — the ids didn't move — only removal of the injected copy.
+   Note this pass is what makes the whole rev worth a migration at all: `indexOptions` alone is
+   ~3.2 GB of byte-identical config at 7M rows.
+2b. **Reverse scan for asserted features** (D2, per TODO.md's migration note): for each `tag/*` and
+   `custom/*` bitmap, walk its ids and append the key to each doc's `features[]`. Required because
+   docs written *before* the 2026-07-15 interim fix have tags that exist ONLY in bitmaps with no
+   doc-side record — they are the last state with no rebuild source, which is the entire point of
+   the move. Run it in the same pass as step 2 (read the bitmap → doc id map once). After this,
+   feature bitmaps are derived state forever: rebuildable and droppable.
+3. Drop all `rel/` bitmap keys. (No feature bitmaps to drop — the schema ids are unchanged, which
+   is precisely the risk D1(c) bought out: the ~2600 tabs, the one document class with no rebuild
+   source outside the DB per TODO.md, are never rewritten.)
 4. Replay ingest derivation: edges from `data.relations`; kind/mime bitmaps;
    (checksums/timeline/embeddings untouched — ids stable).
 5. `synapsd rebuild --plane l3 [--src <s>]` subcommand: `removeEdges({src})`/drop derived
    structures + re-run ingest derivation. Even a minimal version (edges + kind/mime
-   only) locks in the rebuild invariant mechanically.
+   only) locks in the rebuild invariant mechanically. **Compose the existing reindexers, do not
+   parallel them** — `reindexCrudTimelines` (:4707), `reindexMimeBitmaps` (:4759),
+   `reindexSearchIndex` (:4814), `reindexEmbeddings` (:4854) already exist as methods, and
+   `scripts/reindex-crud.js` is the CLI precedent to copy. `rebuild --plane l3` should be the
+   umbrella that calls them plus the two new derivations, not a fifth mechanism.
 
 **Tests:** migrate a fixture v2 env (build one in tests/fixtures via the old code
-path pinned as JSON rows) → assert schema ids, kind, edges, absent rel/ keys,
-absent indexOptions; idempotency (running migrate twice = no-op).
+path pinned as JSON rows) → assert schema ids **unchanged**, kind stamped, edges derived, absent
+`rel/` keys, absent `indexOptions`; idempotency (running migrate twice = no-op).
 
 ## Phase 7 — docs & sweep
 
 - Update README/TODO architecture sections; move the L0–L3 spec into `docs/`.
-- Grep sweep: `data/abstraction`, `indexOptions`, `rel/`, `Bucket`, `'BaseDocument'`
-  must return zero hits in `src/` (tests may reference fixtures).
+- Grep sweep: `indexOptions`, `rel/`, `Bucket`, `'BaseDocument'`, `Contact`, `repoPath`,
+  `conflictsWith` must return zero hits in `src/` (tests may reference fixtures).
+- ⚠️ **`data/abstraction` is NOT part of the sweep** — under D1(c) those strings are load-bearing
+  and must stay. The sweep target for the deferred rename rev is instead: every `data/abstraction/*`
+  read in the five sibling submodules has moved to a `data/kind/*` query. Track that as the
+  rename rev's entry criterion.
 
 ## Sequencing & risk notes
 
 - Phases 1–2 are independent of 3–4 and land first (edge primitive is
   self-contained; bitmap-relations deletion is low-blast-radius — predicate surface
   is tiny today).
-- Phase 3 is the big-bang commit; 4 and 5 depend on it. Keep 3+4 in one PR so the
-  repo never has entity rows without edge derivation.
-- Watch: `src/index.js` is 4.9k lines — the insert/update/delete and query paths are
-  the two integration surfaces; everything else is additive files. Backend change in
-  Phase 1 (dupsort passthrough) is ~5 lines but verify `datasetOptions` doesn't
-  already strip unknown keys.
+- Phase 2b (device presence) is independent of everything else and needs no migration beyond a
+  reindex — its first two items are a live correctness bug and an unexposed capability, so it can
+  jump the queue whenever devices matter. It touches `#deviceFeaturesFromLocations` and the two
+  schemas' `#buildLocations`, none of which Phases 1–6 go near.
+- Phase 3 is still the largest commit, and 4 and 5 depend on it — but **D1(c) took the "big bang"
+  out of it**. It is now additive to BaseDocument + a registry rewrite, with no id migration, no
+  cross-repo coordination and no test-suite port. Keep 3+4 in one PR so the repo never has
+  `data.relations` rows without edge derivation.
+- Watch: `src/index.js` is 4.9k lines, but the surface is concentrated — all four write paths
+  funnel through `#applyMembership` (:4407) and all reads through `#resolveParsed` (:2547-2681).
+  `putMany` :836-1137, `#putOne` :2098-2201, `#updateOne` :3207-3318, `#deleteOne` :3421-3528.
+  Everything else is additive files. (The Phase 1 backend change is zero lines — already verified.)
+- **D1 and D2 are both resolved (2026-08-02) — no open decisions remain.** Phase 3 is executable
+  as written. D2 grew Phase 3 (the `features[]` move, `data/source/*` derivation, indexOptions
+  merge order) but did **not** grow Phase 6: its full-table pass was already required to drop
+  `indexOptions`, so `features[]` rides along in the same scan. The one genuinely new migration
+  work is the reverse scan (step 2b) for pre-2026-07-15 tags that exist only in bitmaps.
+
+## Deferred to its own rev — the `data/entity/*` rename
+
+Not cancelled; sequenced behind consumer migration. Entry criterion: the five sibling submodules
+read `data/kind/*` rather than `data/abstraction/*`. Carries with it: `todo`→`task` (Task.js
+rename), `email`→`message kind:email` (fold Email.js), `note`/`tab`/`link`→`document` + kind,
+the `/data/abstraction/:abstraction` route path, the embedd router + shipped config, and the
+24-of-29 test-suite port. **`dotfile` does NOT fold into `file`** — it stays its own entity
+(`data/entity/dotfile`) for the identity and file-vs-folder reasons in Phase 3.
 
 ## Non-goals (explicitly out)
 
 Version chains / same-path-new-checksum successor migration (reconciliation design
 owns it); `rel/has/*` coarse bitmaps; multi-hop traversal; MDB_DUPFIXED packing;
-token-string sugar for the rel bucket; any back-compat shims.
+token-string sugar for the rel bucket; any back-compat shims **inside the DB** (D1(c) keeps ids
+stable so no shim is needed — that is not the same as adding one).
