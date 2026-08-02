@@ -309,7 +309,6 @@ query(
 ```
 
 ### Perf & storage
-- [x] Audit `#buildAllDocumentsBitmap()` callers: done (verified 2026-07-17). All callers now gate on the positive set and only full-scan when the query is genuinely unconstrained (noneOf-only, no positive filters). `excludeTree`/`excludeContext` are gone (replaced by `paths.not` selectors). *Follow-up DONE 2026-07-18: maintained `internal/docs/all` bitmap — #buildAllDocumentsBitmap is now an O(1) clone (see tests/all-docs-bitmap.test.js).*
 - [ ] Lift `indexOptions` (esp. `embeddingOptions`) out of per-document `toJSON()` to schema level: GBs of identical config across 7M rows. *(deferred: per-abstraction config, not per-doc storage; needs design + back-compat sign-off.)*
 
 ## Doc-declared features (`features: []` on the document)
