@@ -12,8 +12,9 @@ const NOTE_SCHEMA = 'data/abstraction/note';
 const DEV_A = 'device-aaa';
 const DEV_B = 'device-bbb';
 
-function dotfile(repoPath, links, type = 'file') {
-    return { schema: DOTFILE_SCHEMA, data: { repoPath, type, links } };
+function dotfile(entry, links, type = 'file') {
+    // v3: identity is a normalized URI; a bare path resolves to the workspace repo.
+    return { schema: DOTFILE_SCHEMA, data: { url: entry, type, links } };
 }
 
 // Application.superRefine requires a type-appropriate `source` for
@@ -134,7 +135,7 @@ describe('device presence bitmaps', () => {
 
         await db.put({
             id,
-            data: { repoPath: 'shell/bashrc', type: 'file', links: { [DEV_A]: '$HOME/.bashrc' } },
+            data: { url: 'shell/bashrc', type: 'file', links: { [DEV_A]: '$HOME/.bashrc' } },
         });
 
         expect(await featuresOf(db, id)).toEqual([`device/id/${DEV_A}`]);
@@ -149,7 +150,7 @@ describe('device presence bitmaps', () => {
         await db.put({
             id,
             schema: DOTFILE_SCHEMA,
-            data: { repoPath: 'shell/bashrc', type: 'file', links: { [DEV_A]: '$HOME/.bashrc' } },
+            data: { url: 'shell/bashrc', type: 'file', links: { [DEV_A]: '$HOME/.bashrc' } },
         });
 
         expect(await featuresOf(db, id)).toEqual([`device/id/${DEV_A}`]);
@@ -183,7 +184,7 @@ describe('device presence bitmaps', () => {
             id,
             schema: DOTFILE_SCHEMA,
             data: {
-                repoPath: 'shell/bashrc',
+                url: 'shell/bashrc',
                 type: 'file',
                 links: { [DEV_A]: '$HOME/.bashrc', [DEV_B]: '$HOME/.bashrc' },
             },

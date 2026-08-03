@@ -47,17 +47,28 @@ const DERIVED_FEATURE_PREFIXES = [
     'data/abstraction/',    // index.js: pushes parsed.schema
     'data/mime/',           // index.js: mimeBitmapKeys from metadata.contentType
     'data/kind/',           // index.js: kindBitmapKeys from the registry
-    'data/status/',         // index.js: statusBitmapKeys from data.status
     'feature/',             // index.js: feature/has-comment
     'device/',              // index.js: #deviceFeaturesFromLocations
 ];
+
+// A schema's own facet namespaces (`static facetFields = ['data.status']` ->
+// `data/status/`) are derived too, but they are per-schema rather than global, so
+// they are computed rather than listed. Without this the generalization would
+// leak: an asserted `data/status/done` would be ticked from the array AND from
+// the facet derivation, and the facet stale-diff could never untick it because
+// the array keeps re-asserting it.
+function facetPrefixesFor(facetFields) {
+    return (Array.isArray(facetFields) ? facetFields : [])
+        .map((field) => String(field).split('.').pop())
+        .filter(Boolean)
+        .map((namespace) => `data/${namespace}/`);
+}
 
 // Asserted, but stamped by INGEST rather than by the client. Preserved across an
 // update that omits them, so a client re-putting its own tag array cannot silently
 // drop the provenance of how the document got here.
 const PRESERVED_FEATURE_PREFIXES = ['data/dataset/'];
 
-const isDerivedFeature = (key) => DERIVED_FEATURE_PREFIXES.some((prefix) => key.startsWith(prefix));
 const isPreservedFeature = (key) => PRESERVED_FEATURE_PREFIXES.some((prefix) => key.startsWith(prefix));
 
 /**
@@ -67,7 +78,9 @@ const isPreservedFeature = (key) => PRESERVED_FEATURE_PREFIXES.some((prefix) => 
  * @param {Array<string>} previous the document's features before this write
  * @returns {Array<string>}
  */
-function normalizeFeatureArray(input, previous = []) {
+function normalizeFeatureArray(input, previous = [], facetFields = []) {
+    const derivedPrefixes = [...DERIVED_FEATURE_PREFIXES, ...facetPrefixesFor(facetFields)];
+    const isDerived = (key) => derivedPrefixes.some((prefix) => key.startsWith(prefix));
     const out = [];
     const seen = new Set();
     const add = (key) => {
@@ -77,7 +90,7 @@ function normalizeFeatureArray(input, previous = []) {
     };
 
     for (const key of Array.isArray(input) ? input : []) {
-        if (typeof key !== 'string' || isDerivedFeature(key)) { continue; }
+        if (typeof key !== 'string' || isDerived(key)) { continue; }
         add(key);
     }
     for (const key of Array.isArray(previous) ? previous : []) {
@@ -303,6 +316,8 @@ class BaseDocument {
         // permanent compat shim.
         this.features = normalizeFeatureArray(
             Array.isArray(options.features) ? options.features : legacyMetadataFeatures,
+            [],
+            this.constructor.facetFields,
         );
 
         // Checksums/embeddings
@@ -388,7 +403,7 @@ class BaseDocument {
             ? data.features
             : (Array.isArray(data.metadata?.features) ? data.metadata.features : null);
         if (incomingFeatures) {
-            this.features = normalizeFeatureArray(incomingFeatures, this.features);
+            this.features = normalizeFeatureArray(incomingFeatures, this.features, this.constructor.facetFields);
         }
 
         // Update metadata if provided. `features` is stripped: it has its own

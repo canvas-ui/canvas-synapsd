@@ -193,3 +193,54 @@ describe('root features[]', () => {
         expect((await db.get(id)).features).toEqual(['tag/red', 'tag/blue']);
     });
 });
+
+// A schema's own facet namespace is derived too — per-schema, so it is computed
+// rather than listed in DERIVED_FEATURE_PREFIXES.
+describe('schema-declared facet namespaces are derived, not assertable', () => {
+    let rootPath;
+    let db;
+
+    beforeEach(async () => {
+        rootPath = await fs.mkdtemp(path.join(os.tmpdir(), 'synapsd-facetassert-'));
+        db = new Db({ path: rootPath, backupOnOpen: false, backupOnClose: false, semantic: { enabled: false } });
+        await db.start();
+    });
+
+    afterEach(async () => {
+        if (db) { await db.shutdown().catch(() => {}); db = null; }
+        if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
+    });
+
+    test('a client cannot assert data/status/* on a schema that derives it', async () => {
+        const id = await db.put({
+            schema: 'data/abstraction/todo',
+            data: { title: 'ship it', status: 'pending' },
+            features: ['tag/urgent', 'data/status/completed'],
+        });
+
+        const doc = await db.get(id);
+        // Otherwise the array would re-assert the key on every write and the facet
+        // stale-diff could never untick it.
+        expect(doc.features).toEqual(['tag/urgent']);
+
+        const completed = await db.list({ features: ['data/status/completed'], limit: 0 });
+        expect(completed.map((d) => d.id)).not.toContain(id);
+
+        const pending = await db.list({ features: ['data/status/pending'], limit: 0 });
+        expect(pending.map((d) => d.id)).toContain(id);
+    });
+
+    test('changing the derived status unticks the old facet', async () => {
+        const id = await db.put({
+            schema: 'data/abstraction/todo',
+            data: { title: 'ship it', status: 'pending' },
+        });
+
+        await db.put({ id, schema: 'data/abstraction/todo', data: { title: 'ship it', status: 'completed' } });
+
+        const pending = await db.list({ features: ['data/status/pending'], limit: 0 });
+        expect(pending.map((d) => d.id)).not.toContain(id);
+        const completed = await db.list({ features: ['data/status/completed'], limit: 0 });
+        expect(completed.map((d) => d.id)).toContain(id);
+    });
+});

@@ -6,19 +6,26 @@
  * Describes a mapping between local paths (file or folder) on multiple devices
  * and a path inside the workspace dotfiles repository.
  *
- * Repository Path (source of truth):
- *   ~/.canvas/data/{user@remote}/workspaces/{workspace}/dotfiles/{repoPath}
+ * Identity (v3): `data.url`, a normalized URI naming WHICH ENTRY IN WHICH REPO.
+ *   workspace:dotfiles#shell/bashrc                     the workspace's own repo
+ *   git+ssh://git@github.com/me/dotfiles#shell/bashrc   an external repo
+ *
+ * This replaced `data.repoPath`, which could not express an external repo at all
+ * (one implicit repo was a hardcoded invariant, not a modelled fact) and was an
+ * un-normalized `z.string()`: since identity is sha*(JSON.stringify(value)),
+ * `shell/bashrc` / `./shell/bashrc` / `shell//bashrc` / `shell/bashrc/` were FOUR
+ * documents for one repo file. Normalization lives in the schema, so every writer
+ * gets it — not just the CLI, which was the only client stripping anything.
  *
  * Links:
  *   Map of deviceId -> localPath
  *
- * Uniqueness is guaranteed by `repoPath` per workspace.
- * A single file in the repo can be mapped to different locations on different devices.
+ * A single entry in the repo can be mapped to different locations on different devices.
  */
 
 import Document, { documentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
-import { pathPattern, normalizeHomePlaceholder, deviceFileUrl } from '../../utils/path-helpers.js';
+import { pathPattern, normalizeHomePlaceholder, deviceFileUrl, normalizeDotfileUrl, dotfileEntryPath } from '../../utils/path-helpers.js';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/dotfile';
 const DOCUMENT_SCHEMA_VERSION = '3.0';
@@ -33,9 +40,10 @@ const documentDataSchema = z
 
         data: z
             .object({
-                // Relative path inside the dotfiles repository (e.g., shell/bashrc).
-                // This is the primary identifier for the dotfile content.
-                repoPath: z.string().min(1),
+                // Primary identity. Accepts a full URI or a bare repo-relative
+                // path (resolved to the workspace-local form) and NORMALIZES both,
+                // so four spellings of one entry cannot become four documents.
+                url: z.string().min(1).transform(normalizeDotfileUrl),
 
                 // Whether this dotfile entry points to a file or folder in the repo.
                 type: z.enum(['file', 'folder']),
@@ -65,10 +73,20 @@ export default class Dotfile extends Document {
 
     // Index configuration is SCHEMA-level, resolved by BaseDocument from this
     // static. Never stored on the row (see documentSchema).
+    // Record fields that MERGE with the stored document instead of replacing it
+    // when a write resolves to an existing doc by checksum. Declared by the
+    // schema so the engine stays schema-agnostic (same pattern as indexOptions).
+    //
+    // `links` needs it because a dotfile's identity is its repo entry, not its
+    // device map: a client POSTing only its OWN device's mapping would otherwise
+    // wipe every other device's. The CLI compensated client-side with
+    // fetch-and-merge; a direct POST had no such protection.
+    static mergeOnDedupe = ['data.links'];
+
     static indexOptions = {
-        ftsSearchFields: ['locationUrls', 'data.repoPath', 'data.description'],
-        vectorEmbeddingFields: ['locationUrls', 'data.repoPath'],
-        checksumFields: ['data.repoPath'],
+        ftsSearchFields: ['locationUrls', 'data.url', 'data.description'],
+        vectorEmbeddingFields: ['locationUrls', 'data.url'],
+        checksumFields: ['data.url'],
     };
 
     constructor(options = {}) {
@@ -89,7 +107,9 @@ export default class Dotfile extends Document {
      * Getters
      * ------------------*/
 
-    get repoPath() { return this.data.repoPath; }
+    get url() { return this.data.url; }
+    /** Repo-relative entry path — what a client joins onto its local checkout. */
+    get entryPath() { return dotfileEntryPath(this.data.url); }
     get type() { return this.data.type; }
     get links() { return this.data.links; }
     get description() { return this.data.description; }
@@ -127,22 +147,6 @@ export default class Dotfile extends Document {
      * Utility helpers
      * ------------------*/
 
-    /**
-     * Check if this dotfile conflicts with another.
-     * Conflicts when:
-     *  1. Same repoPath (duplicate)
-     *  2. Same localPath on the same device
-     */
-    conflictsWith(other) {
-        if (!other) { return false; }
-        if (this.repoPath === other.repoPath) { return true; }
-
-        for (const deviceId of Object.keys(this.links)) {
-            const otherPath = other.getLink(deviceId);
-            if (otherPath && otherPath === this.links[deviceId]) { return true; }
-        }
-        return false;
-    }
 
     /* --------------------
      * Static helpers
@@ -165,7 +169,7 @@ export default class Dotfile extends Document {
         return {
             schema: DOCUMENT_SCHEMA_NAME,
             data: {
-                repoPath: 'string',
+                url: 'string',
                 type: '"file"|"folder"',
                 links: 'Record<deviceId, localPath>',
                 description: 'string',
