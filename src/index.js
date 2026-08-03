@@ -76,6 +76,8 @@ function envFlag(value) {
 
 const SCHEMA_VERSION = 2;
 const SCHEMA_VERSION_KEY = 'internal/schemaVersion';
+// Tracked separately from SCHEMA_VERSION on purpose — see the call site in start().
+const EMBED_KEYS_MIGRATION_KEY = 'internal/migrations/embed-keys';
 
 // Presence bitmap for docs carrying a non-empty user-authored comment. A `feature/`
 // key so it is non-internal (listed + user-filterable in the toolbox). Ticked/unticked
@@ -727,12 +729,21 @@ class SynapsD extends EventEmitter {
             // writing to the canonical key while the legacy one still held the data.
             if (this.#semanticConfig.enabled) {
                 try {
-                    // Folded into the versioned scheme (it used to run on EVERY open
-                    // as an unversioned O(all-bitmaps) pass) — but it must keep its
-                    // position: VectorIndex latches its presence bitmap key at
-                    // construction, so this cannot move down to the migration block.
-                    if ((Number(this.#internalStore.get(SCHEMA_VERSION_KEY)) || 0) < SCHEMA_VERSION) {
+                    // Run-once, tracked by its OWN marker rather than the schema
+                    // version. It used to run on every open (an unversioned
+                    // O(all-bitmaps) pass), and it cannot move down into the
+                    // migration block because VectorIndex latches its presence
+                    // bitmap key at construction.
+                    //
+                    // ⚠️ It must NOT share SCHEMA_VERSION: this whole branch is
+                    // skipped when `semantic.enabled` is false, and the v3 migration
+                    // script runs exactly that way. Gating on the schema version
+                    // meant the version got stamped to 2 with this never having run,
+                    // and every later start then saw "already current" and skipped
+                    // it forever — silently leaving vectors on legacy keys.
+                    if (!this.#internalStore.get(EMBED_KEYS_MIGRATION_KEY)) {
                         await this.#migrateEmbedBitmapKeys();
+                        await this.#internalStore.put(EMBED_KEYS_MIGRATION_KEY, 1);
                     }
                     const textSpace = this.#semanticConfig.spaces.text || defaultVectorSpaces(this.#semanticConfig.dim).text;
                     this.#vectorIndex = new VectorIndex({
