@@ -448,8 +448,70 @@ parent suite is `node --test "tests/**/*.test.js"`, synapsd is `npm test` (jest,
 
 **Scope of this phase, in dependency order.** Do NOT try to land it as one commit:
 
-1. Registry: `registerSchema()` + core set, `Message` registered, `'BaseDocument'` alias deleted,
-   all core `schemaVersion: '3.0'`, `contact`→`identity`, `bucket` deleted.
+1. ✅ **SHIPPED 2026-08-03.** Registry: `registerSchema()` + core set, `Message` registered,
+   `'BaseDocument'` alias deleted, all core `schemaVersion: '3.0'`, `contact`→`identity`,
+   `bucket` deleted, **`event` added** (see below). `tests/schema-registry.test.js` (20),
+   `tests/events.test.js` (13).
+
+   Registry entries are now records — `{SchemaClass, tier, kind?, kindField?, kindPrefix?,
+   indexOptions?}` — in three tiers: **core** (sealed against re-registration), **app**
+   (note/tab/link/dotfile, bundled but registered through the same public path canvas-server
+   will use, so the move is a deletion not a rewrite) and **internal** (tree layers).
+   `getSchema()` still returns the class, so no caller changed.
+
+   Judgment calls inside `contact`→`identity`, all at 0 documents:
+   `data.kind`→`data.type` (a data-level `kind` would shadow the reserved top-level row field),
+   `data.identities[]`→`data.identifiers[]` + `addIdentifier`/`removeIdentifier`/
+   `primaryIdentifier` (an Identity *has* identifiers; it is not a list of them — and this
+   touches `checksumFields`, which is free now and would not be later), and `data.tags` dropped
+   from `vectorEmbeddingFields` ahead of the D2 `features[]` move so that move cannot silently
+   fork every identity's vector.
+
+### `data/abstraction/event` — SHIPPED 2026-08-03 (use case supplied by the user)
+
+Why it exists, in the user's words: *contextualize mostly-unstructured data.* Focus on
+`/work/customer-foo/task-bar` and see everything related to that task; zoom out to
+`/work/customer-foo` and every app bound to that context loads the widened set. A calendar app
+must therefore surface calendar entries **and** todos **and** alerts **and** whatever activity log
+a client app chose to store — through one query against a human-readable context tree.
+
+That is why event is ONE entity with a `type` subtype rather than three entities: calendar, alert
+and activity are three lenses on one time-bound set, and a client should not have to union three
+corpora by hand.
+
+- **One `events` timeline**, deliberately NOT in `pointTimelines`. Calendar entries have duration;
+  a start-only entry on an interval timeline is already stored as an instant, so alerts and
+  activity points cost nothing. "Everything time-bound in this context" is one timeline scan, and
+  `data/kind/event/calendar` narrows it when a caller wants a single lens.
+- **Cross-schema by construction:** `filters: ['t:events:today', 't:tasks:today']` under a context
+  path returns events and todos together — the sigil combiner already ORs them. No new machinery;
+  the zoom-out is the existing context-tree roll-up. Both are covered by tests.
+- `type` is **required, not defaulted** — it drives the kind bitmap, so a silent default mis-files
+  documents into the exact query the entity exists to serve. `start` is required for the same
+  reason: an event with no position on the timeline is not an event.
+- `checksumFields: ['data.title', 'data.start', 'data.type']` — same reasoning as Todo's
+  `dueDate`: "Standup" at 09:00 and at 14:00 are different events, and a calendar entry is not the
+  alert that shares its title.
+
+**Pre-existing bug found and fixed while building it** (`src/index.js`,
+`#normalizeDocumentTimelineEntries`): `const rawEnd = entry.end ?? entry.start` collapsed an
+explicit `null` into `start`, so **no document could ever declare an ongoing interval** even
+though `TimelineIndex.insert` supports one and `tests/timeline-open-intervals.test.js` proves it
+via direct `t.insert()` calls. Now `undefined` (absent) ⇒ instant, `null` ⇒ open end. This is what
+makes an open incident or an ongoing meeting expressible from a document at all.
+
+**RESOLVED 2026-08-03 — kind-prefix rule: ALWAYS prefix with the entity.** A `kindField` value is
+always emitted as `<entity>/<value>`: `application/flatpak`, `identity/person`, `event/calendar`,
+`dotfile/folder`. Mechanical, no per-schema judgment call, no collision risk, and the parent
+segment is a free roll-up (`data/kind/application` = all applications).
+
+**Enforced in code, not by convention:** `registerSchema` throws if `kindField` is set without
+`kindPrefix`. Kind values are persisted in bitmap keys and therefore append-only, so an unprefixed
+generic value that later collides with another schema's is not fixable without a migration — the
+guard makes that unrepresentable rather than merely discouraged.
+
+⚠️ This supersedes the `{allOf:['data/kind/flatpak','device/id/A']}` example in the facet-family
+section below: it is now `data/kind/application/flatpak`.
 2. Row shape: `indexOptions` off the row → registry; top-level `kind` + `mime`; `data.relations`
    accepted; root-level `features[]` (D2) with the derived-prefix exclusion and the dropped
    schema unshift.
@@ -499,7 +561,7 @@ actual value — the value is in the model, and the model is orthogonal to the s
 
 **`kind` is the migration path, not just a field.** Stamping `kind` on documents that keep their
 existing ids means consumers can migrate their queries from `data/abstraction/tab` to
-`data/kind/browser-tab` incrementally, per submodule, on their own release cadence. When every
+`data/kind/browser/tab` incrementally, per submodule, on their own release cadence. When every
 consumer reads `kind`, the eventual id consolidation becomes a no-op for them. Do the rename as
 its own rev, gated on a coordinated submodule release — not here.
 
@@ -513,12 +575,15 @@ data/abstraction/message      —             core         REGISTER it (see bugs
 data/abstraction/email        email         core-variant fold Email.js zod into the message email-variant validator
 data/abstraction/todo         —             core         (Task.js rename deferred with the id)
 data/abstraction/device       —             core
-data/abstraction/application  —             core
+data/abstraction/application  data.type     core         kindField (flatpak, snap, appimage, …)
+data/abstraction/identity     data.type     core         kindField (person | organization | service | bot)
+data/abstraction/event        event/*       core         kindField+prefix (calendar | alert | activity) — SHIPPED
 data/abstraction/note         note          app-level
-data/abstraction/tab          browser-tab   app-level
+data/abstraction/tab          browser/tab   app-level    (this row said `browser-tab`; the hierarchical
+                                                          kind decision below supersedes it)
 data/abstraction/link         link          app-level
-data/abstraction/dotfile      dotfile       app-level    stays its OWN entity — NOT a file (see below)
-+ NEW data/abstraction/event  —             core         (type: calendar | alert | activity)
+data/abstraction/dotfile      dotfile/*     app-level    kindField+prefix (file | folder); stays its OWN
+                                                          entity — NOT a file (see below)
 ```
 
 **Correction 2026-08-02 — `dotfile` is NOT a `file`.** An earlier draft mapped

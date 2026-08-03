@@ -4,7 +4,7 @@ import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/message';
-const DOCUMENT_SCHEMA_VERSION = '1.0';
+const DOCUMENT_SCHEMA_VERSION = '3.0';
 
 const documentDataSchema = z.object({
     schema: z.string(),

@@ -22,7 +22,7 @@ import { z } from 'zod';
 import { pathPattern, normalizeHomePlaceholder, deviceFileUrl, deviceUrl } from '../../utils/path-helpers.js';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/application';
-const DOCUMENT_SCHEMA_VERSION = '1.1';
+const DOCUMENT_SCHEMA_VERSION = '3.0';
 
 const applicationTypeSchema = z.enum(['appimage', 'flatpak', 'snap', 'portable', 'system', 'local']);
 const installStatusSchema = z.enum(['available', 'missing', 'installing', 'error', 'unknown']);

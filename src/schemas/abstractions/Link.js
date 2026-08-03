@@ -4,7 +4,7 @@ import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/link';
-const DOCUMENT_SCHEMA_VERSION = '1.0';
+const DOCUMENT_SCHEMA_VERSION = '3.0';
 const URI_SCHEME_REGEX = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 
 const linkPayloadSchema = Document.extendDataSchema(

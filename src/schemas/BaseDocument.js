@@ -16,7 +16,7 @@ import { generateChecksum } from '../utils/crypto.js';
 
 // Document constants
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/document';
-const DOCUMENT_SCHEMA_VERSION = '2.2';
+const DOCUMENT_SCHEMA_VERSION = '3.0';
 const DOCUMENT_DATA_CHECKSUM_ALGORITHMS = ['sha1', 'sha256'];
 const DOCUMENT_DATA_CHECKSUM_FIELDS = ['data'];
 const DOCUMENT_DATA_FTS_SEARCH_FIELDS = ['data'];
