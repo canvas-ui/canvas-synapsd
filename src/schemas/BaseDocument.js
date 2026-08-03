@@ -310,10 +310,12 @@ class BaseDocument {
         // every construct, which was triple-redundant (clients send it, #putOne
         // re-adds it) and put a DERIVED key inside an asserted-only array.
         //
-        // TODO(Phase 6): `metadata.features` is read as a fallback so rows written
-        // before this change keep their tags. Delete that fallback once the
-        // migration has rewritten rows — it is a migration read path, not a
-        // permanent compat shim.
+        // `metadata.features` is accepted as INPUT and promoted here. Originally a
+        // migration read path — but it outlived that: the v3 migration rewrites
+        // stored rows (and a stale DB refuses to open at all), while clients still
+        // legitimately send `metadata: { features: [...] }`. So this is a client
+        // input path now, not a row-compat shim, and it stays. The promotion also
+        // guarantees there is never a second, stale copy under metadata.
         this.features = normalizeFeatureArray(
             Array.isArray(options.features) ? options.features : legacyMetadataFeatures,
             [],

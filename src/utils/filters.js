@@ -109,10 +109,26 @@ export function parseFilters(filterArray) {
 
         if (body.startsWith('t:')) {
             const parsed = parseTimelineToken(body.slice(2));
-            if (parsed) { timelineFilters.push({ sigil, ...parsed }); }
+            // THROW rather than drop. A dropped filter does not narrow anything, so
+            // a typo'd token ran the query UNFILTERED and returned a wider set with
+            // no error at all — strictly worse than an empty result, because it
+            // looks like a successful answer.
+            if (!parsed) {
+                throw new Error(
+                    `Unparseable timeline filter "${filter}". Expected t:<timeline>:<spec> where spec is ` +
+                    'a named timeframe (today, thisWeek, …), a range (start..end), or a single value.',
+                );
+            }
+            timelineFilters.push({ sigil, ...parsed });
         } else if (body.startsWith('geo:')) {
             const parsed = parseGeoToken(body.slice(4));
-            if (parsed) { geoFilters.push({ sigil, ...parsed }); }
+            if (!parsed) {
+                throw new Error(
+                    `Unparseable geo filter "${filter}". Expected geo:bbox:<minLat>,<minLon>,<maxLat>,<maxLon>, ` +
+                    'geo:near:<lat>,<lon>,<radius[m|km]>, or geo:cell:<s2CellId>[,…].',
+                );
+            }
+            geoFilters.push({ sigil, ...parsed });
         } else if (body.startsWith('g:') || body.startsWith('re:')) {
             const kind = body.startsWith('g:') ? 'glob' : 'regexp';
             throw new Error(`Filter "${kind}" is not yet implemented`);
@@ -137,13 +153,13 @@ export function parseFilters(filterArray) {
  */
 export async function applyTimelineFilter(filter, timelineIndex) {
     if (!timelineIndex) { return new RoaringBitmap32(); }
-    try {
-        const ids = await timelineIndex.queryInterval(filter.name, filter.start, filter.end);
-        return ids && ids.length > 0 ? new RoaringBitmap32(ids) : new RoaringBitmap32();
-    } catch (error) {
-        debug(`Error applying timeline filter: ${error.message}`);
-        return new RoaringBitmap32();
-    }
+    // Deliberately NOT wrapped in try/catch. A malformed interval used to resolve
+    // to an empty bitmap, which is indistinguishable from "nothing matched" — the
+    // caller got a confident wrong answer. A timeline that simply does not exist
+    // still returns an empty result (queryInterval handles that), so only genuine
+    // operand errors surface.
+    const ids = await timelineIndex.queryInterval(filter.name, filter.start, filter.end);
+    return ids && ids.length > 0 ? new RoaringBitmap32(ids) : new RoaringBitmap32();
 }
 
 /**
@@ -156,19 +172,15 @@ export async function applyTimelineFilter(filter, timelineIndex) {
  */
 export async function applyGeoFilter(filter, geoIndex) {
     if (!geoIndex) { return new RoaringBitmap32(); }
-    try {
-        if (filter.kind === 'bbox') {
-            return await geoIndex.queryBBox(filter.minLat, filter.minLon, filter.maxLat, filter.maxLon);
-        }
-        if (filter.kind === 'near') {
-            return await geoIndex.queryRadius(filter.lat, filter.lon, filter.radiusMeters);
-        }
-        if (filter.kind === 'cell') {
-            return await geoIndex.queryCells(filter.cells);
-        }
-        return new RoaringBitmap32();
-    } catch (error) {
-        debug(`Error applying geo filter: ${error.message}`);
-        return new RoaringBitmap32();
+    // Same reasoning as applyTimelineFilter: operand errors propagate.
+    if (filter.kind === 'bbox') {
+        return await geoIndex.queryBBox(filter.minLat, filter.minLon, filter.maxLat, filter.maxLon);
     }
+    if (filter.kind === 'near') {
+        return await geoIndex.queryRadius(filter.lat, filter.lon, filter.radiusMeters);
+    }
+    if (filter.kind === 'cell') {
+        return await geoIndex.queryCells(filter.cells);
+    }
+    return new RoaringBitmap32();
 }

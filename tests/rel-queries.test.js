@@ -155,3 +155,55 @@ describe('rel query bucket', () => {
         await expect(db.list({ rel: { p: 'mentioned-by', of: 1 } })).rejects.toThrow(/Direction is an axis/);
     });
 });
+
+// A filter that cannot be parsed used to be DROPPED, so the query ran unfiltered
+// and returned a wider set with no error — a confident wrong answer, which for a
+// deterministic layer is worse than an empty one. (This is exactly what made an
+// earlier events test pass against a filter that was never applied.)
+describe('filters fail loudly instead of silently widening or emptying', () => {
+    let rootPath;
+    let db;
+
+    beforeEach(async () => {
+        rootPath = await fs.mkdtemp(path.join(os.tmpdir(), 'synapsd-filterfail-'));
+        db = new Db({ path: rootPath, backupOnOpen: false, backupOnClose: false, semantic: { enabled: false } });
+        await db.start();
+    });
+
+    afterEach(async () => {
+        if (db) { await db.shutdown().catch(() => {}); db = null; }
+        if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
+    });
+
+    test('an unparseable timeline token throws rather than running unfiltered', async () => {
+        await db.put(note('a'));
+        await db.put(note('b'));
+
+        // The '>=' form does not exist; the grammar is t:<timeline>:<start>..<end>.
+        await expect(db.list({ filters: ['t:events>=2026-01-01<=2026-12-31'], limit: 0 }))
+            .rejects.toThrow(/Unparseable timeline filter/);
+        await expect(db.list({ filters: ['t:events'], limit: 0 }))
+            .rejects.toThrow(/Unparseable timeline filter/);
+    });
+
+    test('an unparseable geo token throws', async () => {
+        await expect(db.list({ filters: ['geo:bbox:1,2'], limit: 0 }))
+            .rejects.toThrow(/Unparseable geo filter/);
+        await expect(db.list({ filters: ['geo:nowhere:1,2'], limit: 0 }))
+            .rejects.toThrow(/Unparseable geo filter/);
+    });
+
+    test('a VALID timeline filter still works, and an unknown timeline is simply empty', async () => {
+        const id = await db.put({
+            schema: 'data/abstraction/todo',
+            data: { title: 'due today', dueDate: new Date().toISOString() },
+        });
+
+        const due = await db.list({ filters: ['t:tasks:today'], limit: 0 });
+        expect(due.map((d) => d.id)).toEqual([id]);
+
+        // Not an error — the timeline just has nothing in it.
+        const none = await db.list({ filters: ['t:nosuchtimeline:today'], limit: 0 });
+        expect(none.map((d) => d.id)).toEqual([]);
+    });
+});
