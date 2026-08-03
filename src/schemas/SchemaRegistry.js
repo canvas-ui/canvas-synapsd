@@ -37,7 +37,7 @@ import Task from './internal/layers/Task.js';
  * The CORE entity set — synapsd's own primitives. Ids stay `data/abstraction/*`
  * under D1(c): the v3 model lands, the id rename is deferred to its own rev gated
  * on a coordinated submodule release. `kind` is what consumers migrate to; see
- * TODO.refactor-v3.md.
+ * TODO.md.
  *
  * `kind` values are HIERARCHICAL (the `data/mime/*` precedent) — a `browser/tab`
  * ticks both `data/kind/browser` and `data/kind/browser/tab`, so "everything

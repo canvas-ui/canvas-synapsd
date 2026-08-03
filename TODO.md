@@ -78,13 +78,17 @@ data/entity/dotfile
 ? data/entity/organization
 
 ### L2 Relations (would require some cleanup)
-data/relation/references
-data/relation/authored-by
-data/relation/mentions
-data/relation/replies-to
-data/relation/generated-from
-data/relation/executed-on
-data/relation/installed-on
+SUPERSEDED by the closed predicate registry (src/indexes/edges/predicates.js), which is
+append-only and ids-in-keys: includes 1, references 2, derived-from 3, mentions 4, replies-to 5,
+depicts 6, authored-by 7. Notes on the ones sketched here that did NOT survive:
+  generated-from  -> folded into derived-from
+  executed-on     -> never modelled
+  installed-on    -> REJECTED. Device presence is not an edge: "what is on device X" is already
+                     answered schema-agnostically by the device/id/* bitmaps derived from
+                     locations[], which drop straight into the paths ∩ features ∩ filters
+                     pipeline. Rule of thumb: edges are for document-to-document facts with no
+                     derivable location; anything expressible as "these bytes live here" stays in
+                     locations[] and its derived bitmaps.
 
 ### L3 Semantic anchors
 Specially generated semantic anchors/chunks and summaries with several sub-layers (more on that later)
@@ -150,375 +154,174 @@ ordinary layers, queried alongside user trees via multi-spec AND:
   LLM taxonomy) are swappable tree builders producing the same artifact — benchmark against the
   same gold set, engine unchanged.
 
-## Refactor v3
+## Refactor v3 — LANDED 2026-08-03
 
-> **The implementation plan lives in [`TODO.refactor-v3.md`](./TODO.refactor-v3.md)** (7 phases +
-> Phase 2b). Reviewed 2026-08-02.
->
-> **DECIDED 2026-08-02 (D1): schema ids stay `data/abstraction/*`.** The rename to `data/entity/*`
-> is deferred to its own rev — it cost ~272 occurrences across five sibling submodules, a public
-> route path and the installed browser extension, while delivering none of v3's value. v3 ships
-> the *model* (`kind`, runtime registry, `data.relations` + dupsort edges, `indexOptions` off the
-> row); `kind` is the incremental migration path for consumers, and the rename rev's entry
-> criterion is that they read `data/kind/*` instead. Consequence: **no document changes its schema
-> id**, the ~2600 tabs are never rewritten, and the 24-of-29 test-suite port disappears.
->
-> **DECIDED 2026-08-02 (D2): root-level `features[]` folds into Phase 3 + Phase 6.** The
-> declarative mechanism already shipped (2026-07-15 interim fix); the move is only about where the
-> field lives, and Phase 6's pass already rewrites every row to drop `indexOptions` — so it rides
-> along free rather than costing a second full-table scan. Brings `data/source/*` derivation and
-> the `indexOptions` merge-order fix with it. The sequencing section below (steps 1–5) is the
-> detail; step 5 "separate rev" no longer applies.
->
-> **No open decisions remain — Phase 3 is executable as written.**
->
-> A **Supersedes** list in that file names the sections *below* it overrides: schema inheritance /
-> ancestor-chain ticking ("Decision 2"), `link`/`bucket` as core primitives, and the
-> `rel/snapshot-of` · `rel/depicts` · `rel/authored-by` predicates. Read that file first; treat
-> the superseded sections here as historical rationale, not as the plan.
->
-> This file remains the authoritative backlog for everything NOT in v3 (tree mountpoints, sessions,
-> semantic layer, geo, vectors).
+Shipped across 7 phases + 2b. The implementation plan (`TODO.refactor-v3.md`) has been deleted: it
+was a working document for one week's work and stopped being useful once the code landed. What
+follows is only what is still OPEN. The code and `README.md` are the reference for what exists.
 
-Do the simplest thing that works; aim to delete more than you add.
+**What landed, in one paragraph.** Typed doc↔doc edges moved from bitmaps to a dupsort adjacency
+index (`src/indexes/edges/`, 7 predicates, direction as an axis). `data.relations` on a row is
+derived into asserted edges on write; the `rel` query bucket composes adjacency into the normal
+candidate pipeline. Schemas got a runtime registry (`registerSchema`, core/app/internal tiers) with
+`kind` as a derived hierarchical axis (`data/kind/*`). `indexOptions` left the row for a class
+static (~414 B/row, 43% of a note). `metadata.features` became a root-level asserted `features[]`
+with derived prefixes stripped. `data/backend/*` became derived from `locations[]` and absorbed
+`data/source/*`. `data/status/*` generalized to schema-declared `facetFields`. Dotfile identity
+became a normalized URI. `contact`→`identity`, `bucket` deleted, `event` added. Schema version 2
+with `scripts/migrate-v3.js`, and `rebuildL3()` makes the rebuild invariant executable.
 
-! Do NOT use `bitmapIndex.untickAll` (`indexes/bitmaps/index.js:415`): O(all-bitmaps) per delete, that's why it's dead. The bitmap side is already cleaned precisely and cheaply by `clearSynapses` (`indexes/inverted/Synapses.js:144`) via the reverse index. Leave `untickAll` dead.
+**D1 stands: schema ids stay `data/abstraction/*`.** `kind` is the migration path — see the rename
+rev below.
+
+### Open: the `data/entity/*` rename (its own rev)
+
+Deferred, not cancelled. **Entry criterion: the five sibling submodules read `data/kind/*` rather
+than `data/abstraction/*`.** The rename cost ~272 occurrences across `ui/web`, `browser-extensions`,
+`ui/fuse`, `ui/cli`, `ui/shell`, plus a public route path (`/data/abstraction/:abstraction`), the
+embedd router and a shipped config — while delivering none of v3's value. The decisive case is the
+browser extension: installed in users' browsers, not atomically upgradable, so it keeps writing
+`data/abstraction/tab` after any cutover.
+
+Carries with it: `todo`→`task` (Task.js), `email`→`message kind:email` (fold Email.js),
+`note`/`tab`/`link`→`document` + kind, the route path, the embedd router + shipped config, and the
+test-suite port. **`dotfile` does NOT fold into `file`** — a dotfile can be a directory (no bytes,
+no content checksum) and its identity is a repo URI, not a content hash.
+
+Sweep target for that rev: every `data/abstraction/*` read in the submodules has moved to
+`data/kind/*`.
+
+### Open: timeline coverings (S2-shaped) — blocks the wikipedia corpus
+
+**A document occupies ONE position per timeline.** The tier is a BSI keyed `id -> a single value`,
+so a second `insert(name, id, …)` overwrites the first. Declaring two entries for one timeline name
+now THROWS rather than silently keeping the last (which is how it failed before, invisibly: the row
+kept every entry and `db.get()` re-rendered them all while the index held one).
+
+**This is what the wikipedia import needs.** An article about ancient Egypt carries several ranges;
+one-doc-per-range or a single collapsed envelope are the only options until coverings land.
+
+Design settled 2026-08-03 — **reuse the `GeoIndex` covering pattern for time.** Spatial and temporal
+representation sharing one underlying structure is the goal, not a shortcut (place/grid-cell
+literature: projecting data into low-dimensional structures, recall generative at its core).
+
+- **Declarative side needs no new field** — `timelines[]` already accepts N entries; the guard's
+  throw becomes support.
+- **Derived side:** `internal/ts/<timeline>/cover/<scale>/<bucket>` roaring bitmaps. Each range
+  ticks the coarsest containing buckets plus finer boundary buckets — the S2 covering algorithm in
+  1-D, over the existing `SCALES` hierarchy (`Gyr…ns`).
+- **Cheap because** bucket-key count is bounded by *timespan ÷ granularity*, not by document count.
+  All of human history at year scale is ~5k keys shared across every article.
+- **The BSI stays** for exact `getSortKeys` and `histogram`; coverings become the membership
+  structure. L3 by construction — droppable, rebuildable, slots into `rebuildL3()`.
+
+**⚠️ OPEN, decide before building: boundary precision.** If an article says "Old Kingdom,
+2686–2181 BC", must a query for exactly 2181 BC match, or is year-level overshoot acceptable? That
+decides whether coverings need boundary refinement or can stop at the containing bucket.
+
+Already supported, do not rebuild: wipeable datasets (`deleteDataset(name, {dropDocuments})` +
+`data/dataset/*`) and layered zeitgeist queries (`RANGE_MODES` includes `layers`/`grouped`, so
+`wikipedia,personal` against a birthdate works today).
+
+Rejected: occurrence sub-ids (adds an id space + a translation step on every timeline query) and a
+time-bucketed dupsort index (re-implements range querying that coverings get from bitmap unions).
+
+### Open: consumer-registered abstractions
+
+Already works: a subclass declaring `static indexOptions` gets its own fts/vector/checksum fields
+(JS static inheritance, resolved via `this.constructor` — no registry import, no cycle); one
+declaring none inherits its parent's; base mandatory fields stay enforced; `registerSchema()`
+accepts it. `kindField`/`kindPrefix`/`facetFields`/`mergeOnDedupe` are all schema-declared.
+
+Two gaps:
+
+1. **No parent-aware data-schema helper.** `Phone.dataSchema` inherits `Device.dataSchema`
+   unchanged, so a consumer's own fields are accepted (passthrough) but never *validated*.
+   `extendDataSchema()` builds a fresh wrapper rather than extending the parent's payload. ⚠️ Fixing
+   it needs care: `Document.dataSchema.shape.data` is a `z.record`, not a `z.object`, so a naive
+   `.merge()` breaks every schema currently calling `Document.extendDataSchema`. Add a separate
+   explicit helper. Small; can ride any commit.
+2. **No registration ROUTE.** Registration is in-process JS only. Its own rev — an API design
+   problem more than an engine one: a class cannot be transmitted over HTTP, so it needs a
+   declarative descriptor compiled server-side into a zod schema + index options. Open questions:
+   persistence across restarts, per-user vs per-workspace scoping, and the sharp one — **what
+   happens to stored documents when a consumer re-registers a schema with different
+   `checksumFields`**, since that silently changes document identity.
+
+⚠️ Not to be confused with the superseded "schema inheritance" decision. What v3 killed is *bitmap
+ancestor-chain ticking* (a tab ticking `data/abstraction/link` so "all links finds tabs"); `kind`
+replaced that. CLASS extension for validation and index-option inheritance is alive and wanted.
+
+### Open: post-v3 rough edges
+
+Collected during the rev and the pre-prod migration. None are blocking; several are worth a
+deliberate decision rather than a drive-by fix.
+
+- **`update()` is replace, not patch, when a schema is supplied.** `put({id, schema, data})` clears
+  `features[]` it does not resend (preserved prefixes excepted); the schema-LESS form
+  (`put({id, data})` / `put({id, features})`) patches. Same footgun as dotfile `links`, which got a
+  schema-declared `mergeOnDedupe` workaround. Fixing it globally is its own rev — the semantics are
+  load-bearing for the stored-index reconciliation path.
+- **`list()` swallows every resolve-time error into an empty array with `.error`.** Three call sites
+  read `.error` (`routes/workspaces/documents.js:333,:612`, `Workspace.js:1526`), so the contract is
+  deliberate — but a direct caller that does not check it sees "no results". Spec-shape errors now
+  throw at parse time (outside the try), which covers the common case; whether the runtime contract
+  should become an exception is open.
+- **A declared backend key does not roll up.** `location.metadata.backend` emits a single-segment
+  `data/backend/<declared>` (seen in pre-prod as `data/backend/fs:data:email`), while URL-derived
+  keys are hierarchical (`data/backend/imap` + `data/backend/imap/<account>`). So a declared backend
+  is invisible to "everything from X" roll-ups. If declared backends become common, the derivation
+  should split them the way the URL path does.
+- **`data/no-location` is asserted, not derived.** Nothing in synapsd derives it; the parent's
+  orphan lifecycle writes it alongside `orphanedAt`. Deriving it from `locations.length === 0` is an
+  open question — it would make the marker rebuildable, but the orphan lifecycle also carries
+  intent ("kept deliberately") that a pure derivation would lose.
+- **`kind` is absent rather than `null` on migrated rows with no kind axis.** The migration only
+  writes the field when it changes, and `undefined ?? null === null`, so it skips. Anything built
+  through `BaseDocument` gets an explicit `null`. Functionally identical; inconsistent if you grep
+  raw rows.
+- **Migration and rebuild are single-document loops.** The v3 row pass does a per-document `put`
+  rather than one batched transaction, and the reverse scan holds a `docId → tags` Map in memory for
+  the whole run. Fine at ~5k (pre-prod: 4953 docs, instant); neither is designed for 1M.
+  `rebuildL3()` has the same shape. Measure on the wikipedia set before relying on it.
+- **`reindexSearchIndex({rebuild:true}) is owed on migrated databases.** The FTS fix (objects were
+  indexed as the literal `"[object Object]"`) changes indexed content for `data/abstraction/document`,
+  Identity `identifiers`/`channels`/`links` and Email `from`/`to`. The migration deliberately does
+  not force it — it is a content change, not a structural one.
+
+### Open: parked additions
+
+- **Email recipients (To/Cc → identity).** `authored-by` covers `From`. The *role* is distinct from
+  authorship and cannot live in edge meta without colliding with the asserted-edge convention
+  (asserted ⇒ no meta row), so it needs its own predicate ids or a role field. Deferred safely: ids
+  are append-only and nothing is being written under a wrong predicate meanwhile.
+- **Selected identities as persistent bitmaps.** `identity/id/<x>` derived like `device/id/*` would
+  put frequently-queried identities straight into the `paths ∩ features ∩ filters` pipeline with no
+  adjacency scan. Tradeoff is unbounded key cardinality — hence "selected" (pin/star), long tail
+  stays on edges. Measure first; at ~1–2k contacts a bitmap per identity is likely the wrong call.
+- **`rel/has/*` coarse bitmaps** — additive later, deliberately not built.
+- **Multi-hop traversal** — one hop only in v3.
+- **Predicate registry** is closed and append-only: `includes` 1, `references` 2, `derived-from` 3,
+  `mentions` 4, `replies-to` 5, `depicts` 6, `authored-by` 7. Never renumber. `snapshot-of` was
+  folded into `derived-from` (the predicate says where something came from; *what* it is lives on
+  the target).
+
+### Non-goals (explicitly out)
+
+Version chains / same-path-new-checksum successor migration (the reconciliation design owns it);
+MDB_DUPFIXED packing; token-string sugar for the `rel` bucket; any back-compat shim inside the DB.
 
 
-### Target surface
+## Doc-declared features — LANDED in v3
 
-```
-// Public read surface = list() + query(). Nothing else. (get(id) is trivial, not shown.)
-list(spec?)              // == query(null, spec); kept for back-compat + simple UX, no match
-query(match, spec?)      // match: string | { text?, image? }
+`features[]` is a root-level asserted array on the document; derived prefixes are stripped on the
+way in, `data/dataset/*` is preserved across updates, and the schema-id unshift is gone. See
+`README.md` and `tests/root-features.test.js`.
 
-// Writes
-put(document, spec?)     // spec: { paths, features } -- no filters, no match
-putMany(documents, spec?)
-link(idOrIds, spec)      // spec: { paths, features }
+**The pre-prod migration validated the premise**: of 4,953 documents, **1,435 (29%) carried tags
+that existed ONLY in bitmaps** with no doc-side record. Those were unrebuildable — a `rebuildL3()`
+would have silently dropped a third of the tagging. The reverse scan recovered them onto the rows.
 
-// recall (anchor planning) + search: folded into the Session feature, not this cut.
-
-spec = {
-  paths:    ['ctx:/a/b', '!dir:/staging'],                       // or { in, not }
-  features: ['+tag/red', 'data/abstraction/file', '!tag/spam'],  // or { allOf, anyOf, noneOf }
-  filters:  ['+t:crud:updated:thisWeek', 't:wikipedia:1996', 't:personal:1996', 'g:*.pdf', 're:^foo'],
-  mode: 'fts|vector|hybrid', limit, offset, parse, groupBy,      // flat; groupBy:'timeline' buckets the result
-}
-```
-
-Buckets intersect (paths AND features AND filters AND match); items within a bucket union. Per item: default is `anyOf` (OR), `+` promotes to required (`allOf`), `!` excludes (`noneOf`). Pipeline order is fixed: tree-path bitmaps, then feature bitmaps, then filters (BSI timelines, glob, regexp), then semantic (vector) on the surviving subset only.
-
-### API consolidation
-- [ ] Filter prefix registry (`t:` temporal, `g:` glob, `re:` regexp) with the same sigil algebra as paths/features; see "Filter grammar" below. *(`t:` shipped; `g:`/`re:` parse-time throw, deferred to db schema refactor.)*
-
-### Filter grammar (`t:` temporal, `g:` glob, `re:` regexp)
-
-Surface is uniform `t:<name>:<spec>`; the parser splits internally. Sigil algebra matches paths/features: default `anyOf` (OR), `+` = `allOf` (required gate), `!` = `noneOf` (exclude). The hard part already exists: `TimelineIndex.queryInterval` (indexes/inverted/Timeline.js:188) takes a name array and unions, auto-detects scale (`'1996'` -> year, Timeline.js:482), and has a per-timeline `mode:'layers'` (Timeline.js:349). Arbitrary content timelines are already indexed per-document (`timelines:[{name,start,end}]`, index.js:3004); `crud:*` are reserved auto-managed ones.
-
-Spec forms:
-- Content point: `t:wikipedia:1996`
-- Content range: `t:wikipedia:1996..1999` (`..`, since `:` is the segment delimiter); relative ages parse too (`t:geology:541mya..252mya`)
-- Lifecycle (reserved `crud`): `t:crud:<action>:<timeframe|range>`, e.g. `t:crud:updated:thisWeek`. ~~Named timeframes stay crud-only~~ *(revised 2026-07-13: named timeframes resolve on ANY timeline — `t:tasks:today` = "due today"; deep-time axes simply never match them.)*
-
-Overlay = multiple anyOf `t:` items, canonical form is one line per timeline (composes when ranges differ):
-
-```
-filters: ['+t:crud:updated:thisWeek', 't:wikipedia:1996', 't:personal:1996']
-// => crud:updated in thisWeek  AND  (wikipedia ~ 1996  OR  personal ~ 1996)
-```
-
-- [ ] `t:`/`g:`/`re:` prefix dispatch in `parseFilters` (replaces the `datetime:`-only check, filters.js:18); timeline name comes from the token, drop the hardcoded `crud:${action}` (filters.js:103). Today `filters` object only knows `timeline` -> `datetime:updated:<v>` (index.js:3196). *(`t:` shipped; `g:`/`re:` deferred to db schema refactor.)*
-- [ ] **Sigil asymmetry on raw bitmap-key filters** (found 2026-07-13): `t:`/`geo:` tokens get
-      the full sigil algebra via `splitSigil`, but raw keys pass through verbatim to
-      `bitmapIndex.AND`. Current actual behavior: `!key` WORKS (AND splits negatives and
-      subtracts; negative-only starts from the full id range — original scope honored), but
-      `+key` was recognized by NO layer — the leading `+` survived `normalizeBitmapKey` into the
-      key itself and the filter silently matched nothing. *Cheap fix SHIPPED 2026-07-13:
-      parseFilters now pushes the sigil-stripped body for raw keys ('+' → AND default no-op,
-      '!' re-prefixed for the downstream negative split); regression test in
-      todo-tasks.test.js.* Fix proper in
-      the refactor-v3 grammar pass: uniform sigil algebra for raw keys too (default anyOf-OR
-      within the bucket? — decide; today raw keys AND while t:/geo: default to anyOf, which is
-      itself an inconsistency worth resolving in one sweep).
-      **Grammar spec addendum (datasets, 2026-07-17 — deliberate, keep in the sweep):**
-      `data/dataset/*` keys have SELECTION semantics, not constraint semantics — anyOf ADDS the
-      dataset to the mix (default stays selected), allOf restricts to it, noneOf deselects
-      (incl. the virtual `data/dataset/default`). They are partitioned out of the generic
-      anyOf/noneOf buckets in `#resolveParsed`. Sigil mapping: bare = add, `+` = only, `!` =
-      deselect. This prefix-dependent anyOf is intentional spec, not an accident.
-- [x] Sigil-aware filter combiner: partition `t:` items into allOf/anyOf/noneOf, resolve each via `queryInterval`, combine `AND(allOf) ∩ OR(anyOf) \ OR(noneOf)`. Replaces the "AND everything" filter loop in `list`/`search` (index.js:1742, index.js:1905).
-- [ ] `groupBy: 'timeline'` result option: union still drives retrieval, response is bucketed per timeline (`{ wikipedia:[...], personal:[...] }`) via `queryInterval` `mode:'layers'`.
-
-### Vectors & modalities
-
-We are moving towards a separate embedding provider based on `https://github.com/StarlightSearch/EmbedAnything`, It should be possible to seamlessly add new embedding models per modality + fine-tune their settings, revert back to a previous model or remove all vectors for a superseeded model.
-
-This item relates to the "## Refactor `embedd` (coupled to the workspace runtime)" from `TODO.md` in the root of canvas-server (the main repo)
-
-- [ ] Multimodal vector search: text + image now, (streaming) video/audio. Carry `match` as `{ text?, image? }` end-to-end.
-- [ ] External embedding connectors besides local ONNX (ollama, openai, anthropic) behind one provider interface, maybe we should completely remove ONNX from synapsd and solely rely on an external provider but this is up for a discussion first
-
-#### Vector provenance + per-(model,dim) spaces — **NEEDED SOON** (qwen VL / matryoshka tests)
-
-Not cosmetics. Blocks the upcoming qwen-VL / Matryoshka (MRL) embedding tests (user, 2026-07-15).
-
-**⚠️ LANDMINE — DEFUSED 2026-07-17.** ~~a dim mismatch SILENTLY DROPS THE TABLE~~
-`VectorIndex.initialize()` now refuses loudly (`console.warn`) instead of dropping when the
-on-disk `vector` width != configured `#dim` AND the table is non-empty: data stays on disk, the
-space goes offline, `stats()` reports the mismatch. An EMPTY table under a mismatch still
-recreates (that path is safe and keeps the original vec_image 512→768 self-heal). Tests:
-`tests/vector-provenance.test.js`.
-
-~~**The row carries no provenance.**~~ **SHIPPED 2026-07-17**: rows now carry `model`, `dim`,
-`embeddedAt`; legacy tables are backfilled on open via `addColumns` (legacy rows get `model:''`
-= honestly unknown). embedd ships `rule.model` with every `storeVectors` push, so provenance is
-stamped end-to-end. "Re-embed everything vectorized with X" is now a Lance query.
-
-- [x] **Key the Lance table by `(space, model, dim)`** — SHIPPED 2026-07-17, opt-in per space:
-      a space config that declares `model` gets `vec_<space>__<model-slug>__<dim>`
-      (`#vectorTableName`, index.js); MRL truncations become sibling tables for free. Model-less
-      legacy spaces keep their fixed `cfg.table` names (`vec_text`/`vec_image`) so existing data
-      stays attached — zero migration. For the qwen-VL / MRL tests: add the space WITH a model
-      name and the keying (plus the non-destructive guard) makes clobbering impossible.
-      Follow-up for the embedd runtime split: derive synapsd space configs (incl. `model`) from
-      the embedd router rules so the keying becomes the default rather than opt-in.
-- [x] **Add `model`, `dim`, `embeddedAt` columns to the row** — SHIPPED 2026-07-17 (see above).
-- [x] **Make the dim guard loud and non-destructive** — SHIPPED 2026-07-17 (see above).
-- [x] **MRL note — DECIDED 2026-07-17: embedd, at write.** A truncated Matryoshka vector must be
-      **re-normalized (L2)** before cosine/dot, or similarity is silently wrong. embedd owns it
-      because truncation-awareness is model semantics (synapsd disclaims those, index.js:263),
-      write-side normalization happens once instead of on every query, and stored vectors stay
-      valid for any future consumer. Applies to both document vectors and `embedQuery` outputs.
-      Implement in the EmbedAnything/provider layer when the MRL test spaces land.
-- [x] Cross-check `#semanticConfig.dim` — verified 2026-07-17: it is only (a) the fallback dim for
-      the default text space when no `spaces` override is passed and (b) reported in `getStats()`.
-      Per-space `cfg.dim` is authoritative everywhere else. Safe as-is; retire the global when
-      space configs start coming from the embedd router.
-
-
-----------
-
-### Examples
-
-Simple: text match scoped to a context subtree, gated by one timeline.
-
-```
-query('red ferrari', {
-  paths:   ['ctx:/cars'],
-  filters: ['t:crud:created:thisWeek'],
-})
-```
-
-Full: hybrid text + image match, scoped and feature-filtered, with a multi-timeline overlay and a per-timeline grouped result.
-
-```
-query(
-  {
-    text:  'opening ceremony',
-    image: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...'   // base64 data URL
-  },
-  {
-    paths:    ['ctx:/media/olympics', 'dir:/','!dir:/staging'],
-    features: ['data/abstraction/file', 'data/source/wikipedia', '!tag/nsfw'],
-    filters: [
-      '+t:crud:updated:thisWeek',   // gate (allOf): indexed this week
-      't:wikipedia:1996',           // content coordinate
-      't:personal:1996',            // overlaid personal-life entries (anyOf with wikipedia)
-      'g:*.jpg',
-    ],
-    mode:    'hybrid',
-    limit:   50,
-    groupBy: 'timeline',            // result bucketed: { wikipedia:[...], personal:[...] }
-  },
-)
-// => paths ∩ features ∩ crud:updated∈thisWeek ∩ (wikipedia~1996 ∪ personal~1996) ∩ g:*.jpg,
-//    then hybrid text+image ranking on the survivors.
-```
-
-### Perf & storage
-- [ ] Lift `indexOptions` (esp. `embeddingOptions`) out of per-document `toJSON()` to schema level: GBs of identical config across 7M rows. *(deferred: per-abstraction config, not per-doc storage; needs design + back-compat sign-off.)*
-
-## Doc-declared features (`features: []` on the document)
-
-**Decision (2026-07-13): do it — fold into the schema refactor rev, not standalone.**
-
-Custom features (`tag/*`, `custom/*`) are the last membership state that exists ONLY in
-bitmaps — i.e. the last state with no rebuild source if a bitmap corrupts. Everything else
-already follows "the document declares, the index derives": `doc.timelines[]` → timeline BSIs,
-`metadata.contentType` → mime bitmaps, `hasComment` → `feature/has-comment`, `locations[]` →
-`device/*`. A root-level `features: []` completes the pattern: doc = source of truth, feature
-bitmaps = derived cache, full reindex-from-docs becomes possible engine-wide. Bonus: synced doc
-JSON is self-contained (offline clients see tags without bitmap access, see client-spec), and
-per-doc attribute reads stop being a reverse scan over the whole feature vocabulary
-(O(keys × page) today, free once in the doc).
-
-**Prefix classification (REVIEWED 2026-07-15 — every row verified against writers; ✅ = confirmed, ⚠️ = corrected):**
-
-| Prefix | Class | Verdict | Review finding |
-|---|---|---|---|
-| `tag/` | user-asserted | → `doc.features` (the whole point) | ✅ Sole mapper `ui/web/.../add/tags.ts` (`tagsToFeatures`/`featuresToTags`); asserted by web add/edit forms, CLI (`tagsToFeatures`), extension (`tag/<browserIdentity>`). ⚠️ Also written DERIVED by `core/workspace/services/linker/index.js:115` (`tag/context:<contextId>`) — a derived key squatting in the asserted namespace. Fix during the move. |
-| `custom/` | user-asserted | → `doc.features` | ⚠️ Only writer left is the browser extension (`tab-manager.js:169`, `custom/tag/${syncTagFilter}`) — the "consolidate `custom/tag/*` → `tag/*`" item below is marked DONE but only covered server/CLI writers. **Extension still writes `custom/tag/*`.** Either finish it or reopen. |
-| `data/abstraction/*` | derived from `doc.schema` | stays computed, NEVER in `features[]` | ⚠️ **Already violated today**: `BaseDocument.js:212-213` unconditionally unshifts `this.schema` into `metadata.features` on every construct, so every persisted doc carries it. Triple-redundant: client sends it too, and `#putOne` re-adds it. When `features[]` moves to root, do NOT carry the schema into it — and drop the unshift. |
-| `data/mime/*` | derived from `metadata.contentType` | stays computed | ✅ `mimeBitmapKeys` (index.js:80). |
-| `data/backend/*` | derivable from `locations[]` | stays computed? verify all writers | ✅ Verified: only `WorkspaceStoredIndex.#buildFeatures` (:1075) + constants (:31,:36) and imap (`data/backend/imap/<account>`). Bitmap-only. |
-| `data/source/*` | stamped at ingest, NOT derivable from doc | → `doc.features`? or `metadata`? decide | ⚠️ **Decide:** exactly ONE writer — `WorkspaceStoredIndex.js:1076`, `data/source/${backend.source.provider}`, derived from the *backend descriptor*, not the doc → today genuinely NOT rebuildable from doc state (breaks the reindex-from-docs property this whole refactor is for). **Recommendation:** carry the provider in `locations[].metadata.provider` and derive like `data/backend/*` — keeps it computed and rebuildable. Putting it in `features[]` would make an ingest-derived fact look user-asserted. |
-| `feature/*` | derived (has-comment, …) | stays computed | ✅ Exactly one key: `feature/has-comment`. |
-| `device/*` | derived from `locations[]` | stays computed | ✅ Two derivers, both fine: `#deviceFeaturesFromLocations` (index.js:3918, `file://` authority) and `buildDeviceFeatureTags` (utils/device-features.js:31, from `request.client`). `stripDeviceFeatureTags` prevents client spoofing. Bitmap-only — never merged onto the doc. **Do NOT move to `features[]`**: `#removeStaleDeviceMembership` owns their lifecycle and would fight a doc-declared copy. |
-| `client/` | insert-time provenance, asserted by client | → `features[]` as provenance tags | ✅ Asserted only (extension `client/app/*`, CLI `client/app/canvas-cli`); no server deriver. ⚠️ `Context.js #clientContextArray` is **query-side only** (`#buildMergedContextArray` → selector); it never touches a write path — so the TODO's justification for this row was wrong even though the verdict holds. |
-| `server/` | — | (was: → `features[]`) | ⚠️ **DEAD.** No bitmap key with this prefix is ever created. The only `server/` producer is `getSyntheticServerDeviceId` (transports/auth/strategies.js:99), whose value is used as a *deviceId* → surfaces as `device/id/server/<host>`. Drop from ALLOWED_BITMAP_PREFIXES. |
-| `user/` | — | (was: → `features[]`) | ⚠️ **DEAD.** Zero references repo-wide outside the prefix list itself. Drop from ALLOWED_BITMAP_PREFIXES. |
-| `nested/` | DEAD | drop from ALLOWED_BITMAP_PREFIXES | ✅ Confirmed dead. Only keys.js:14 + a defensive `EXCLUDED_BITMAP_PREFIXES` entry in `ui/web/.../services/workspace.ts:1170` (filtering a class that never exists). Drop both. |
-| `context/`, `vfs/` | view membership | bitmap-only, NEVER in doc | ✅ Correct — and see the `contextUUIDs`/`contextPath` finding below: a dead vestige of violating exactly this rule is still in the schema. |
-| `rel/` | relations via Synapses | separate mechanism, untouched | ✅ |
-| `internal/` | engine | untouched | ✅ |
-
-Rule of thumb: `features[]` holds only keys that are *asserted* and *not derivable* from other
-doc state. Derived keys stay computed (single source of truth); view membership stays bitmap-only.
-
-**Deep review 2026-07-15 — `doc.metadata` vs `doc.features`**
-
-The two are different *kinds* of thing and must not share a container:
-
-- **`metadata`** = descriptive facts about the payload, mostly EXTRACTED (`contentType`, `size`,
-  `geo`, `exif`, `dimensions`, `media`). Written by derivers (stored ingest, the embed-time seam),
-  opaque to the index except where a named deriver reads one field.
-- **`features`** = membership assertions that map 1:1 onto bitmaps. Written by humans/clients.
-
-Today `features` lives *inside* `metadata`, which fuses two lifecycles into one object — and
-`BaseDocument.update()` (:299-301) merges metadata as a SINGLE shallow spread. So an EXIF
-enrichment patch and a user tag edit take the same code path, at wildly different write
-frequencies and trust levels. That is the sharpest argument for the root-level move, independent
-of the rebuild-from-docs argument above.
-
-**`comment` is the precedent to copy, exactly.** It was moved top-level for the same reasons and
-already has every property `features[]` needs (BaseDocument.js:104-108): survives per-schema
-migrations, stays out of `checksumFields` so edits don't fork dedup or re-embed, has its own
-`update()` branch outside the `dataUpdated` path (:282-287), and drives a derived bitmap
-(`feature/has-comment`). Model `features[]` on it line for line rather than inventing a shape.
-
-**Status of the interim fix (2026-07-15, shipped, keep for now):** `documentFeatureKeys()`
-(index.js:111) + tick/untick from `metadata.features` in `#putOne`/`putMany`/
-`putManyDirectoryPaths`/link-by-id/`#updateOne`. Right *semantics* (declarative → derived),
-wrong *place* (inside `metadata`). It fixes a real user-visible bug — tags on notes/files were
-stored but never indexed, so bitmap filters and tag autocomplete could never see them. It is a
-stepping stone, not throwaway: at cutover `documentFeatureKeys` changes one line
-(`doc.features` instead of `doc.metadata.features`) plus a derived-prefix exclusion; the
-stale-diff, tick/untick and batch wiring stay. **Do not ship it long-term as-is** — it currently
-ticks derived keys out of an asserted-array, harmless only because `schema` is the sole derived
-key in there.
-
-**Dead code this refactor should delete (all verified zero-caller):** — **ALL DELETED 2026-07-17**
-- [x] `BaseDocument.addFeature` / `removeFeature` / `hasFeature` / `getFeaturesByPrefix`
-      — the whole imperative feature API. Zero callers; everything flows declaratively.
-- [x] `setDocumentArrayFeatures` / `unsetDocumentArrayFeatures` — zero callers.
-- [x] `metadata.contextUUIDs` + `metadata.contextPath` with their
-      `addContext`/`removeContext` helpers — **100% dead**: always `[]` (verified live),
-      no writer, no reader. Link.js duplicate declarations removed too. (Contact's linkSchema
-      `contextPath` left alone — dies wholesale in the contact→identity fold.)
-- [x] `nested/`, `user/`, `server/` from `ALLOWED_BITMAP_PREFIXES` (+ the `nested/` entry in the web's
-      `EXCLUDED_BITMAP_PREFIXES`).
-
-**Bugs found during the review (independent of the refactor, fix or ticket separately):**
-- [x] **`enforceClientTags` coverage is asymmetric** — **FIXED 2026-08-03.** Was: device tags not
-      merged on `PUT /workspaces/:id/documents` and `POST /workspaces/:id/dotfiles`. Resolved
-      together with the device-semantics decision — `device/*` is engine-DERIVED from `locations[]`
-      (`device/*` = "present on", never "written by"), so these routes no longer *merge* anything:
-      they **strip** client-supplied `device/*`, which would otherwise sit underived and
-      un-untickable. Now applied on all four write paths (`workspaces/documents.js:670`,
-      `workspaces/dotfiles.js:130`, `contexts/dotfiles.js:135,:180`). `client/*` stays optional and
-      untouched — consumers tag it or not, as they choose. See TODO.refactor-v3.md Phase 2b.
-- [ ] **`data/abstraction/document` is registered at two versions**: `BaseDocument.js:18-19` says 2.2,
-      `abstractions/Document.js:6-7` says 2.0 and is what the registry returns — so docs are stamped
-      2.0 while validating against the 2.2 zod shape.
-- [ ] **`Message.js` is not registered** (`data/abstraction/message`, with `fromSlack`/`fromTeams`/
-      `fromIRC`) — `schemaRegistry.getSchema('data/abstraction/message')` throws, yet
-      `core/workspace/services/chat/index.js:209` refers to the Message schema helper.
-- [ ] **`indexOptions` merge order is inconsistent across schemas**: Bucket/Link/Contact/Application
-      spread caller options LAST (caller wins); Document/Note/Email/Tab/Todo/File/Dotfile/Device
-      spread them FIRST then hard-override the field lists (**caller's `ftsSearchFields`/
-      `checksumFields` silently discarded**). Two opposite conventions for one knob — settle it in the
-      schema-registration pass.
-- [ ] **Derived `locations` drift on update**: `Dotfile` (:83) and `Application` (:114) rebuild
-      `locations` from `data` in the CONSTRUCTOR only; `BaseDocument.update()` overwrites `data` and
-      `locations` independently and neither overrides `update()` → a generic `update({data})` leaves
-      `locations` stale.
-- [ ] `abstractions/Document.js` is a leaf nobody extends (every abstraction does
-      `import Document from '../BaseDocument.js'` and extends **BaseDocument**) — the import alias
-      reads as if there's a Document hierarchy that doesn't exist.
-
-**Prefix semantics — the "who says so?" rule (decided 2026-07-13):**
-- `data/*` — the DOCUMENT says so: facts derived from doc state (`data/abstraction` ← schema,
-  `data/mime` ← contentType, `data/backend` ← locations, `data/status` ← data.status). Controlled
-  vocabularies, always rederivable, never asserted.
-- `feature/*` — the ENGINE observes presence: boolean has-X flags (`feature/has-comment`).
-  Presence flags only — multi-valued facets go under `data/*`.
-- `tag/*` — the USER says so, free-form flat labels. Uncontrolled vocabulary; must NEVER share
-  a namespace with controlled ones (a user tagging `pending` must stay distinguishable from
-  `data/status/pending` — the cognitive layer disagreeing with the data layer is a feature).
-- `custom/<axis>/<value>` — the USER says so, structured attributes (`custom/urgency/high`).
-- [x] Consolidate `custom/tag/*` → `tag/*` (DONE 2026-07-13 — writers only, no data migration
-      needed pre-deploy: CLI docbuilders, seed hook example, hook meta template).
-- [x] Todo status bitmaps (DONE 2026-07-13): derived `data/status/<status>` via facetBitmapKeys
-      (mime + status unified; tick current / untick stale in putMany/#putOne/#updateOne +
-      reindex backfill). Gated on STATUS_FACET_SCHEMAS (todo only; generalize to
-      `indexOptions.facetFields` with the schema registration facility). Also FIXED a latent
-      putMany bug on the way: batch id-updates never unticked stale mime keys (prev-state must
-      snapshot BEFORE existing.update(doc) mutates in place). Tests in todo-tasks.test.js.
-
-**Write-path gotchas (all have existing precedent):**
-- [ ] Feature edits must NOT regenerate checksums (dedup forks) — same treatment as `comment`
-      (outside the `dataUpdated` path in `BaseDocument.update()`).
-- [ ] **Dataset stamps must survive user feature edits** (2026-07-17): `data/dataset/*` entries
-      are ingest provenance (`data/*` = not user-asserted). A client resending a doc's feature
-      array without the stamp must NOT untick it via the stale-diff — preserve `data/dataset/*`
-      entries on feature-only updates (same preserved bucket as the derived-prefix exclusion).
-- [ ] Feature-only updates must NOT untick the embed seen-ledger in `#updateOne` (or bulk-tagging
-      a photo gallery re-CLIPs it) and should reuse `emitEvent`-style event control.
-- [ ] Tick/untick derived by diffing prev vs new `features[]` per doc — exactly the
-      `mimeBitmapKeys` / `prevTimelineState` / `#removeStaleDeviceMembership` pattern.
-- [ ] Batch path: `linkMany`-equivalent that rewrites N docs in ONE LMDB tx (feature edits become
-      doc writes; 10k-doc tag = one tx, not 10k puts). Keep pure-bitmap `linkMany` for
-      context/vfs membership — that stays view-layer.
-- [ ] Decide `updatedAt` semantics for feature-only edits (bump = clients can sync-detect,
-      but interacts with seen-ledger fix above; maybe bump + skip untick).
-- [ ] GC/id-reuse: doc-declared features die with the doc naturally; today's bitmap-only tags on
-      a reused id are a phantom-membership hazard — this refactor closes it.
-
-**Migration:** one-time reverse scan — for each `tag/*`/`custom/*` (+ whatever the review adds)
-bitmap, walk its ids, append the key to each doc's `features[]`; after that, feature bitmaps are
-derived state forever (rebuildable, droppable).
-
-**Rejected alternative (consciously):** separate `id → [featureKeys]` LMDB dbi (forward index
-beside the inverted bitmaps). Cheaper writes, O(1) reads, but splits truth into a third place,
-doesn't ride along in doc sync/export, no rebuild-from-docs property. Only revisit if feature
-write volume ever makes doc rewrites measurably hurt.
-
-**Sequencing (proposed 2026-07-15 — ordered so each step is independently shippable & revertable):**
-
-1. **Deletions first, no behavior change** (~1h, zero data migration): drop the dead prefixes
-   (`nested/`, `user/`, `server/`), the dead imperative feature API, the dead
-   `contextUUIDs`/`contextPath` + `addContext`/`removeContext`, and Link's duplicate `data` copies.
-   Deleting these *first* shrinks the surface every later step has to reason about — and each is
-   provably unreachable, so the risk is a stale test, not a regression.
-2. **Root-level `features[]`, modelled on `comment`** (the actual cut): field + zod entry + its own
-   `update()` branch outside `dataUpdated`; `documentFeatureKeys()` reads `doc.features` and
-   excludes derived prefixes; drop the schema unshift. Bitmaps keep following the doc — the
-   tick/untick/stale-diff machinery from the interim fix carries over unchanged.
-3. **Write-path gotchas** (the checklist above): checksum exclusion, seen-ledger, `updatedAt`
-   semantics, batch tag-in-one-tx.
-4. **Migration**: reverse scan per the plan above. Only after 2+3 are green.
-5. **Schema registration facility**: separate rev, post-deploy per its own sequencing note — do NOT
-   fold it into this cut. The `data/source/*` decision and the `indexOptions` merge-order
-   inconsistency are the two things this cut should hand it.
-
-**PITFALL — cost a cycle on 2026-07-15, will bite step 2 in exactly the same place:** in `putMany`,
-`existing.update(doc)` **mutates `existing` in place and returns the same instance**. Any
-"previous state" snapshot for a stale-diff MUST be taken BEFORE that call — the existing code
-already does this for `prevChecksums`/`prevLocations`/`prevComment`/`prevTimelineState`/
-`prevFacetKeys`, and `prevFeatureKeys` now joins them. Compute it after and the stale set is
-silently always empty: the untick never fires, and every test that only asserts the *positive*
-case still passes. (Same class of bug as the mime-untick one fixed 2026-07-13 — noted there too.)
 
 ## Session support
 
@@ -697,301 +500,44 @@ LMDB copy/snapshot - mdb_copy (or the env .copy() API) gives a consistent point-
 - [ ] Move source-specific normalization/mapping to app/workspace layer.
 - [ ] Keep `synapsd` input shape generic and canonical.
 
-### BaseDocument v3 — the golden standard (designed 2026-07-15)
+### BaseDocument v3 — LANDED
 
-Everything else builds on this, and most current abstractions move app-side anyway — so this is the
-one schema worth getting right. Do NOT sweep the 13 abstractions; fix the foundation, then let the
-registry carry the rest.
+`indexOptions` off the row (measured 414 B/row, 43% of a note; ~2.9 GB at 7M rows), root `features[]`,
+top-level `kind`, `data.relations` excluded from whole-`data` projections via `contentData()`.
+Resolution moved to a `static indexOptions` on the schema class rather than a registry lookup —
+BaseDocument cannot import SchemaRegistry (the registry imports every schema, which import
+BaseDocument), but `this.constructor.indexOptions` reaches the subclass with no import at all.
+Per-document overrides are deliberately impossible: the field is not persisted, so an override would
+apply on write and vanish on read.
 
-**Measured, not estimated** (a real `data/abstraction/note`, universe, 2026-07-15):
 
-| field | bytes | share |
-|---|---|---|
-| `indexOptions` | 461 | **40.8%** |
-| ↳ `embeddingOptions` alone | 203 | 18.0% |
-| `metadata` | 140 | 12.4% |
-| `checksumArray` | 124 | 11.0% |
-| **`data` — the actual payload** | **42** | **3.7%** |
-| everything else | ~360 | ~31% |
-| **total** | **1129** | |
+### Schema simplification — PARTIALLY LANDED
 
-A note is **41% index config and 3.7% content**. At 7M rows `indexOptions` alone is ~3.2 GB of
-byte-identical config — the "GBs" estimate above is confirmed.
+Done in v3: `contact` → `identity` (with `data.kind` → `data.type`, `identities[]` → `identifiers[]`),
+`bucket` deleted (folders are tree nodes), `event` added, `message` registered (it declared an id but
+was never in the registry, so `getSchema()` threw while the parent chat service wrote that schema),
+all core schemas at `schemaVersion 3.0` (which fixed `document` being stamped 2.0 while validating
+against the 2.2 shape).
 
-#### Target shape
+**Still open, and it belongs to the rename rev above**: `tab` and `link` are the same document with
+different field names (`data.uri`/`data.label` vs `data.url`/`data.title`), and folding them means
+touching `tab` (83 external hits) and `link`. `kind` already makes them queryable as one axis, which
+is the point of doing the fold *after* consumers migrate.
 
-```js
-{
-    id, schema, schemaVersion,   // identity + which rules applied
-    createdAt, updatedAt,
-    data:          {},           // the payload
-    comment:       '',           // user-authored, never regenerated, never checksummed
-    features:      [],           // ASSERTED membership -> bitmaps 1:1   (root; see the section above)
-    locations:     [],           // copies of the SAME bytes (dedup-keyed by checksum)
-    timelines:     [],           // content-derived intervals
-    metadata:      {},           // EXTRACTED/descriptive facts about the payload (contentType, geo, exif, dimensions, media)
-    checksumArray: [],           // content identity
-}
-```
 
-Note the symmetry that makes the whole model legible: **`features` = asserted, `metadata` =
-extracted, `data` = the payload, `locations` = where the bytes are, `timelines` = when.** Each
-answers exactly one question, and each has exactly one writer class.
+### Schema registration facility — LANDED
 
-#### Removals (each verified, this session)
+`registerSchema(id, SchemaClass, {kind|kindField, kindPrefix, indexOptions})`, plus
+`unregisterSchema`, `getSchemaEntry`, `resolveKind`. Three tiers: **core** (sealed against
+re-registration), **app** (note/tab/link/dotfile, bundled but registered through the same public
+path a third party would use, so the eventual move out is a deletion not a rewrite), **internal**
+(tree layers). Enforced at registration: core ids are sealed, `kind` and `kindField` are mutually
+exclusive, `kindField` REQUIRES `kindPrefix` (kind values are persisted in bitmap keys and therefore
+append-only — an unprefixed generic value that later collides is not fixable without a migration),
+and a supplied `indexOptions` writes the class static rather than a parallel registry copy.
 
-- [ ] **`indexOptions` -> the registry, keyed by `(schema, schemaVersion)`.** −461 B/doc (41%).
-      `schemaVersion` is already on every document and currently does nothing — give it this job:
-      it is precisely the pointer to "which rules applied to this doc". Side-benefit: per-doc
-      indexOptions accidentally *freezes* each document's identity rule at write time (an old doc
-      keeps old `checksumFields` forever); registry-keyed rules make changing `checksumFields` an
-      explicit, versioned migration — which is what it always was.
-- [ ] **`embeddingOptions` -> off the document entirely** (see below).
-- [x] **`embeddingsArray`** — zero writers (only BaseDocument + web type mirrors). Dead.
-      **DELETED 2026-07-17** (schema, constructor, update(), toJSON(), web type mirrors).
-- [x] **DECIDED 2026-07-15 — drop versioning. DELETED 2026-07-17.** `parentId` / `versions` /
-      `versionNumber` / `latestVersion` + all SEVEN empty-stub methods removed from BaseDocument,
-      web type mirrors and web version-display UI (document lists, object-card tabs, sort column).
-      Re-add with a real implementation (see "DB snapshot/restore" above), not before.
-- [ ] `metadata.contextUUIDs` / `metadata.contextPath` + `addContext`/`removeContext` — dead (see
-      the feature review above).
-- [ ] `metadata.features` -> root `features[]` (see the feature review above).
-- [x] **DECIDED 2026-07-15 — generate sha256 ONLY; keep the multi-algorithm logic.** The array/
-      `checksumAlgorithms` machinery stays (more algorithms must remain supportable); the default
-      simply becomes `['sha256']`. sha256 because cacache uses it too, so blob and document identity
-      finally speak one language (`File` already ships sha256-only). Saves ~62 B/doc.
+Remaining gaps are in **Open: consumer-registered abstractions** above.
 
-      **Correcting a live assumption — dedup is sha1 today, NOT sha256, for exactly the docs that
-      matter.** Measured 2026-07-15: `note` and `tab` have `checksumArray[0] = 'sha1/…'`;
-      `file`/`email` have `sha256/…`. `getPrimaryChecksum()` returns `checksumArray[0]` and
-      **ignores `primaryChecksumAlgorithm` entirely** (email declares primary `'sha1'` yet is sha256
-      by array position). So the switch DOES move the tab primary sha1 → sha256.
-
-      **Verified safe empirically** (universe, 2026-07-15): created a tab the current way
-      (sha1+sha256), then re-put the same tab with a sha256-ONLY `checksumArray` → **deduped to the
-      same id**, no fork. **This works only because every checksum in the array is indexed**
-      (`#checksumIndex.insertArray(doc.checksumArray)`, confirmed by user) — so a sha256 entry
-      already exists for every sha1-primary doc, and the sha256-only lookup hits it. That is the
-      load-bearing fact, not the plan: **if a future schema ever generates an algorithm that was not
-      previously indexed for existing docs, the same switch forks every document.** Stale sha1 index
-      entries are harmless (dropped on the doc's next `#updateOne`, which `deleteArray`s the old
-      array).
-- [x] **`indexOptions.primaryChecksumAlgorithm`** — dead twice over (never read; not in the zod
-      shape). **DELETED 2026-07-17** from BaseDocument defaults, File.js, web type mirrors; the
-      web's three `getPrimaryChecksum()` helpers now use `checksumArray[0]` (position = primacy,
-      matching synapsd) instead of a prefix-match against the field with an 'sha1' fallback.
-
-Result for the measured note: **1129 B -> ~620 B (−45%)**, with `data` rising from 3.7% to ~7% of
-the row.
-
-#### Embedding config does not belong on the document — and the A/B case is better served without it
-
-The clinching argument is not size, it is that **the layer storing it disclaims the responsibility**:
-`index.js:263` — *"synapsd owns no embedding model: vectors arrive via storeDocumentEmbeddings (the
-embedd service / any app)"* — and `VectorIndex.js:29` — *"searches them — it does not run the
-embedding model."* Nothing in synapsd reads `embeddingOptions` to make a decision; the embedd
-router decides. `embeddingDimensions` is worse than redundant: `VectorIndex` holds ONE fixed `#dim`
-per table and recreates the table on mismatch (`VectorIndex.js:93-94`), so a per-document dimension
-can never be honored.
-
-**The "different model on a subset of documents as a test" use-case (the reason to keep it) is
-actually the argument against it.** A subset of documents is a *set*, not a schema and not a
-per-doc field — and set-selection is the one thing this engine is best at. Split the concern:
-
-| concern | belongs | why |
-|---|---|---|
-| **config** (which model to run) | embedd router rule + a feature/filter selector | the subset primitive already exists (bitmaps); an experiment = tag a subset, point a rule at it — **zero document writes**. With per-doc config you would rewrite N documents to start an experiment, and N more to end it. |
-| **provenance** (which model produced this vector) | a column on the Lance row (`model`, `dim`, `embeddedAt`) | needed anyway for drift detection and partial re-embed ("re-embed everything vectorized with model X"). Today NO model provenance exists on a vector row — that is the real gap the per-doc field was pretending to cover. |
-| **the document** | nothing | it is neither config nor provenance |
-
-A different model almost always means different dimensions, which means a different Lance
-table/space regardless — so an A/B is naturally "second space + router rule", never a doc field.
-
-- [x] Add model/dim provenance to the Lance row (the actual missing capability) — SHIPPED
-      2026-07-17, see "Vector provenance + per-(model,dim) spaces" above.
-- [ ] Per-workspace embedd router rules (already tracked in canvas-server TODO "Refactor embedd") are
-      the config surface; a feature/filter-scoped rule is the experiment mechanism.
-
-### Schema simplification (decided 2026-07-15)
-
-**The problem, concretely: `tab` and `link` are the same document with different field names.**
-
-| | `link` v1.0 | `tab` v2.0 |
-|---|---|---|
-| URI field | `data.uri` | `data.url` |
-| Title field | `data.label` | `data.title` |
-| checksumFields | `['data.uri']` | `['data.url']` |
-
-The divergence already leaks into the UI: `ui/web/.../object-card/EditForm.tsx` carries
-`urlTitleKeys(schema)` whose ONLY job is to paper over `uri/label` vs `url/title`. That function is
-the bug report. Delete it as part of this.
-
-#### What the data says (sizes every decision below)
-
-| | local dev (`universe`, measured 2026-07-15) | pre-prod (daily driver, user-reported) |
-|---|---|---|
-| tab | 16 | **the bulk of ~2600 docs** |
-| file (mostly images) | 34 | most of the rest |
-| note | 129 | — |
-| email | 23 | — |
-| device / dotfile | 2 / 1 | — |
-| **link** | **0** | assumed 0 — **NOT measured, verify before the Link rename** |
-| **contact** | **0** | 0 (user: never implemented, never used) |
-| todo / application / message / document | 0 | — |
-
-⚠️ The pre-prod column is user-reported, not measured — local dev counts do not authorize a
-destructive step there. Before executing anything in the migration table, run the per-abstraction
-count on pre-prod (`GET /workspaces/:ws/documents?allOf=data/abstraction/<x>&limit=1` → `totalCount`).
-The Link rename is code-only **only if `link` is genuinely 0 there**.
-
-**Only `tab` documents must survive a migration.** Everything else has a rebuild source (user,
-2026-07-15): images/files live in the workspace on disk and re-add on re-sync; notes are backed by
-on-disk markdown; todos and emails can be reingested. Tabs are the one class with no source of
-truth outside the DB — so any plan that rewrites tab docs is the one plan worth being paranoid
-about. Six of the ~13 abstractions have ZERO documents anywhere, so most of this refactor is
-deletion and renaming against nothing.
-
-#### Decision 1 — field naming: `url` + `title` wins. **Link adopts Tab's names, not vice versa.**
-
-Industry standard is overwhelming: WebExtensions `tabs.Tab`, Chrome/Firefox bookmarks, the Netscape
-bookmark format (`HREF` + text), JSON Feed, Atom (`link href` + `title`), Open Graph
-(`og:url`/`og:title`), Pocket, Raindrop. schema.org is the only near-miss (`url` + `name`).
-`uri`/`label` is essentially nowhere.
-
-Internal consistency agrees: `locations[].url` already holds `file://`, `stored://`, `imap://`,
-`s3://` — arbitrary non-http schemes, under the name `url`. Naming Link's field `uri` would
-contradict the codebase's own convention for the same concept.
-
-**And it's the zero-risk direction**: `link` has 0 documents, so nothing migrates; the extension and
-CLI already write `data.url`, so no client changes; and the ~2600 tabs — the only data with no
-rebuild source — are never touched. The opposite direction would have rewritten exactly them.
-Keep Link's `data.scheme` derivation (`#extractScheme`) — it's genuinely useful and stays.
-
-#### Decision 2 — schema inheritance ticks the ancestor chain
-
-Precedent already in the engine: `mimeBitmapKeys()` ticks BOTH `data/mime/image` and
-`data/mime/image/jpeg` for one jpeg. Same rule for schemas: a tab ticks `data/abstraction/tab` AND
-`data/abstraction/link`, so "all links" finds tabs.
-
-Ids stay **flat**; the registry supplies the chain. Do NOT rename to `data/abstraction/link/tab` —
-mime gets its hierarchy free because `image/jpeg` is inherently hierarchical AND derived from
-`contentType` (rename costs nothing), whereas schema ids are persisted in every `doc.schema` and in
-the feature bitmaps. Flat ids + chain ticking give identical query power with no id migration, and
-nothing precludes nesting later.
-
-#### Decision 3 — `contact` folds into `identity`; `data.tags` → `features[]`
-
-`contact` has **0 documents** — never implemented, so this is a pure code change with no migration.
-Target `data/abstraction/identity` with `type: person|organization|service|bot` (per the L1 list
-above). It matters later — tagging photos with identities, harvesting contacts from email, building
-a contact DB — and both of those are **relations** (`rel/depicts`, `rel/authored-by`), i.e. the same
-L2 mechanism as tab→snapshot below, not new machinery.
-
-`data.tags` → `features[]` is now unconditional. Zero contacts also dissolves the one blocker:
-`Contact` was the only schema vector-embedding `data.tags` (`vectorEmbeddingFields: ['data.tags']`),
-so there is no re-embed cost. Remaining `data.tags` writers to fold: `Link`
-(`addTag`/`removeTag`/`#ensureArray`), `Dotfile` (:79,:94), `Application` (:110,:125), and CLI
-`dot add` (`modules/dot/actions/add.js:68`). Note the web's `EditForm.tsx:50-52` already falls back
-to `doc.data?.tags` when `features` has none — it is silently reconciling two of the three tag homes
-today (the third being the body-level `features` param).
-
-#### Offline "download this site" → a SECOND document, joined by a relation
-
-Not a location, not an in-place transform:
-
-```
-tab (identity = url)  ──rel/snapshot-of──>  file (identity = content hash, stored://…)
-```
-
-- **Cardinality decides it.** One URL → N snapshots over time (that's the point of an archive).
-  `locations[]` cannot express it: locations are *copies of the same bytes*, dedup-keyed by one
-  checksum. Two snapshots a month apart have different checksums, so by definition they are not
-  copies of each other.
-- **Identity.** A tab's checksum is its normalized URL; a file's is its content hash. If a tab
-  "became" a file its id would have to change — and the id is the key every bitmap, timeline and
-  relation hangs off.
-- **Payoff.** As a real `file` doc the snapshot inherits FTS, embedding, CLIP, dedup, blob backends
-  and range streaming — all already built. Inside `data` it gets none of them.
-- [x] **Delete `Link.data.previews[]`** — zero writers, zero readers, a half-built version of
-      exactly this. **DELETED 2026-07-17.** Build the relation instead.
-
-Generalizes beyond tabs — email→attachment, note→embedded image, application→installer blob,
-photo→identity. This is the L2 relation layer earning its keep (`data/relation/generated-from` is
-already listed above); Synapses already reverse-indexes and cleans up precisely.
-
-#### Registry shape
-
-```js
-db.registerSchema('data/abstraction/tab', {
-    extends: 'data/abstraction/link',      // parent dataSchema + indexOptions merge in
-    data: z.object({ browser: z.string().optional(), windowId: z.number().optional() }),
-    indexOptions: { ftsSearchFields: ['data.title', 'data.url'] },
-});
-```
-
-- **Core stays in synapsd** (schema-agnostic primitives): `document`, `link`, `file`, `bucket`.
-- **App-registered** (canvas-server, at boot): `tab extends link`, plus note, todo, email, identity,
-  message, device, application, dotfile.
-- Settle the **`indexOptions` merge order** here (see the review findings above — half the schemas
-  silently discard a caller's `ftsSearchFields` today). `extends` makes the merge rule load-bearing,
-  so it can no longer be left ambiguous.
-
-#### Migration table
-
-| Change | Docs affected | Migration |
-|---|---|---|
-| Link `uri`/`label` → `url`/`title` | 0 | none — code only |
-| `tab extends link` | ~2600 | **none** — ids and fields unchanged; ancestor bitmap ticked on next write, backfilled by reindex |
-| `contact` → `identity` | 0 | none — code only |
-| `data.tags` → `features[]` | dotfile 1, application 0, link 0 | trivial script; fold into the reverse scan |
-| Drop `previews[]`, `contextUUIDs`, `contextPath` | all (all empty/dead) | none — drop on next write |
-
-The only ~2600-doc item is the one that needs no migration at all. Everything requiring a rewrite
-touches ≤1 document.
-
-### Schema registration facility (v2)
-
-**Motivation.** `synapsd` was extracted from `canvas-server` (the split was justified), but the
-hard-coded `SchemaRegistry` still carries app-specific abstractions (contact, email, tab, note,
-todo, dotfile, application, message, device). The db only ever needs three things per schema:
-
-- `dataSchema` - zod schema for `data`, used for validate-on-write
-- `indexOptions` - which fields to checksum / FTS / vector-embed
-- `(de)serialization` - `toJSON` shape (round-trip)
-
-Everything else (e.g. `Email.fromIMAP`, `Email.fromGraph`, `Message.fromSlack/fromTeams/fromIRC`)
-is ingest/integration logic that does **not** belong in the storage layer.
-
-**Target shape.** Replace the hard-coded map with a registration API the app calls at boot:
-
-```js
-db.registerSchema('data/abstraction/email', {
-    dataSchema,            // zod
-    indexOptions,          // { checksumFields, ftsSearchFields, vectorEmbeddingFields }
-    toJSON, fromJSON,      // optional; default to BaseDocument behaviour
-});
-```
-
-- **Builtin core** stays in `synapsd` (schema-agnostic primitives only):
-  `document` (generic JSON), `blob`/`file`, `bucket`, `link`.
-- **App-registered**: contact, email, tab, note, todo, dotfile, application, message, device -
-  definitions move to `canvas-server`, registered on startup.
-- The `device/id/<id>` presence-bitmap derivation reads `locations` only and is fully
-  schema-agnostic - it stays in the db and is untouched by this refactor (validates the seam).
-
-**Cutover is migration-free.** Schema id strings (`data/abstraction/email`) are persisted in each
-doc's `schema` field and in the `metadata.features` bitmap. Moving a class app-side changes only
-*where the definition lives*, not the stored id strings or bitmaps - so no data migration, and old
-and new can coexist during the move. Do it incrementally: register one abstraction app-side, delete
-it from the builtin map, repeat.
-
-**Cheap pre-work (independent, low-risk):** lift the provider factories
-(`Email.fromIMAP`/`fromGraph`, `Message.fromSlack`/`fromTeams`/`fromIRC`) out of the schema classes
-into the app ingest layer now - no registry change, no data change, removes the worst of the leak.
-
-**Sequencing:** post-deployment. Not on the critical path for the current customer deploy
-(roaming profiles / browser sync / dotfiles / imap+o365) - those use the existing abstractions
-as-is, and the clutter has no runtime/security/perf cost, only maintainability.
 
 ## Tests
 
