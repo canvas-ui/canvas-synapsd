@@ -5057,7 +5057,8 @@ class SynapsD extends EventEmitter {
             // re-renders them all, so only a bitmap/timeline query reveals that
             // just the last one was indexed.
             // Multi-position is a wanted capability (a note referencing N eras on
-            // a 'wikipedia'/'content' timeline) — see TODO.md, "timeline coverings". Until
+            // a 'wikipedia'/'content' timeline) — see TODO.md, "multi-position
+            // timelines". Until
             // the index supports it, refuse rather than silently drop.
             if (seen.has(name)) {
                 throw new Error(
