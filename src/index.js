@@ -39,7 +39,7 @@ import EdgeIndex from './indexes/edges/index.js';
 import LanceIndex from './indexes/lance/index.js';
 import VectorIndex from './indexes/lance/VectorIndex.js';
 import * as lancedb from '@lancedb/lancedb';
-import { normalizeBitmapKeys, normalizeBitmapKey, validateBitmapKey } from './indexes/bitmaps/lib/keys.js';
+import { normalizeBitmapKeys, normalizeBitmapKey, validateBitmapKey, ALLOWED_BITMAP_PREFIXES } from './indexes/bitmaps/lib/keys.js';
 import { deviceFacetsFromData } from './utils/device-facets.js';
 import SemanticEngine from './semantic/index.js';
 
@@ -785,7 +785,13 @@ class SynapsD extends EventEmitter {
                 }
 
                 debug(`Schema migrations: applied=${appliedVersion} < current=${SCHEMA_VERSION}, running`);
-                await this.#migrateBitmapKeys();
+                // Each migration is gated on the version that INTRODUCED it, not on
+                // "anything older than current". Bumping SCHEMA_VERSION to 2
+                // otherwise re-runs the v1 bitmap-key migration on databases that
+                // already applied it — which is not a no-op, because keys created
+                // since then (feature/has-comment) look like the legacy shape it
+                // rewrites. That crashed workspace startup in production.
+                if (appliedVersion < 1) { await this.#migrateBitmapKeys(); }
                 if (appliedVersion < 2 && !empty) {
                     const stats = await this.#migrateToV3();
                     debug(`v3 migration: ${JSON.stringify(stats)}`);
@@ -4658,12 +4664,20 @@ class SynapsD extends EventEmitter {
             }
         }
 
-        // --- Feature bitmaps: revert feature/ prefix back to raw keys ---
-        // Previous code stored features under feature/data/..., feature/client/..., etc.
-        // We now store them directly as data/..., client/..., tag/..., etc.
+        // --- Feature bitmaps: revert DOUBLE-prefixed keys to raw keys ---
+        // Previous code stored features under feature/data/..., feature/client/...,
+        // etc. We now store them directly as data/..., client/..., tag/... .
+        //
+        // ⚠️ Only keys whose remainder is ITSELF a validly-prefixed key are legacy.
+        // `feature/` is a real, allowed namespace for engine-observed facts
+        // (`feature/has-comment`), and stripping those yields `has-comment`, which
+        // is not a valid key at all — hasBitmap() throws on it and takes workspace
+        // startup down with it.
         const featureKeys = await this.bitmapIndex.listBitmaps('feature/');
         for (const oldKey of featureKeys) {
             const naturalKey = oldKey.slice('feature/'.length);
+            const isDoublePrefixed = ALLOWED_BITMAP_PREFIXES.some((prefix) => naturalKey.startsWith(prefix));
+            if (!isDoublePrefixed) { continue; }
             if (!this.bitmapIndex.hasBitmap(naturalKey)) {
                 await this.bitmapIndex.renameBitmap(oldKey, naturalKey);
             } else {

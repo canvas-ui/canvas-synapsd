@@ -12,7 +12,7 @@ const Roaring = require('roaring'); // New
 const { RoaringBitmap32 } = Roaring; // New
 import Bitmap from './lib/Bitmap.js';
 import BitmapCollection from './lib/BitmapCollection.js';
-import { normalizeBitmapKey, validateBitmapKey } from './lib/keys.js';
+import { normalizeBitmapKey, validateBitmapKey, isValidBitmapKey } from './lib/keys.js';
 
 class BitmapIndex {
 
@@ -242,8 +242,20 @@ class BitmapIndex {
         return true;
     }
 
+    /**
+     * Does a bitmap exist under this key?
+     *
+     * A malformed key returns FALSE rather than throwing: it cannot name an
+     * existing bitmap, so false is the honest answer to the question asked. This
+     * is not pedantry — the throwing version turned a cosmetic key-format issue in
+     * a legacy migration into a failed workspace start in production, because a
+     * predicate raised where the caller only branched.
+     *
+     * Operations keep throwing: `tick`/`deleteBitmap`/`createBitmap` are asked to
+     * WRITE a malformed key, which is a genuine error rather than a question.
+     */
     hasBitmap(key) {
-        BitmapIndex.validateKey(key);
+        if (!isValidBitmapKey(key)) { return false; }
         key = BitmapIndex.normalizeKey(key);
         return this.dataset.doesExist(key);
     }

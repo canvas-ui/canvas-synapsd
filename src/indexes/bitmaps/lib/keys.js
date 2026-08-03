@@ -40,14 +40,30 @@ export function normalizeBitmapKey(key) {
     return isNegated ? `!${normalized}` : normalized;
 }
 
+/**
+ * Non-throwing key check, for PREDICATES.
+ *
+ * "Is this key well-formed?" and "does this bitmap exist?" collapse to the same
+ * answer for a malformed key — it cannot name anything — so a boolean question
+ * deserves a boolean answer. Operations (tick, delete, create) still use
+ * `validateBitmapKey` and throw, because WRITING a malformed key is a real error.
+ *
+ * @param {*} key
+ * @returns {boolean}
+ */
+export function isValidBitmapKey(key) {
+    if (!key || typeof key !== 'string') { return false; }
+
+    const normalizedKey = normalizeBitmapKey(key);
+    const keyWithoutNegation = normalizedKey.startsWith('!') ? normalizedKey.slice(1) : normalizedKey;
+    return ALLOWED_BITMAP_PREFIXES.some(prefix => keyWithoutNegation.startsWith(prefix));
+}
+
 export function validateBitmapKey(key) {
     if (!key) { throw new Error('Bitmap key cannot be null or undefined'); }
     if (typeof key !== 'string') { throw new Error('Bitmap key must be a string'); }
 
-    const normalizedKey = normalizeBitmapKey(key);
-    const keyWithoutNegation = normalizedKey.startsWith('!') ? normalizedKey.slice(1) : normalizedKey;
-    const isValid = ALLOWED_BITMAP_PREFIXES.some(prefix => keyWithoutNegation.startsWith(prefix));
-    if (!isValid) {
+    if (!isValidBitmapKey(key)) {
         throw new Error(`Bitmap key "${key}" does not follow naming convention. Must start with one of: ${ALLOWED_BITMAP_PREFIXES.join(', ')}`);
     }
 
