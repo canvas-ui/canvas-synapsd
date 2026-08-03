@@ -109,6 +109,103 @@ describe('event schema + events timeline', () => {
         expect(tomorrow.map((d) => d.id)).toEqual([ongoing]);
     });
 
+    // A document occupies exactly ONE position per timeline (the index is a BSI
+    // keyed id -> a single value, so a second insert overwrites the first), so a
+    // series cannot be expanded into N entries. The entry spans an envelope and
+    // the client expands the RRULE — the CalDAV contract.
+    describe('recurrence envelope', () => {
+        const RULE_UNTIL = 'FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T235959Z';
+
+        test('a bounded rule spans first occurrence → UNTIL', async () => {
+            const id = await db.put({
+                schema: EVENT_SCHEMA,
+                data: {
+                    title: 'Standup', type: 'calendar',
+                    start: '2026-01-06T09:00:00.000Z', end: '2026-01-06T09:15:00.000Z',
+                    recurrence: RULE_UNTIL,
+                },
+            });
+
+            const doc = await db.get(id);
+            const entry = doc.timelines.find((t) => t.timeline === 'events');
+            expect(entry.start).toBe('2026-01-06T09:00:00.000Z');
+            // NOT data.end — that is one occurrence's duration, not the envelope.
+            expect(entry.end).toBe('2026-12-31T23:59:59.000Z');
+
+            const inside = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2026-08-01..2026-08-31'], limit: 0 });
+            expect(inside.map((d) => d.id)).toEqual([id]);
+
+            const after = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2027-06-01..2027-06-30'], limit: 0 });
+            expect(after.map((d) => d.id)).toEqual([]);
+        });
+
+        test('an unbounded rule is an open envelope', async () => {
+            const id = await db.put({
+                schema: EVENT_SCHEMA,
+                data: { title: 'Daily sync', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=DAILY' },
+            });
+
+            const doc = await db.get(id);
+            expect(doc.timelines.find((t) => t.timeline === 'events').end).toBeNull();
+
+            const farFuture = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2030-01-01..2030-12-31'], limit: 0 });
+            expect(farFuture.map((d) => d.id)).toEqual([id]);
+        });
+
+        test('COUNT yields an OPEN envelope — over-matching is recoverable, under-matching is not', async () => {
+            const id = await db.put({
+                schema: EVENT_SCHEMA,
+                data: { title: 'Onboarding', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=WEEKLY;COUNT=4' },
+            });
+
+            const doc = await db.get(id);
+            expect(doc.timelines.find((t) => t.timeline === 'events').end).toBeNull();
+
+            // Resolving COUNT needs rule expansion; a guessed end could stop
+            // matching before the real final occurrence, which nothing downstream
+            // could recover. The client's expansion drops the surplus instead.
+            const later = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2027-01-01..2027-12-31'], limit: 0 });
+            expect(later.map((d) => d.id)).toEqual([id]);
+        });
+
+        test('a non-recurring event is unaffected — data.end stays the interval end', async () => {
+            const id = await db.put({
+                schema: EVENT_SCHEMA,
+                data: {
+                    title: 'One-off', type: 'calendar',
+                    start: '2026-01-06T09:00:00.000Z', end: '2026-01-06T10:00:00.000Z',
+                },
+            });
+
+            const doc = await db.get(id);
+            expect(doc.timelines.find((t) => t.timeline === 'events').end).toBe('2026-01-06T10:00:00.000Z');
+        });
+
+        test('the rule must be a real RRULE value', async () => {
+            await expect(db.put({
+                schema: EVENT_SCHEMA,
+                data: { title: 'Bad', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'every tuesday' },
+            })).rejects.toThrow();
+        });
+
+        test('editing the rule edits the series, it does not fork a new event', async () => {
+            const id = await db.put({
+                schema: EVENT_SCHEMA,
+                data: { title: 'Standup', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: RULE_UNTIL },
+            });
+
+            const again = await db.put({
+                schema: EVENT_SCHEMA,
+                data: { title: 'Standup', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=WEEKLY;BYDAY=TH' },
+            });
+
+            // recurrence is NOT a checksum field — same title/start/type is the
+            // same event, so this dedups onto the existing document (CalDAV keeps
+            // the same UID when a rule changes).
+            expect(again).toBe(id);
+        });
+    });
+
     test('the timeline entry is regenerated on update, never drifting from the doc', async () => {
         const id = await db.put({
             schema: EVENT_SCHEMA,

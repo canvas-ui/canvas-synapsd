@@ -493,6 +493,38 @@ corpora by hand.
   `dueDate`: "Standup" at 09:00 and at 14:00 are different events, and a calendar entry is not the
   alert that shares its title.
 
+**Recurrence — the envelope model (decided 2026-08-03).** Driven by a hard index constraint,
+verified by probe rather than assumed: **a document occupies exactly ONE position per timeline.**
+The timeline is a BSI keyed `id -> a single value`, so a second `insert(name, id, …)` OVERWRITES
+the first — two `timelines[]` entries with the same name silently keep only the last. Expanding a
+series into N entries on one document is therefore impossible without changing the index.
+
+Chosen: one document per series, whose timeline entry spans an **envelope** — first occurrence to
+`UNTIL`, or open when the rule is unbounded — with `data.recurrence` holding the RRULE verbatim and
+the CLIENT expanding it to render occurrences. This is what a CalDAV client already does with
+VEVENT+RRULE, so it adds no obligation consumers do not already have.
+
+- The envelope is a deliberate **superset**: a weekly standup answers any day-query inside its span
+  until the rule is expanded. Same candidate-set-then-refine contract the engine uses elsewhere; it
+  never misses an occurrence, which is the property a bitmap pre-filter must have.
+- `COUNT=n` yields an **open** envelope, not a computed last occurrence — resolving COUNT needs
+  rule expansion, and a guessed end could stop matching before the real final occurrence. Over-
+  matching is recoverable by the client; under-matching is not recoverable by anyone.
+- On a recurring event `data.end` remains ONE occurrence's duration and does **not** become the
+  envelope end.
+- `recurrence` is deliberately NOT a checksum field: editing the rule edits the series, it does not
+  fork a new event (CalDAV keeps the same UID). Covered by a test.
+
+Rejected: one document per occurrence (infinite rules need an arbitrary horizon, a year of daily
+standups is 365 docs, and "change all future occurrences" becomes a mass update) and extending the
+timeline index for multi-position ids (correct, but the largest possible change to the storage
+model everything else depends on, and not in this plan).
+
+**Parent wiring (same rev):** `classifier.js` gains `SCHEMAS.event` + `isEvent()`, and events join
+notes/todos in `isText()` — they carry inline title/description with no contentType, so without it
+they would never reach the embedder. `CLASSIFIER_SURFACE` (hook wizard) and the agent's schema list
+list it too.
+
 **Pre-existing bug found and fixed while building it** (`src/index.js`,
 `#normalizeDocumentTimelineEntries`): `const rawEnd = entry.end ?? entry.start` collapsed an
 explicit `null` into `start`, so **no document could ever declare an ongoing interval** even
@@ -515,6 +547,29 @@ section below: it is now `data/kind/application/flatpak`.
 2. Row shape: `indexOptions` off the row → registry; top-level `kind` + `mime`; `data.relations`
    accepted; root-level `features[]` (D2) with the derived-prefix exclusion and the dropped
    schema unshift.
+   - [x] **`kind` — SHIPPED 2026-08-03.** Top-level row field, derived via
+     `schemaRegistry.resolveKind()` and stamped in all three write paths (`putMany` after the
+     `existing.update(doc)` merge, `#putOne` after parse, `#updateOne` after `update()`).
+     Client-supplied values are OVERWRITTEN — a kind the engine did not derive is
+     indistinguishable from one it did while being immune to cleanup, the same reasoning that made
+     `device/*` a strip rather than a merge. Outside `checksumFields`, so it cannot fork identity.
+     Mirrored into HIERARCHICAL `data/kind/*` bitmaps (parent AND child ticked, `data/mime/*`
+     precedent) via `kindBitmapKeys()`, folded into `facetBitmapKeys()` so it inherits the existing
+     tick/untick stale-diff on every write path for free — an application switching
+     `data.type` unticks its old key. `tests/kind-bitmaps.test.js` (8), including the migration
+     property (`data/kind/browser/tab` returns exactly what `data/abstraction/tab` returns) and the
+     negative drift assertion.
+   - [ ] **`mime` — NOT DONE, and possibly should not be.** `data/mime/*` bitmaps already derive
+     from `metadata.contentType` with parent+child ticking, so a top-level `mime` field adds no
+     query capability — it adds a SECOND home for one value, which is the drift class this refactor
+     exists to remove. It is also not free: the parent's `classifier.js` reads
+     `doc.metadata.contentType` and falls back to deriving it from `locations[]` filenames, so
+     promoting the field is a cross-repo change with no payoff. Recommendation: keep
+     `metadata.contentType` as the single source and revisit only if/when `metadata` is split into
+     extracted-vs-asserted containers. Decide before closing step 2.
+   - [ ] `data.relations` accepted (Phase 4 consumes it)
+   - [ ] `indexOptions` off the row → registry resolution
+   - [ ] root-level `features[]` (D2)
 3. Dotfile identity → `data.url` + zod normalization; schema-scoped checksum dedup.
 4. `data/*` facet-family consolidation (`data/kind/*` hierarchical values, source/status dedup).
 
@@ -847,6 +902,94 @@ data/no-location              zero locations       (orphan marker; keep in data/
   Phase 2b (truthful presence replaced it), so `STATUS_FACET_SCHEMAS` has exactly one member. If
   no second customer appears, fold it into the generalized `indexOptions.facetFields` rather than
   keeping a bespoke status axis.
+
+## Multi-position timeline indexing — WANTED, not yet supported (raised 2026-08-03)
+
+**The requirement (user, 2026-08-03):** a document must be indexable at N positions on one
+timeline. A note may reference N other events and we want it indexed at each of them on a
+`wikipedia` / `content` timeline. The one-position limit "should not be a blocker" — it is
+acceptable for `crud:*` (a document is created once) but wrong for content axes.
+
+**What the index does today.** One document occupies ONE position per timeline: the tier is a BSI
+keyed `id -> a single value` (plus a parallel `end` BSI), so a second `insert(name, id, …)`
+overwrites the first.
+
+**Why this was urgent rather than merely missing — it failed SILENTLY, and invisibly.** Probed
+2026-08-03 with a note declaring three Roman eras on a `wikipedia` timeline: the row stored all
+three entries and `db.get()` re-rendered all three, so a read looked perfectly correct — while the
+index held only the last. The Republic query returned nothing; the other two matched only because
+they overlapped the surviving interval. This is the same "reads re-derive and look correct while
+stored state is stale" trap documented in the Phase 3 START HERE notes, and it would have
+corrupted the wikipedia import with no visible symptom.
+
+**Landed now (guard, not capability):** `#normalizeDocumentTimelineEntries` THROWS on duplicate
+timeline names in one document, naming the timeline and pointing at the workarounds. Deletion is
+deliberately exempt — `#removeDocumentTimelines` now collects names directly instead of going
+through the normalizer, so a row written before the guard (or by a future multi-position writer)
+can still be cleaned up. `tests/timeline-multi-position.test.js` (5).
+
+Supported today: **one document per position**, or **a distinct timeline name per axis** (a note
+can be on `wikipedia` AND `content` simultaneously — both covered by tests).
+
+### DECIDED 2026-08-03 — timeline coverings (S2-shaped), deferred to its own rev
+
+**Not a blocker for the v3 refactor; revisit fresh after Phase 3.** Design settled now so the
+decision does not get re-derived.
+
+**The BSI cannot be ticked twice, and extending it is not the small change it appears to be.** A
+bit-sliced index encodes exactly one number per id: the slice bitmaps *are* the binary digits of
+the value, so "the same id in two places" is unrepresentable by construction, not by policy.
+
+**Chosen shape: reuse the `GeoIndex` covering pattern for time.** The engine already ships this
+exact structure in one dimension over — S2 region coverings, where a region becomes a set of
+hierarchical cells, a document ticks every cell it covers, and the query is a union over covering
+cells, under the shipped contract that *"coverings are inclusive (may slightly overshoot the
+region) — precise containment is the renderer's job"* (GeoIndex.js). `SCALES`
+(`Gyr, Myr, Kyr, year, month, day, second, ms, ns`) is already the hierarchy time needs.
+
+Rationale beyond convenience (user, 2026-08-03): spatial and temporal representation sharing one
+underlying structure is the point, not a shortcut — it mirrors the place/grid-cell literature on
+projecting data into low-dimensional structures, where recall is generative at its core. One
+covering primitive serving both axes is the design goal.
+
+- **Declarative side needs NO new field.** `timelines[]` already accepts N entries — the guard
+  above simply throws today. Ancient Egypt is three `{timeline:'wikipedia', start, end}` entries on
+  one article; the guard's throw becomes support. JSON declarative, bitmaps derived, rebuild
+  invariant intact.
+- **Derived side:** `internal/ts/<timeline>/cover/<scale>/<bucket>` roaring bitmaps. Each range
+  ticks the coarsest buckets containing it plus finer boundary buckets — the S2 covering algorithm
+  in 1-D. Query = union of buckets overlapping the range, refined against the row's actual ranges
+  when exactness is needed.
+- **Why it stays cheap:** bucket-key count is bounded by *timespan ÷ granularity*, NOT by document
+  count. All of human history at year scale is ~5k keys total, shared across every article; deep
+  time rides the Kyr/Myr/Gyr tiers. Ancient Egypt ticks a few Kyr buckets plus boundary years, not
+  3,000 year buckets.
+- **The BSI stays** for what coverings cannot do: exact `getSortKeys` values, `histogram`, and
+  every existing point/`crud:*` timeline. Coverings become the membership structure; the BSI
+  remains the value structure.
+- Sizing: a new derived index (~`EdgeIndex` scale) plus a reindexer. L3 by construction —
+  droppable, rebuildable from `timelines[]` — so it slots into `rebuild --plane l3`. Does not touch
+  Phase 3's row-shape surface.
+
+**⚠️ OPEN, decide before building:** boundary precision. If an article says "Old Kingdom,
+2686–2181 BC", must a query for exactly 2181 BC match, or is year-level overshoot acceptable? This
+decides whether coverings need finer boundary refinement or can stop at the containing bucket —
+far cheaper to settle up front than to retrofit.
+
+Rejected alternatives: occurrence sub-ids (synthetic id per position + `occurrenceId <-> docId`
+mapping — least invasive but adds an id space, a translation step on every timeline query, and
+occurrence cleanup on delete) and a time-bucketed dupsort index in the `EdgeIndex` shape (natural
+multi-position, but re-implements range querying that coverings get from plain bitmap unions).
+
+Also confirmed already-supported for the wikipedia case, do not rebuild: the wipeable dataset
+(`deleteDataset(name, {dropDocuments})`, `index.js:1946`, plus `data/dataset/*` provenance) and
+layered zeitgeist queries (`RANGE_MODES` includes `layers`/`grouped`; `#queryIntervalLayers`
+returns `{name: {scale: [ids]}}` per timeline, so `wikipedia,personal` against a birthdate works
+today).
+
+This does **not** reopen the Event recurrence decision: the envelope model was chosen because it
+matches how CalDAV clients already consume VEVENT+RRULE, which stands regardless of how many
+positions the index can hold.
 
 ## Phase 4 — ingest derivation of asserted edges
 
