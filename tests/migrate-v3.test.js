@@ -108,6 +108,57 @@ describe('v3 migration', () => {
         }
     });
 
+    // Production crash, 2026-08-03: bumping SCHEMA_VERSION 1 -> 2 re-ran the v1
+    // bitmap-key migration on databases that had already applied it. That
+    // migration strips `feature/` from every key beneath it, so the engine-owned
+    // `feature/has-comment` (created long after v1) became `has-comment`, which is
+    // not a valid bitmap key at all — hasBitmap() threw and took workspace startup
+    // down with it.
+    describe('v1 bitmap-key migration does not re-run or eat engine keys', () => {
+        const seedAtVersion = async (version, extraKeys = []) => {
+            const db = await openRaw();
+            const id = await db.put({
+                schema: NOTE,
+                data: { title: 'n', content: 'n' },
+                comment: 'a comment creates feature/has-comment',
+            });
+            for (const key of extraKeys) { await db.bitmapIndex.tick(key, id); }
+            await db.internalStore.put('internal/schemaVersion', version);
+            await db.shutdown();
+            return id;
+        };
+
+        test('a v1 database starts, and feature/has-comment survives', async () => {
+            await seedAtVersion(1);
+
+            const db = await openRaw({ migrate: true });
+            expect(await db.bitmapIndex.hasBitmap('feature/has-comment')).toBe(true);
+            await db.shutdown();
+        });
+
+        test('migrations are version-stepped — v1 work does not re-run on a v1 db', async () => {
+            // Artificial legacy key on an ALREADY-migrated database: the v1 pass
+            // must not touch it, because it already ran.
+            await seedAtVersion(1, ['feature/tag/legacy-double']);
+
+            const db = await openRaw({ migrate: true });
+            expect(await db.bitmapIndex.listBitmaps('tag')).toEqual([]);
+            expect(await db.bitmapIndex.listBitmaps('feature')).toContain('feature/tag/legacy-double');
+            await db.shutdown();
+        });
+
+        test('a pre-v1 database still gets the double-prefix rewrite', async () => {
+            await seedAtVersion(0, ['feature/tag/legacy-double']);
+
+            const db = await openRaw({ migrate: true });
+            // The genuinely legacy key is un-prefixed...
+            expect(await db.bitmapIndex.listBitmaps('tag')).toEqual(['tag/legacy-double']);
+            // ...while the engine-owned one is left exactly as it is.
+            expect(await db.bitmapIndex.listBitmaps('feature')).toEqual(['feature/has-comment']);
+            await db.shutdown();
+        });
+    });
+
     test('a fresh/empty database is stamped without hitting the gate', async () => {
         const db = await openRaw();
         expect(db.lastMigrationStats).toBeNull();

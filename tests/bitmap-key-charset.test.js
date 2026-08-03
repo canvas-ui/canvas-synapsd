@@ -71,3 +71,53 @@ describe('bitmap key charset (@ and : allowed) + legacy key migration', () => {
         expect(await db.migrateBitmapKey(legacy, canonical)).toBe(false);
     });
 });
+
+// hasBitmap is a PREDICATE. A malformed key cannot name an existing bitmap, so
+// false is the honest answer to the question asked. The throwing version turned a
+// cosmetic key-format issue in a legacy migration into a failed workspace start
+// in production, because a predicate raised where the caller only branched.
+describe('hasBitmap answers, it does not raise', () => {
+    let rootPath;
+    let db;
+
+    beforeEach(async () => {
+        rootPath = await fs.mkdtemp(path.join(os.tmpdir(), 'synapsd-haskey-'));
+        db = new Db({ path: rootPath, backupOnOpen: false, backupOnClose: false, semantic: { enabled: false } });
+        await db.start();
+    });
+
+    afterEach(async () => {
+        if (db) { await db.shutdown().catch(() => {}); db = null; }
+        if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
+    });
+
+    test('a malformed key is false, not a throw', async () => {
+        // 'has-comment' is the exact key that crashed production: the v1 migration
+        // stripped 'feature/' off 'feature/has-comment' and asked about the rest.
+        expect(await db.bitmapIndex.hasBitmap('has-comment')).toBe(false);
+        expect(await db.bitmapIndex.hasBitmap('nonsense')).toBe(false);
+        expect(await db.bitmapIndex.hasBitmap('')).toBe(false);
+        expect(await db.bitmapIndex.hasBitmap(null)).toBe(false);
+        expect(await db.bitmapIndex.hasBitmap(42)).toBe(false);
+    });
+
+    test('a well-formed key still answers truthfully', async () => {
+        const id = await db.put({
+            schema: 'data/abstraction/note',
+            data: { title: 'n', content: 'n' },
+            comment: 'creates feature/has-comment',
+        });
+        expect(id).toBeGreaterThan(0);
+
+        expect(await db.bitmapIndex.hasBitmap('feature/has-comment')).toBe(true);
+        expect(await db.bitmapIndex.hasBitmap('tag/never-created')).toBe(false);
+    });
+
+    test('OPERATIONS still reject malformed keys — writing one is a real error', async () => {
+        // The predicate is lenient because it is answering a question; the write
+        // paths are not, because they are being told to store something invalid.
+        await expect(db.bitmapIndex.tick('has-comment', 1)).rejects.toThrow(/naming convention/);
+        await expect(db.bitmapIndex.deleteBitmap('has-comment')).rejects.toThrow(/naming convention/);
+        await expect(db.bitmapIndex.createBitmap('has-comment')).rejects.toThrow(/naming convention/);
+    });
+});
