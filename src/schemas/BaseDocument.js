@@ -30,6 +30,63 @@ const DOCUMENT_DATA_VECTOR_EMBEDDING_FIELDS = ['data'];
 // before, so existing checksums are untouched.
 const NON_CONTENT_DATA_KEYS = ['relations'];
 
+// Feature namespaces the ENGINE derives on every write from document state
+// (schema id, contentType, locations, kind, device presence, orphan status).
+// They must never be stored in the asserted array: a stored copy is
+// indistinguishable from a derived one while being immune to the derivation's own
+// stale-diff — i.e. it could never be unticked. Same reasoning that made
+// `device/*` a strip rather than a merge on the write routes.
+// ⚠️ This list contains ONLY what the engine actually derives TODAY. The v3 plan
+// also names `data/backend/*`, `data/source/*` and `data/no-location`, but nothing
+// derives those — the parent ASSERTS them (WorkspaceStoredIndex builds them from
+// the backend descriptor; the orphan lifecycle writes data/no-location). Stripping
+// a key that has no deriver does not make it derived, it makes it unsettable.
+// Add each one here in the SAME commit that adds its deriver — `data/source/*`
+// from `locations[].metadata.provider` is already an open Phase 3 item.
+const DERIVED_FEATURE_PREFIXES = [
+    'data/abstraction/',    // index.js: pushes parsed.schema
+    'data/mime/',           // index.js: mimeBitmapKeys from metadata.contentType
+    'data/kind/',           // index.js: kindBitmapKeys from the registry
+    'data/status/',         // index.js: statusBitmapKeys from data.status
+    'feature/',             // index.js: feature/has-comment
+    'device/',              // index.js: #deviceFeaturesFromLocations
+];
+
+// Asserted, but stamped by INGEST rather than by the client. Preserved across an
+// update that omits them, so a client re-putting its own tag array cannot silently
+// drop the provenance of how the document got here.
+const PRESERVED_FEATURE_PREFIXES = ['data/dataset/'];
+
+const isDerivedFeature = (key) => DERIVED_FEATURE_PREFIXES.some((prefix) => key.startsWith(prefix));
+const isPreservedFeature = (key) => PRESERVED_FEATURE_PREFIXES.some((prefix) => key.startsWith(prefix));
+
+/**
+ * Normalize an asserted feature array: strip derived keys, de-duplicate, and
+ * carry forward any preserved keys the incoming array omitted.
+ * @param {Array<string>} input incoming (client-supplied) features
+ * @param {Array<string>} previous the document's features before this write
+ * @returns {Array<string>}
+ */
+function normalizeFeatureArray(input, previous = []) {
+    const out = [];
+    const seen = new Set();
+    const add = (key) => {
+        if (typeof key !== 'string' || key === '' || seen.has(key)) { return; }
+        seen.add(key);
+        out.push(key);
+    };
+
+    for (const key of Array.isArray(input) ? input : []) {
+        if (typeof key !== 'string' || isDerivedFeature(key)) { continue; }
+        add(key);
+    }
+    for (const key of Array.isArray(previous) ? previous : []) {
+        if (typeof key === 'string' && isPreservedFeature(key)) { add(key); }
+    }
+
+    return out;
+}
+
 const DEFAULT_DOCUMENT_DATA_TYPE = 'application/json';
 const DEFAULT_DOCUMENT_DATA_ENCODING = 'utf8';
 
@@ -117,6 +174,21 @@ const documentSchema = z.object({
     // Outside checksumFields — a kind is a projection of data that is already
     // checksummed, so it must not fork identity.
     kind: z.string().nullable().optional(),
+
+    // ASSERTED feature membership — tags a human or client put on this document
+    // (`tag/*`, `custom/*`, `client/*`), plus ingest provenance (`data/dataset/*`).
+    // Top-level for the same reasons as `comment`: outside checksumFields so a tag
+    // edit never forks dedup or triggers a re-embed, and updated by its own branch
+    // outside the data path.
+    //
+    // Deliberately separate from `metadata`, which holds EXTRACTED facts written by
+    // derivers. Sharing one container meant an EXIF enrichment patch and a user tag
+    // edit took the same shallow-merge code path at wildly different write
+    // frequencies and trust levels.
+    //
+    // DERIVED keys never live here — they are recomputed on every write and would
+    // otherwise be un-untickable. See DERIVED_FEATURE_PREFIXES.
+    features: z.array(z.string()).optional(),
 
     // Locations: addressable copies of the data content. Each entry is
     // { url, metadata? }; the URL authority encodes the device (file://<deviceId>/…)
@@ -210,23 +282,28 @@ class BaseDocument {
 
         this.timelines = Array.isArray(options.timelines) ? options.timelines : [];
 
-        const meta = options.metadata || {};
+        // `features` no longer lives under metadata (v3). Strip it from the spread
+        // so a legacy row cannot leave a second, stale copy behind.
+        const { features: legacyMetadataFeatures, ...meta } = options.metadata || {};
         this.metadata = {
             contentType: meta.contentType || DEFAULT_DOCUMENT_DATA_TYPE,
             contentEncoding: meta.contentEncoding || DEFAULT_DOCUMENT_DATA_ENCODING,
-            features: meta.features || [],
             ...meta,
         };
 
-        // Ensure the document's schema id is always present as a feature (deduplicated)
-        if (!Array.isArray(this.metadata.features)) {
-            this.metadata.features = [];
-        }
-        if (!this.metadata.features.includes(this.schema)) {
-            this.metadata.features.unshift(this.schema);
-        }
-        // Deduplicate features array
-        this.metadata.features = Array.from(new Set(this.metadata.features));
+        // Asserted features (see documentSchema).
+        //
+        // The schema id is NOT injected here any more. It used to be unshifted onto
+        // every construct, which was triple-redundant (clients send it, #putOne
+        // re-adds it) and put a DERIVED key inside an asserted-only array.
+        //
+        // TODO(Phase 6): `metadata.features` is read as a fallback so rows written
+        // before this change keep their tags. Delete that fallback once the
+        // migration has rewritten rows — it is a migration read path, not a
+        // permanent compat shim.
+        this.features = normalizeFeatureArray(
+            Array.isArray(options.features) ? options.features : legacyMetadataFeatures,
+        );
 
         // Checksums/embeddings
         this.checksumArray = options.checksumArray || this.generateChecksumStrings();
@@ -302,9 +379,24 @@ class BaseDocument {
             this.timelines = data.timelines;
         }
 
-        // Update metadata if provided
+        // Update asserted features if provided. Deliberately outside the
+        // dataUpdated path — exactly like `comment` — so a tag edit never
+        // regenerates checksums (no dedup fork, no content re-embed).
+        // Preserved prefixes are carried forward from the CURRENT value, which is
+        // still the pre-write state at this point.
+        const incomingFeatures = Array.isArray(data.features)
+            ? data.features
+            : (Array.isArray(data.metadata?.features) ? data.metadata.features : null);
+        if (incomingFeatures) {
+            this.features = normalizeFeatureArray(incomingFeatures, this.features);
+        }
+
+        // Update metadata if provided. `features` is stripped: it has its own
+        // top-level home and its own branch above, so letting it through here
+        // would recreate the second container this move exists to remove.
         if (data.metadata) {
-            this.metadata = { ...this.metadata, ...data.metadata };
+            const { features: _ignoredMetadataFeatures, ...metadataPatch } = data.metadata;
+            this.metadata = { ...this.metadata, ...metadataPatch };
         }
 
         // Update checksums and embeddings if explicitly provided
@@ -608,6 +700,7 @@ class BaseDocument {
             data: this.data,
             comment: this.comment,
             kind: this.kind,
+            features: this.features,
             locations: this.locations,
             timelines: this.timelines,
             metadata: this.metadata,
@@ -650,3 +743,4 @@ class BaseDocument {
 // Export document class and schemas
 export default BaseDocument;
 export { documentDataSchema, documentSchema, locationSchema, timelineEntrySchema };
+export { DERIVED_FEATURE_PREFIXES, PRESERVED_FEATURE_PREFIXES, normalizeFeatureArray };
