@@ -128,10 +128,50 @@ function documentFeatureKeys(doc) {
     return keys;
 }
 
-// Derived facet keys (mime + status) for one doc — ticked on every write, with
-// stale keys from the previous doc state unticked, so they can't drift.
+// v3 subtype axis: `data/kind/*`, derived from the schema REGISTRATION (a literal
+// `kind`, or a `kindField` read off the document under its entity prefix) and
+// never from the client. This is the axis consumers migrate to ahead of the
+// deferred `data/entity/*` id rename — `data/kind/browser/tab` answers what
+// `data/abstraction/tab` answers today, so a submodule can switch on its own
+// release cadence.
+const KIND_BITMAP_PREFIX = 'data/kind/';
+
+// Stamp the derived kind onto a document before it is written. Client-supplied
+// values are OVERWRITTEN, exactly like device/* tags: a kind the engine did not
+// derive is indistinguishable from one it did, while being immune to cleanup.
+function stampDerivedKind(doc) {
+    if (!doc || typeof doc !== 'object') { return doc; }
+    doc.kind = schemaRegistry.resolveKind(doc.schema, doc) ?? null;
+    return doc;
+}
+
+// Hierarchical, exactly like data/mime/*: 'browser/tab' ticks BOTH
+// 'data/kind/browser' and 'data/kind/browser/tab', so "everything browser-ish"
+// is one key with no enumeration of children. Single-segment kinds ('note') are
+// fine — they simply never have children.
+//
+// ⚠️ Inherited from mime: listBitmaps(prefix) range-scans `prefix + '/'`, so a
+// bare 'data/kind/browser' key is invisible to a prefix listing of its OWN
+// namespace — list 'data/kind/' instead. Safe here precisely because the parent
+// is ALWAYS ticked. Key-based AND/OR/ANDNOT queries are unaffected.
+function kindBitmapKeys(doc) {
+    const kind = typeof doc?.kind === 'string' ? doc.kind.trim() : '';
+    if (!kind) { return []; }
+    const segments = kind.split('/').filter(Boolean);
+    const keys = [];
+    for (let i = 1; i <= segments.length; i++) {
+        keys.push(`${KIND_BITMAP_PREFIX}${segments.slice(0, i).join('/')}`);
+    }
+    return normalizeBitmapKeys(keys);
+}
+
+// Derived facet keys (mime + status + kind) for one doc — ticked on every write,
+// with stale keys from the previous doc state unticked, so they can't drift.
+// `kind` rides this existing lifecycle deliberately: the tick/untick stale-diff
+// is already wired into all four write paths, so a document whose kind changes
+// (an application switching data.type) cannot leave its old bitmap ticked.
 function facetBitmapKeys(doc) {
-    return [...mimeBitmapKeys(doc), ...statusBitmapKeys(doc)];
+    return [...mimeBitmapKeys(doc), ...statusBitmapKeys(doc), ...kindBitmapKeys(doc)];
 }
 
 // Union extra locations into a document by url (used by in-batch content dedup,
@@ -1003,6 +1043,10 @@ class SynapsD extends EventEmitter {
                 if (!docFeatures.includes(parsed.schema)) {
                     docFeatures.push(parsed.schema);
                 }
+
+                // Derived kind: stamped AFTER any existing.update(doc) merge above,
+                // so it reflects the post-merge data, and BEFORE the row is written.
+                stampDerivedKind(parsed);
 
                 const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevTimelineState, prevFacetKeys, prevFeatureKeys, docFeatures };
                 prepared.push(entry);
@@ -2164,6 +2208,7 @@ class SynapsD extends EventEmitter {
 
         const featureBitmaps = parseBitmapArray(featureBitmapArray);
         const parsedDocument = isDocumentInstance(document) ? document : parseInitializeDocument(document);
+        stampDerivedKind(parsedDocument);
         parsedDocument.validateData();
 
         // Dedup by checksum
@@ -3301,6 +3346,7 @@ class SynapsD extends EventEmitter {
         const previousFeatureKeys = documentFeatureKeys(storedDocument);
 
         const updatedDocument = storedDocument.update(updateData);
+        stampDerivedKind(updatedDocument);
         updatedDocument.validate();
 
         // Bitmaps follow the document's features — union the updated document's
@@ -4438,10 +4484,16 @@ class SynapsD extends EventEmitter {
     }
 
     async #removeDocumentTimelines(docId, ...documents) {
+        // Names only — deliberately NOT via #normalizeDocumentTimelineEntries, so
+        // a row written before the duplicate-name guard (or by a future
+        // multi-position writer) can still be cleaned up rather than throwing on
+        // the way out.
         const names = new Set();
         for (const document of documents) {
-            for (const entry of this.#normalizeDocumentTimelineEntries(document)) {
-                names.add(entry.name);
+            const timelines = Array.isArray(document?.timelines) ? document.timelines : [];
+            for (const entry of timelines) {
+                const name = entry?.name ?? entry?.timeline;
+                if (name) { names.add(name); }
             }
         }
 
@@ -4452,10 +4504,30 @@ class SynapsD extends EventEmitter {
 
     #normalizeDocumentTimelineEntries(document) {
         const timelines = Array.isArray(document?.timelines) ? document.timelines : [];
+        const seen = new Set();
         return timelines.map((entry) => {
             const name = entry.name ?? entry.timeline;
             if (!name) { throw new Error('Document timeline entry requires name or timeline'); }
             if (!('start' in entry)) { throw new Error(`Document timeline entry "${name}" requires start`); }
+
+            // A document occupies ONE position per timeline: the index is a BSI
+            // keyed id -> a single value, so a second insert for the same
+            // (timeline, id) OVERWRITES the first. Left unguarded this loses data
+            // SILENTLY and invisibly — the row keeps every entry and db.get()
+            // re-renders them all, so only a bitmap/timeline query reveals that
+            // just the last one was indexed.
+            // Multi-position is a wanted capability (a note referencing N eras on
+            // a 'wikipedia'/'content' timeline) — see TODO.refactor-v3.md. Until
+            // the index supports it, refuse rather than silently drop.
+            if (seen.has(name)) {
+                throw new Error(
+                    `Document declares multiple entries for timeline "${name}", which the index cannot ` +
+                    'represent: one document occupies one position per timeline, so all but the last ' +
+                    'would be silently discarded. Use one document per position, or a distinct timeline ' +
+                    'name per axis, until multi-position indexing lands.',
+                );
+            }
+            seen.add(name);
 
             const start = entry.scale ? { scale: entry.scale, value: entry.start } : entry.start;
             // `undefined` (absent) => instant; explicit `null` => OPEN end, the

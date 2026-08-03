@@ -110,6 +110,16 @@ const documentSchema = z.object({
     // and is the one text class that can never be regenerated — user-editable only.
     comment: z.string().optional(),
 
+    // v3 subtype axis. DERIVED from the schema registration (a literal `kind`, or
+    // a `kindField` read off the document under the entity prefix), stamped at
+    // ingest and mirrored into hierarchical `data/kind/*` bitmaps. Never
+    // client-authoritative: whatever a caller sends is overwritten by the derived
+    // value, exactly like device/* tags. Present on the row so it round-trips
+    // through the constructor on read and so a rebuild can verify itself.
+    // Outside checksumFields — a kind is a projection of data that is already
+    // checksummed, so it must not fork identity.
+    kind: z.string().nullable().optional(),
+
     // Locations: addressable copies of the data content. Each entry is
     // { url, metadata? }; the URL authority encodes the device (file://<deviceId>/…)
     // for device-local detection/preference.
@@ -181,6 +191,12 @@ class BaseDocument {
 
         // User-authored free-text comment (see documentSchema). Empty string = none.
         this.comment = typeof options.comment === 'string' ? options.comment : '';
+
+        // Derived subtype axis (see documentSchema). Carried through the
+        // constructor so a stored row rehydrates with it; the authoritative value
+        // is re-stamped from the registry on every write, so a client cannot pin
+        // a stale or invented kind.
+        this.kind = typeof options.kind === 'string' ? options.kind : null;
 
         // Locations: canonical source-of-truth for where the data lives ({ url, metadata? }).
         this.locations = Array.isArray(options.locations) ? options.locations : [];
@@ -554,6 +570,7 @@ class BaseDocument {
             schemaVersion: this.schemaVersion,
             data: this.data,
             comment: this.comment,
+            kind: this.kind,
             locations: this.locations,
             timelines: this.timelines,
             metadata: this.metadata,
