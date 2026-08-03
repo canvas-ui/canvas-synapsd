@@ -249,29 +249,19 @@ function normalizeHeaderValue(value) {
 }
 
 export default class Email extends Document {
+
+    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // static. Never stored on the row (see documentSchema).
+    static indexOptions = {
+        ftsSearchFields: ['data.subject', 'data.body', 'data.from.address', 'data.from', 'data.to'],
+        vectorEmbeddingFields: ['data.subject', 'data.body'],
+        checksumFields: ['data.messageId', 'data.from.address', 'data.subject'],
+    };
+
     constructor(options = {}) {
         // Set schema before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-
-        // Inject Email-specific index options BEFORE super().
-        // checksumFields = stable, protocol-independent identity (NOT the whole
-        // data object, which carries volatile per-fetch fields — receivedAt,
-        // platformMetadata.uid/seqno/flags — that fork a re-ingested message into
-        // duplicates). The RFC Message-ID is the canonical dedup key; from.address
-        // + subject harden against a missing/duplicate Message-ID. Deliberately
-        // excluded: `body` (IMAP text vs Graph html/preview differ for the same
-        // message → would block cross-protocol dedup) and `date` (volatile
-        // new-Date() fallback). The same message in multiple folders/accounts, or
-        // re-fetched, collapses to one doc; folder/location lives in membership.
-        // If the ingest layer supplies `checksumArray` (raw .eml/MIME blob hash),
-        // that still wins (BaseDocument honours an explicit checksumArray).
-        options.indexOptions = {
-            ...(options.indexOptions || {}),
-            ftsSearchFields: ['data.subject', 'data.body', 'data.from.address', 'data.from', 'data.to'],
-            vectorEmbeddingFields: ['data.subject', 'data.body'],
-            checksumFields: ['data.messageId', 'data.from.address', 'data.subject'],
-        };
 
         super(options);
     }

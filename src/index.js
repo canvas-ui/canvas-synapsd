@@ -23,6 +23,7 @@ import LmdbBackend from './backends/lmdb/index.js';
 
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
+import { predicateId } from './indexes/edges/predicates.js';
 import { isDocumentData, isDocumentInstance } from './schemas/SchemaRegistry.js';
 import BaseDocument from './schemas/BaseDocument.js';
 
@@ -135,6 +136,39 @@ function documentFeatureKeys(doc) {
 // `data/abstraction/tab` answers today, so a submodule can switch on its own
 // release cadence.
 const KIND_BITMAP_PREFIX = 'data/kind/';
+
+// Asserted edges, declared by the document: `data.relations = [{p, to}]`.
+// Validated at ingest rather than in BaseDocument, because the predicate registry
+// is an index concern and this is where Phase 4 will derive the actual edges —
+// one place, all write paths.
+//
+// Rejecting early is deliberate: a relation with an unknown predicate or a
+// non-integer target can never become an edge, so storing it would leave the row
+// claiming a relationship the graph does not have. Predicate errors from
+// predicateId() are already precise (including the inverse-name case).
+function validateDocumentRelations(doc) {
+    const relations = doc?.data?.relations;
+    if (relations === undefined || relations === null) { return; }
+
+    if (!Array.isArray(relations)) {
+        throw new Error('data.relations must be an array of { p, to } entries');
+    }
+
+    for (const relation of relations) {
+        if (!relation || typeof relation !== 'object' || Array.isArray(relation)) {
+            throw new Error('data.relations entries must be objects of shape { p, to }');
+        }
+        // Throws on unknown predicates AND on inverse-style spellings: direction
+        // is an axis expressed by which side declares the edge, never by a name.
+        predicateId(relation.p);
+        if (!Number.isInteger(relation.to) || relation.to <= 0) {
+            throw new Error(
+                `data.relations entry for predicate "${relation.p}" needs a positive integer document id ` +
+                `as "to" (got ${JSON.stringify(relation.to)})`,
+            );
+        }
+    }
+}
 
 // Stamp the derived kind onto a document before it is written. Client-supplied
 // values are OVERWRITTEN, exactly like device/* tags: a kind the engine did not
@@ -1046,6 +1080,7 @@ class SynapsD extends EventEmitter {
 
                 // Derived kind: stamped AFTER any existing.update(doc) merge above,
                 // so it reflects the post-merge data, and BEFORE the row is written.
+                validateDocumentRelations(parsed);
                 stampDerivedKind(parsed);
 
                 const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevTimelineState, prevFacetKeys, prevFeatureKeys, docFeatures };
@@ -2208,6 +2243,7 @@ class SynapsD extends EventEmitter {
 
         const featureBitmaps = parseBitmapArray(featureBitmapArray);
         const parsedDocument = isDocumentInstance(document) ? document : parseInitializeDocument(document);
+        validateDocumentRelations(parsedDocument);
         stampDerivedKind(parsedDocument);
         parsedDocument.validateData();
 
@@ -3346,6 +3382,7 @@ class SynapsD extends EventEmitter {
         const previousFeatureKeys = documentFeatureKeys(storedDocument);
 
         const updatedDocument = storedDocument.update(updateData);
+        validateDocumentRelations(updatedDocument);
         stampDerivedKind(updatedDocument);
         updatedDocument.validate();
 

@@ -21,6 +21,19 @@ const fileDocumentSchema = baseDocumentSchema.extend({
 });
 
 export default class File extends BaseDocument {
+
+    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // static. Never stored on the row (see documentSchema).
+    static indexOptions = {
+        // Checksums are computed upstream by `stored` (content-addressed blob);
+        // declare the real algorithms so the doc doesn't report Base's sha1 default.
+        checksumAlgorithms: ['sha256', 'md5'],
+        // Names live in the location URLs (one blob, many aliases) — index those.
+        ftsSearchFields: ['locationUrls'],
+        vectorEmbeddingFields: ['locationUrls'],
+        // File relies on external checksumArray, so we don't modify checksumFields here
+    };
+
     constructor(options = {}) {
         // Ensure checksumArray is provided and non-empty before calling super
         // File abstraction implies we already have the file content/checksum analyzed
@@ -33,18 +46,6 @@ export default class File extends BaseDocument {
         // schemaVersion is a class invariant, not persisted state — always
         // stamp the current version so re-parsed/updated docs self-heal.
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-
-        // Inject File-specific index options BEFORE super()
-        options.indexOptions = {
-            ...(options.indexOptions || {}),
-            // Checksums are computed upstream by `stored` (content-addressed blob);
-            // declare the real algorithms so the doc doesn't report Base's sha1 default.
-            checksumAlgorithms: ['sha256', 'md5'],
-            // Names live in the location URLs (one blob, many aliases) — index those.
-            ftsSearchFields: ['locationUrls'],
-            vectorEmbeddingFields: ['locationUrls'],
-            // File relies on external checksumArray, so we don't modify checksumFields here
-        };
 
         super(options);
     }

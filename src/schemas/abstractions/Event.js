@@ -51,20 +51,18 @@ const documentDataSchema = Document.extendDataSchema(
 const RRULE_UNTIL_RE = /(?:^|;)\s*UNTIL=(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2}))?Z?/i;
 
 export default class Event extends Document {
+
+    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // static. Never stored on the row (see documentSchema).
+    static indexOptions = {
+        ftsSearchFields: ['data.title', 'data.description', 'data.location'],
+        vectorEmbeddingFields: ['data.title', 'data.description'],
+        checksumFields: ['data.title', 'data.start', 'data.type'],
+    };
+
     constructor(options = {}) {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-
-        // Injected BEFORE super() so the checksum uses these fields.
-        // start and type are in the checksum for the same reason Todo puts
-        // dueDate there: "Standup" at 09:00 and "Standup" at 14:00 are different
-        // events, and a calendar entry is not the alert that shares its title.
-        options.indexOptions = {
-            ...(options.indexOptions || {}),
-            ftsSearchFields: ['data.title', 'data.description', 'data.location'],
-            vectorEmbeddingFields: ['data.title', 'data.description'],
-            checksumFields: ['data.title', 'data.start', 'data.type'],
-        };
 
         options.timelines = Event.#deriveTimelines(options);
 

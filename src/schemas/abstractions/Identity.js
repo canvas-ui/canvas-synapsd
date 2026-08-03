@@ -87,13 +87,13 @@ const defaultIndexOptions = {
 
 export default class Identity extends Document {
 
+    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // static. Never stored on the row (see documentSchema).
+    static indexOptions = defaultIndexOptions;
+
     constructor(options = {}) {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-        options.indexOptions = {
-            ...defaultIndexOptions,
-            ...(options.indexOptions || {}),
-        };
 
         super(options);
 

@@ -567,8 +567,48 @@ section below: it is now `data/kind/application/flatpak`.
      promoting the field is a cross-repo change with no payoff. Recommendation: keep
      `metadata.contentType` as the single source and revisit only if/when `metadata` is split into
      extracted-vs-asserted containers. Decide before closing step 2.
-   - [ ] `data.relations` accepted (Phase 4 consumes it)
-   - [ ] `indexOptions` off the row → registry resolution
+   - [x] **`data.relations` — SHIPPED 2026-08-03.** Accepted, round-trips, and validated at
+     ingest (`validateDocumentRelations`, called beside `stampDerivedKind` in all three write
+     paths). Validation lives in index.js rather than BaseDocument because the predicate registry
+     is an index concern and this is exactly where Phase 4 hooks in. Rejects unknown predicates,
+     inverse-style spellings, non-arrays, malformed entries and non-positive/non-integer targets —
+     a relation that can never become an edge must not be stored, or the row claims a relationship
+     the graph does not have.
+
+     **The load-bearing part is the projection exclusion.** The defaults for `checksumFields`,
+     `ftsSearchFields` AND `vectorEmbeddingFields` are all literally `['data']` — the WHOLE data
+     object — so without an exclusion, asserting an edge would fork the document's identity,
+     pollute its search text and trigger a re-embed. `NON_CONTENT_DATA_KEYS = ['relations']` plus
+     `BaseDocument.contentData()` strips it from every whole-`data` projection, returning the SAME
+     object reference when there is nothing to strip so existing checksums are byte-identical.
+     `tests/data-relations.test.js` (11).
+   - [x] **`indexOptions` off the row — SHIPPED 2026-08-03. Measured saving: 414 B per note row,
+     43.7% of the row (534 B vs 948 B), ~2.9 GB at 7M rows** — close to the 461 B/3.2 GB estimate
+     this plan was written against.
+
+     Resolution moved to a `static indexOptions` on each schema class, NOT to a registry lookup:
+     BaseDocument cannot import SchemaRegistry (the registry imports every schema, which import
+     BaseDocument — a cycle), but `this.constructor.indexOptions` reaches the subclass's static
+     with no import at all. `registerSchema({indexOptions})` writes that same static, so there is
+     one source of truth rather than a registry copy that looks authoritative while affecting
+     nothing; `getSchemaEntry()` reads through to it.
+
+     **Caller overrides are now impossible, deliberately.** A per-document override would apply on
+     write and vanish on read once the field is not persisted — silently different behaviour per
+     code path. Dropping caller input also settles the inherited merge-order inconsistency
+     (Application/Link/Identity let the caller win; Document/Note/Email/Tab/Todo/File/Dotfile/Device
+     spread it first then hard-overrode the field lists, silently discarding a caller's
+     `ftsSearchFields`) — with no caller input there is one convention and nothing to get wrong.
+
+     Legacy rows still carrying the field are IGNORED on read, so stale stored config can never
+     resurrect; Phase 6's pass drops it from the rows themselves.
+     `tests/index-options-off-row.test.js` (8), including that checksums are unchanged by the move.
+   - [x] **Pre-existing FTS bug fixed in passing (2026-08-03).** `generateFtsData` did
+     `String(value)` on objects, so any object/array FTS field indexed the literal text
+     `"[object Object]"` — no searchable content at all. Hits `data/abstraction/document` (which
+     declares the default `ftsSearchFields: ['data']`), Identity's `identifiers`/`channels`/`links`
+     and Email's `from`/`to`. Now JSON-serialized. ⚠️ **Changes FTS content for those documents —
+     existing rows need `reindexSearchIndex()` to pick it up.**
    - [ ] root-level `features[]` (D2)
 3. Dotfile identity → `data.url` + zod normalization; schema-scoped checksum dedup.
 4. `data/*` facet-family consolidation (`data/kind/*` hierarchical values, source/status dedup).
@@ -990,6 +1030,51 @@ today).
 This does **not** reopen the Event recurrence decision: the envelope model was chosen because it
 matches how CalDAV clients already consume VEVENT+RRULE, which stands regardless of how many
 positions the index can hold.
+
+## Consumer-registered abstractions — the generic-engine goal (raised 2026-08-03)
+
+**Requirement (user):** consumers register their own data abstractions by extending BaseDocument or
+a core schema, with their own fts/vector fields declared **per abstraction schema, never per
+write**, and the base schema's mandatory fields always enforced. Example: a
+`data/abstraction/phone` extending `Device` with `ftsSearchFields: ['data.maker',
+'data.hwRelease']`.
+
+⚠️ **Do not confuse this with the superseded "Decision 2".** What v3 killed is *bitmap
+ancestor-chain ticking* — a tab ticking `data/abstraction/link` so "all links finds tabs"; `kind`
+replaced that. CLASS extension for validation and index-option inheritance is a different thing and
+is very much wanted.
+
+**Already works today, verified 2026-08-03** (`tests/schema-registry.test.js`, 4 tests):
+
+- A subclass declaring `static indexOptions` gets its own fts/vector/checksum fields — JS static
+  inheritance resolves through the prototype chain, and BaseDocument reads it via
+  `this.constructor`, so there is no registry import and therefore no import cycle.
+- A subclass declaring none inherits its parent's.
+- Base mandatory fields stay enforced (a `Phone` without `data.deviceId` throws) — a consumer
+  cannot opt out of its parent's contract by registering.
+- `registerSchema()` accepts it; `instanceof BaseDocument` is the guard.
+
+**Gaps, in the order they matter:**
+
+1. **No parent-aware data-schema helper.** `Phone.dataSchema` inherits `Device.dataSchema`
+   unchanged, so a consumer's OWN fields are accepted (passthrough) but never *validated*.
+   `BaseDocument.extendDataSchema()` builds a fresh wrapper rather than extending the PARENT's data
+   shape, so there is no one-liner for "Device's payload plus these fields". Fixing it needs care:
+   `Document.dataSchema.shape.data` is a `z.record`, not a `z.object`, so a naive `.merge()` breaks
+   for every schema currently calling `Document.extendDataSchema`. Add a separate explicit helper
+   rather than changing that one.
+2. **No registration ROUTE.** Registration is in-process JS only. A real consumer-facing API means
+   an HTTP surface in the parent, which raises questions this plan has not answered: how is a
+   *class* transmitted (it cannot be — so a declarative descriptor compiled server-side into a
+   zod schema + index options), persistence of registrations across restarts, per-user vs
+   per-workspace scoping, and what happens to stored documents when a consumer re-registers a
+   schema with different `checksumFields` (identity churn).
+3. **`kindField`/`kindPrefix` are already exposed** on `registerSchema`, so a consumer abstraction
+   gets the `data/kind/*` axis for free.
+
+Sequencing: (1) is small and can ride any later Phase 3 commit. (2) is its own rev — it is an API
+design problem more than an engine one, and the descriptor-vs-class question should be settled
+before any code.
 
 ## Phase 4 — ingest derivation of asserted edges
 

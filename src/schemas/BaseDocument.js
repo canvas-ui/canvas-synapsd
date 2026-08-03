@@ -21,6 +21,15 @@ const DOCUMENT_DATA_CHECKSUM_ALGORITHMS = ['sha1', 'sha256'];
 const DOCUMENT_DATA_CHECKSUM_FIELDS = ['data'];
 const DOCUMENT_DATA_FTS_SEARCH_FIELDS = ['data'];
 const DOCUMENT_DATA_VECTOR_EMBEDDING_FIELDS = ['data'];
+// Structural `data` keys that are NOT content: they describe the document's
+// place in the graph, not what it says. Excluded from every WHOLE-`data`
+// projection (checksum / FTS / embedding), because those default to the entire
+// data object — so without this, asserting an edge would fork the document's
+// identity, pollute its search text and trigger a re-embed.
+// A document that carries none of these keys projects byte-identically to
+// before, so existing checksums are untouched.
+const NON_CONTENT_DATA_KEYS = ['relations'];
+
 const DEFAULT_DOCUMENT_DATA_TYPE = 'application/json';
 const DEFAULT_DOCUMENT_DATA_ENCODING = 'utf8';
 
@@ -74,24 +83,13 @@ const documentSchema = z.object({
     schema: z.string(),
     schemaVersion: z.string(),
 
-    // Internal index configuration
-    indexOptions: z.object({
-        checksumAlgorithms: z.array(z.string()),
-        checksumFields: z.array(z.string()),
-        ftsSearchFields: z.array(z.string()),
-        vectorEmbeddingFields: z.array(z.string()),
-        embeddingOptions: z.object({
-            embeddingModel: z.string(),
-            embeddingDimensions: z.number(),
-            embeddingProvider: z.string(),
-            embeddingProviderOptions: z.record(z.any()).optional(),
-            chunking: z.object({
-                type: z.enum(['sentence', 'paragraph', 'chunk']),
-                chunkSize: z.number(),
-                chunkOverlap: z.number(),
-            }).optional(),
-        }).optional(),
-    }).optional(),
+    // NOTE: `indexOptions` is deliberately ABSENT from the row. It is SCHEMA-level
+    // configuration, identical for every document of a schema, so persisting it
+    // per row was pure overhead — ~461 B of byte-identical JSON on a measured
+    // note, ~3.2 GB at 7M rows. It now lives on the schema class as a
+    // `static indexOptions` and is resolved at construction time.
+    // Legacy rows may still carry the field; it is ignored on read (see the
+    // constructor), so a stale stored copy can never resurrect old config.
 
     // Timestamps
     createdAt: z.string().datetime(),
@@ -154,7 +152,6 @@ class BaseDocument {
      * @param {string} options.schemaVersion - Document schema version
      * @param {Object} options.data - Document data
      * @param {Object} options.metadata - Document metadata
-     * @param {Object} options.indexOptions - Document index options
      */
     constructor(options = {}) {
         // Base
@@ -162,23 +159,33 @@ class BaseDocument {
         this.schema = options.schema ?? DOCUMENT_SCHEMA_NAME;
         this.schemaVersion = options.schemaVersion ?? DOCUMENT_SCHEMA_VERSION;
 
-        // Internal index configuration
+        // Internal index configuration — resolved from the SCHEMA, never from the
+        // caller or the row. Resolution order is core defaults -> the subclass's
+        // `static indexOptions`, and that is the whole order: a per-document
+        // override is deliberately impossible now that the field is not persisted,
+        // because it would apply on write and vanish on read.
+        //
+        // This also settles the merge-order inconsistency v3 inherited: half the
+        // schemas spread caller options last (caller wins) and half spread them
+        // first then hard-override the field lists (caller silently discarded).
+        // With no caller input there is one convention and nothing to get wrong.
+        const schemaIndexOptions = this.constructor.indexOptions || {};
         this.indexOptions = {
-            checksumAlgorithms: options.indexOptions?.checksumAlgorithms || DOCUMENT_DATA_CHECKSUM_ALGORITHMS,
-            checksumFields: options.indexOptions?.checksumFields || DOCUMENT_DATA_CHECKSUM_FIELDS,
-            ftsSearchFields: options.indexOptions?.ftsSearchFields || DOCUMENT_DATA_FTS_SEARCH_FIELDS,
-            vectorEmbeddingFields: options.indexOptions?.vectorEmbeddingFields || DOCUMENT_DATA_VECTOR_EMBEDDING_FIELDS,
-            ...(options.indexOptions || {}),
+            checksumAlgorithms: schemaIndexOptions.checksumAlgorithms || DOCUMENT_DATA_CHECKSUM_ALGORITHMS,
+            checksumFields: schemaIndexOptions.checksumFields || DOCUMENT_DATA_CHECKSUM_FIELDS,
+            ftsSearchFields: schemaIndexOptions.ftsSearchFields || DOCUMENT_DATA_FTS_SEARCH_FIELDS,
+            vectorEmbeddingFields: schemaIndexOptions.vectorEmbeddingFields || DOCUMENT_DATA_VECTOR_EMBEDDING_FIELDS,
+            ...schemaIndexOptions,
             embeddingOptions: {
-                ...(options.indexOptions?.embeddingOptions || {}),
+                ...(schemaIndexOptions.embeddingOptions || {}),
                 // Local in-process ONNX (fastembed) is the MVP default; the
                 // server computes vectors for readable JSON docs (notes). Apps
                 // may override per-document for blob/media (app-provided vectors).
-                embeddingModel: options.indexOptions?.embeddingOptions?.embeddingModel || 'bge-small-en-v1.5',
-                embeddingDimensions: options.indexOptions?.embeddingOptions?.embeddingDimensions || 384,
-                embeddingProvider: options.indexOptions?.embeddingOptions?.embeddingProvider || 'local',
-                embeddingProviderOptions: options.indexOptions?.embeddingOptions?.embeddingProviderOptions || {},
-                chunking: options.indexOptions?.embeddingOptions?.chunking || {
+                embeddingModel: schemaIndexOptions.embeddingOptions?.embeddingModel || 'bge-small-en-v1.5',
+                embeddingDimensions: schemaIndexOptions.embeddingOptions?.embeddingDimensions || 384,
+                embeddingProvider: schemaIndexOptions.embeddingOptions?.embeddingProvider || 'local',
+                embeddingProviderOptions: schemaIndexOptions.embeddingOptions?.embeddingProviderOptions || {},
+                chunking: schemaIndexOptions.embeddingOptions?.chunking || {
                     type: 'sentence',
                     chunkSize: 1000,
                     chunkOverlap: 200,
@@ -425,6 +432,22 @@ class BaseDocument {
     }
 
     /**
+     * `data` with structural (non-content) keys removed — the view every
+     * whole-`data` projection must use. Returns the SAME object reference when
+     * there is nothing to strip, so documents without relations keep byte-identical
+     * checksums.
+     * @returns {Object} content-only view of data
+     */
+    contentData() {
+        if (!this.data || typeof this.data !== 'object') { return this.data; }
+        if (!NON_CONTENT_DATA_KEYS.some((key) => key in this.data)) { return this.data; }
+
+        const content = { ...this.data };
+        for (const key of NON_CONTENT_DATA_KEYS) { delete content[key]; }
+        return content;
+    }
+
+    /**
      * Generate checksum data for the document
      * @returns {string} Checksum data
      */
@@ -433,7 +456,8 @@ class BaseDocument {
             // Default to the whole data object if no specific fields are set
             if (!this.indexOptions?.checksumFields?.length ||
                 this.indexOptions.checksumFields.includes('data')) {
-                return this.data ? JSON.stringify(this.data) : '';
+                const content = this.contentData();
+                return content ? JSON.stringify(content) : '';
             }
 
             // Extract and concatenate specified fields
@@ -460,8 +484,21 @@ class BaseDocument {
             // Extract specified fields (ftsSearchFields may be empty for blob docs)
             const fieldValues = (this.indexOptions?.ftsSearchFields || [])
                 .map((field) => {
-                    const value = this.getNestedValue(this, field);
-                    return value ? String(value).trim() : null;
+                    const value = field === 'data' ? this.contentData() : this.getNestedValue(this, field);
+                    if (value === null || value === undefined || value === '') { return null; }
+
+                    // Objects and arrays must be serialized, not String()'d: the
+                    // default ftsSearchFields is ['data'] (whole object) and several
+                    // schemas index array fields (Identity identifiers/channels/links,
+                    // Email from/to), all of which previously indexed the literal
+                    // text "[object Object]" — i.e. no searchable content at all.
+                    // ⚠️ Changes FTS content for those documents: existing rows need
+                    // reindexSearchIndex() to pick it up.
+                    if (typeof value === 'object') {
+                        const serialized = JSON.stringify(value);
+                        return (serialized && serialized !== '{}' && serialized !== '[]') ? serialized : null;
+                    }
+                    return String(value).trim() || null;
                 })
                 .filter(Boolean);  // Remove null/empty values
 
@@ -487,7 +524,7 @@ class BaseDocument {
             // Extract specified fields
             const fieldValues = this.indexOptions.vectorEmbeddingFields
                 .map((field) => {
-                    const value = this.getNestedValue(this, field);
+                    const value = field === 'data' ? this.contentData() : this.getNestedValue(this, field);
                     return value || null;
                 })
                 .filter(Boolean);  // Remove null values
@@ -574,7 +611,6 @@ class BaseDocument {
             locations: this.locations,
             timelines: this.timelines,
             metadata: this.metadata,
-            indexOptions: this.indexOptions,
             createdAt: this.createdAt,
             updatedAt: this.updatedAt,
             orphanedAt: this.orphanedAt,

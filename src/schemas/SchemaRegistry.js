@@ -168,13 +168,21 @@ class SchemaRegistry {
             );
         }
 
+        // `static indexOptions` on the class is the ONE source of truth — that is
+        // what BaseDocument resolves from at construction time (it cannot import
+        // this registry without a cycle). Registering with indexOptions therefore
+        // writes the static rather than storing a parallel copy that would look
+        // authoritative while affecting nothing.
+        if (options.indexOptions) {
+            SchemaClass.indexOptions = options.indexOptions;
+        }
+
         this.#entries.set(schemaId, {
             SchemaClass,
             tier: 'app',
             kind: options.kind,
             kindField: options.kindField,
             kindPrefix: options.kindPrefix,
-            indexOptions: options.indexOptions,
         });
 
         return this;
@@ -214,7 +222,10 @@ class SchemaRegistry {
         if (!entry) {
             throw new Error(`Schema not found: ${schemaId}`);
         }
-        return entry;
+        // Read `indexOptions` through to the class static rather than caching a
+        // copy here: it is resolved from the class at construction time, and a
+        // second stored copy could drift from what documents actually use.
+        return { ...entry, indexOptions: entry.SchemaClass?.indexOptions };
     }
 
     /**

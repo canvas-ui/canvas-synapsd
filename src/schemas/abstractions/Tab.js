@@ -17,19 +17,19 @@ const documentDataSchema = z.object({
 });
 
 export default class Tab extends Document {
+
+    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // static. Never stored on the row (see documentSchema).
+    static indexOptions = {
+        ftsSearchFields: ['data.title', 'data.url'],
+        vectorEmbeddingFields: ['data.title', 'data.url'],
+        checksumFields: ['data.url'],
+    };
+
     constructor(options = {}) {
         // Set schema defaults before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-
-        // Inject Tab-specific index options BEFORE super() so that BaseDocument
-        // computes checksums and other derived values using the correct fields.
-        options.indexOptions = {
-            ...(options.indexOptions || {}),
-            ftsSearchFields: ['data.title', 'data.url'],
-            vectorEmbeddingFields: ['data.title', 'data.url'],
-            checksumFields: ['data.url'],
-        };
 
         super(options);
     }

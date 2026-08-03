@@ -34,20 +34,19 @@ const documentDataSchema = z.object({
 });
 
 export default class Todo extends Document {
+
+    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // static. Never stored on the row (see documentSchema).
+    static indexOptions = {
+        ftsSearchFields: ['data.title', 'data.description'],
+        vectorEmbeddingFields: ['data.title', 'data.description'],
+        checksumFields: ['data.title', 'data.description', 'data.dueDate'],
+    };
+
     constructor(options = {}) {
         // Set schema before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-
-        // Inject Todo-specific index options BEFORE super()
-        // dueDate is part of the checksum: "Call plumber" due Tuesday and
-        // "Call plumber" due Friday are different tasks, not dedup candidates.
-        options.indexOptions = {
-            ...(options.indexOptions || {}),
-            ftsSearchFields: ['data.title', 'data.description'],
-            vectorEmbeddingFields: ['data.title', 'data.description'],
-            checksumFields: ['data.title', 'data.description', 'data.dueDate'],
-        };
 
         Todo.#normalizeStatus(options.data);
         options.timelines = Todo.#deriveTimelines(options);
