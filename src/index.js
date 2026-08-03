@@ -197,6 +197,18 @@ function validateDocumentRelations(doc) {
     }
 }
 
+// Normalized asserted relations of a document, as `{p, to}` pairs. Validation
+// already happened at ingest (validateDocumentRelations), so this only shapes.
+function documentRelations(doc) {
+    const relations = doc?.data?.relations;
+    if (!Array.isArray(relations)) { return []; }
+    return relations
+        .filter((r) => r && typeof r === 'object' && typeof r.p === 'string' && Number.isInteger(r.to))
+        .map((r) => ({ p: r.p, to: r.to }));
+}
+
+const relationKey = (relation) => `${relation.p}\u0000${relation.to}`;
+
 // Merge schema-declared record fields from the stored document into an incoming
 // one that resolved to it by checksum. Incoming keys WIN; keys the incoming write
 // omitted survive. Without this, the checksum-match path replaces the stored
@@ -1063,6 +1075,10 @@ class SynapsD extends EventEmitter {
                 let prevTimelineState = null;
                 let prevFacetKeys = null;
                 let prevFeatureKeys = null;
+                // Snapshotted BEFORE existing.update(doc) — that call mutates in
+                // place and returns the SAME instance, so a snapshot taken after
+                // it would always equal the new value and the diff would be empty.
+                let prevRelations = null;
 
                 // Dedup priority: a supplied id that exists is an UPDATE — the id
                 // is the stable key every bitmap/timeline/checksum reference hangs
@@ -1090,6 +1106,7 @@ class SynapsD extends EventEmitter {
                         };
                         prevFacetKeys = facetBitmapKeys(existing);
                         prevFeatureKeys = documentFeatureKeys(existing);
+                        prevRelations = documentRelations(existing);
                         // Merge input onto existing (preserves locations, metadata,
                         // parentId chain; regenerates checksums when data changed).
                         parsed = existing.update(doc);
@@ -1121,6 +1138,7 @@ class SynapsD extends EventEmitter {
                         };
                         prevFacetKeys = facetBitmapKeys(existing);
                         prevFeatureKeys = documentFeatureKeys(existing);
+                        prevRelations = documentRelations(existing);
                     }
                 }
 
@@ -1154,7 +1172,7 @@ class SynapsD extends EventEmitter {
                 validateDocumentRelations(parsed);
                 stampDerivedKind(parsed);
 
-                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevTimelineState, prevFacetKeys, prevFeatureKeys, docFeatures };
+                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures };
                 prepared.push(entry);
                 if (!isUpdate) {
                     const primaryChecksum = parsed.getPrimaryChecksum();
@@ -1195,7 +1213,7 @@ class SynapsD extends EventEmitter {
         try {
             await this.#withDeferredMembership(async () => {
                 await this.bitmapIndex.tick(this.allDocumentsBitmap.key, prepared.map((p) => p.parsed.id));
-                for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, prevFacetKeys, prevFeatureKeys, docFeatures } of prepared) {
+                for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures } of prepared) {
                     await this.documents.put(parsed.id, parsed);
 
                     // Features this write dropped from the document — untick, or a
@@ -1220,6 +1238,7 @@ class SynapsD extends EventEmitter {
                     if (existing && prevTimelineState) await this.#removeDocumentTimelines(parsed.id, prevTimelineState, parsed);
                     await this.#indexDocumentTimelines(parsed.id, parsed);
                     await this.#indexDocumentGeo(parsed.id, parsed);
+                    this.#syncDocumentRelations(parsed.id, prevRelations, documentRelations(parsed));
                     await this.#indexDocument(parsed.id, contextSpec, directorySpec, docFeatures);
                     if (existing) {
                         await this.#removeStaleLocationMembership(parsed.id, prevLocations || [], parsed.locations, docFeatures);
@@ -2360,6 +2379,11 @@ class SynapsD extends EventEmitter {
                 if (storedDocument) await this.#removeDocumentTimelines(parsedDocument.id, storedDocument, parsedDocument);
                 await this.#indexDocumentTimelines(parsedDocument.id, parsedDocument);
                 await this.#indexDocumentGeo(parsedDocument.id, parsedDocument);
+                this.#syncDocumentRelations(
+                    parsedDocument.id,
+                    documentRelations(storedDocument),
+                    documentRelations(parsedDocument),
+                );
                 await this.#indexDocument(parsedDocument.id, contextSpec, directorySpec, featureBitmaps);
                 if (storedDocument) {
                     await this.#removeStaleLocationMembership(parsedDocument.id, storedDocument.locations, parsedDocument.locations, featureBitmaps);
@@ -2746,7 +2770,7 @@ class SynapsD extends EventEmitter {
     }
 
     async #resolveParsed(parsed) {
-        const { paths, features, filters } = parsed;
+        const { paths, features, filters, rel = [] } = parsed;
         const keys = [];
         // collectionKeys: the actual bitmap keys (collection vocabulary) consulted,
         // for precise QuerySession invalidation. coarse: this candidate set depends
@@ -2836,6 +2860,21 @@ class SynapsD extends EventEmitter {
             }
         }
 
+        // Graph adjacency: one hop from a known document, composed under the same
+        // sigil algebra as features and the BSI filter families.
+        if (rel.length > 0) {
+            const relBitmap = await this.#combineRelFilters(rel);
+            keys.push(...rel.map((r) => `rel:${r.dir}:${r.p}:${r.of}`));
+            // A rel operand is built from a dupsort scan, so it has NO stable
+            // bitmap key — link()/unlink() fire no membership event a QuerySession
+            // could intersect, and a cached operand would go stale silently. Same
+            // no-stable-key story as the temporal and spatial families: mark
+            // coarse so consumers re-resolve rather than key-invalidate.
+            coarse = true;
+            if (bitmap) { bitmap.andInPlace(relBitmap); } else { bitmap = relBitmap; }
+            constrained = true;
+        }
+
         if (paths.not.length > 0) {
             const excludeBitmap = await this.#buildPathsBitmap(paths.not, keys, collectionKeys);
             if (excludeBitmap && !excludeBitmap.isEmpty) {
@@ -2901,6 +2940,19 @@ class SynapsD extends EventEmitter {
 
     async #combineTimelineFilters(timelineFilters) {
         return await this.#combineSigilFilters(timelineFilters, (f) => applyTimelineFilter(f, this.#timelineIndex));
+    }
+
+    // One rel entry -> the sorted adjacency list for (of, p) in the requested
+    // direction, lifted into an ephemeral bitmap. `new RoaringBitmap32(array)` is
+    // fine here: the dupsort iteration is already sorted.
+    async #combineRelFilters(relFilters) {
+        return await this.#combineSigilFilters(relFilters, (f) => {
+            const iterator = f.dir === 'in'
+                ? this.#edges.incoming(f.of, f.p)
+                : this.#edges.outgoing(f.of, f.p);
+            // Drain promptly — a live iterator pins an LMDB read txn.
+            return new RoaringBitmap32([...iterator]);
+        });
     }
 
     async #combineGeoFilters(geoFilters) {
@@ -3452,6 +3504,9 @@ class SynapsD extends EventEmitter {
         // Same for declarative features: captured before update() mutates the
         // document in place, so an edit that removes a tag can untick it.
         const previousFeatureKeys = documentFeatureKeys(storedDocument);
+        // Same again for asserted relations — update() mutates storedDocument in
+        // place, so this must be read before it.
+        const previousRelations = documentRelations(storedDocument);
 
         const updatedDocument = storedDocument.update(updateData);
         validateDocumentRelations(updatedDocument);
@@ -3479,6 +3534,7 @@ class SynapsD extends EventEmitter {
                 await this.#removeDocumentTimelines(updatedDocument.id, previousTimelineState, updatedDocument);
                 await this.#indexDocumentTimelines(updatedDocument.id, updatedDocument);
                 await this.#indexDocumentGeo(updatedDocument.id, updatedDocument);
+                this.#syncDocumentRelations(updatedDocument.id, previousRelations, documentRelations(updatedDocument));
 
                 // Untick features this edit removed (e.g. a tag deleted in the UI)
                 // BEFORE re-indexing, so a case-only change re-ticks correctly.
@@ -4629,6 +4685,50 @@ class SynapsD extends EventEmitter {
         }
 
         return normalizeBitmapKeys([...tags]);
+    }
+
+    /**
+     * Derive asserted edges from `data.relations`, as a DIFF against the document's
+     * previous relations.
+     *
+     * Asserted edges are OWNED by the row: an update that drops an entry drops the
+     * edge. But it must not touch a DERIVED edge between the same pair — an
+     * extractor's `mentions` edge is not the client's to delete. Provenance
+     * distinguishes them: an asserted edge has no meta row (`edge().meta.src` is
+     * the synthesized `'doc'`), a derived one always does.
+     *
+     * Dangling `to` ids are allowed and logged at debug: edges to documents that do
+     * not exist yet are filtered at query time by candidate-set intersection
+     * anyway, and forbidding them would make ingest order significant.
+     *
+     * Runs inside the caller's transaction, alongside the bitmap/timeline writes.
+     */
+    #syncDocumentRelations(docId, previousRelations, currentRelations) {
+        const previous = new Map((previousRelations || []).map((r) => [relationKey(r), r]));
+        const current = new Map((currentRelations || []).map((r) => [relationKey(r), r]));
+
+        for (const [key, relation] of current) {
+            if (previous.has(key)) { continue; }
+            this.#edges.link(docId, relation.p, relation.to);
+            if (!this.#documentExistsSync(relation.to)) {
+                debug(`Relation ${docId} --${relation.p}--> ${relation.to} targets a document that does not exist (allowed)`);
+            }
+        }
+
+        for (const [key, relation] of previous) {
+            if (current.has(key)) { continue; }
+            const existing = this.#edges.edge(docId, relation.p, relation.to);
+            // Only asserted edges are the row's to remove.
+            if (existing && existing.meta?.src === 'doc') {
+                this.#edges.unlink(docId, relation.p, relation.to);
+            }
+        }
+    }
+
+    // Cheap existence probe for the dangling-target debug log. `documents.get` is
+    // SYNCHRONOUS (lmdb-js returns the value) — attaching .catch() throws.
+    #documentExistsSync(id) {
+        try { return this.documents.get(id) !== undefined; } catch { return false; }
     }
 
     // Every feature derived from locations[], in one place — so the stale-diff

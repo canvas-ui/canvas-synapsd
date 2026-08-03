@@ -1193,8 +1193,22 @@ pipeline):
   filtered at query time by candidate-set intersection anyway; `deleteNode`
   cleanup keeps them from accumulating for known ids.
 
-**Tests:** insert/update/delete round-trips; update-diff preserves derived edge
-between same pair; batch `putMany` derives edges for all docs in one txn.
+✅ **SHIPPED 2026-08-03.** `tests/relations-derivation.test.js` (12); 8 fail without it.
+
+- `#syncDocumentRelations(docId, prev, next)` runs inside the caller's transaction beside the
+  bitmap/timeline writes, in all three write paths. Delete already called `edges.deleteNode(id)`
+  (landed in Phase 2).
+- **Provenance is what keeps the two planes from fighting.** Asserted edges are OWNED by the row —
+  dropping an entry drops the edge — but a DERIVED edge between the same pair is not the client's
+  to delete. `edge().meta.src === 'doc'` (the synthesized value when no meta row exists) is the
+  discriminator; both directions are tested, including a derived edge on the SAME predicate.
+- ⚠️ `prevRelations` is snapshotted BEFORE `existing.update(doc)` in `putMany` and before
+  `storedDocument.update()` in `#updateOne` — the same in-place-mutation trap as
+  `prevFeatureKeys`/`prevFacetKeys`. Taken after, the diff is always empty and the stale edge is
+  never removed, while every positive assertion still passes. There is a test asserting the
+  negative case through the batch path specifically.
+- Dangling targets are allowed and logged at debug (forbidding them would make ingest ORDER
+  significant); `#documentExistsSync` is used for the probe — `documents.get()` is SYNCHRONOUS.
 
 ### Recipients — deferred, not rejected (user steer 2026-08-03)
 
@@ -1250,9 +1264,21 @@ specifies for temporal / glob / regexp operands. Cheapest correct version: have
 `resolveCandidates` report rel-derived operands as unkeyed so the existing coarse path picks them
 up — no new machinery.
 
-**Tests:** rel-only query; rel ∧ context path; rel ∧ features noneOf; empty
-adjacency ⇒ empty result fast-path; `dir:'in'` equals swapped-DBI scan; a QuerySession cue with a
-rel bucket re-resolves after `link()`/`unlink()` (fails if the operand is treated as keyed).
+✅ **SHIPPED 2026-08-03.** `tests/rel-queries.test.js` (10); 8 fail without it.
+
+- `parseRel()` in `spec.js` normalizes `{p, of, dir?, op?}` (or an array) into the same sigil trio
+  as features; `#combineRelFilters` lifts each adjacency scan into an ephemeral bitmap and reuses
+  the EXISTING `#combineSigilFilters` algebra, so rel composes with paths/features/filters with no
+  new pipeline.
+- **Marked `coarse`**, exactly as the plan required: a rel operand is built from a dupsort scan and
+  has no stable bitmap key, so `link()`/`unlink()` fire no membership event a QuerySession could
+  intersect. Tested directly (`resolveCandidates().coarse === true`) and behaviourally (a cached
+  cue re-resolves after a pure `edges.link()` with no bitmap tick anywhere).
+- ⚠️ **Predicates are validated at PARSE time, not scan time.** `#combineSigilFilters` catches
+  operand errors and yields an empty bitmap, so an unknown or inverse-style predicate
+  (`mentioned-by`) would have SILENTLY widened the result set instead of failing. Caught by the
+  malformed-spec test — `parseRel` now calls `predicateId()` up front.
+- One hop only; multi-hop traversal stays parked.
 
 ## Phase 6 — migration + rebuild command
 

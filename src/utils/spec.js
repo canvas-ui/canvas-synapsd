@@ -1,5 +1,7 @@
 'use strict';
 
+import { predicateId } from '../indexes/edges/predicates.js';
+
 // Canonical query/spec parser. Pure and stateless: turns the public spec shape
 // into an internal { paths, features, filters, options } structure. Tree->bitmap
 // resolution stays in the db; this module only parses strings and sigils.
@@ -127,6 +129,54 @@ function parseFilters(spec) {
     return tokens;
 }
 
+// Graph-adjacency bucket: one hop from a known document.
+//
+//   rel: { p: 'mentions', of: 123 }               docs that 123 mentions
+//   rel: { p: 'mentions', of: 123, dir: 'in' }    docs mentioning 123
+//   rel: [ {p:'replies-to', of:55}, {op:'noneOf', p:'derived-from', of:55} ]
+//
+// DIRECTION IS AN AXIS, never a predicate name — `dir` selects which dupsort DBI
+// is scanned. There are no inverse predicate names anywhere in the system.
+//
+// `op` is the same sigil trio as features: anyOf (default) / allOf / noneOf.
+// Multi-hop traversal is deliberately out of scope for v3.
+const REL_OPS = new Set(['anyOf', 'allOf', 'noneOf']);
+
+export function parseRel(rawSpec = {}) {
+    const base = typeof rawSpec.options === 'object' && rawSpec.options !== null ? rawSpec.options : {};
+    const raw = rawSpec.rel !== undefined ? rawSpec.rel : base.rel;
+    if (raw === undefined || raw === null) { return []; }
+
+    const entries = Array.isArray(raw) ? raw : [raw];
+    return entries.map((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            throw new Error('rel entries must be objects of shape { p, of, dir?, op? }');
+        }
+        if (typeof entry.p !== 'string' || entry.p === '') {
+            throw new Error('rel entry requires a predicate "p"');
+        }
+        // Validate here, not at scan time: the sigil combiner catches operand
+        // errors and yields an empty bitmap, so an unknown or inverse-style
+        // predicate would SILENTLY widen the result set instead of failing.
+        predicateId(entry.p);
+        const of = typeof entry.of === 'string' && /^\d+$/.test(entry.of.trim())
+            ? parseInt(entry.of, 10)
+            : entry.of;
+        if (!Number.isInteger(of) || of <= 0) {
+            throw new Error(`rel entry for predicate "${entry.p}" requires a positive integer document id as "of"`);
+        }
+        const dir = String(entry.dir || 'out').toLowerCase();
+        if (dir !== 'out' && dir !== 'in') {
+            throw new Error(`rel entry "dir" must be 'out' or 'in' (got ${JSON.stringify(entry.dir)})`);
+        }
+        const op = entry.op || 'anyOf';
+        if (!REL_OPS.has(op)) {
+            throw new Error(`rel entry "op" must be one of ${[...REL_OPS].join(', ')} (got ${JSON.stringify(entry.op)})`);
+        }
+        return { op, sigil: op, p: entry.p, of, dir };
+    });
+}
+
 export function parseSpec(rawSpec = {}) {
     if (!rawSpec || typeof rawSpec !== 'object' || Array.isArray(rawSpec)) {
         throw new Error('spec must be an object');
@@ -139,6 +189,7 @@ export function parseSpec(rawSpec = {}) {
         paths: parsePaths(rawSpec),
         features: parseFeatures(rawSpec),
         filters: parseFilters(rawSpec),
+        rel: parseRel(rawSpec),
         options: {
             mode: (pick('mode') || 'hybrid').toLowerCase(),
             // Listing order (no-match path only): 'asc' (id/insertion order,
