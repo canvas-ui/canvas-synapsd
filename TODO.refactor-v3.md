@@ -609,7 +609,37 @@ section below: it is now `data/kind/application/flatpak`.
      declares the default `ftsSearchFields: ['data']`), Identity's `identifiers`/`channels`/`links`
      and Email's `from`/`to`. Now JSON-serialized. ⚠️ **Changes FTS content for those documents —
      existing rows need `reindexSearchIndex()` to pick it up.**
-   - [ ] root-level `features[]` (D2)
+   - [x] **root-level `features[]` (D2) — SHIPPED 2026-08-03.** `metadata.features` → root
+     `features[]`, modelled on `comment` line for line: top-level, outside `checksumFields`, own
+     `update()` branch outside the `dataUpdated` path. The schema-id unshift is GONE (it injected a
+     derived key into an asserted-only array on every construct; the schema bitmap is still ticked
+     by the derivation). `documentFeatureKeys()` reads `doc.features`.
+     `tests/root-features.test.js` (14) — 11 fail without the change.
+
+     **⚠️ The plan's derived-prefix list was wrong and would have caused silent data loss.** It
+     names `data/backend/*`, `data/source/*` and `data/no-location` as derived-and-strippable.
+     Nothing derives them: `WorkspaceStoredIndex` asserts backend/source (`:1424-1425`) and the
+     orphan lifecycle asserts `data/no-location`. Stripping a key that has no deriver does not make
+     it derived, it makes it UNSETTABLE — caught by `orphan-succession.test.js`.
+     `DERIVED_FEATURE_PREFIXES` therefore contains only what the engine derives today
+     (`data/abstraction/`, `data/mime/`, `data/kind/`, `data/status/`, `feature/`, `device/`), each
+     annotated with its deriver. **Add the others in the SAME commit that adds their deriver** —
+     `data/source/*` from `locations[].metadata.provider` is still an open Phase 3 item.
+
+     `data/dataset/*` is preserved across an update that omits it (`PRESERVED_FEATURE_PREFIXES`),
+     so a client resending its own tags cannot silently drop ingest provenance it never knew about.
+
+     **Update semantics, now explicit and tested both ways:** a **schema-LESS** patch
+     (`put({id, features})` or `put({id, data})`) is the feature-only path — it skips the
+     re-parse in `#updateOne`, so omitting `features` leaves them alone. A **schema-FUL** put is a
+     whole-document REPLACE and clears tags it does not resend. That is pre-existing behaviour
+     unchanged by this move (the old `metadata` merge wiped them the same way) and it is the same
+     footgun already logged for dotfile `links` — worth fixing globally in its own rev, not here.
+
+     Parent moved with it: `WorkspaceStoredIndex` orphan/re-bind paths now read and write root
+     `features`, and the re-bind marker drop moved into `#buildDocument`.
+     `updatedAt` still bumps on a feature-only update (sync detection); checksums and embedding
+     input provably do not change, so bulk-tagging a gallery cannot re-CLIP it.
 3. Dotfile identity → `data.url` + zod normalization; schema-scoped checksum dedup.
 4. `data/*` facet-family consolidation (`data/kind/*` hierarchical values, source/status dedup).
 
@@ -934,10 +964,43 @@ data/no-location              zero locations       (orphan marker; keep in data/
   are unaffected; only prefix *enumeration* is.
 
   Values stay append-only — they are persisted in bitmap keys.
-- **`data/source/*` vs `data/backend/*` look like dedup candidates.** `data/backend/imap/<account>`
-  already encodes provider-ish structure, and once `source` derives from
-  `locations[].metadata.provider` the two are both pure projections of `locations[]`. Check
-  whether `source` survives as a distinct axis or collapses into `backend`.
+- **`data/source/*` COLLAPSED into `data/backend/*` — DECIDED AND SHIPPED 2026-08-03.**
+  `tests/backend-features.test.js` (9); 6 fail without the derivation.
+
+  Both were ASSERTED by the parent from the backend descriptor, so neither was rebuildable from
+  rows — the plan flagged that for `source` and missed that `backend` had the identical problem.
+  Both are now DERIVED by synapsd from `locations[]`, and `data/source/*` is deleted: once both
+  derive from the same field they are two projections of one fact, and the provider is a property
+  of the backend, not of the document.
+
+  **The boundary is the point** (user, 2026-08-03): storage logic in synapsd leaks one module's
+  responsibility into another. synapsd knows nothing about `stored`, S3 or IMAP — it parses a URL
+  into scheme + authority exactly as it already does for `file://<deviceId>`, via the existing
+  `parseLocationUrl()`. `stored://` is just another URL scheme.
+
+  Key shape: **hierarchical `data/backend/<scheme>` + `data/backend/<scheme>/<authority>`**, tick
+  parent AND child (the `data/mime/*` / `data/kind/*` contract). "Everything from IMAP" is one key;
+  `data/backend/imap/<account>` is preserved exactly as it was. Same prefix-listing caveat as the
+  other hierarchical axes — list `data/backend/`, not `data/backend/imap`.
+
+  - `file://` and `device://` derive NO backend key: `device/*` already answers "where do these
+    bytes live" for device-local copies, and a second answer would be redundant. Easy to add later
+    if a case appears.
+  - **Device-anchored mounts are still attributed**, via `location.metadata.backend` (which
+    `WorkspaceStoredIndex` already writes at `:1515`). Their bytes are addressed as
+    `file://<deviceId>/…` so the URL cannot carry the backend — this is the "supplied by the
+    client" escape hatch for anything a URL cannot express, and it stays generic (a
+    location-metadata key, not a `stored` concept).
+  - **Stale-diff generalized**: `#removeStaleDeviceMembership` → `#removeStaleLocationMembership`,
+    driven by `#locationDerivedFeatures()` (device + backend in ONE place) so the diff can never
+    cover one axis and silently miss another. Moving a document between backends now unticks the
+    old key — it had no stale-diff at all while it was asserted.
+  - Parent stops asserting entirely: `WorkspaceStoredIndex#buildFeatures` is DELETED along with the
+    `data/backend/home` / `data/backend/data` short aliases (zero consumers), and the imap service
+    no longer pushes `data/backend/imap/<account>` — its messages already carry an
+    `imap://<account>/<folder>;UID=<n>` provenance location, so the derived key is identical.
+  - ⚠️ Key change for existing rows: `data/backend/workspace:home` → `data/backend/stored/workspace:home`.
+    Needs a reindex; pre-prod only.
 - **`data/status/*` may only ever serve todo.** Application status stopped being a bitmap in
   Phase 2b (truthful presence replaced it), so `STATUS_FACET_SCHEMAS` has exactly one member. If
   no second customer appears, fold it into the generalized `indexOptions.facetFields` rather than

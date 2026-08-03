@@ -106,16 +106,21 @@ function statusBitmapKeys(doc) {
     return normalizeBitmapKeys([`${STATUS_BITMAP_PREFIX}${status}`]);
 }
 
-// A document's `metadata.features` array is DECLARATIVE and authoritative: the
-// document JSON says what it is, and bitmaps follow it 1:1 (features are
-// distinguished by prefix — tag/, data/, device/, …). Every write path derives
-// its tick set from this, so a feature stored on the document is always indexed
-// — storing it IS the way to create/update the bitmap.
+// A document's root `features` array is DECLARATIVE and authoritative: the
+// document JSON says what it is, and bitmaps follow it 1:1. Every write path
+// derives its tick set from this, so a feature stored on the document is always
+// indexed — storing it IS the way to create/update the bitmap.
+//
+// v3 moved this off `metadata` (which holds EXTRACTED facts written by derivers)
+// to a top-level array (ASSERTED membership written by humans/clients). The
+// array is asserted-only: BaseDocument strips DERIVED prefixes on the way in, so
+// this function never sees a `data/abstraction/*` or `device/*` key it would tick
+// without owning the corresponding untick.
 //
 // Invalid keys are skipped rather than thrown: a document written by an older or
 // third-party client must not turn every subsequent re-put into a hard failure.
 function documentFeatureKeys(doc) {
-    const features = doc?.metadata?.features;
+    const features = doc?.features;
     if (!Array.isArray(features)) { return []; }
     const keys = [];
     for (const feature of features) {
@@ -1151,7 +1156,7 @@ class SynapsD extends EventEmitter {
                     await this.#indexDocumentGeo(parsed.id, parsed);
                     await this.#indexDocument(parsed.id, contextSpec, directorySpec, docFeatures);
                     if (existing) {
-                        await this.#removeStaleDeviceMembership(parsed.id, prevLocations || [], parsed.locations, docFeatures);
+                        await this.#removeStaleLocationMembership(parsed.id, prevLocations || [], parsed.locations, docFeatures);
                     }
                     await this.#applyMembership(parsed.hasComment ? 'tick' : 'untick', parsed.id, [COMMENT_BITMAP_KEY]);
                     // Facet bitmaps (mime + status): tick current, untick whatever
@@ -2290,7 +2295,7 @@ class SynapsD extends EventEmitter {
                 await this.#indexDocumentGeo(parsedDocument.id, parsedDocument);
                 await this.#indexDocument(parsedDocument.id, contextSpec, directorySpec, featureBitmaps);
                 if (storedDocument) {
-                    await this.#removeStaleDeviceMembership(parsedDocument.id, storedDocument.locations, parsedDocument.locations, featureBitmaps);
+                    await this.#removeStaleLocationMembership(parsedDocument.id, storedDocument.locations, parsedDocument.locations, featureBitmaps);
                 }
                 await this.#applyMembership(parsedDocument.hasComment ? 'tick' : 'untick', parsedDocument.id, [COMMENT_BITMAP_KEY]);
                 // Facet bitmaps (mime + status): tick current, untick stale from
@@ -3413,7 +3418,7 @@ class SynapsD extends EventEmitter {
                 if (staleFeatureKeys.length) { await this.#applyMembership('untick', updatedDocument.id, staleFeatureKeys); }
                 // Index across all views using shared helper
                 await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
-                await this.#removeStaleDeviceMembership(updatedDocument.id, previousLocations, updatedDocument.locations, featureBitmaps);
+                await this.#removeStaleLocationMembership(updatedDocument.id, previousLocations, updatedDocument.locations, featureBitmaps);
                 // Presence bitmap tracks comment state; untick when cleared on this edit.
                 await this.#applyMembership(updatedDocument.hasComment ? 'tick' : 'untick', updatedDocument.id, [COMMENT_BITMAP_KEY]);
                 // Facet bitmaps (mime + status): tick current keys, untick any the
@@ -4339,7 +4344,7 @@ class SynapsD extends EventEmitter {
             // A Device document defines the os/type facets other documents derive.
             // Runs before the derivation below so a device's own write sees itself.
             if (stored?.schema === DEVICE_SCHEMA_NAME) { await this.#syncDeviceFacets(stored); }
-            for (const tag of this.#deviceFeaturesFromLocations(stored?.locations)) {
+            for (const tag of this.#locationDerivedFeatures(stored?.locations)) {
                 if (!features.includes(tag)) { features.push(tag); }
             }
         } catch (error) {
@@ -4481,10 +4486,76 @@ class SynapsD extends EventEmitter {
      * @param {Array<{url:string}>} currentLocations   locations after the write
      * @param {string[]} assertedFeatures              tags explicitly set this write
      */
-    async #removeStaleDeviceMembership(docId, previousLocations, currentLocations, assertedFeatures = []) {
-        const previous = this.#deviceFeaturesFromLocations(previousLocations);
+    /**
+     * Derive backend feature tags from a document's locations:
+     *   data/backend/<scheme>              — roll-up ("everything from IMAP")
+     *   data/backend/<scheme>/<authority>  — the specific store/account/bucket
+     *
+     * Deliberately GENERIC: synapsd knows nothing about `stored`, S3 or IMAP — it
+     * parses a URL into scheme + authority exactly as it already does for
+     * file://<deviceId>. That keeps the storage subsystem's vocabulary out of the
+     * index, which is the reason this replaced the parent asserting the tags.
+     *
+     * Hierarchical (tick parent AND child), same contract as data/mime/* and
+     * data/kind/*: "everything from IMAP" is one key with no enumeration of
+     * accounts. Note the inherited caveat — listBitmaps(prefix) range-scans
+     * `prefix + '/'`, so a bare `data/backend/imap` is invisible to a prefix
+     * listing of its own namespace; list `data/backend/` instead. Safe here
+     * because the parent is ALWAYS ticked.
+     *
+     * `file://` and `device://` are skipped: device/* already answers "where do
+     * these bytes live" for device-local copies, and a backend key there would be
+     * a redundant second answer to a solved question. Device-anchored mounts are
+     * still attributed, via `location.metadata.backend` below.
+     *
+     * `data/source/*` is GONE, folded into this axis (decided 2026-08-03): once
+     * both derive from locations[] they are two projections of the same fact, and
+     * the provider is a property of the backend, not of the document.
+     */
+    #backendFeaturesFromLocations(locations) {
+        const tags = new Set();
+
+        for (const loc of Array.isArray(locations) ? locations : []) {
+            // An explicitly declared backend wins. Device-anchored mounts address
+            // their bytes as file://<deviceId>/… so the URL cannot carry the
+            // backend — it lives in location metadata instead. Reading it here is
+            // still generic (a location-metadata key, not a `stored` concept) and
+            // is the "supplied by the client" escape hatch for anything the URL
+            // cannot express.
+            const declared = typeof loc?.metadata?.backend === 'string' ? loc.metadata.backend.trim() : '';
+            if (declared) {
+                tags.add(`data/backend/${declared}`);
+                continue;
+            }
+
+            const parsed = parseLocationUrl(loc?.url);
+            if (!parsed || parsed.scheme === 'file' || parsed.scheme === 'device') { continue; }
+
+            tags.add(`data/backend/${parsed.scheme}`);
+            const authority = parsed.backend;
+            // Skip {WORKSPACE_ROOT}/{VAR} placeholders — workspace-relative, not an
+            // addressable store (same guard as the device derivation).
+            if (authority && !/^\{.*\}$/.test(authority)) {
+                tags.add(`data/backend/${parsed.scheme}/${authority}`);
+            }
+        }
+
+        return normalizeBitmapKeys([...tags]);
+    }
+
+    // Every feature derived from locations[], in one place — so the stale-diff
+    // below can never cover one axis and silently miss another.
+    #locationDerivedFeatures(locations) {
+        return [
+            ...this.#deviceFeaturesFromLocations(locations),
+            ...this.#backendFeaturesFromLocations(locations),
+        ];
+    }
+
+    async #removeStaleLocationMembership(docId, previousLocations, currentLocations, assertedFeatures = []) {
+        const previous = this.#locationDerivedFeatures(previousLocations);
         if (previous.length === 0) { return; }
-        const current = new Set(this.#deviceFeaturesFromLocations(currentLocations));
+        const current = new Set(this.#locationDerivedFeatures(currentLocations));
         const asserted = new Set((Array.isArray(assertedFeatures) ? assertedFeatures : []).map(normalizeBitmapKey));
         const stale = previous.filter((tag) => !current.has(tag) && !asserted.has(tag));
         if (stale.length > 0) { await this.#removeDocumentMembership(docId, stale); }
