@@ -184,9 +184,42 @@ describe('EdgeIndex', () => {
     test('inverse-style names throw rather than resolving to the forward predicate', () => {
         // The whole point: resolving these would erase direction at the callsite
         // and produce a silently-wrong forward scan.
-        for (const name of ['mentioned-by', 'included-by', 'referenced-by', 'derives']) {
+        for (const name of [
+            'mentioned-by', 'included-by', 'referenced-by', 'derives',
+            'depicted-by', 'depicted-in', 'authors', 'authored',
+        ]) {
             expect(() => edges.link(1, name, 2)).toThrow(/Direction is an axis/);
         }
+    });
+
+    test('depicts and authored-by are distinct axes from mentions', () => {
+        // photo 10 shows Alice(20); email 11 is FROM Alice and merely mentions Bob(21).
+        edges.link(10, 'depicts', 20);
+        edges.link(11, 'authored-by', 20);
+        edges.link(11, 'mentions', 21);
+
+        // "photos of Alice" must not pick up the email that is merely from her,
+        // and "things Alice wrote" must not pick up the photo she appears in.
+        expect([...edges.incoming(20, 'depicts')]).toEqual([10]);
+        expect([...edges.incoming(20, 'authored-by')]).toEqual([11]);
+        expect([...edges.incoming(20, 'mentions')]).toEqual([]);
+        expect([...edges.incoming(21, 'mentions')]).toEqual([11]);
+    });
+
+    test('depicts and authored-by keep their ids under edgesOf and survive a delete', () => {
+        edges.link(10, 'depicts', 20);
+        edges.link(10, 'authored-by', 21);
+
+        expect(edges.edgesOf(10).outgoing).toEqual(
+            expect.arrayContaining([
+                { p: 'depicts', to: 20 },
+                { p: 'authored-by', to: 21 },
+            ]),
+        );
+
+        edges.deleteNode(10);
+        expect([...edges.incoming(20, 'depicts')]).toEqual([]);
+        expect([...edges.incoming(21, 'authored-by')]).toEqual([]);
     });
 
     test('invalid node ids are rejected', () => {

@@ -77,9 +77,15 @@ registry.
   registration facility"). Here `link` is app-level `document kind:link` and `bucket` is deleted
   outright (folders are tree nodes).
 - **`rel/snapshot-of`, `rel/depicts`, `rel/authored-by`** referenced by TODO.md's tab→snapshot and
-  contact→identity designs are not in this plan's closed five-predicate registry. Either map them
-  onto existing predicates (`snapshot-of` ≈ `derived-from`) or add ids — but decide now, since ids
-  are append-only.
+  contact→identity designs. **RESOLVED 2026-08-03 — `snapshot-of` folds into `derived-from`;
+  `depicts` (id 6) and `authored-by` (id 7) are ADDED.** See `predicates.js` for the full
+  rationale; the short version: the predicate answers "where did this come from", while *what* it
+  is already lives on the target (`kind`/mime/location), so `snapshot-of` would split one
+  provenance axis in two forever — whereas `depicts`/`authored-by` cannot be recovered from
+  `mentions` later, because a human face-tagging a photo writes an ASSERTED edge (no meta row, so
+  no `src` to separate it from a hand-written mention). Conflating is a lossy one-way door;
+  appending an id is one line. **Email recipients (To/Cc → identity) are deferred, not rejected**
+  — see "Recipients" under Phase 4.
 
 ## Verified platform facts (do not re-litigate)
 
@@ -140,10 +146,12 @@ export const PREDICATES = {
   'derived-from': { id: 3 },
   'mentions':     { id: 4 },
   'replies-to':   { id: 5 },
+  'depicts':      { id: 6 },   // added 2026-08-03
+  'authored-by':  { id: 7 },   // added 2026-08-03
 };
 ```
 
-Five predicates, five ids, forward names only. **There are no inverse predicate
+Seven predicates, seven ids, forward names only. **There are no inverse predicate
 names anywhere in the system** — not in the registry, not in persisted data, not in
 the query grammar. Direction is an axis (`out`/`in`), expressed by which method you
 call (`outgoing`/`incoming`) or a `dir` parameter, never by a string. (An earlier
@@ -792,6 +800,26 @@ pipeline):
 
 **Tests:** insert/update/delete round-trips; update-diff preserves derived edge
 between same pair; batch `putMany` derives edges for all docs in one txn.
+
+### Recipients — deferred, not rejected (user steer 2026-08-03)
+
+Email is the richest identity source in the corpus, and `authored-by` only covers `From`. `To`/`Cc`
+→ identity is wanted **eventually**; it is deferred because the *role* is distinct from authorship
+and has nowhere clean to live yet: it cannot go in edge meta without colliding with the
+asserted-edge convention (asserted ⇒ no meta row), so it needs either its own predicate ids or a
+role field that survives that convention. Deferring costs nothing — ids are append-only and
+`data.to`/`data.cc` stay ordinary fields until the reverse query ("everything sent to Alice") is
+actually built. Unlike `depicts`/`authored-by`, there is no conflation risk in waiting: nothing is
+being written under a wrong predicate in the meantime.
+
+**Also parked, and the more interesting half:** *"each selected identity might become a bitmap
+eventually."* That is a real alternative to the Phase 5 rel-bucket, not a restatement of it. Phase 5
+materializes an adjacency scan into an **ephemeral** bitmap per query; a **persistent**
+`identity/id/<x>` bitmap — derived exactly like `device/id/*` — would instead put frequently-queried
+identities directly into the `paths ∩ features ∩ filters` pipeline with no scan at all. The tradeoff
+is unbounded key cardinality (one bitmap per identity vs. a handful of devices), which is why
+"selected" is the load-bearing word: promote only pinned/starred identities, keep the long tail on
+edges. Decide when there is a real corpus to measure — do NOT build it speculatively in v3.
 
 ## Phase 5 — query integration (`rel` bucket)
 
