@@ -23,7 +23,9 @@ import LmdbBackend from './backends/lmdb/index.js';
 
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
+import { normalizeFeatureArray } from './schemas/BaseDocument.js';
 import { predicateId } from './indexes/edges/predicates.js';
+import { normalizeDotfileUrl } from './utils/path-helpers.js';
 import { isDocumentData, isDocumentInstance } from './schemas/SchemaRegistry.js';
 import BaseDocument from './schemas/BaseDocument.js';
 
@@ -62,7 +64,17 @@ const DEFAULT_LIST_LIMIT = 100;
 // Startup migration (#migrateBitmapKeys) is an O(all-docs) transaction. Gate it
 // behind a persisted version so it runs once per bump instead of on every boot.
 // Increment when a new idempotent migration is added.
-const SCHEMA_VERSION = 1;
+// v2 = the refactor-v3 row/derivation migration (#migrateToV3). Bumping this is
+// what triggers it; it is gated behind an explicit opt-in because it REWRITES
+// every row (see the check in start()).
+// Env flags are strings; accept the usual truthy spellings and nothing else, so
+// `CANVAS_SYNAPSD_MIGRATE=0` and `=false` mean what they look like.
+function envFlag(value) {
+    if (typeof value !== 'string') { return false; }
+    return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+const SCHEMA_VERSION = 2;
 const SCHEMA_VERSION_KEY = 'internal/schemaVersion';
 
 // Presence bitmap for docs carrying a non-empty user-authored comment. A `feature/`
@@ -412,6 +424,8 @@ class SynapsD extends EventEmitter {
     #geoIndex;
     #synapses;
     #edges;
+    #migrateOnOpen = false;
+    #lastMigrationStats = null;
 
     // deviceId -> { os, type }, projected from data/abstraction/device documents.
     #deviceFacets = new Map();
@@ -455,6 +469,12 @@ class SynapsD extends EventEmitter {
 
         // Initialize database backend
         this.#rootPath = options.rootPath ?? options.path;
+        // Opt-in for the v3 row migration — see the gate in start(). Also readable
+        // from the environment, because the constructor option is a whole-DB
+        // switch and the DB is usually constructed deep inside a host process
+        // (canvas-server opens one per workspace), where threading a flag down
+        // means touching every call site.
+        this.#migrateOnOpen = options.migrate === true || envFlag(process.env.CANVAS_SYNAPSD_MIGRATE);
         if (!this.#rootPath) { throw new Error('Database path required'); }
 
         if (options.backend && options.backend !== 'lmdb') {
@@ -644,6 +664,11 @@ class SynapsD extends EventEmitter {
     get geo() { return this.#geoIndex; }
     get synapses() { return this.#synapses; }
     get edges() { return this.#edges; }
+    /** The `internal` dataset (schema version marker, id counter). Exposed for
+     *  migration tooling and tests — not part of the document API. */
+    get internalStore() { return this.#internalStore; }
+    /** Stats from the v3 migration if it ran during start(), else null. */
+    get lastMigrationStats() { return this.#lastMigrationStats; }
     get semantic() { return this.#semantic; }
 
     /**
@@ -702,7 +727,13 @@ class SynapsD extends EventEmitter {
             // writing to the canonical key while the legacy one still held the data.
             if (this.#semanticConfig.enabled) {
                 try {
-                    await this.#migrateEmbedBitmapKeys();
+                    // Folded into the versioned scheme (it used to run on EVERY open
+                    // as an unversioned O(all-bitmaps) pass) — but it must keep its
+                    // position: VectorIndex latches its presence bitmap key at
+                    // construction, so this cannot move down to the migration block.
+                    if ((Number(this.#internalStore.get(SCHEMA_VERSION_KEY)) || 0) < SCHEMA_VERSION) {
+                        await this.#migrateEmbedBitmapKeys();
+                    }
                     const textSpace = this.#semanticConfig.spaces.text || defaultVectorSpaces(this.#semanticConfig.dim).text;
                     this.#vectorIndex = new VectorIndex({
                         rootPath: path.join(this.#rootPath, 'lance'),
@@ -734,8 +765,32 @@ class SynapsD extends EventEmitter {
             // every startup.
             const appliedVersion = Number(this.#internalStore.get(SCHEMA_VERSION_KEY)) || 0;
             if (appliedVersion < SCHEMA_VERSION) {
+                // A brand-new (or empty) database has nothing to migrate — stamp it
+                // and carry on, so a fresh install or the hourly-reset demo instance
+                // never hits the opt-in gate below.
+                const empty = await this.#documentStoreIsEmpty();
+
+                if (!empty && appliedVersion < 2 && this.#migrateOnOpen !== true) {
+                    // The v3 migration REWRITES every row (drops indexOptions, moves
+                    // metadata.features to the root, stamps kind) and drops derived
+                    // bitmap namespaces. That is not something to run implicitly on a
+                    // server restart — it is an operator action, taken deliberately,
+                    // ideally after a backup.
+                    throw new Error(
+                        `synapsd: database is at schema v${appliedVersion}, this build needs v${SCHEMA_VERSION}. ` +
+                        'The v3 migration rewrites every document row and is not run implicitly. ' +
+                        'Run: node scripts/migrate-v3.js -d <db-dir>   ' +
+                        '(or open with { migrate: true }, or set CANVAS_SYNAPSD_MIGRATE=true)',
+                    );
+                }
+
                 debug(`Schema migrations: applied=${appliedVersion} < current=${SCHEMA_VERSION}, running`);
                 await this.#migrateBitmapKeys();
+                if (appliedVersion < 2 && !empty) {
+                    const stats = await this.#migrateToV3();
+                    debug(`v3 migration: ${JSON.stringify(stats)}`);
+                    this.#lastMigrationStats = stats;
+                }
                 await this.#internalStore.put(SCHEMA_VERSION_KEY, SCHEMA_VERSION);
             } else {
                 debug(`Schema migrations: up to date (v${appliedVersion}), skipping`);
@@ -4416,6 +4471,170 @@ class SynapsD extends EventEmitter {
      * Feature bitmaps: feature/<prefix>/...  →  <prefix>/...
      *   Reverts the short-lived feature/ prefix; features are stored directly in bitmapIndex.
      */
+    async #documentStoreIsEmpty() {
+        for await (const _ of this.documents.getKeys({ limit: 1 })) { return false; }
+        return true;
+    }
+
+    /**
+     * refactor-v3 migration (schema v1 -> v2).
+     *
+     * Rewrites every row and re-derives the structures this rev changed. Idempotent:
+     * running it twice is a no-op, because every step is "make the row/index match
+     * what the current code would produce".
+     *
+     * What it does NOT do: rename schema ids. Under D1(c) `data/abstraction/*` stays,
+     * so the ~2600 tabs (the one document class with no rebuild source outside the
+     * DB) are never re-keyed — precisely the risk that decision bought out.
+     */
+    async #migrateToV3({ onProgress = null } = {}) {
+        const stats = {
+            documents: 0, indexOptionsDropped: 0, featuresMoved: 0,
+            featuresRecovered: 0, kindsStamped: 0, dotfileUrls: 0,
+            bitmapsDropped: 0, edges: 0,
+        };
+
+        // ── 1. Recover asserted tags that exist ONLY in bitmaps ──────────────
+        // Documents written before the 2026-07-15 interim fix carry tags with no
+        // doc-side record: they are the last state with no rebuild source, which is
+        // the entire reason features moved onto the row. Read the bitmap -> id map
+        // ONCE, before the row pass, and fold it in as we go.
+        const assertedByDoc = new Map();
+        for (const prefix of ['tag', 'custom', 'client', 'data/dataset']) {
+            for (const key of await this.bitmapIndex.listBitmaps(prefix)) {
+                const bitmap = await this.bitmapIndex.getBitmap(key, false);
+                if (!bitmap) { continue; }
+                for (const id of bitmap.toArray()) {
+                    if (!assertedByDoc.has(id)) { assertedByDoc.set(id, new Set()); }
+                    assertedByDoc.get(id).add(key);
+                }
+            }
+        }
+
+        // ── 2. Drop derived namespaces this rev removed or re-shaped ─────────
+        //   rel/*          -> dupsort adjacency (Phase 2)
+        //   data/source/*  -> folded into data/backend/*
+        //   data/backend/* -> reshaped to <scheme>/<authority>, now derived
+        //   data/kind/*    -> new axis, re-derived below
+        // They are all derived state, so dropping and recomputing IS the contract.
+        for (const prefix of ['rel', 'data/source', 'data/backend', 'data/kind']) {
+            for (const key of await this.bitmapIndex.listBitmaps(prefix)) {
+                await this.bitmapIndex.deleteBitmap(key);
+                stats.bitmapsDropped++;
+            }
+        }
+
+        // ── 3. Row pass ──────────────────────────────────────────────────────
+        const ids = [];
+        for await (const { key } of this.documents.getRange()) {
+            const id = Number(key);
+            if (Number.isInteger(id) && id > 0) { ids.push(id); }
+        }
+
+        for (const id of ids) {
+            const row = this.documents.get(id);
+            if (!row || typeof row !== 'object') { continue; }
+
+            // indexOptions is schema-level now — ~414 B of byte-identical config per
+            // row, ~2.9 GB at 7M rows.
+            if (row.indexOptions !== undefined) { delete row.indexOptions; stats.indexOptionsDropped++; }
+
+            // metadata.features -> root features[], stripping DERIVED keys (they are
+            // recomputed and would otherwise be un-untickable) while keeping the
+            // asserted ones. Recovered bitmap-only tags fold in here too.
+            const legacy = Array.isArray(row.metadata?.features) ? row.metadata.features : [];
+            const recovered = assertedByDoc.get(id);
+            if (legacy.length > 0 || recovered) {
+                const merged = [...legacy, ...(recovered ? [...recovered] : [])];
+                const before = Array.isArray(row.features) ? row.features : [];
+                row.features = normalizeFeatureArray(
+                    [...before, ...merged],
+                    before,
+                    schemaRegistry.hasSchema(row.schema) ? schemaRegistry.getSchema(row.schema).facetFields : [],
+                );
+                if (legacy.length > 0) { stats.featuresMoved++; }
+                if (recovered) { stats.featuresRecovered++; }
+            } else if (!Array.isArray(row.features)) {
+                row.features = [];
+            }
+            if (row.metadata && row.metadata.features !== undefined) { delete row.metadata.features; }
+
+            // Dotfile identity: repoPath -> normalized url (0 documents expected,
+            // but a stale one would be unreadable otherwise).
+            if (row.schema === 'data/abstraction/dotfile' && row.data?.repoPath && !row.data.url) {
+                try {
+                    row.data.url = normalizeDotfileUrl(row.data.repoPath);
+                    delete row.data.repoPath;
+                    stats.dotfileUrls++;
+                } catch (error) {
+                    debug(`v3 migration: dotfile ${id} has an unmigratable repoPath: ${error.message}`);
+                }
+            }
+
+            const kind = schemaRegistry.hasSchema(row.schema) ? schemaRegistry.resolveKind(row.schema, row) : null;
+            if (kind !== (row.kind ?? null)) { row.kind = kind ?? null; stats.kindsStamped++; }
+
+            await this.documents.put(id, row);
+            stats.documents++;
+            if (onProgress && stats.documents % 1000 === 0) { onProgress({ ...stats }); }
+        }
+
+        // ── 4. Replay derivation from the rewritten rows ─────────────────────
+        stats.edges = await this.#replayDerivedPlane(ids);
+
+        return stats;
+    }
+
+    /**
+     * Recompute the L3 structures derivable from rows: kind/mime/facet bitmaps,
+     * location-derived device+backend features, asserted feature membership, and
+     * asserted edges. Shared by the v3 migration and `rebuild --plane l3`, so the
+     * rebuild invariant is exercised by the same code that migrates.
+     */
+    async #replayDerivedPlane(ids = null) {
+        const documentIds = ids ?? await this.#allDocumentIds();
+        let edges = 0;
+
+        for (const id of documentIds) {
+            const row = this.documents.get(id);
+            if (!row || typeof row !== 'object') { continue; }
+
+            let doc;
+            try { doc = parseInitializeDocument(row); } catch (error) {
+                debug(`rebuild: skipping ${id} — ${error.message}`);
+                continue;
+            }
+            doc.id = id;
+
+            const derived = [
+                ...facetBitmapKeys(doc),
+                ...this.#locationDerivedFeatures(doc.locations),
+                ...documentFeatureKeys(doc),
+                doc.schema,
+            ];
+            await this.#applyMembership('tick', id, normalizeBitmapKeys(derived));
+
+            const relations = documentRelations(doc);
+            if (relations.length > 0) {
+                // link() is idempotent (dupsort dedups), so a replay over an intact
+                // index is a no-op rather than a duplicate.
+                this.#syncDocumentRelations(id, [], relations);
+                edges += relations.length;
+            }
+        }
+
+        return edges;
+    }
+
+    async #allDocumentIds() {
+        const ids = [];
+        for await (const { key } of this.documents.getRange()) {
+            const id = Number(key);
+            if (Number.isInteger(id) && id > 0) { ids.push(id); }
+        }
+        return ids;
+    }
+
     async #migrateBitmapKeys() {
         let migrated = 0;
 
@@ -5228,6 +5447,67 @@ class SynapsD extends EventEmitter {
      *
      * @returns {Promise<{ scanned, created, updated, removedTimelines }>}
      */
+    /**
+     * Rebuild the derived (L3) plane from rows.
+     *
+     * This is the rebuild invariant made executable: drop the derived structures,
+     * recompute them from `documents` + extractors, and the index must come back
+     * identical. If it does not, something is storing state that has no source.
+     *
+     * Composes the EXISTING reindexers rather than paralleling them — reindexMime,
+     * reindexCrudTimelines, reindexSearchIndex and reindexEmbeddings already exist
+     * and this is the umbrella that calls them plus the v3 derivations.
+     *
+     * @param {object} [opts]
+     * @param {boolean} [opts.edges=true]     drop + re-derive asserted edges
+     * @param {boolean} [opts.bitmaps=true]   drop + re-derive kind/backend/facet keys
+     * @param {boolean} [opts.timelines=false] re-derive crud:* timelines
+     * @param {boolean} [opts.search=false]   rebuild the FTS index
+     * @param {boolean} [opts.embeddings=false] recompute embeddings (expensive)
+     * @param {string}  [opts.src]            only drop derived edges from this source
+     */
+    async rebuildL3(opts = {}) {
+        const {
+            edges = true, bitmaps = true, timelines = false,
+            search = false, embeddings = false, src = null,
+            onProgress = null,
+        } = opts;
+
+        const stats = { edges: 0, bitmapsDropped: 0, documents: 0 };
+
+        if (edges) {
+            if (src) {
+                // Derived edges only — asserted ones have no meta row and are
+                // reproduced from the rows below anyway.
+                this.#edges.removeEdges({ src });
+            } else {
+                this.#edges.clear();
+            }
+        }
+
+        if (bitmaps) {
+            for (const prefix of ['data/kind', 'data/backend', 'data/mime']) {
+                for (const key of await this.bitmapIndex.listBitmaps(prefix)) {
+                    await this.bitmapIndex.deleteBitmap(key);
+                    stats.bitmapsDropped++;
+                }
+            }
+        }
+
+        if (edges || bitmaps) {
+            const ids = await this.#allDocumentIds();
+            stats.documents = ids.length;
+            stats.edges = await this.#replayDerivedPlane(ids);
+            if (onProgress) { onProgress({ ...stats }); }
+        }
+
+        if (timelines) { await this.reindexCrudTimelines({ onProgress }); }
+        if (search) { await this.reindexSearchIndex({ rebuild: true, onProgress }); }
+        if (embeddings) { await this.reindexEmbeddings({ onProgress }); }
+
+        return stats;
+    }
+
     async reindexCrudTimelines({ batchSize = 1000, onProgress = null } = {}) {
         if (!this.isRunning()) { throw new Error('Database is not running'); }
 

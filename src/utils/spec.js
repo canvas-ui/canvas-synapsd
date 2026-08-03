@@ -1,6 +1,7 @@
 'use strict';
 
 import { predicateId } from '../indexes/edges/predicates.js';
+import { parseFilters as categorizeFilterTokens } from './filters.js';
 
 // Canonical query/spec parser. Pure and stateless: turns the public spec shape
 // into an internal { paths, features, filters, options } structure. Tree->bitmap
@@ -121,6 +122,13 @@ function parseFilters(spec) {
             if (body.startsWith('re:')) { throw new Error('list(): unsupported filter "regexp" (not yet implemented)'); }
             tokens.push(token);
         }
+        // Validate token SHAPE here, at spec-parse time, not at resolve time.
+        // list() catches resolve-time errors into an `.error` array (a contract
+        // three call sites rely on), so a malformed token thrown from there is
+        // reported but still looks like "no results" to anyone not checking. A
+        // malformed token is a caller bug, like the g:/re: cases above — fail it
+        // the same way, before the query runs.
+        categorizeFilterTokens(tokens);
     } else if (spec.filters && typeof spec.filters === 'object') {
         for (const v of legacyArray(spec.filters.timeline)) { tokens.push(`t:crud:updated:${v}`); }
         if (spec.filters.glob) { throw new Error('list(): unsupported filter "glob"'); }

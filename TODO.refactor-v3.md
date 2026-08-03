@@ -1282,6 +1282,41 @@ up — no new machinery.
 
 ## Phase 6 — migration + rebuild command
 
+✅ **SHIPPED 2026-08-03.** `scripts/migrate-v3.js` + `db.rebuildL3()`; `tests/migrate-v3.test.js`
+(10) — all 10 fail without it. Verified end-to-end against a real seeded database, not only in
+tests: dry-run → apply → re-run, then the migrated rows inspected directly.
+
+- **Version gate reuses the existing one** as planned: `SCHEMA_VERSION` 1 → 2, hung off the same
+  `internal/schemaVersion` branch in `start()`. `#migrateEmbedBitmapKeys()` is folded into the
+  versioned scheme but keeps its POSITION — VectorIndex latches its presence bitmap key at
+  construction, so it cannot move down into the migration block.
+- **A stale DB REFUSES to open** without `{migrate:true}` (or the script). A full-table rewrite is
+  an operator action, not something a server restart does implicitly. ⚠️ Exception: an EMPTY
+  database is stamped and opened normally — otherwise a fresh install, or the demo instance that
+  resets hourly, would deadlock on a migration with nothing to migrate.
+- Row pass: drops `indexOptions`, moves `metadata.features` → root `features[]` (stripping derived,
+  keeping tag/custom/client/dataset), stamps `kind`, migrates dotfile `repoPath` → normalized
+  `url`. **Reverse scan** recovers asserted tags that existed ONLY in bitmaps (pre-2026-07-15
+  rows), read once before the row pass and folded in as it goes.
+- Drops + re-derives `rel/*`, `data/source/*`, `data/backend/*` (flat → `<scheme>/<authority>`) and
+  `data/kind/*`. Under D1(c) NO document changes its schema id, so the ~2600 tabs are never
+  re-keyed — the risk that decision bought out.
+- **Idempotent by construction**: every step makes the row match what current code would produce.
+  Re-running is a no-op (asserted, plus the second open reports `lastMigrationStats === null`).
+- `rebuildL3({edges, bitmaps, timelines, search, embeddings, src})` **composes the existing
+  reindexers** rather than paralleling them, and shares `#replayDerivedPlane()` with the migration
+  — so the rebuild invariant is exercised by the same code that migrates. Two tests assert it
+  literally: drop the derived plane, rebuild from rows, get the same sets back; and `edges.clear()`
+  followed by a rebuild restores every asserted edge.
+
+**Still owed by whoever runs this on real data** (both are content changes, not structure, so the
+migration deliberately does not force them):
+- `reindexSearchIndex({rebuild:true})` — the FTS `[object Object]` fix changes indexed content for
+  `data/abstraction/document`, Identity `identifiers`/`channels`/`links`, and Email `from`/`to`.
+- `reindexEmbeddings()` only if the Identity `data.tags` embedding-field drop matters (0 documents).
+
+
+
 `scripts/migrate-v3.js` (or extend existing scripts/):
 
 1. Env version gate — **reuse the existing one, do not invent `internal/version`.** There already
