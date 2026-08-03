@@ -90,20 +90,42 @@ function mimeBitmapKeys(doc) {
     return normalizeBitmapKeys([`${MIME_BITMAP_PREFIX}${type}`, `${MIME_BITMAP_PREFIX}${clean}`]);
 }
 
-// Lifecycle-facet bitmaps: data/status/<status>, derived from data.status
+// Facet bitmaps: data/<field>/<value>, derived from a schema-declared field
 // ("who says so?" — the document; controlled vocabulary, always rederivable).
-// Gated per-schema so foreign data.status vocabularies don't pollute the axis;
-// generalize to indexOptions.facetFields with the schema registration facility.
-const STATUS_BITMAP_PREFIX = 'data/status/';
-const STATUS_FACET_SCHEMAS = new Set(['data/abstraction/todo']);
+//
+// Generalized 2026-08-03 from a bespoke status axis hardcoded to todo. A schema
+// declares `static facetFields = ['data.status']` and the leaf field name becomes
+// the namespace, so a consumer abstraction gets the same machinery without an
+// engine change — the same "declare it on the class" pattern as indexOptions and
+// mergeOnDedupe.
+//
+// Engine-owned namespaces are refused: a schema declaring `data.kind` would write
+// into the derived kind axis, where it would be indistinguishable from a derived
+// value while being immune to that derivation's stale-diff.
+const ENGINE_OWNED_FACET_NAMESPACES = new Set([
+    'abstraction', 'kind', 'mime', 'backend', 'source', 'dataset', 'no-location',
+]);
 
 // Device documents are the source of truth for the derived device/os|type facets.
 const DEVICE_SCHEMA_NAME = 'data/abstraction/device';
-function statusBitmapKeys(doc) {
-    if (!STATUS_FACET_SCHEMAS.has(doc?.schema)) { return []; }
-    const status = typeof doc?.data?.status === 'string' ? doc.data.status.trim().toLowerCase() : '';
-    if (!status) { return []; }
-    return normalizeBitmapKeys([`${STATUS_BITMAP_PREFIX}${status}`]);
+function facetFieldKeys(doc) {
+    const fields = doc?.constructor?.facetFields;
+    if (!Array.isArray(fields) || fields.length === 0) { return []; }
+
+    const keys = [];
+    for (const field of fields) {
+        const segments = String(field).split('.');
+        const namespace = segments[segments.length - 1];
+        if (!namespace || ENGINE_OWNED_FACET_NAMESPACES.has(namespace)) {
+            debug(`Skipping facet field "${field}" on ${doc?.schema} — "${namespace}" is engine-owned`);
+            continue;
+        }
+        const value = segments.reduce((acc, seg) => (acc == null ? acc : acc[seg]), doc);
+        if (typeof value !== 'string' || value.trim() === '') { continue; }
+        keys.push(`data/${namespace}/${value.trim().toLowerCase()}`);
+    }
+
+    return normalizeBitmapKeys(keys);
 }
 
 // A document's root `features` array is DECLARATIVE and authoritative: the
@@ -175,6 +197,45 @@ function validateDocumentRelations(doc) {
     }
 }
 
+// Merge schema-declared record fields from the stored document into an incoming
+// one that resolved to it by checksum. Incoming keys WIN; keys the incoming write
+// omitted survive. Without this, the checksum-match path replaces the stored
+// document wholesale (only id/createdAt/updatedAt carry over), so a partial write
+// silently destroys state it never knew about — e.g. a dotfile POST carrying one
+// device's mapping wiping every other device's.
+//
+// Schema-declared (`static mergeOnDedupe`) rather than hardcoded, so the engine
+// stays schema-agnostic.
+function mergeDedupePreservedFields(parsed, existing) {
+    const paths = parsed?.constructor?.mergeOnDedupe;
+    if (!Array.isArray(paths) || paths.length === 0 || !existing) { return parsed; }
+
+    let changed = false;
+    for (const dotted of paths) {
+        const segments = dotted.split('.');
+        const key = segments.pop();
+        const target = segments.reduce((acc, seg) => (acc == null ? acc : acc[seg]), parsed);
+        const source = segments.reduce((acc, seg) => (acc == null ? acc : acc[seg]), existing);
+        const prior = source?.[key];
+        if (!prior || typeof prior !== 'object' || Array.isArray(prior) || !target) { continue; }
+
+        const incoming = (target[key] && typeof target[key] === 'object' && !Array.isArray(target[key]))
+            ? target[key]
+            : {};
+        target[key] = { ...prior, ...incoming };
+        changed = true;
+    }
+
+    // Locations derive from these fields for some schemas (Dotfile links), so a
+    // merge that widens the map must widen the derived locations with it.
+    if (changed && typeof parsed.deriveLocations === 'function') {
+        const derived = parsed.deriveLocations();
+        if (derived) { parsed.locations = derived; }
+    }
+
+    return parsed;
+}
+
 // Stamp the derived kind onto a document before it is written. Client-supplied
 // values are OVERWRITTEN, exactly like device/* tags: a kind the engine did not
 // derive is indistinguishable from one it did, while being immune to cleanup.
@@ -209,8 +270,12 @@ function kindBitmapKeys(doc) {
 // `kind` rides this existing lifecycle deliberately: the tick/untick stale-diff
 // is already wired into all four write paths, so a document whose kind changes
 // (an application switching data.type) cannot leave its old bitmap ticked.
+// Exported for tests: the facet derivation is pure and worth asserting directly,
+// rather than only through a full put/read round-trip.
+export function facetBitmapKeysForTest(doc) { return facetBitmapKeys(doc); }
+
 function facetBitmapKeys(doc) {
-    return [...mimeBitmapKeys(doc), ...statusBitmapKeys(doc), ...kindBitmapKeys(doc)];
+    return [...mimeBitmapKeys(doc), ...facetFieldKeys(doc), ...kindBitmapKeys(doc)];
 }
 
 // Union extra locations into a document by url (used by in-batch content dedup,
@@ -1040,9 +1105,10 @@ class SynapsD extends EventEmitter {
                     parsed.validateData();
 
                     const primaryChecksum = parsed.getPrimaryChecksum();
-                    existing = await this.getByChecksumString(primaryChecksum).catch(() => null);
+                    existing = await this.getByChecksumString(primaryChecksum, { parse: true, schema: parsed.schema }).catch(() => null);
                     if (existing) {
                         parsed.id = existing.id;
+                        mergeDedupePreservedFields(parsed, existing);
                         if (existing.createdAt) { parsed.createdAt = existing.createdAt; }
                         if (existing.updatedAt) { parsed.updatedAt = existing.updatedAt; }
                         prevChecksums = Array.isArray(existing.checksumArray) ? [...existing.checksumArray] : [];
@@ -1670,7 +1736,7 @@ class SynapsD extends EventEmitter {
                 parsed.validateData();
 
                 const primaryChecksum = parsed.getPrimaryChecksum();
-                const existing = await this.getByChecksumString(primaryChecksum).catch(() => null);
+                const existing = await this.getByChecksumString(primaryChecksum, { parse: true, schema: parsed.schema }).catch(() => null);
                 if (existing) {
                     // Already stored — skip re-insertion entirely
                     continue;
@@ -2254,10 +2320,11 @@ class SynapsD extends EventEmitter {
 
         // Dedup by checksum
         const primaryChecksum = parsedDocument.getPrimaryChecksum();
-        const storedDocument = await this.getByChecksumString(primaryChecksum);
+        const storedDocument = await this.getByChecksumString(primaryChecksum, { parse: true, schema: parsedDocument.schema });
 
         if (storedDocument) {
             parsedDocument.id = storedDocument.id;
+            mergeDedupePreservedFields(parsedDocument, storedDocument);
             if (storedDocument.createdAt) { parsedDocument.createdAt = storedDocument.createdAt; }
             if (storedDocument.updatedAt) { parsedDocument.updatedAt = storedDocument.updatedAt; }
         } else {
@@ -3754,6 +3821,25 @@ class SynapsD extends EventEmitter {
      * @param {string} checksumString - Checksum string
      * @returns {BaseDocument|null} Document instance or null if not found
      */
+    /**
+     * @param {string} checksumString
+     * @param {object} [options]
+     * @param {string} [options.schema] Restrict the match to one schema. OPT-IN,
+     *   and used only on the dedup paths: the checksum index is global per
+     *   workspace and carries no schema prefix, so two schemas whose
+     *   `checksumFields` serialize to the same string collide and the incoming
+     *   document silently OVERWRITES the other's id. Live exposure:
+     *   Link['data.uri'] vs Tab['data.url'] (both bare URLs), Dotfile['data.url'],
+     *   Device['data.deviceId'].
+     *
+     *   Deliberately NOT prefixing the stored checksum with the schema id: that
+     *   changes every document's identity and forces a full re-dedup. Scoping the
+     *   LOOKUP leaves all stored checksums untouched — no migration, no identity
+     *   fork. And deliberately not a default: plain lookups
+     *   (`hasByChecksumString`, the route handlers, stored reconciliation) are
+     *   "find the doc with these bytes", where cross-schema matching is the
+     *   correct behaviour.
+     */
     async getByChecksumString(checksumString, options = { parse: true }) {
         if (!checksumString) { throw new Error('Checksum string required'); }
         debug(`getByChecksumString: Searching for document with checksum ${checksumString}`);
@@ -3763,7 +3849,9 @@ class SynapsD extends EventEmitter {
         if (!id) { return null; }
 
         // Return the document instance, passing the contextSpec through
-        return await this.#getById(id, options);
+        const document = await this.#getById(id, options);
+        if (options?.schema && document && document.schema !== options.schema) { return null; }
+        return document;
     }
 
     // spec: { context?, directory?, features?, attributes? } — same shape as has().

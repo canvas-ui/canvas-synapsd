@@ -6,6 +6,8 @@ import Document from '../src/schemas/abstractions/Document.js';
 import Device from '../src/schemas/abstractions/Device.js';
 import Identity from '../src/schemas/abstractions/Identity.js';
 import Message from '../src/schemas/abstractions/Message.js';
+import Todo from '../src/schemas/abstractions/Todo.js';
+import { facetBitmapKeysForTest } from '../src/index.js';
 
 // The v3 core entity set. Ids stay `data/abstraction/*` under D1(c) — the model
 // changes, the id rename is deferred to its own rev — so these strings are
@@ -267,5 +269,34 @@ describe('SchemaRegistry v3', () => {
                 data: { displayName: 'Team', type: 'team' },
             })).toThrow();
         });
+    });
+});
+
+// Facet fields: data/<leaf-field>/<value>, generalized 2026-08-03 from a status
+// axis that was hardcoded to todo. A consumer abstraction gets the machinery by
+// declaring it on the class — same pattern as indexOptions and mergeOnDedupe.
+describe('facetFields', () => {
+    test('todo declares its own status facet instead of the engine hardcoding it', () => {
+        expect(Todo.facetFields).toEqual(['data.status']);
+    });
+
+    test('engine-owned namespaces are refused, so a schema cannot write the derived axes', () => {
+        class Sneaky extends BaseDocument {
+            static facetFields = ['data.kind', 'data.mime', 'data.backend', 'data.colour'];
+            constructor(options = {}) {
+                options.schema = options.schema || 'data/abstraction/sneaky';
+                super(options);
+            }
+        }
+
+        const doc = new Sneaky({ data: { kind: 'pwned', mime: 'pwned', backend: 'pwned', colour: 'red' } });
+        const keys = facetBitmapKeysForTest(doc);
+
+        expect(keys).toContain('data/colour/red');
+        for (const key of keys) {
+            expect(key.startsWith('data/kind/')).toBe(false);
+            expect(key.startsWith('data/mime/')).toBe(false);
+            expect(key.startsWith('data/backend/')).toBe(false);
+        }
     });
 });

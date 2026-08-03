@@ -640,8 +640,47 @@ section below: it is now `data/kind/application/flatpak`.
      `features`, and the re-bind marker drop moved into `#buildDocument`.
      `updatedAt` still bumps on a feature-only update (sync detection); checksums and embedding
      input provably do not change, so bulk-tagging a gallery cannot re-CLIP it.
-3. Dotfile identity → `data.url` + zod normalization; schema-scoped checksum dedup.
-4. `data/*` facet-family consolidation (`data/kind/*` hierarchical values, source/status dedup).
+3. ✅ **SHIPPED 2026-08-03 — Dotfile identity → `data.url`; schema-scoped checksum dedup.**
+   `tests/dotfile-identity.test.js` (14).
+   - `normalizeDotfileUrl()` in path-helpers, wired as a zod `.transform()` so EVERY writer gets
+     it, not just the CLI: trim, NFC, collapse `//`, drop `./`, strip leading/trailing `/`,
+     lowercase scheme + host (fragment left case-sensitive — repo paths are), reject `..` and empty
+     entries. The four spellings (`shell/bashrc` · `./shell/bashrc` · `shell//bashrc` ·
+     `shell/bashrc/`) now resolve to ONE document.
+   - A bare path is accepted and resolved to `workspace:dotfiles#<path>` — clients doing the common
+     thing should not have to spell out a URI. External repos work:
+     `git+ssh://git@github.com/me/dotfiles#shell/bashrc` is a DISTINCT document from the
+     workspace-local entry with the same path, which `repoPath` could not express at all.
+   - `checksumFields: ['data.url']`; `conflictsWith()` deleted (dead code).
+   - **`links` merge on the checksum-match path**, declared by the schema
+     (`static mergeOnDedupe = ['data.links']`) rather than hardcoded, so the engine stays
+     schema-agnostic. Incoming keys win, omitted ones survive — a partial POST can no longer
+     destroy another device's mapping, and the merge re-derives locations so device presence
+     widens with it.
+   - **Checksum dedup scoped by schema**, opt-in on the three dedup lookups only. The checksum
+     index is global per workspace and carries no schema prefix, so `Link['data.uri']` and
+     `Tab['data.url']` (both bare URLs) collided and the incoming doc silently overwrote the
+     other's id. Plain lookups (`hasByChecksumString`, routes, stored reconciliation) stay
+     cross-schema — there "which doc has these bytes" is the correct question.
+   - CLI moved in the same commit (`dot` is the only writer): `lib/docs.js` gained
+     `entryPath()`/`toWorkspaceUrl()` and converts at the boundary, so the CLI keeps talking to
+     users in repo paths. Routes needed no change — they pass dotfiles through as opaque objects,
+     which is exactly why schema-level normalization was the right layer.
+4. ✅ **SHIPPED 2026-08-03 — `data/*` facet-family consolidation.**
+   - `data/kind/*` hierarchical values — done (step 1/2).
+   - `data/source/*` — collapsed into `data/backend/*`, both now derived from `locations[]`.
+   - **`data/status/*` generalized to schema-declared `static facetFields`.** The engine no longer
+     hardcodes a status axis to todo (`STATUS_FACET_SCHEMAS` is gone); a schema declares
+     `facetFields = ['data.status']` and the leaf field name becomes the namespace, so a consumer
+     abstraction gets the machinery without an engine change. Engine-owned namespaces
+     (`kind`, `mime`, `backend`, `source`, `abstraction`, `dataset`, `no-location`) are REFUSED —
+     a schema declaring `data.kind` would write into the derived kind axis where it would be
+     indistinguishable from a derived value and immune to that derivation's stale-diff.
+   - ⚠️ Closing the generalization needed one more thing, found by the Phase 7 sweep: a schema's
+     own facet namespace must also be stripped from asserted `features[]`. It is per-schema, so
+     `DERIVED_FEATURE_PREFIXES` (a global list) cannot express it — `facetPrefixesFor()` computes
+     it from `static facetFields`. Without it an asserted `data/status/done` would be re-asserted
+     on every write and the facet stale-diff could never untick it.
 
 **Hard-won facts from Phases 1–2b — do not rediscover these:**
 

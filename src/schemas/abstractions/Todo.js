@@ -37,6 +37,11 @@ export default class Todo extends Document {
 
     // Index configuration is SCHEMA-level, resolved by BaseDocument from this
     // static. Never stored on the row (see documentSchema).
+    // Todo's status genuinely IS per-document (unlike application install status,
+    // which is per-device and lives in locations[].metadata). Declared here rather
+    // than hardcoded in the engine.
+    static facetFields = ['data.status'];
+
     static indexOptions = {
         ftsSearchFields: ['data.title', 'data.description'],
         vectorEmbeddingFields: ['data.title', 'data.description'],
