@@ -432,6 +432,57 @@ document with only `stored://` / `https://` locations ticks nothing.
 
 ## Phase 3 — schema model v3 (`kind` + registry; **ids stay `data/abstraction/*`**)
 
+### START HERE (written 2026-08-03 at the close of Phase 2b — read before writing code)
+
+Phases 1, 2 and 2b are shipped and committed. Baseline: **synapsd 31 suites / 188 tests green,
+parent `tests/core/workspace` 145 + `tests/utils` 18 green.** Run both before and after — the
+parent suite is `node --test "tests/**/*.test.js"`, synapsd is `npm test` (jest, `maxWorkers: 1`).
+
+**Scope of this phase, in dependency order.** Do NOT try to land it as one commit:
+
+1. Registry: `registerSchema()` + core set, `Message` registered, `'BaseDocument'` alias deleted,
+   all core `schemaVersion: '3.0'`, `contact`→`identity`, `bucket` deleted.
+2. Row shape: `indexOptions` off the row → registry; top-level `kind` + `mime`; `data.relations`
+   accepted; root-level `features[]` (D2) with the derived-prefix exclusion and the dropped
+   schema unshift.
+3. Dotfile identity → `data.url` + zod normalization; schema-scoped checksum dedup.
+4. `data/*` facet-family consolidation (`data/kind/*` hierarchical values, source/status dedup).
+
+**Hard-won facts from Phases 1–2b — do not rediscover these:**
+
+- **`this.documents.get()` is SYNCHRONOUS** (lmdb-js returns the value, not a promise). Attaching
+  `.catch()` throws a TypeError. Worse, several write paths wrap derivation in a broad `catch`,
+  so a thrown bug looks exactly like "the logic is wrong". `#indexDocument`'s catch now logs;
+  when a derivation mysteriously does nothing, **suspect a swallowed throw before the logic**.
+- **Assert on BITMAP MEMBERSHIP, never on `doc.locations` / `doc.metadata`.** `db.get()` rebuilds
+  a document through its subclass constructor, so reads re-derive and look correct even when the
+  stored row is stale. Only write-time bitmaps expose drift. See `tests/device-presence.test.js`
+  `featuresOf()` for the helper shape.
+- **Verify every regression test actually fails without its fix** — `git stash push <file>`, run,
+  `git stash pop`. My first drift test passed either way and proved nothing. This matters doubly
+  in Phase 3, where `features[]` has a known silent-failure mode: a positive-only assertion
+  passes even when the untick never fires.
+- **PITFALL, will bite `features[]` exactly as it bit the others:** in `putMany`,
+  `existing.update(doc)` mutates in place and returns the same instance. `prevFeatureKeys` MUST be
+  snapshotted BEFORE that call, beside `prevChecksums`/`prevLocations`/`prevComment`/
+  `prevTimelineState`/`prevFacetKeys`.
+- **`BaseDocument.deriveLocations()` now exists** (added in Phase 2b) — an overridable hook called
+  at the end of `update()`; `Dotfile`/`Application` override it. When Phase 3 moves derivation
+  config into the registry, route through this hook rather than adding a second derivation path.
+- **Test fixtures:** `Application`'s `superRefine` requires a type-appropriate `data.source` —
+  flatpak→`ref`, snap→`name`, appimage→`url`, portable→one of `url`/`repoPath`/`path`; `system`
+  and `local` need none. `Dotfile` requires `repoPath` + `type` (`file|folder`). A missing
+  `source` fails as a confusing zod error, not an obvious fixture problem.
+- **lmdb is pinned to `3.5.6` in BOTH root and synapsd `package.json`** — it is an npm workspace
+  member sharing one hoisted copy, so pinning only one forces a second *native* build into the
+  process. Pin both or neither.
+- **`npm run lint` is broken pre-existing** (ESLint 9 wants a flat `eslint.config.js`; the repo
+  has `.eslintrc.json`, so every file reports as ignored). Not caused by v3 work — don't chase it.
+- Integration surfaces are concentrated: all four write paths funnel through `#applyMembership`
+  (`index.js:~4460`), all reads through `#resolveParsed` (`~2547-2681`). `putMany` ~836-1137,
+  `#putOne` ~2145-2210, `#updateOne` ~3237-3332, `#deleteOne` ~3421-3528. Line numbers drifted
+  during Phases 1–2b — grep, don't trust them.
+
 **D1 RESOLVED 2026-08-02 — option (c): keep the `data/abstraction/*` id strings.** The L1 model
 (kind, runtime registry, `data.relations`, `indexOptions` off the row) lands in full; only the
 *id rename* is deferred. Rationale: the rename carried ~272 cross-repo occurrences over five
@@ -696,10 +747,25 @@ data/no-location              zero locations       (orphan marker; keep in data/
   prefix, let `registerSchema` name the field — `kindField: 'data.type'` — so
   `data/kind/flatpak` falls out of the existing derivation. "All flatpaks on device A" then
   becomes `{allOf:['data/kind/flatpak','device/id/A']}` with no new machinery.
-  ⚠️ Watch the vocabulary collision: `kind` values would then share one flat namespace across
-  schemas (`file` means dotfile-is-a-folder's sibling AND nothing else). Either scope the key
-  (`data/kind/<schema>/<v>`) or accept a controlled global vocabulary — decide before stamping,
-  since these ids are persisted.
+  **DECIDED 2026-08-03: `data/kind/*` values are HIERARCHICAL** — `data/kind/browser/tab`,
+  `data/kind/dotfile/folder`, `data/kind/dotfile/file`. Note this is hierarchy in the *value*, not
+  schema-scoping (`browser` is not a schema — a tab's entity is `document`). Follows
+  `data/mime/*` precedent exactly, and for the same reason: the taxonomy really is hierarchical,
+  so the parent segment is a meaningful query on its own.
+
+  Implementation is the existing `mimeBitmapKeys` shape — **tick parent AND child**
+  (`data/kind/browser` *and* `data/kind/browser/tab`), which buys roll-up queries for free:
+  "everything browser-ish" is one key, no enumeration of children. Single-segment kinds
+  (`note`, `link`) are fine; they simply never have children. Cheap: one extra tick per level.
+
+  ⚠️ One caveat inherited from mime, worth knowing rather than avoiding: `listBitmaps(prefix)`
+  range-scans `prefix + '/' .. prefix + '/￿'`, so a bare `data/kind/browser` key is **invisible to
+  a prefix listing of its own namespace** — list `data/kind/` instead. This is safe here precisely
+  because the parent is ALWAYS ticked (deliberate roll-up), unlike the genuinely broken
+  namespace-is-also-a-key case documented at index.js:147-159. Key-based queries (AND/OR/ANDNOT)
+  are unaffected; only prefix *enumeration* is.
+
+  Values stay append-only — they are persisted in bitmap keys.
 - **`data/source/*` vs `data/backend/*` look like dedup candidates.** `data/backend/imap/<account>`
   already encodes provider-ish structure, and once `source` derives from
   `locations[].metadata.provider` the two are both pure projections of `locations[]`. Check
