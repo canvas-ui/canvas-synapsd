@@ -4458,7 +4458,11 @@ class SynapsD extends EventEmitter {
             if (!('start' in entry)) { throw new Error(`Document timeline entry "${name}" requires start`); }
 
             const start = entry.scale ? { scale: entry.scale, value: entry.start } : entry.start;
-            const rawEnd = entry.end ?? entry.start;
+            // `undefined` (absent) => instant; explicit `null` => OPEN end, the
+            // Timeline index's "ongoing" sentinel. This must not be `??`: that
+            // collapses null into start, so no document could ever declare an
+            // ongoing interval even though TimelineIndex.insert supports it.
+            const rawEnd = (entry.end === undefined) ? entry.start : entry.end;
             const end = entry.scale ? { scale: entry.scale, value: rawEnd } : rawEnd;
 
             return { name, interval: { start, end } };

@@ -3,10 +3,15 @@
 import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
 import { z } from 'zod';
 
-const DOCUMENT_SCHEMA_NAME = 'data/abstraction/contact';
-const DOCUMENT_SCHEMA_VERSION = '1.0';
+const DOCUMENT_SCHEMA_NAME = 'data/abstraction/identity';
+const DOCUMENT_SCHEMA_VERSION = '3.0';
 
-const identitySchema = z.object({
+/**
+ * One external identifier for this identity (an email address, a Slack user id,
+ * a GPG fingerprint). NOT to be confused with the Identity entity itself — an
+ * Identity HAS identifiers, it is not a list of them.
+ */
+const identifierSchema = z.object({
     type: z.string(),
     provider: z.string().optional(),
     identifier: z.string(),
@@ -40,10 +45,16 @@ const organizationSchema = z.object({
     metadata: z.record(z.any()).optional(),
 }).strict();
 
-const contactPayloadSchema = Document.extendDataSchema(
+const identityPayloadSchema = Document.extendDataSchema(
     z.object({
         displayName: z.string(),
-        kind: z.enum(['person', 'team', 'integration', 'service']).optional(),
+        // Subtype axis. `type` (not `kind`) because `kind` becomes a RESERVED
+        // top-level row field in v3; a data-level `kind` beside a top-level one
+        // would read as the same thing and is exactly the collision the registry's
+        // `kindField: 'data.type'` indirection exists to avoid.
+        // 'team' -> organization and 'integration' -> service under the old enum;
+        // there are 0 documents, so this is a pure code change.
+        type: z.enum(['person', 'organization', 'service', 'bot']).optional(),
         primaryEmail: z.string().email().optional(),
         name: z.object({
             given: z.string().optional(),
@@ -54,7 +65,7 @@ const contactPayloadSchema = Document.extendDataSchema(
         }).optional(),
         timezone: z.string().optional(),
         locale: z.string().optional(),
-        identities: z.array(identitySchema).optional(),
+        identifiers: z.array(identifierSchema).optional(),
         channels: z.array(channelSchema).optional(),
         organizations: z.array(organizationSchema).optional(),
         links: z.array(linkSchema).optional(),
@@ -65,12 +76,16 @@ const contactPayloadSchema = Document.extendDataSchema(
 );
 
 const defaultIndexOptions = {
-    ftsSearchFields: ['data.displayName', 'data.primaryEmail', 'data.identities', 'data.channels', 'data.links'],
-    vectorEmbeddingFields: ['data.displayName', 'data.tags'],
-    checksumFields: ['data.displayName', 'data.identities', 'data.channels'],
+    ftsSearchFields: ['data.displayName', 'data.primaryEmail', 'data.identifiers', 'data.channels', 'data.links'],
+    // `data.tags` dropped from the embedding input: Contact was the ONLY schema
+    // embedding it, and tags move to root `features[]` in the D2 work later this
+    // phase. At 0 documents there is no re-embed cost, so taking it out now stops
+    // that move from silently forking every identity's vector.
+    vectorEmbeddingFields: ['data.displayName'],
+    checksumFields: ['data.displayName', 'data.identifiers', 'data.channels'],
 };
 
-export default class Contact extends Document {
+export default class Identity extends Document {
 
     constructor(options = {}) {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
@@ -82,7 +97,7 @@ export default class Contact extends Document {
 
         super(options);
 
-        this.#ensureArrays(['identities', 'channels', 'organizations', 'links', 'tags']);
+        this.#ensureArrays(['identifiers', 'channels', 'organizations', 'links', 'tags']);
     }
 
     // ----- Getters / Setters -----
@@ -109,29 +124,29 @@ export default class Contact extends Document {
         });
     }
 
-    get primaryIdentity() {
-        return this.data.identities.find((identity) => identity.primary) || this.data.identities[0] || null;
+    get primaryIdentifier() {
+        return this.data.identifiers.find((identity) => identity.primary) || this.data.identifiers[0] || null;
     }
 
-    // ----- Identity management -----
+    // ----- Identifier management -----
 
-    addIdentity(identityInput) {
-        if (!identityInput) { return this; }
-        const identity = identitySchema.parse(identityInput);
-        const index = this.#upsert('identities', identity, (existing) => (
-            existing.type === identity.type &&
-            existing.identifier === identity.identifier &&
-            (existing.provider ?? null) === (identity.provider ?? null)
+    addIdentifier(identifierInput) {
+        if (!identifierInput) { return this; }
+        const identifier = identifierSchema.parse(identifierInput);
+        const index = this.#upsert('identifiers', identifier, (existing) => (
+            existing.type === identifier.type &&
+            existing.identifier === identifier.identifier &&
+            (existing.provider ?? null) === (identifier.provider ?? null)
         ));
-        if (identity.primary) {
-            this.#enforceSinglePrimary('identities', index);
+        if (identifier.primary) {
+            this.#enforceSinglePrimary('identifiers', index);
         }
         return this;
     }
 
-    removeIdentity(match) {
+    removeIdentifier(match) {
         if (!match) { return this; }
-        this.data.identities = this.data.identities.filter((identity) => !this.#match(identity, match));
+        this.data.identifiers = this.data.identifiers.filter((identifier) => !this.#match(identifier, match));
         return this;
     }
 
@@ -176,11 +191,11 @@ export default class Contact extends Document {
 
     static fromData(data) {
         data.schema = DOCUMENT_SCHEMA_NAME;
-        return new Contact(data);
+        return new Identity(data);
     }
 
     static get dataSchema() {
-        return contactPayloadSchema;
+        return identityPayloadSchema;
     }
 
     static get schema() {
@@ -202,7 +217,7 @@ export default class Contact extends Document {
     }
 
     static validateData(documentData) {
-        return contactPayloadSchema.parse(documentData);
+        return identityPayloadSchema.parse(documentData);
     }
 
     // ----- Private helpers -----

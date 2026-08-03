@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/email';
 // 3.1: attachments use `url` (stored://) + `checksum`; ad-hoc `storageRef` removed.
-const DOCUMENT_SCHEMA_VERSION = '3.1';
+const DOCUMENT_SCHEMA_VERSION = '3.0';
 const EMAIL_FEATURE_BITMAPS = {
     sent: 'data/abstraction/email/sent',
     received: 'data/abstraction/email/received',

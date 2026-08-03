@@ -21,7 +21,7 @@ import { z } from 'zod';
 import { pathPattern, normalizeHomePlaceholder, deviceFileUrl } from '../../utils/path-helpers.js';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/dotfile';
-const DOCUMENT_SCHEMA_VERSION = '3.1';
+const DOCUMENT_SCHEMA_VERSION = '3.0';
 
 /*******************
  * Data Schema     *

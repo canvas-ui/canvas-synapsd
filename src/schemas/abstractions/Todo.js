@@ -4,7 +4,7 @@ import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/todo';
-const DOCUMENT_SCHEMA_VERSION = '2.1';
+const DOCUMENT_SCHEMA_VERSION = '3.0';
 
 // Task lifecycle aligned with VTODO (RFC 5545) STATUS / JSCalendar (RFC 8984)
 // progress: pending=NEEDS-ACTION, in-progress=IN-PROCESS, completed, cancelled.

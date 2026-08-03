@@ -5,20 +5,23 @@ import BaseDocument from './BaseDocument.js';
 
 // Document Schemas
 import Document from './abstractions/Document.js';
-// The below abstractions should move back to the app level, not the db level
-// We will need a proper schema registry API so that consumers can define,
-// register and validate schemas on runtime
-import Contact from './abstractions/Contact.js';
 import Email from './abstractions/Email.js';
+import Event from './abstractions/Event.js';
 import File from './abstractions/File.js';
-import Bucket from './abstractions/Bucket.js';
+import Identity from './abstractions/Identity.js';
+import Message from './abstractions/Message.js';
+import Todo from './abstractions/Todo.js';
+import Device from './abstractions/Device.js';
+import Application from './abstractions/Application.js';
+
+// App-level schemas. These are NOT synapsd primitives — they belong to
+// canvas-server and register through `registerSchema()`. They stay bundled here
+// only until the parent lands its own registration; the `tier: 'app'` marker is
+// what makes that pending move greppable rather than folklore.
 import Link from './abstractions/Link.js';
 import Note from './abstractions/Note.js';
 import Tab from './abstractions/Tab.js';
-import Todo from './abstractions/Todo.js';
 import Dotfile from './abstractions/Dotfile.js';
-import Device from './abstractions/Device.js';
-import Application from './abstractions/Application.js';
 
 // Tree Abstractions
 import Canvas from './internal/layers/Canvas.js';
@@ -30,24 +33,41 @@ import Workspace from './internal/layers/Workspace.js';
 import Project from './internal/layers/Project.js';
 import Task from './internal/layers/Task.js';
 
-// Default schema registry (for now hard-coded)
-const SCHEMA_REGISTRY = {
-    // Data Abstractions
-    'data/abstraction/document': Document,
-    // Back-compat aliases used in tests and older code
-    'BaseDocument': Document,
-    'data/abstraction/contact': Contact,
-    'data/abstraction/email': Email,
-    'data/abstraction/file': File,
-    'data/abstraction/bucket': Bucket,
-    'data/abstraction/link': Link,
-    'data/abstraction/note': Note,
-    'data/abstraction/tab': Tab,
-    'data/abstraction/todo': Todo,
-    'data/abstraction/dotfile': Dotfile,
-    'data/abstraction/device': Device,
-    'data/abstraction/application': Application,
+/**
+ * The CORE entity set — synapsd's own primitives. Ids stay `data/abstraction/*`
+ * under D1(c): the v3 model lands, the id rename is deferred to its own rev gated
+ * on a coordinated submodule release. `kind` is what consumers migrate to; see
+ * TODO.refactor-v3.md.
+ *
+ * `kind` values are HIERARCHICAL (the `data/mime/*` precedent) — a `browser/tab`
+ * ticks both `data/kind/browser` and `data/kind/browser/tab`, so "everything
+ * browser-ish" is one key with no enumeration of children.
+ */
+const CORE_SCHEMAS = {
+    'data/abstraction/document': { SchemaClass: Document },
+    'data/abstraction/file': { SchemaClass: File },
+    'data/abstraction/message': { SchemaClass: Message },
+    'data/abstraction/email': { SchemaClass: Email, kind: 'email' },
+    'data/abstraction/event': { SchemaClass: Event, kindField: 'data.type', kindPrefix: 'event' },
+    'data/abstraction/todo': { SchemaClass: Todo },
+    'data/abstraction/identity': { SchemaClass: Identity, kindField: 'data.type', kindPrefix: 'identity' },
+    'data/abstraction/device': { SchemaClass: Device },
+    'data/abstraction/application': { SchemaClass: Application, kindField: 'data.type', kindPrefix: 'application' },
+};
 
+/**
+ * App-level schemas, bundled pending the parent's own `registerSchema()` calls.
+ * Registered exactly like a third-party schema would be — same code path, so the
+ * eventual move is a deletion here, not a rewrite.
+ */
+const APP_SCHEMAS = {
+    'data/abstraction/note': { SchemaClass: Note, kind: 'note' },
+    'data/abstraction/tab': { SchemaClass: Tab, kind: 'browser/tab' },
+    'data/abstraction/link': { SchemaClass: Link, kind: 'link' },
+    'data/abstraction/dotfile': { SchemaClass: Dotfile, kindField: 'data.type', kindPrefix: 'dotfile' },
+};
+
+const INTERNAL_SCHEMAS = {
     // Tree Abstractions
     'internal/layers/canvas': Canvas,           // Can store context, feature and filter bitmaps + dashboard / UI layouts
     'internal/layers/context': Context,         // Default context layer(linked to a bitmap)
@@ -89,10 +109,87 @@ export function isDocumentData(obj) {
 
 class SchemaRegistry {
 
-    #schemas = new Map();
+    // schemaId -> { SchemaClass, tier, kind?, kindField?, kindPrefix?, indexOptions? }
+    #entries = new Map();
 
     constructor() {
-        this.#schemas = this.#initSchemaRegistry();
+        this.#entries = this.#initSchemaRegistry();
+    }
+
+    /**
+     * Register a schema at runtime.
+     *
+     * This is the API app-level consumers (canvas-server, and eventually third
+     * parties) use instead of editing this file. Core ids are sealed: they are
+     * synapsd's own primitives and re-pointing one at a foreign class would let a
+     * consumer silently change what `data/abstraction/file` means for everyone.
+     *
+     * @param {string} schemaId          e.g. 'data/abstraction/note'
+     * @param {Function} SchemaClass     a BaseDocument subclass
+     * @param {object} [options]
+     * @param {string} [options.kind]        literal kind value, e.g. 'browser/tab'
+     * @param {string} [options.kindField]   dotted path to a subtype discriminator,
+     *                                       e.g. 'data.type' — resolved per document
+     * @param {string} [options.kindPrefix]  parent segment prepended to a kindField
+     *                                       value, e.g. 'dotfile' -> 'dotfile/folder'
+     * @param {object} [options.indexOptions] fts/vector/checksum field lists
+     * @returns {SchemaRegistry} this, for chaining
+     */
+    registerSchema(schemaId, SchemaClass, options = {}) {
+        if (typeof schemaId !== 'string' || schemaId.trim() === '') {
+            throw new Error('registerSchema: schemaId must be a non-empty string');
+        }
+
+        if (typeof SchemaClass !== 'function' || !(SchemaClass.prototype instanceof BaseDocument)) {
+            throw new Error(`registerSchema: ${schemaId} must be registered with a BaseDocument subclass`);
+        }
+
+        if (CORE_SCHEMAS[schemaId]) {
+            throw new Error(`registerSchema: ${schemaId} is a core schema and cannot be re-registered`);
+        }
+
+        if (options.kind && options.kindField) {
+            throw new Error(
+                `registerSchema: ${schemaId} sets both kind and kindField — a schema has one kind axis, ` +
+                'either a literal or a per-document field, not both',
+            );
+        }
+
+        // Enforced, not conventional: kind values are persisted in bitmap keys and
+        // are therefore append-only, so an unprefixed generic value ('file',
+        // 'person', 'calendar') that later collides with another schema's is not
+        // fixable without a migration. Decided 2026-08-03 — always prefix with the
+        // entity, no per-schema judgment call.
+        if (options.kindField && !options.kindPrefix) {
+            throw new Error(
+                `registerSchema: ${schemaId} sets kindField without kindPrefix — kind values derived ` +
+                'from a document field must be prefixed with the entity (e.g. kindPrefix: \'widget\' ' +
+                'yields data/kind/widget/<value>), so they cannot collide across schemas',
+            );
+        }
+
+        this.#entries.set(schemaId, {
+            SchemaClass,
+            tier: 'app',
+            kind: options.kind,
+            kindField: options.kindField,
+            kindPrefix: options.kindPrefix,
+            indexOptions: options.indexOptions,
+        });
+
+        return this;
+    }
+
+    /**
+     * Unregister an app-level schema. Core schemas cannot be removed.
+     * @param {string} schemaId
+     * @returns {boolean} true if a schema was removed
+     */
+    unregisterSchema(schemaId) {
+        if (CORE_SCHEMAS[schemaId]) {
+            throw new Error(`unregisterSchema: ${schemaId} is a core schema and cannot be removed`);
+        }
+        return this.#entries.delete(schemaId);
     }
 
     /**
@@ -102,10 +199,48 @@ class SchemaRegistry {
      * @throws {Error} If schema is not found
      */
     getSchema(schemaId) {
-        if (!this.hasSchema(schemaId)) {
+        return this.getSchemaEntry(schemaId).SchemaClass;
+    }
+
+    /**
+     * Get the full registration record — the shape Phase 3's row work reads
+     * `kind` and `indexOptions` from, so ingest never reads them off the row.
+     * @param {string} schemaId Schema identifier
+     * @returns {object} Registration entry
+     * @throws {Error} If schema is not found
+     */
+    getSchemaEntry(schemaId) {
+        const entry = this.#entries.get(schemaId);
+        if (!entry) {
             throw new Error(`Schema not found: ${schemaId}`);
         }
-        return this.#schemas.get(schemaId);
+        return entry;
+    }
+
+    /**
+     * Resolve the `kind` value for a document: a literal from the registration, or
+     * the registration's `kindField` read off the document (optionally under a
+     * parent segment). Returns null when the schema declares no kind axis.
+     *
+     * Hierarchical by construction — the caller ticks every parent segment, so
+     * 'dotfile/folder' also answers to 'dotfile'.
+     *
+     * @param {string} schemaId
+     * @param {object} [document] document instance or plain object
+     * @returns {string|null}
+     */
+    resolveKind(schemaId, document = null) {
+        const entry = this.#entries.get(schemaId);
+        if (!entry) { return null; }
+        if (entry.kind) { return entry.kind; }
+        if (!entry.kindField || !document) { return null; }
+
+        const value = entry.kindField
+            .split('.')
+            .reduce((acc, segment) => (acc == null ? acc : acc[segment]), document);
+
+        if (typeof value !== 'string' || value === '') { return null; }
+        return entry.kindPrefix ? `${entry.kindPrefix}/${value}` : value;
     }
 
     /**
@@ -134,7 +269,7 @@ class SchemaRegistry {
      * @returns {boolean} True if schema is registered, false otherwise
      */
     hasSchema(schemaId) {
-        return this.#schemas.has(schemaId);
+        return this.#entries.has(schemaId);
     }
 
     /**
@@ -142,11 +277,9 @@ class SchemaRegistry {
      * @returns {Array<string>} Array of schema IDs
      */
     listSchemas(prefix) {
-        if (!prefix) {
-            return Array.from(this.#schemas.keys());
-        }
-
-        return Array.from(this.#schemas.keys()).filter(schemaId => schemaId.startsWith(prefix));
+        const ids = Array.from(this.#entries.keys());
+        if (!prefix) { return ids; }
+        return ids.filter(schemaId => schemaId.startsWith(prefix));
     }
 
     /**
@@ -154,14 +287,21 @@ class SchemaRegistry {
      * @returns {Map<string, object>} Schema registry
      */
     #initSchemaRegistry() {
-        const schemas = new Map();
+        const entries = new Map();
 
-        // Initialize schemas from registry
-        for (const [schemaId, SchemaClass] of Object.entries(SCHEMA_REGISTRY)) {
-            schemas.set(schemaId, SchemaClass);
+        for (const [schemaId, definition] of Object.entries(CORE_SCHEMAS)) {
+            entries.set(schemaId, { ...definition, tier: 'core' });
         }
 
-        return schemas;
+        for (const [schemaId, definition] of Object.entries(APP_SCHEMAS)) {
+            entries.set(schemaId, { ...definition, tier: 'app' });
+        }
+
+        for (const [schemaId, SchemaClass] of Object.entries(INTERNAL_SCHEMAS)) {
+            entries.set(schemaId, { SchemaClass, tier: 'internal' });
+        }
+
+        return entries;
     }
 }
 
