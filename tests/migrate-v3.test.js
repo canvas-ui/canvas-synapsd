@@ -159,6 +159,25 @@ describe('v3 migration', () => {
         });
     });
 
+    test('the embed-key migration is tracked separately from the schema version', async () => {
+        // The migration script runs with semantic disabled, which skips the whole
+        // vector branch. Gating the embed-key migration on SCHEMA_VERSION meant the
+        // version got stamped to 2 without it ever running — and every later start
+        // then saw "already current" and skipped it forever, silently leaving
+        // vectors on legacy bitmap keys.
+        await seedLegacy();
+
+        const migrated = await openRaw({ migrate: true, semantic: { enabled: false } });
+        expect(migrated.internalStore.get('internal/schemaVersion')).toBe(2);
+        expect(migrated.internalStore.get('internal/migrations/embed-keys')).toBeUndefined();
+        await migrated.shutdown();
+
+        // First normal start with the vector stack on: it must still run.
+        const normal = await openRaw({ semantic: { enabled: true } });
+        expect(normal.internalStore.get('internal/migrations/embed-keys')).toBe(1);
+        await normal.shutdown();
+    });
+
     test('a fresh/empty database is stamped without hitting the gate', async () => {
         const db = await openRaw();
         expect(db.lastMigrationStats).toBeNull();
