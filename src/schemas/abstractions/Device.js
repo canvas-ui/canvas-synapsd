@@ -28,16 +28,18 @@ const documentDataSchema = z.object({
 });
 
 export default class Device extends Document {
+
+    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // static. Never stored on the row (see documentSchema).
+    static indexOptions = {
+        ftsSearchFields: ['data.name', 'data.deviceId', 'data.alias', 'data.hostname', 'data.description'],
+        vectorEmbeddingFields: ['data.name', 'data.alias'],
+        checksumFields: ['data.deviceId'],
+    };
+
     constructor(options = {}) {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-
-        options.indexOptions = {
-            ...(options.indexOptions || {}),
-            ftsSearchFields: ['data.name', 'data.deviceId', 'data.alias', 'data.hostname', 'data.description'],
-            vectorEmbeddingFields: ['data.name', 'data.alias'],
-            checksumFields: ['data.deviceId'],
-        };
 
         super(options);
     }

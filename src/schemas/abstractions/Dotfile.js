@@ -62,16 +62,18 @@ const documentDataSchema = z
  * Dotfile class   *
  *******************/
 export default class Dotfile extends Document {
+
+    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // static. Never stored on the row (see documentSchema).
+    static indexOptions = {
+        ftsSearchFields: ['locationUrls', 'data.repoPath', 'data.description'],
+        vectorEmbeddingFields: ['locationUrls', 'data.repoPath'],
+        checksumFields: ['data.repoPath'],
+    };
+
     constructor(options = {}) {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-
-        options.indexOptions = {
-            ...(options.indexOptions || {}),
-            ftsSearchFields: ['locationUrls', 'data.repoPath', 'data.description'],
-            vectorEmbeddingFields: ['locationUrls', 'data.repoPath'],
-            checksumFields: ['data.repoPath'],
-        };
 
         super(options);
 

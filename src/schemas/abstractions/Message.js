@@ -83,18 +83,19 @@ const documentDataSchema = z.object({
 });
 
 export default class Message extends Document {
+
+    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // static. Never stored on the row (see documentSchema).
+    static indexOptions = {
+        ftsSearchFields: ['data.text', 'data.sender.name', 'data.sender.displayName', 'data.channel.name'],
+        vectorEmbeddingFields: ['data.text'],
+        checksumFields: ['data.text', 'data.sender.id', 'data.channel.id', 'data.timestamp', 'data.platform'],
+    };
+
     constructor(options = {}) {
         // Set schema before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-
-        // Inject Message-specific index options BEFORE super() so checksum uses correct fields
-        options.indexOptions = {
-            ...(options.indexOptions || {}),
-            ftsSearchFields: ['data.text', 'data.sender.name', 'data.sender.displayName', 'data.channel.name'],
-            vectorEmbeddingFields: ['data.text'],
-            checksumFields: ['data.text', 'data.sender.id', 'data.channel.id', 'data.timestamp', 'data.platform'],
-        };
 
         super(options);
     }

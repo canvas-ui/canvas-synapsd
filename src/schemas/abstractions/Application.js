@@ -100,15 +100,18 @@ const applicationPayloadSchema = Document.extendDataSchema(
  *******************/
 
 export default class Application extends Document {
+
+    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // static. Never stored on the row (see documentSchema).
+    static indexOptions = {
+        ftsSearchFields: ['data.appId', 'data.name', 'data.type', 'data.description', 'locationUrls'],
+        vectorEmbeddingFields: ['data.name', 'data.appId', 'locationUrls'],
+        checksumFields: ['data.appId'],
+    };
+
     constructor(options = {}) {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-        options.indexOptions = {
-            ftsSearchFields: ['data.appId', 'data.name', 'data.type', 'data.description', 'locationUrls'],
-            vectorEmbeddingFields: ['data.name', 'data.appId', 'locationUrls'],
-            checksumFields: ['data.appId'],
-            ...(options.indexOptions || {}),
-        };
 
         super(options);
 

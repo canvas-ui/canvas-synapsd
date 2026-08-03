@@ -14,18 +14,19 @@ const documentDataSchema = z.object({
 });
 
 export default class Document extends BaseDocument {
+
+    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // static. Never stored on the row (see documentSchema).
+    static indexOptions = {
+        ftsSearchFields: ['data'],
+        vectorEmbeddingFields: ['data'],
+        checksumFields: ['data'],
+    };
+
     constructor(options = {}) {
         // Set schema before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-
-        // Inject Document-specific index options BEFORE super() so checksum fields are correct
-        options.indexOptions = {
-            ...(options.indexOptions || {}),
-            ftsSearchFields: ['data'],
-            vectorEmbeddingFields: ['data'],
-            checksumFields: ['data'],
-        };
 
         super(options);
     }

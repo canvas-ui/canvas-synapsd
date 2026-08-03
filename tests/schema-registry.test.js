@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from '@jest/globals';
 import schemaRegistry from '../src/schemas/SchemaRegistry.js';
 import BaseDocument from '../src/schemas/BaseDocument.js';
 import Document from '../src/schemas/abstractions/Document.js';
+import Device from '../src/schemas/abstractions/Device.js';
 import Identity from '../src/schemas/abstractions/Identity.js';
 import Message from '../src/schemas/abstractions/Message.js';
 
@@ -130,6 +131,73 @@ describe('SchemaRegistry v3', () => {
             expect(() => schemaRegistry.registerSchema('data/abstraction/widget', Widget, {
                 kind: 'widget', kindField: 'data.type',
             })).toThrow(/one kind axis/);
+        });
+    });
+
+    // The generic-engine goal: a consumer registers its own abstraction by
+    // extending BaseDocument or a core schema, declares its OWN fts/vector fields
+    // per SCHEMA (never per write), and still gets the base mandatory fields
+    // enforced. This is class inheritance doing the work — `static indexOptions`
+    // resolves through the prototype chain, so BaseDocument finds it via
+    // `this.constructor` with no registry import and therefore no import cycle.
+    describe('consumer-registered abstraction extending a core schema', () => {
+        class Phone extends Device {
+            static indexOptions = {
+                ftsSearchFields: ['data.maker', 'data.hwRelease'],
+                vectorEmbeddingFields: ['data.maker'],
+                checksumFields: ['data.deviceId'],
+            };
+
+            constructor(options = {}) {
+                options.schema = options.schema || 'data/abstraction/phone';
+                super(options);
+            }
+        }
+
+        // Declares nothing of its own — must inherit its parent's configuration.
+        class Tablet extends Device {
+            constructor(options = {}) {
+                options.schema = options.schema || 'data/abstraction/tablet';
+                super(options);
+            }
+        }
+
+        afterEach(() => {
+            for (const id of ['data/abstraction/phone', 'data/abstraction/tablet']) {
+                try { schemaRegistry.unregisterSchema(id); } catch { /* not registered */ }
+            }
+        });
+
+        test('a subclass declares its own index fields per schema, not per write', () => {
+            schemaRegistry.registerSchema('data/abstraction/phone', Phone, { kind: 'phone' });
+
+            const phone = new Phone({ data: { deviceId: 'p1', name: 'Pixel', maker: 'Google', hwRelease: '2024' } });
+
+            expect(phone.indexOptions.ftsSearchFields).toEqual(['data.maker', 'data.hwRelease']);
+            expect(phone.generateFtsData()).toEqual(['Google', '2024']);
+            expect(schemaRegistry.getSchema('data/abstraction/phone')).toBe(Phone);
+        });
+
+        test('a subclass declaring none inherits its parent index options', () => {
+            schemaRegistry.registerSchema('data/abstraction/tablet', Tablet);
+
+            const tablet = new Tablet({ data: { deviceId: 't1', name: 'Tab' } });
+            expect(tablet.indexOptions.ftsSearchFields).toEqual(Device.indexOptions.ftsSearchFields);
+        });
+
+        test('base mandatory fields stay enforced on the subclass', () => {
+            // Device requires data.deviceId; a consumer subclass cannot opt out of
+            // its parent's contract by registering.
+            expect(() => Phone.validateData({
+                schema: 'data/abstraction/phone',
+                data: { name: 'no deviceId' },
+            })).toThrow();
+        });
+
+        test('a registered subclass is still a BaseDocument', () => {
+            const phone = new Phone({ data: { deviceId: 'p1', name: 'Pixel' } });
+            expect(phone instanceof BaseDocument).toBe(true);
+            expect(phone instanceof Device).toBe(true);
         });
     });
 

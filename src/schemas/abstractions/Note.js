@@ -17,18 +17,19 @@ const documentDataSchema = z.object({
 });
 
 export default class Note extends Document {
+
+    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // static. Never stored on the row (see documentSchema).
+    static indexOptions = {
+        ftsSearchFields: ['data.title', 'data.content'],
+        vectorEmbeddingFields: ['data.title', 'data.content'],
+        checksumFields: ['data.title', 'data.content'],
+    };
+
     constructor(options = {}) {
         // Set schema before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-
-        // Inject Note-specific index options BEFORE super()
-        options.indexOptions = {
-            ...(options.indexOptions || {}),
-            ftsSearchFields: ['data.title', 'data.content'],
-            vectorEmbeddingFields: ['data.title', 'data.content'],
-            checksumFields: ['data.title', 'data.content'],
-        };
 
         super(options);
 
