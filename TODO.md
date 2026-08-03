@@ -191,40 +191,111 @@ no content checksum) and its identity is a repo URI, not a content hash.
 Sweep target for that rev: every `data/abstraction/*` read in the submodules has moved to
 `data/kind/*`.
 
-### Open: timeline coverings (S2-shaped) — blocks the wikipedia corpus
+### Open: multi-position timelines — blocks the wikipedia corpus
 
-**A document occupies ONE position per timeline.** The tier is a BSI keyed `id -> a single value`,
-so a second `insert(name, id, …)` overwrites the first. Declaring two entries for one timeline name
-now THROWS rather than silently keeping the last (which is how it failed before, invisibly: the row
-kept every entry and `db.get()` re-rendered them all while the index held one).
+**The constraint.** A document occupies ONE position per timeline. The tier is a BSI keyed
+`id -> a single value`, so a second `insert(name, id, …)` overwrites the first. Declaring two
+entries for one timeline name now THROWS rather than silently keeping the last (which is how it
+failed before, invisibly: the row kept every entry and `db.get()` re-rendered them all while the
+index held one).
 
-**This is what the wikipedia import needs.** An article about ancient Egypt carries several ranges;
-one-doc-per-range or a single collapsed envelope are the only options until coverings land.
+**Why it blocks wikipedia.** The import distils dates/periods per article with an LLM; an article
+on ancient Egypt carries several ranges. Until this lands: one document per range, or a single
+collapsed envelope per article (earliest start → latest end, losing interior precision). The ranges
+live in `timelines[]` either way, so a later rebuild picks them up — an import done against the
+workaround is not wasted.
 
-Design settled 2026-08-03 — **reuse the `GeoIndex` covering pattern for time.** Spatial and temporal
-representation sharing one underlying structure is the goal, not a shortcut (place/grid-cell
-literature: projecting data into low-dimensional structures, recall generative at its core).
+#### ⚠️ Correction: the geo precedent is a BSI, NOT per-cell bitmaps
 
-- **Declarative side needs no new field** — `timelines[]` already accepts N entries; the guard's
-  throw becomes support.
-- **Derived side:** `internal/ts/<timeline>/cover/<scale>/<bucket>` roaring bitmaps. Each range
-  ticks the coarsest containing buckets plus finer boundary buckets — the S2 covering algorithm in
-  1-D, over the existing `SCALES` hierarchy (`Gyr…ns`).
-- **Cheap because** bucket-key count is bounded by *timespan ÷ granularity*, not by document count.
-  All of human history at year scale is ~5k keys shared across every article.
-- **The BSI stays** for exact `getSortKeys` and `histogram`; coverings become the membership
-  structure. L3 by construction — droppable, rebuildable, slots into `rebuildL3()`.
+An earlier draft of this section proposed `internal/ts/<timeline>/cover/<scale>/<bucket>` roaring
+bitmaps and called it "the GeoIndex pattern". That mischaracterises GeoIndex. It keeps **one BSI
+over the full 64-bit S2 cell id** (`BitSlicedIndex('internal/geo/s2', …, 64)`), and its own comment
+states why that works:
 
-**⚠️ OPEN, decide before building: boundary precision.** If an article says "Old Kingdom,
-2686–2181 BC", must a query for exactly 2181 BC match, or is year-level overshoot acceptable? That
-decides whether coverings need boundary refinement or can stop at the containing bucket.
+> every ancestor cell covers the contiguous `[rangeMin, rangeMax]` interval of its descendants, so
+> "in cell X" at ANY level is a single BETWEEN — the bitmap population stays fixed at the slice
+> width (~64 + ebm) regardless of data density or which levels queries use.
 
-Already supported, do not rebuild: wipeable datasets (`deleteDataset(name, {dropDocuments})` +
-`data/dataset/*`) and layered zeitgeist queries (`RANGE_MODES` includes `layers`/`grouped`, so
-`wikipedia,personal` against a birthdate works today).
+So the real S2 lesson is **encode the hierarchy into a sortable id space so containment becomes a
+range query on one BSI** — not "a bitmap per cell". Read the correction before designing.
 
-Rejected: occurrence sub-ids (adds an id space + a translation step on every timeline query) and a
-time-bucketed dupsort index (re-implements range querying that coverings get from bitmap unions).
+**It does not transfer wholesale**, and the reason is the whole problem: a geo point has ONE cell.
+A time *range* is not a point, and an article has N of them. Putting hierarchical time-cell ids in a
+BSI gives ms resolution for free (precision lives in the id, not in key count) — but it is exactly
+the structure that exists today, and it keeps one-value-per-id. **Adding levels does not buy
+multi-position, and multi-position is the requirement.**
+
+#### The BSI stays regardless
+
+`getSortKeys()` reconstructs each candidate's *value* by ANDing ~64 slices once — cost independent
+of candidate count and corpus size. Its single caller is `rank()` (`index.js`, the `sortBy` path).
+A membership structure answers "is it in this range"; it never answers "what is its timestamp".
+Whatever lands for multi-position is an ADDITIONAL plane, not a replacement:
+
+- **BSI = the value plane.** Exact timestamps, sort keys, histograms. Single-position by
+  construction, which is correct — a document has one canonical time.
+- **New structure = the multi-position membership plane.** "Which articles might overlap
+  2686–2181 BC", cheaply, for a document with N ranges.
+
+#### Three candidate shapes
+
+1. **Coarse covering bitmaps + refinement.** Per-bucket roaring bitmaps at capped resolution; a
+   range ticks the coarsest containing buckets plus boundary buckets. Multi-position is free.
+   Key count is `timespan ÷ granularity`, so resolution MUST stay coarse — ms over a single year is
+   ~3.15e10 keys, a non-starter. Precision comes from refining against `timelines[]` on the row.
+2. **Occurrence-id indirection over the existing BSI.** Give each range a synthetic id, keep a
+   `occurrenceId ↔ docId` map, translate query results back to doc ids before they meet the bitmap
+   pipeline. Preserves the one-BSI property that makes geo cheap, and gives ms precision AND
+   multi-position with no new index type. Cost: an id space, a translation step on every timeline
+   query, and occurrence cleanup on delete. **Rejected earlier for adding an id space; with the geo
+   precedent understood properly it is a live contender.**
+3. **Hierarchical time-cell id in a BSI.** Elegant, and closest to geo — but see above: it does not
+   solve multi-position, so it is only interesting combined with (2).
+
+#### ⚠️ The real cost is engine complexity, not index size (user, 2026-08-03)
+
+The S2 shape can be made to work for 1-D time in at least two ways **if resolution is capped at
+hours or days**. But a capped-resolution membership index then forces one of:
+
+- **filter on top of the candidate set** — fine, and consistent with the candidate-set-then-refine
+  contract used everywhere else (geo coverings, `imageMaxDistance`, dangling edge targets); or
+- **keep the current BSI for `crud:*`** (which genuinely needs finer resolution and is
+  single-position by nature) — which means **two TYPES of timeline in the engine**, with different
+  storage, different query paths and different capabilities.
+
+That second option is the one to weigh carefully. The engine is already at the edge of what one
+person holds in their head; a timeline type split is a permanent tax on every future change to the
+temporal layer. Prefer a single mechanism with a refinement step over two mechanisms with none.
+
+**⚠️ Still open, decide before building: boundary precision.** If an article says "Old Kingdom,
+2686–2181 BC", must a query for exactly 2181 BC match, or is year-level overshoot acceptable? This
+decides whether the membership plane needs boundary refinement or can stop at the containing
+bucket — and it interacts directly with the capped-resolution question above.
+
+#### Aside: render a BSI as a context tree (debug surface, NOT a design input)
+
+A context tree is a hierarchy of bitmaps with roll-up semantics, which is structurally what a
+temporal index looks like — so a BSI or covering index could be *rendered* as a tree and made
+clickable, turning temporal density into something directly inspectable.
+
+⚠️ To be explicit, because an earlier draft of this note implied otherwise: **the tree machinery is
+NOT reusable for the temporal index.** Layers carry ULIDs, tree metadata and per-layer lifecycle
+that a time bucket has no use for. This is a visualization idea for a rainy afternoon, not an input
+to the multi-position design above.
+
+#### Already supported — do not rebuild
+
+Wipeable datasets (`deleteDataset(name, {dropDocuments})` + `data/dataset/*` provenance) and layered
+zeitgeist queries (`RANGE_MODES` includes `layers`/`grouped`; `#queryIntervalLayers` returns
+`{name: {scale: [ids]}}` per timeline), so `wikipedia,personal` against a birthdate works today.
+
+#### Explicitly NOT this round
+
+**Exponential-falloff dynamic timelines for agentic workloads** — high resolution around "now",
+degrading with distance, so an agent's recent context is precise while deep history stays cheap.
+Experimental, and may not belong in synapsd at all. Noted so it is not accidentally designed into
+the multi-position work.
+
 
 ### Open: consumer-registered abstractions
 
@@ -251,6 +322,49 @@ Two gaps:
 ⚠️ Not to be confused with the superseded "schema inheritance" decision. What v3 killed is *bitmap
 ancestor-chain ticking* (a tab ticking `data/abstraction/link` so "all links finds tabs"); `kind`
 replaced that. CLASS extension for validation and index-option inheritance is alive and wanted.
+
+### Open: `src/index.js` is ~5.7k lines / 181 methods
+
+Measured 2026-08-03. Not a stylistic complaint — it is the file every change to this engine has to
+be made in, and it is past the point where one person holds it in their head. v3 added ~800 lines to
+it, so this is partly self-inflicted.
+
+Where the lines actually are:
+
+| group | methods | ~lines |
+|---|---|---|
+| query/read (`resolveCandidates`, `#resolveParsed`, `rank`, `list`, `query`, `search`, combiners) | 27 | 1009 |
+| write paths (`put`, `putMany`, `#putOne`, `#updateOne`, `#deleteOne`, …) | 11 | 999 |
+| migration / reindex / rebuild | 11 | 445 |
+| trees & layers | 23 | 405 |
+| membership & bitmap derivation | 13 | 349 |
+| vectors / semantic / lance wiring | 11 | 266 |
+| everything else (link/unlink, accessors, helpers, module-level pure functions) | 85 | ~2114 |
+
+Biggest single methods: `putMany` (317), `#resolveParsed` (154), `start` (148), `unlinkMany` (143),
+`deleteMany` (142), `constructor` (142).
+
+**Extraction order, cheapest and safest first:**
+
+1. **Migration / reindex / rebuild (~445).** Zero coupling to the query path — it touches
+   `documents` and `bitmapIndex` only, and `#replayDerivedPlane` is already the shared seam between
+   `#migrateToV3` and `rebuildL3`. Most of it was written in one go and has 16 dedicated tests.
+   Cleanest possible first cut.
+2. **Module-level pure derivation helpers (~250 of "everything else").** `mimeBitmapKeys`,
+   `kindBitmapKeys`, `facetFieldKeys`, `documentFeatureKeys`, `documentRelations`,
+   `validateDocumentRelations`, `stampDerivedKind`, `mergeDedupePreservedFields`, `envFlag` — no
+   `this`, trivially testable in isolation, currently sitting above the class for no reason.
+3. **Membership & location-derived features (~349).** Already concentrated
+   (`#deviceFeaturesFromLocations`, `#backendFeaturesFromLocations`, `#locationDerivedFeatures`,
+   `#removeStaleLocationMembership`, `#applyMembership`).
+4. **Trees & layers (~405).** Mostly delegation to the tree classes already.
+5. **Query/read (~1009).** Biggest win, highest risk — `#resolveParsed` is the core of the engine
+   and every read path funnels through it. Do it last, and only with the query suites green.
+
+Do NOT attempt this as one commit. The reason `index.js` is safe to touch at all right now is that
+all four write paths funnel through `#applyMembership` and all reads through `#resolveParsed`;
+an extraction that blurs those two choke points costs more than the line count does.
+
 
 ### Open: post-v3 rough edges
 
