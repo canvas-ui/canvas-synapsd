@@ -1,6 +1,6 @@
 'use strict';
 
-import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
+import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/identity';
@@ -87,7 +87,7 @@ const defaultIndexOptions = {
 
 export default class Identity extends Document {
 
-    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = defaultIndexOptions;
 
@@ -200,16 +200,6 @@ export default class Identity extends Document {
 
     static get schema() {
         return baseDocumentSchema;
-    }
-
-    static get jsonSchema() {
-        return {
-            schema: DOCUMENT_SCHEMA_NAME,
-            data: {
-                displayName: 'string',
-                primaryEmail: 'string',
-            },
-        };
     }
 
     static validate(document) {

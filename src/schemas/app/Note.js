@@ -1,6 +1,6 @@
 'use strict';
 
-import Document, { documentSchema } from '../BaseDocument.js';
+import Document, { documentSchema } from '../Document.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/note';
@@ -18,7 +18,7 @@ const documentDataSchema = z.object({
 
 export default class Note extends Document {
 
-    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = {
         ftsSearchFields: ['data.title', 'data.content'],
@@ -61,16 +61,6 @@ export default class Note extends Document {
 
     static get schema() {
         return documentSchema;
-    }
-
-    static get jsonSchema() {
-        return {
-            schema: DOCUMENT_SCHEMA_NAME,
-            data: {
-                title: 'string',
-                content: 'string',
-            },
-        };
     }
 
     static validate(document) {

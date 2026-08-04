@@ -1,6 +1,6 @@
 'use strict';
 
-import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
+import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/event';
@@ -52,7 +52,7 @@ const RRULE_UNTIL_RE = /(?:^|;)\s*UNTIL=(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(
 
 export default class Event extends Document {
 
-    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = {
         ftsSearchFields: ['data.title', 'data.description', 'data.location'],
@@ -143,17 +143,6 @@ export default class Event extends Document {
     static get dataSchema() { return documentDataSchema; }
 
     static get schema() { return baseDocumentSchema; }
-
-    static get jsonSchema() {
-        return {
-            schema: DOCUMENT_SCHEMA_NAME,
-            data: {
-                title: 'string',
-                type: EVENT_TYPES.join('|'),
-                start: 'string',
-            },
-        };
-    }
 
     static validate(document) { return baseDocumentSchema.parse(document); }
 

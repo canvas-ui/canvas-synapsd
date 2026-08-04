@@ -209,48 +209,145 @@ the phasing vehicle went unused, and carrying it cost more than the cutover.
 slash form is found, the colon form is not). You would have to tick both keys anyway, so the
 bitmap plane saves nothing, and `doc.schema` would stop being the registry lookup key.
 
-#### Rev A — local cleanup (no consumer impact)
+#### Rev A — local cleanup — LANDED 2026-08-04
+
+Shipped exactly as scoped; 352 tests green (350 before, +2 regressions below).
 
 - ~~`kind` fallback~~ — **DROPPED 2026-08-03.** It existed to complete `data/kind/*` so consumers
   could migrate to it before the rename. `kind` is being removed entirely instead, so there is
   nothing to complete and Rev A has no prerequisite left to produce. Rev A is now pure cleanup and
   the two revs are independent (still do A first, it is smaller).
-- Folder layout: `schemas/core/`, `schemas/app/` (shipped templates, optional), `schemas/internal/`.
-- `Document` becomes the base class; the `BaseDocument` NAME dies (the class stays).
+- [x] **Folder layout.** `schemas/abstractions/` is gone: 8 core schemas -> `schemas/core/`, the 4
+      bundled app schemas (note, tab, link, dotfile) -> `schemas/app/`, `schemas/internal/`
+      unchanged. The tier is now the FOLDER, so moving a bundled app schema out of this repo is a
+      directory-level move rather than a hunt through one flat folder.
+- [x] **`Document` is the base class**, `schemas/Document.js`; the `BaseDocument` name is gone
+      repo-wide (src, tests, README). Most schema files already imported the base *as* `Document`,
+      so this mostly deleted an alias.
+      ⚠️ `abstractions/Document.js` was DELETED, not moved: it was a subclass that pinned the schema
+      id/version the base already defaults to, restated the default `indexOptions`, and forwarded
+      validate/validateData to `super` — no behaviour at all. `data/abstraction/document` now
+      registers the base class itself (asserted in `schema-registry.test.js`). Base `fromData()`
+      gained the schema-id default the subclass used to provide.
 - ~~Internal-schema audit~~ **LEAVE AS-IS 2026-08-03 (user-verified).** The `internal/layers/*`
   schema IDS look unused (~1 hit each, the registry itself), but trees instantiate layers by TYPE
   NAME (`'canvas'`, `'context'`) — so the id count undercounts, and 2 of them are genuinely in use.
   Not worth pruning the rest for now. Do NOT delete on the id count alone.
-- Add `data/backend/` to `DERIVED_FEATURE_PREFIXES` — now legitimate, it became derived in v3.
-  **NOT `data/no-location`**, which is still app-asserted.
-- Seal `schema` in `ENGINE_OWNED_FACET_NAMESPACES` so a consumer cannot declare
-  `facetFields: ['data.schema']`.
+- [x] **`data/backend/` added to `DERIVED_FEATURE_PREFIXES`** — legitimate since v3 made it derived
+      from `locations[]`. Verified first that no consumer still asserts it (zero hits outside
+      synapsd's own tests). Regression test in `backend-features.test.js` asserts an asserted
+      `data/backend/*` is stripped AND does not survive a backend move (the negative half — an
+      asserted copy was immune to the derivation's stale-diff, so it could never be unticked).
+      **`data/no-location` deliberately NOT added**, still app-asserted.
+- [x] **`schema` sealed in `ENGINE_OWNED_FACET_NAMESPACES`** — reserved AHEAD of the namespace
+      existing, so nobody can squat `facetFields: ['data.schema']` and land inside the identity
+      axis on the day Rev B ships. Covered in the existing engine-owned-namespace test.
 - **Geo: leave as-is.** `GeoIndex.has(id)` already answers presence off the BSI existence bitmap;
   a `feature/has-geo` key would be a second source of truth for one fact, with its own lifecycle.
+- [x] **`Todo` class renamed to `Task`** (user, 2026-08-04) — `schemas/core/Task.js`,
+      `TODO_STATUSES` -> `TASK_STATUSES`. The class was already a task in everything but its name
+      (RFC 5545 VTODO statuses, due dates deriving onto a timeline literally called `tasks`).
+      ⚠️ The schema ID is STILL `data/abstraction/todo` — deliberately. The class name is local and
+      free; the id is consumer-visible and moves to `data/schema/task` with every other id in Rev B.
+      There is a comment at the constant saying so, because the mismatch looks like an oversight.
+      No `Task` superclass with `Todo extends Task`: a todo has no field a task lacks, so it would
+      be an empty subclass — see the Rev B note.
+- [x] **`internal/layers/task` DELETED** (user, 2026-08-04): "I wanted to create layers of type task
+      but realized it's not the correct design." Verified unused first, the way the audit note above
+      demands — layer classes are resolved by TYPE NAME (`internal/layers/${type}`), so a grep for
+      the id undercounts. Searched every repo for the type name too: the only hit anywhere was the
+      registry line itself. The class was a no-op `extends Layer` carrying a copy-pasted (and wrong)
+      "not tied to any bitmap" comment from `Label`. `internal/layers/project` is KEPT.
+      Consequence, by design: creating a layer with `type: 'task'` now throws at `LayerIndex.js:217`
+      instead of silently succeeding.
 
-#### Rev B — the rename (cross-repo)
+⚠️ One consumer edit was unavoidable despite "no consumer impact": the parent imported
+`synapsd/src/schemas/abstractions/Email.js` directly (`core/workspace/services/imap/index.js`).
+Repointed to `schemas/core/Email.js` in the same change. It is the ONLY deep import of a schema file
+from outside synapsd — everything else goes through `SchemaRegistry`.
 
-**Cost, measured 2026-08-03:** 194 occurrences outside synapsd across **6 separate git
-submodules** — `ui/web` 48, `ui/fuse` 25, `ui/cli` 20, `ui/shell` 6, `browser-extensions` 33, plus
-parent `transports` 27, `core` 30, `embedd` 5 — and the public route
-`/data/abstraction/:abstraction` (`routes/schemas.js:27,50`).
+#### Rev B — the rename (cross-repo) — NOT STARTED, handoff below
+
+Rev A is landed and Rev B is independent of it (the two revs were decoupled when the `kind` fallback
+was dropped). Nothing about Rev B is blocked; it was split off because it is a coordinated release
+across 5 other repos plus a row-rewriting migration, and that wants its own session with every
+consumer suite runnable — not a tail-end of a cleanup.
 
 **Why now (user, 2026-08-03):** breaking changes are priced by installed base. Today that is one
 person. At 1500 users with integrations this becomes a deprecation cycle plus a compatibility shim
 maintained for a year. Do it while it is merely tiresome.
 
 **Sequence:** one coordinated release. Rename `data/abstraction/` to `data/schema/`, adopt the
-hierarchy, delete `kind`, and update all 6 submodules together. There is no incremental path by
-design (see the shape section) — so land it when you can cut every consumer at once, not
-piecemeal.
+hierarchy, delete `kind`, and cut every consumer together. There is no incremental path by design
+(see the shape section) — so land it when you can cut them all at once, not piecemeal.
 
 ⚠️ **Unlike everything else in this plane, this one rewrites ROWS.** `doc.schema` changes value on
 every document, and hierarchy adoption changes ids outright (`data/abstraction/email` ->
 `data/schema/message/email`). Bitmaps are derived and rebuild from `rebuildL3()`; the schema field
 does not. Schema version 3, same gate as v2.
 
-**No blocking sub-decisions remain.**
+##### Inventory, re-measured 2026-08-04
 
+The 2026-08-03 figure ("194 across 6 submodules") was close but miscounted the repo boundary. Actual:
+
+| repo | occurrences | files | note |
+|---|---|---|---|
+| `ui/web` (submodule) | 46 | 14 | incl. `lib/schema-meta.ts`, `utils/url-params.ts`, renderers |
+| `browser-extensions` (submodule) | 33 | 7 | |
+| `ui/fuse` (submodule) | 25 | 5 | |
+| `ui/cli` (submodule) | 20 | 11 | |
+| `ui/shell` (submodule) | 6 | 1 | |
+| canvas-server parent | 59 | 28 | **includes `services/embedd` (5) — that is NOT a submodule, it is in-tree** |
+| `ui/desktop`, `services/neurald`, `services/stored` | 0 | 0 | nothing to do |
+
+So it is **5 submodules + the parent**, not 6 submodules. Parent hot spots: `core/agent/files.js` 9
+(an LLM tool prompt listing schema ids — prose, not code), `routes/contexts/dotfiles.js` 5,
+`core/agent/tools/index.js` 5, `webdav/VirtualNamedContextFS.js` 4, `routes/schemas.js` 4,
+`embedd/src/router.js` 4.
+
+⚠️ **The public route is not a plain rename.** `routes/schemas.js:27,50` declares
+`/data/abstraction/:abstraction` — a SINGLE path parameter. Under the hierarchy a schema id can be
+two segments (`data/schema/message/email`), which `:abstraction` cannot match. The route needs a
+wildcard/greedy param and the id reassembled from it, in both handlers (`.json` variant included).
+Do not sweep this one with sed.
+
+##### Suggested order (each step is independently verifiable)
+
+1. **synapsd, `kind` removal first, ids untouched.** ~104 `kind` refs in `src/` (index.js 35,
+   SchemaRegistry 33, Document 10) — but ~14 of those in `utils/filters.js` are the geo-filter's
+   own `kind` local and are NOT part of this; check before sweeping. Rename `kindField` ->
+   `subtypeField`, delete `kind`/`kindPrefix`/`kindBitmapKeys()`/`stampDerivedKind()`/
+   `resolveKind()`/`data/kind/*` and the kind stamping in the v3 migration. `tests/kind-bitmaps.test.js`
+   is repurposed or deleted here. Suite must be green before touching an id.
+2. **synapsd, ids + hierarchy.** Registry map, per-schema `DOCUMENT_SCHEMA_NAME` constants,
+   `DERIVED_FEATURE_PREFIXES` (`data/abstraction/` -> `data/schema/`), `ENGINE_OWNED_FACET_NAMESPACES`
+   (drop `abstraction`, `schema` is already sealed — Rev A), `DEVICE_SCHEMA_NAME`, semantic
+   `embeddableSchemas` default, and the id strings in every test.
+3. **synapsd, the v4 migration.** Schema version 3, same explicit opt-in gate as v2. Maps old id ->
+   new id per row, rewrites `doc.schema`, drops `kind`, then `#replayDerivedPlane`. Write the
+   old->new map ONCE, as an exported constant, and let the consumers import it where they can.
+4. **Consumers, one repo per commit**, parent last (it is the only one that can hold a stale
+   submodule pointer). Then one release that bumps all pointers together.
+5. **`reindexSearchIndex({rebuild:true})` on migrated DBs** — already owed independently (see
+   post-v3 rough edges), and this is the natural moment.
+
+##### Decisions still to make (none blocking, but decide before step 2)
+
+- **`data/abstraction/todo` -> `data/schema/task`. DECIDED 2026-08-04 (user), half-done.** The CLASS
+  rename landed in Rev A; only the ID is left, and it waits here because ids cannot move one at a
+  time. Consumer cost is ~6 hits outside tests (web ui 4, webdav 1, agent prompt 1).
+  - ❌ **Do NOT introduce `Task` as a superclass with `Todo extends Task`.** A todo has no field a
+    task lacks, so the subclass would carry no behaviour — exactly the empty subclass Rev A just
+    deleted (`abstractions/Document.js`), and exactly what the register-vs-derive rule refuses.
+    Subtypes, if they ever matter (chore/milestone/bug), come free as DERIVED segments via
+    `subtypeField: 'data.type'` -> `data/schema/task/todo`.
+  - ~~Naming collision with `internal/layers/task`~~ — **GONE 2026-08-04**, that layer type was
+    deleted (see Rev A). There is only one Task now.
+  - **Still open: tier.** `Note` is `app`, task is `core`, and it is hard to say why. The real smell
+    underneath is that the ENGINE registers the `tasks` point-timeline in its own constructor
+    (`index.js:700`, `pointTimelines: ['tasks']`) — engine knowledge of one schema. Either task is
+    core and that hardcode is legitimate, or it moves to `app/` and the timeline registration
+    becomes schema-declared. Decide the hardcode first; the tier follows.
 - ~~Does the `kind` row field survive?~~ **RESOLVED 2026-08-03: no, removed entirely.** See the
   shape section above. Consumers needing the subtype read the schema id (it is in the path) or
   `data.type`; no per-schema knowledge leaks, because the subtype is visible in the id itself —
@@ -374,7 +471,33 @@ Already works: a subclass declaring `static indexOptions` gets its own fts/vecto
 declaring none inherits its parent's; base mandatory fields stay enforced; `registerSchema()`
 accepts it. `kindField`/`kindPrefix`/`facetFields`/`mergeOnDedupe` are all schema-declared.
 
-Two gaps:
+Three gaps (0 is half-fixed):
+
+0. **Nothing worth fetching is exported — so consumers COPY schemas (user, 2026-08-04).** The
+   intent of a registry is that consumers fetch a schema and hand it to *their* consumers. Today
+   they cannot, and the web ui duplicating the todo status enum
+   (`ui/web/.../useTodoFields.ts`, comment: "Mirrors synapsd Todo.js STATUS") is the symptom, not
+   the disease. Two concrete defects, both measured 2026-08-04:
+   - [x] ~~**`static jsonSchema` is an example stub, not a JSON Schema.**~~ **FIXED 2026-08-04.**
+     It was `{ schema, data: { title: 'string' } }` — no enums, required/optional, ranges or
+     nesting — while every one of those facts sat in the zod `dataSchema`, unexported.
+     `jsonSchema` is now DERIVED: `Document.jsonSchema` runs `zod-to-json-schema` over
+     `this.dataSchema` (so each subclass converts its own, via static inheritance) and memoizes per
+     class in a WeakMap; all **12** hand-written statics are deleted, and a test asserts no subclass
+     owns the property so a stub cannot come back. `getJsonSchema()` stamps `$id` in the REGISTRY,
+     which is what knows the id<->class mapping. Layer types return `null` instead of throwing.
+     `zod-to-json-schema` promoted from transitive to a declared dependency.
+     Verified end to end: `data/abstraction/todo` now publishes the four statuses as an enum,
+     `priority` as `{integer, 1..9}` and `required: ['title']`.
+   - **`GET /data/abstraction/:abstraction` returns a CLASS.** `routes/schemas.js:39` sends
+     `schemaRegistry.getSchema(id)` — a constructor, which JSON-serializes to `{}` — and reports
+     `schemas.length`, i.e. the constructor's ARITY, as the result count. This endpoint has never
+     returned anything a consumer could use. It should serve the registration record (id, tier,
+     subtype axis, indexOptions field lists) or the derived JSON Schema, not the class.
+   Sequencing: the derivation is DONE. What remains is the `:abstraction` route returning a class,
+   and that route is being rewritten in Rev B anyway (its single path param cannot match a
+   two-segment hierarchical id), so fold the fix in there rather than making a separate pass.
+   Then the consumer half: point the web ui at `…/…json` and delete its copied enums.
 
 1. **No parent-aware data-schema helper.** `Phone.dataSchema` inherits `Device.dataSchema`
    unchanged, so a consumer's own fields are accepted (passthrough) but never *validated*.

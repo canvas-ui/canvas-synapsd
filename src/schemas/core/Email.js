@@ -1,6 +1,6 @@
 'use strict';
 
-import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
+import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { generateChecksum } from '../../utils/crypto.js';
 import { z } from 'zod';
 
@@ -250,7 +250,7 @@ function normalizeHeaderValue(value) {
 
 export default class Email extends Document {
 
-    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = {
         ftsSearchFields: ['data.subject', 'data.body', 'data.from.address', 'data.from', 'data.to'],
@@ -421,13 +421,6 @@ export default class Email extends Document {
 
     static get schema() {
         return baseDocumentSchema;
-    }
-
-    static get jsonSchema() {
-        return {
-            schema: DOCUMENT_SCHEMA_NAME,
-            data: {},
-        };
     }
 
     static validate(document) {

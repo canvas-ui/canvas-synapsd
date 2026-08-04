@@ -1,6 +1,6 @@
 'use strict';
 
-import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
+import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/link';
@@ -29,7 +29,7 @@ const defaultIndexOptions = {
 
 export default class Link extends Document {
 
-    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = defaultIndexOptions;
 
@@ -96,16 +96,6 @@ export default class Link extends Document {
 
     static get schema() {
         return baseDocumentSchema;
-    }
-
-    static get jsonSchema() {
-        return {
-            schema: DOCUMENT_SCHEMA_NAME,
-            data: {
-                uri: 'string',
-                label: 'string',
-            },
-        };
     }
 
     static validate(document) {

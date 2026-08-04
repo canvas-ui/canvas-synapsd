@@ -1,6 +1,6 @@
 'use strict';
 
-import BaseDocument, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
+import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/file';
@@ -20,9 +20,9 @@ const fileDocumentSchema = baseDocumentSchema.extend({
     data: fileDataSchema,
 });
 
-export default class File extends BaseDocument {
+export default class File extends Document {
 
-    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = {
         // Checksums are computed upstream by `stored` (content-addressed blob);
@@ -66,16 +66,6 @@ export default class File extends BaseDocument {
 
     static get schema() {
         return fileDocumentSchema;
-    }
-
-    static get jsonSchema() {
-        return {
-            schema: DOCUMENT_SCHEMA_NAME,
-            data: {},
-            locations: [{ url: 'string', metadata: {} }],
-            metadata: { contentType: 'string', size: 'number' },
-            checksumArray: ['string'],
-        };
     }
 
     /**

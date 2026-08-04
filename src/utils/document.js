@@ -37,7 +37,7 @@ export function parseDocumentData(documentData) {
 /**
  * Initialize a document from data (creates class instance if needed)
  * @param {Object} documentData
- * @returns {BaseDocument} Initialized document instance
+ * @returns {Document} Initialized document instance
  */
 export function initializeDocument(documentData) {
     if (!documentData || typeof documentData !== 'object') {
@@ -57,7 +57,7 @@ export function initializeDocument(documentData) {
 /**
  * Parse and initialize a document in one step
  * @param {Object|string} documentData
- * @returns {BaseDocument} Initialized document instance
+ * @returns {Document} Initialized document instance
  */
 export function parseInitializeDocument(documentData) {
     if (!documentData) { throw new Error('Document data required'); }

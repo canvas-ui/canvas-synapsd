@@ -23,11 +23,10 @@ import LmdbBackend from './backends/lmdb/index.js';
 
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
-import { normalizeFeatureArray } from './schemas/BaseDocument.js';
+import { normalizeFeatureArray } from './schemas/Document.js';
 import { predicateId } from './indexes/edges/predicates.js';
 import { normalizeDotfileUrl } from './utils/path-helpers.js';
 import { isDocumentData, isDocumentInstance } from './schemas/SchemaRegistry.js';
-import BaseDocument from './schemas/BaseDocument.js';
 
 // Indexes
 import BitmapIndex from './indexes/bitmaps/index.js';
@@ -116,8 +115,14 @@ function mimeBitmapKeys(doc) {
 // Engine-owned namespaces are refused: a schema declaring `data.kind` would write
 // into the derived kind axis, where it would be indistinguishable from a derived
 // value while being immune to that derivation's stale-diff.
+//
+// `schema` is sealed AHEAD of its own namespace existing (Rev A, 2026-08-04):
+// `data/abstraction/*` becomes `data/schema/*` in Rev B, and a consumer that
+// declared `facetFields: ['data.schema']` in the meantime would be writing into
+// the identity axis itself the day the rename lands. Cheaper to reserve it now
+// than to break someone then.
 const ENGINE_OWNED_FACET_NAMESPACES = new Set([
-    'abstraction', 'kind', 'mime', 'backend', 'source', 'dataset', 'no-location',
+    'abstraction', 'schema', 'kind', 'mime', 'backend', 'source', 'dataset', 'no-location',
 ]);
 
 // Device documents are the source of truth for the derived device/os|type facets.
@@ -149,7 +154,7 @@ function facetFieldKeys(doc) {
 //
 // v3 moved this off `metadata` (which holds EXTRACTED facts written by derivers)
 // to a top-level array (ASSERTED membership written by humans/clients). The
-// array is asserted-only: BaseDocument strips DERIVED prefixes on the way in, so
+// array is asserted-only: Document strips DERIVED prefixes on the way in, so
 // this function never sees a `data/abstraction/*` or `device/*` key it would tick
 // without owning the corresponding untick.
 //
@@ -179,7 +184,7 @@ function documentFeatureKeys(doc) {
 const KIND_BITMAP_PREFIX = 'data/kind/';
 
 // Asserted edges, declared by the document: `data.relations = [{p, to}]`.
-// Validated at ingest rather than in BaseDocument, because the predicate registry
+// Validated at ingest rather than in Document, because the predicate registry
 // is an index concern and this is where Phase 4 will derive the actual edges —
 // one place, all write paths.
 //
@@ -690,7 +695,7 @@ class SynapsD extends EventEmitter {
             this.allDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/docs/all');
             await this.#backfillAllDocumentsBitmap();
 
-            // 'tasks' (Todo due dates) is a point-event axis — instants, not
+            // 'tasks' (Task due dates) is a point-event axis — instants, not
             // intervals — so it gets the cheaper single-BSI storage.
             this.#timelineIndex = new TimelineIndex(this.bitmapIndex, { pointTimelines: ['tasks'] });
             this.#geoIndex = new GeoIndex(this.bitmapIndex);
@@ -2426,7 +2431,7 @@ class SynapsD extends EventEmitter {
 
         // The document's own features are declarative — bitmaps follow them, so
         // union them with any caller-supplied ones (tree/insert-time + device
-        // tags). Schema is always among them (BaseDocument guarantees it); the
+        // tags). Schema is always among them (Document guarantees it); the
         // explicit push covers pre-built Document instances.
         for (const key of documentFeatureKeys(parsedDocument)) {
             if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
@@ -3876,7 +3881,7 @@ class SynapsD extends EventEmitter {
      * @param {string|number} id - Document ID
      * @param {Object} options - Options object
      * @param {boolean} options.parse - Whether to parse the documents
-     * @returns {BaseDocument|null} Document instance or null if not found
+     * @returns {Document|null} Document instance or null if not found
      */
     async #getById(id, options = { parse: true }) {
         if (!id) { throw new Error('Document id required'); }
@@ -3901,7 +3906,7 @@ class SynapsD extends EventEmitter {
      * @param {boolean} options.parse - Whether to parse the documents
      * @param {number} options.limit - Maximum number of documents to return
      * TODO: Support proper pagination!
-     * @returns {Array<BaseDocument>} Array of document instances
+     * @returns {Array<Document>} Array of document instances
      */
     async getDocumentsByIdArray(idArray, options = { parse: true, limit: null }) {
         if (!Array.isArray(idArray)) {
@@ -3947,7 +3952,7 @@ class SynapsD extends EventEmitter {
     /**
      * Get a document by checksum string and return a properly instantiated document object
      * @param {string} checksumString - Checksum string
-     * @returns {BaseDocument|null} Document instance or null if not found
+     * @returns {Document|null} Document instance or null if not found
      */
     /**
      * @param {string} checksumString
@@ -3994,7 +3999,7 @@ class SynapsD extends EventEmitter {
     /**
      * Get multiple documents by checksum string and return properly instantiated document objects
      * @param {Array<string>} checksumStringArray - Array of checksum strings
-     * @returns {Array<BaseDocument>} Array of document instances
+     * @returns {Array<Document>} Array of document instances
      */
     async getDocumentsByChecksumStringArray(checksumStringArray, contextSpec = '/', options = { parse: true }) {
         if (!Array.isArray(checksumStringArray)) {

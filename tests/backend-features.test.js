@@ -120,6 +120,26 @@ describe('data/backend/* derived from locations', () => {
         expect(keys).toEqual(['data/backend/s3', 'data/backend/s3/awscloud']);
     });
 
+    test('an asserted data/backend/* feature is stripped, so it cannot outlive its locations', async () => {
+        // Rev A (2026-08-04) added `data/backend/` to DERIVED_FEATURE_PREFIXES.
+        // Before that, a client could put the key into `features[]`, where the
+        // derivation's stale-diff could not reach it: the array re-asserted the key
+        // on every write, so moving the document to another backend left the old
+        // one ticked forever.
+        const id = await db.put({
+            ...blob('kkk', [{ url: 'stored://homenas/k1' }]),
+            features: ['data/backend/madeup', 'tag/keepme'],
+        });
+
+        const doc = await db.get(id);
+        expect(doc.features).toEqual(['tag/keepme']);
+        expect(await backendKeys(id)).toEqual(['data/backend/stored', 'data/backend/stored/homenas']);
+
+        // The NEGATIVE half: the asserted key must not survive a move either.
+        await db.put({ id, locations: [{ url: 's3://awscloud/k1' }] });
+        expect(await backendKeys(id)).not.toContain('data/backend/madeup');
+    });
+
     test('losing every location unticks the whole axis', async () => {
         const id = await db.put(blob('jjj', [{ url: 'stored://homenas/k1' }]));
         await db.put({ id, locations: [] });

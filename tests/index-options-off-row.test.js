@@ -5,8 +5,8 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 import schemaRegistry from '../src/schemas/SchemaRegistry.js';
-import BaseDocument from '../src/schemas/BaseDocument.js';
-import Note from '../src/schemas/abstractions/Note.js';
+import Document from '../src/schemas/Document.js';
+import Note from '../src/schemas/app/Note.js';
 
 const NOTE = 'data/abstraction/note';
 
@@ -85,7 +85,7 @@ describe('indexOptions off the row', () => {
     });
 
     test('the base default still applies to a schema declaring none', () => {
-        class Bare extends BaseDocument {}
+        class Bare extends Document {}
         const doc = new Bare({ schema: 'data/abstraction/bare', data: { x: 1 } });
 
         expect(doc.indexOptions.checksumFields).toEqual(['data']);
@@ -93,7 +93,7 @@ describe('indexOptions off the row', () => {
     });
 
     test('registerSchema indexOptions actually apply to constructed documents', () => {
-        class Widget extends BaseDocument {
+        class Widget extends Document {
             constructor(options = {}) {
                 options.schema = options.schema || 'data/abstraction/widget';
                 super(options);
@@ -106,7 +106,7 @@ describe('indexOptions off the row', () => {
 
         try {
             // The registration must reach the DOCUMENT, not just sit in the registry
-            // looking authoritative — BaseDocument resolves from the class static.
+            // looking authoritative — Document resolves from the class static.
             const doc = new Widget({ data: { label: 'w' } });
             expect(doc.indexOptions.checksumFields).toEqual(['data.label']);
             expect(schemaRegistry.getSchemaEntry('data/abstraction/widget').indexOptions.checksumFields)

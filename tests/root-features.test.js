@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import Db from '../src/index.js';
-import Note from '../src/schemas/abstractions/Note.js';
+import Note from '../src/schemas/app/Note.js';
 
 const NOTE = 'data/abstraction/note';
 const note = (title, features) => ({
