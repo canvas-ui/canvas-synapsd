@@ -65,30 +65,14 @@ Resources, where the physical bits of the full objects are stored and can be ret
 data/resource/blob or file or url/uri? - points to a local or remote resource (immutable)
 data/resource/reference - points to a external source(db, s3)
 
-### L1 Semantics 
-data/entity/file ? (blob)
-data/entity/document (JSON doc)
-data/entity/message
-data/entity/event (type: calendar, alert, activity)
-data/entity/task
-data/entity/identity (type: person, organization, service, bot)
-data/entity/device
-data/entity/application
-data/entity/dotfile
-? data/entity/organization
+### L1 Semantics / L2 Relations — LANDED
 
-### L2 Relations (would require some cleanup)
-SUPERSEDED by the closed predicate registry (src/indexes/edges/predicates.js), which is
-append-only and ids-in-keys: includes 1, references 2, derived-from 3, mentions 4, replies-to 5,
-depicts 6, authored-by 7. Notes on the ones sketched here that did NOT survive:
-  generated-from  -> folded into derived-from
-  executed-on     -> never modelled
-  installed-on    -> REJECTED. Device presence is not an edge: "what is on device X" is already
-                     answered schema-agnostically by the device/id/* bitmaps derived from
-                     locations[], which drop straight into the paths ∩ features ∩ filters
-                     pipeline. Rule of thumb: edges are for document-to-document facts with no
-                     derivable location; anything expressible as "these bytes live here" stays in
-                     locations[] and its derived bitmaps.
+Entity set and predicate registry both shipped. The entity list and its subtype shape now live in
+"Open: schema hierarchy + `data/schema/*` rename"; the predicates are closed and append-only in
+`src/indexes/edges/predicates.js` (7 of them, direction is an axis). One rejection worth keeping:
+`installed-on` is NOT a predicate — device presence is answered by `device/id/*` bitmaps derived
+from `locations[]`. Rule: edges are for document-to-document facts with no derivable location;
+anything expressible as "these bytes live here" stays in `locations[]` and its derived bitmaps.
 
 ### L3 Semantic anchors
 Specially generated semantic anchors/chunks and summaries with several sub-layers (more on that later)
@@ -156,40 +140,126 @@ ordinary layers, queried alongside user trees via multi-spec AND:
 
 ## Refactor v3 — LANDED 2026-08-03
 
-Shipped across 7 phases + 2b. The implementation plan (`TODO.refactor-v3.md`) has been deleted: it
-was a working document for one week's work and stopped being useful once the code landed. What
-follows is only what is still OPEN. The code and `README.md` are the reference for what exists.
+Shipped across 7 phases + 2b; `TODO.refactor-v3.md` deleted. `README.md` and the code are the
+reference for what exists. Only OPEN items follow.
 
-**What landed, in one paragraph.** Typed doc↔doc edges moved from bitmaps to a dupsort adjacency
-index (`src/indexes/edges/`, 7 predicates, direction as an axis). `data.relations` on a row is
-derived into asserted edges on write; the `rel` query bucket composes adjacency into the normal
-candidate pipeline. Schemas got a runtime registry (`registerSchema`, core/app/internal tiers) with
-`kind` as a derived hierarchical axis (`data/kind/*`). `indexOptions` left the row for a class
-static (~414 B/row, 43% of a note). `metadata.features` became a root-level asserted `features[]`
-with derived prefixes stripped. `data/backend/*` became derived from `locations[]` and absorbed
-`data/source/*`. `data/status/*` generalized to schema-declared `facetFields`. Dotfile identity
-became a normalized URI. `contact`→`identity`, `bucket` deleted, `event` added. Schema version 2
-with `scripts/migrate-v3.js`, and `rebuildL3()` makes the rebuild invariant executable.
 
-**D1 stands: schema ids stay `data/abstraction/*`.** `kind` is the migration path — see the rename
-rev below.
+### Open: schema hierarchy + `data/schema/*` rename (designed 2026-08-03)
 
-### Open: the `data/entity/*` rename (its own rev)
+Supersedes the earlier "`data/entity/*` rename" entry. Two revs: a local cleanup with no consumer
+impact, then the cross-repo rename. **Do them in that order** — the cleanup produces the property
+that makes the rename safe.
 
-Deferred, not cancelled. **Entry criterion: the five sibling submodules read `data/kind/*` rather
-than `data/abstraction/*`.** The rename cost ~272 occurrences across `ui/web`, `browser-extensions`,
-`ui/fuse`, `ui/cli`, `ui/shell`, plus a public route path (`/data/abstraction/:abstraction`), the
-embedd router and a shipped config — while delivering none of v3's value. The decisive case is the
-browser extension: installed in users' browsers, not atomically upgradable, so it keeps writing
-`data/abstraction/tab` after any cutover.
+#### The shape
 
-Carries with it: `todo`→`task` (Task.js), `email`→`message kind:email` (fold Email.js),
-`note`/`tab`/`link`→`document` + kind, the route path, the embedd router + shipped config, and the
-test-suite port. **`dotfile` does NOT fold into `file`** — a dotfile can be a directory (no bytes,
-no content checksum) and its identity is a repo URI, not a content hash.
+One hierarchical axis. `kind` as a separate namespace goes away; the schema id carries it:
 
-Sweep target for that rev: every `data/abstraction/*` read in the submodules has moved to
-`data/kind/*`.
+```
+data/schema/note                      note, no subtype
+data/schema/application/flatpak       ticks .../application AND .../application/flatpak
+data/schema/dotfile/folder
+data/schema/message/email             Email keeps its OWN class, checksum and FTS fields
+data/schema/message/chat
+```
+
+**Register-vs-derive — the rule that makes one namespace hold both cases:**
+
+> Needs its own validation or identity -> **register** it as a schema id with a class.
+> Just a discriminator on one class -> **leave it derived** from a field (`kindField`).
+
+`application/flatpak` is derived (one `Application` class, one identity rule, discriminated by
+`data.type`). `message/email` is registered (verified disjoint: Email checksums
+`messageId + from.address + subject`, Message checksums `text + sender.id + channel.id + timestamp
++ platform`). Consumers query identically either way and never need to know which mechanism made
+the key — which is exactly what `kindField` was invented to provide, now falling out of the id
+shape instead of a second axis.
+
+**The facet boundary:**
+
+> The schema hierarchy is what a thing IS. Anything that cuts across entities is a FACET.
+
+`platform` (slack/teams/irc/whatsapp) belongs in `facetFields: ['data.platform']` ->
+`data/platform/slack`, NOT in the hierarchy — "everything from Slack" spans messages, files and
+identities. Same reasoning retired `browser/*`: a synced tab behaves like a bookmark, so `browser`
+was never an entity grouping, it was provenance/behaviour. Use a facet or `tag/*`.
+
+**`kind` IS REMOVED ENTIRELY — decided 2026-08-03.** No `kind` row field, no `data/kind/*`
+namespace. The hierarchy IS the axis. What dies and what survives:
+
+| dies | survives, repointed |
+|---|---|
+| `kind` row field (documentSchema, ctor, toJSON) | the subtype DERIVATION (`kindField`) — rename to `subtypeField`; it now emits a schema-path SEGMENT instead of a separate axis |
+| `data/kind/*` bitmaps, `kindBitmapKeys()`, `stampDerivedKind()` | — |
+| `resolveKind()` returning a kind string | resolution folds into schema-id resolution |
+| `kindPrefix` **and its required-prefix guard** | unnecessary: the prefix IS the schema path (`data/schema/application` + `/flatpak`) |
+| kind stamping in the v3 migration | — |
+
+Scope: ~104 `kind` references in `src/` (index.js 35, SchemaRegistry 33, BaseDocument 10) plus
+tests and README. **Zero consumers outside synapsd** (measured) — nobody had migrated to
+`data/kind/*` yet, so the removal is externally free.
+
+⚠️ **This deletes the incremental migration path, deliberately.** `kind` existed under D1(c) so
+consumers could move off `data/abstraction/*` before the rename. With it gone, Rev B is a
+COORDINATED CUTOVER across 6 submodules in one release — which is the trade already accepted
+("do it while it is merely tiresome"). Nobody should later ask why this was not phased: it was,
+the phasing vehicle went unused, and carrying it cost more than the cutover.
+
+**`:` as a separator was rejected**, empirically: `listBitmaps` scans `prefix + '/'`, so
+`data/schema/application:flatpak` is NOT a child of `data/schema/application` (verified — the
+slash form is found, the colon form is not). You would have to tick both keys anyway, so the
+bitmap plane saves nothing, and `doc.schema` would stop being the registry lookup key.
+
+#### Rev A — local cleanup (no consumer impact)
+
+- ~~`kind` fallback~~ — **DROPPED 2026-08-03.** It existed to complete `data/kind/*` so consumers
+  could migrate to it before the rename. `kind` is being removed entirely instead, so there is
+  nothing to complete and Rev A has no prerequisite left to produce. Rev A is now pure cleanup and
+  the two revs are independent (still do A first, it is smaller).
+- Folder layout: `schemas/core/`, `schemas/app/` (shipped templates, optional), `schemas/internal/`.
+- `Document` becomes the base class; the `BaseDocument` NAME dies (the class stays).
+- ~~Internal-schema audit~~ **LEAVE AS-IS 2026-08-03 (user-verified).** The `internal/layers/*`
+  schema IDS look unused (~1 hit each, the registry itself), but trees instantiate layers by TYPE
+  NAME (`'canvas'`, `'context'`) — so the id count undercounts, and 2 of them are genuinely in use.
+  Not worth pruning the rest for now. Do NOT delete on the id count alone.
+- Add `data/backend/` to `DERIVED_FEATURE_PREFIXES` — now legitimate, it became derived in v3.
+  **NOT `data/no-location`**, which is still app-asserted.
+- Seal `schema` in `ENGINE_OWNED_FACET_NAMESPACES` so a consumer cannot declare
+  `facetFields: ['data.schema']`.
+- **Geo: leave as-is.** `GeoIndex.has(id)` already answers presence off the BSI existence bitmap;
+  a `feature/has-geo` key would be a second source of truth for one fact, with its own lifecycle.
+
+#### Rev B — the rename (cross-repo)
+
+**Cost, measured 2026-08-03:** 194 occurrences outside synapsd across **6 separate git
+submodules** — `ui/web` 48, `ui/fuse` 25, `ui/cli` 20, `ui/shell` 6, `browser-extensions` 33, plus
+parent `transports` 27, `core` 30, `embedd` 5 — and the public route
+`/data/abstraction/:abstraction` (`routes/schemas.js:27,50`).
+
+**Why now (user, 2026-08-03):** breaking changes are priced by installed base. Today that is one
+person. At 1500 users with integrations this becomes a deprecation cycle plus a compatibility shim
+maintained for a year. Do it while it is merely tiresome.
+
+**Sequence:** one coordinated release. Rename `data/abstraction/` to `data/schema/`, adopt the
+hierarchy, delete `kind`, and update all 6 submodules together. There is no incremental path by
+design (see the shape section) — so land it when you can cut every consumer at once, not
+piecemeal.
+
+⚠️ **Unlike everything else in this plane, this one rewrites ROWS.** `doc.schema` changes value on
+every document, and hierarchy adoption changes ids outright (`data/abstraction/email` ->
+`data/schema/message/email`). Bitmaps are derived and rebuild from `rebuildL3()`; the schema field
+does not. Schema version 3, same gate as v2.
+
+**No blocking sub-decisions remain.**
+
+- ~~Does the `kind` row field survive?~~ **RESOLVED 2026-08-03: no, removed entirely.** See the
+  shape section above. Consumers needing the subtype read the schema id (it is in the path) or
+  `data.type`; no per-schema knowledge leaks, because the subtype is visible in the id itself —
+  which is precisely what the hierarchy buys.
+- ~~`Tab extends Link`~~ **DEFERRED ENTIRELY 2026-08-03.** Tab keeps its own class and its own
+  `data.url` identity; do NOT make it extend Link as part of this work. `extends` would be
+  cosmetic unless the field names unify (Link requires `data.uri`), and unifying is a data
+  migration for the ~2600 tabs — unrelated to the rename and not worth coupling to it.
+
 
 ### Open: multi-position timelines — blocks the wikipedia corpus
 
@@ -426,17 +496,6 @@ Version chains / same-path-new-checksum successor migration (the reconciliation 
 MDB_DUPFIXED packing; token-string sugar for the `rel` bucket; any back-compat shim inside the DB.
 
 
-## Doc-declared features — LANDED in v3
-
-`features[]` is a root-level asserted array on the document; derived prefixes are stripped on the
-way in, `data/dataset/*` is preserved across updates, and the schema-id unshift is gone. See
-`README.md` and `tests/root-features.test.js`.
-
-**The pre-prod migration validated the premise**: of 4,953 documents, **1,435 (29%) carried tags
-that existed ONLY in bitmaps** with no doc-side record. Those were unrebuildable — a `rebuildL3()`
-would have silently dropped a third of the tagging. The reverse scan recovered them onto the rows.
-
-
 ## Session support
 
 The "Why"
@@ -518,9 +577,10 @@ ids `…XMXK` and `…QQSH`), so `name` cannot reliably address a tree — only 
 *type name* (`directory`). Both break if names collide. Uniqueness lets `treeNameOrTreeId`
 resolve a name unambiguously instead of falling back to id-only.
 
-- [ ] Reject create/rename when a sibling tree in the same workspace shares the name.
-- [ ] Migration: de-dup existing collisions (the stray second `universe` `context` tree).
-- [ ] Keep `treeNameOrTreeId` resolution accepting both, but name now guaranteed unique.
+- [x] Reject create/rename when a sibling shares the name — DONE, `createTree`/`renameTree` both
+      throw `Tree already exists`.
+- [ ] **Still open:** migration to de-dup collisions created BEFORE the guard (the stray second
+      `universe` `context` tree). New collisions cannot happen; old ones persist.
 
 
 ### Support context and directory tree mountpoints
@@ -613,50 +673,6 @@ LMDB copy/snapshot - mdb_copy (or the env .copy() API) gives a consistent point-
 - [ ] Reduce app-specific abstractions inside `synapsd`.
 - [ ] Move source-specific normalization/mapping to app/workspace layer.
 - [ ] Keep `synapsd` input shape generic and canonical.
-
-### BaseDocument v3 — LANDED
-
-`indexOptions` off the row (measured 414 B/row, 43% of a note; ~2.9 GB at 7M rows), root `features[]`,
-top-level `kind`, `data.relations` excluded from whole-`data` projections via `contentData()`.
-Resolution moved to a `static indexOptions` on the schema class rather than a registry lookup —
-BaseDocument cannot import SchemaRegistry (the registry imports every schema, which import
-BaseDocument), but `this.constructor.indexOptions` reaches the subclass with no import at all.
-Per-document overrides are deliberately impossible: the field is not persisted, so an override would
-apply on write and vanish on read.
-
-
-### Schema simplification — PARTIALLY LANDED
-
-Done in v3: `contact` → `identity` (with `data.kind` → `data.type`, `identities[]` → `identifiers[]`),
-`bucket` deleted (folders are tree nodes), `event` added, `message` registered (it declared an id but
-was never in the registry, so `getSchema()` threw while the parent chat service wrote that schema),
-all core schemas at `schemaVersion 3.0` (which fixed `document` being stamped 2.0 while validating
-against the 2.2 shape).
-
-**Still open, and it belongs to the rename rev above**: `tab` and `link` are the same document with
-different field names (`data.uri`/`data.label` vs `data.url`/`data.title`), and folding them means
-touching `tab` (83 external hits) and `link`. `kind` already makes them queryable as one axis, which
-is the point of doing the fold *after* consumers migrate.
-
-
-### Schema registration facility — LANDED
-
-`registerSchema(id, SchemaClass, {kind|kindField, kindPrefix, indexOptions})`, plus
-`unregisterSchema`, `getSchemaEntry`, `resolveKind`. Three tiers: **core** (sealed against
-re-registration), **app** (note/tab/link/dotfile, bundled but registered through the same public
-path a third party would use, so the eventual move out is a deletion not a rewrite), **internal**
-(tree layers). Enforced at registration: core ids are sealed, `kind` and `kindField` are mutually
-exclusive, `kindField` REQUIRES `kindPrefix` (kind values are persisted in bitmap keys and therefore
-append-only — an unprefixed generic value that later collides is not fixable without a migration),
-and a supplied `indexOptions` writes the class static rather than a parallel registry copy.
-
-Remaining gaps are in **Open: consumer-registered abstractions** above.
-
-
-## Tests
-
-- [ ] Add a proper test suite for the current API
-
 
 ## Optional
 
