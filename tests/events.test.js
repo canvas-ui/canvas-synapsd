@@ -35,14 +35,16 @@ describe('event schema + events timeline', () => {
         if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
     });
 
-    test('is registered as a core schema with an event/* kind axis', () => {
+    test('is registered as a core schema with a data.type subtype axis', () => {
         expect(schemaRegistry.getSchemaEntry(EVENT_SCHEMA).tier).toBe('core');
-        expect(schemaRegistry.resolveKind(EVENT_SCHEMA, { data: { type: 'calendar' } })).toBe('event/calendar');
-        expect(schemaRegistry.resolveKind(EVENT_SCHEMA, { data: { type: 'alert' } })).toBe('event/alert');
-        expect(schemaRegistry.resolveKind(EVENT_SCHEMA, { data: { type: 'activity' } })).toBe('event/activity');
+        // Unprefixed: the subtype is scoped by the schema id it hangs under, so
+        // 'calendar' cannot collide with another schema's 'calendar'.
+        expect(schemaRegistry.resolveSubtype(EVENT_SCHEMA, { data: { type: 'calendar' } })).toBe('calendar');
+        expect(schemaRegistry.resolveSubtype(EVENT_SCHEMA, { data: { type: 'alert' } })).toBe('alert');
+        expect(schemaRegistry.resolveSubtype(EVENT_SCHEMA, { data: { type: 'activity' } })).toBe('activity');
     });
 
-    test('type is required — a silent default would mis-file into the kind query', async () => {
+    test('type is required — a silent default would mis-file the subtype', async () => {
         await expect(db.put({
             schema: EVENT_SCHEMA,
             data: { title: 'Untyped', start: at(9) },
@@ -297,7 +299,7 @@ describe('event schema + events timeline', () => {
             expect(ids).not.toContain(elsewhere);
         });
 
-        test('a calendar-only lens narrows by kind without changing the context query', async () => {
+        test('a calendar-only lens narrows by schema without changing the context query', async () => {
             const { taskEvent, taskTodo, siblingEvent } = await seed();
 
             const all = await db.list({

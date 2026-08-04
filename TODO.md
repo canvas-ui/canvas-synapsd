@@ -194,9 +194,9 @@ namespace. The hierarchy IS the axis. What dies and what survives:
 | `kindPrefix` **and its required-prefix guard** | unnecessary: the prefix IS the schema path (`data/schema/application` + `/flatpak`) |
 | kind stamping in the v3 migration | — |
 
-Scope: ~104 `kind` references in `src/` (index.js 35, SchemaRegistry 33, BaseDocument 10) plus
-tests and README. **Zero consumers outside synapsd** (measured) — nobody had migrated to
-`data/kind/*` yet, so the removal is externally free.
+**`kind` removal is DONE (2026-08-04)** — see Rev B step 1 below for what landed. The
+"zero consumers outside synapsd" claim was re-verified at removal time across every repo and held,
+so it was shipped ahead of the coordinated release rather than with it.
 
 ⚠️ **This deletes the incremental migration path, deliberately.** `kind` existed under D1(c) so
 consumers could move off `data/abstraction/*` before the rename. With it gone, Rev B is a
@@ -266,19 +266,45 @@ Shipped exactly as scoped; 352 tests green (350 before, +2 regressions below).
 Repointed to `schemas/core/Email.js` in the same change. It is the ONLY deep import of a schema file
 from outside synapsd — everything else goes through `SchemaRegistry`.
 
-#### Rev B — the rename (cross-repo) — NOT STARTED, handoff below
+#### Rev B — the rename (cross-repo) — STEP 1 LANDED 2026-08-04, steps 2–5 open
 
-Rev A is landed and Rev B is independent of it (the two revs were decoupled when the `kind` fallback
-was dropped). Nothing about Rev B is blocked; it was split off because it is a coordinated release
-across 5 other repos plus a row-rewriting migration, and that wants its own session with every
-consumer suite runnable — not a tail-end of a cleanup.
+**Step 1 (`kind` removal) is DONE and shipped separately** — it is synapsd-local with zero external
+consumers, so it never needed the coordinated release. 350 tests green. What landed:
+
+- `kind` row field gone from `documentSchema`, the constructor and `toJSON`. `data/kind/*`,
+  `kindBitmapKeys()`, `stampDerivedKind()` and all three of its call sites gone; `facetBitmapKeys`
+  is mime + schema-declared facets now.
+- `resolveKind()` -> **`resolveSubtype()`**, `kindField` -> **`subtypeField`**. It returns ONE RAW
+  SEGMENT: `kindPrefix` has no successor, because a subtype is scoped by the schema id it hangs
+  under rather than by a prefix inside one flat namespace. Registrations still passing
+  `kind`/`kindField`/`kindPrefix` now THROW instead of being silently ignored.
+- ⚠️ **The subtype axis is deliberately DARK until step 2.** `subtypeField` is declared, resolved
+  and tested, but nothing indexes it — the replacement is a SEGMENT of the schema id, which lands
+  with the ids. Safe only because the axis had zero consumers; re-verified across every repo
+  2026-08-04 (every `.kind` hit outside synapsd is an unrelated local variable).
+- Two cleanup paths, because they reach different databases: the v3 migration drops the field and
+  the `data/kind` prefix inside the row pass it already performs, and a **separate run-once marker**
+  (`internal/migrations/kind-axis-removed`) drops the bitmaps on open. The marker is not optional —
+  a database already stamped at the current SCHEMA_VERSION never re-enters the migration block, and
+  those are exactly the databases holding residue. Bumping the version instead would re-arm the
+  explicit opt-in gate for a cleanup that rewrites no rows.
+- `data/kind/` is refused in `features[]` through a new `RETIRED_FEATURE_PREFIXES` list, kept
+  SEPARATE from `DERIVED_FEATURE_PREFIXES` so that list stays literally true ("what the engine
+  derives today"). Without it a client could assert a namespace nothing derives and nothing unticks.
+- `kind` stays in `ENGINE_OWNED_FACET_NAMESPACES`: retired, not free, while residue can exist.
+- `tests/kind-bitmaps.test.js` -> `tests/kind-axis-removed.test.js`. A removal needs a guard as much
+  as a feature does — a resurrected axis is silent. Both new guards verified to fail without the fix.
+
+**Steps 2–5 remain** and are the genuinely coordinated part: id rename, hierarchy adoption, the
+row-rewriting migration, and 5 submodules + the parent cut in one release. That wants its own
+session with every consumer suite runnable — not a tail-end of a cleanup.
 
 **Why now (user, 2026-08-03):** breaking changes are priced by installed base. Today that is one
 person. At 1500 users with integrations this becomes a deprecation cycle plus a compatibility shim
 maintained for a year. Do it while it is merely tiresome.
 
 **Sequence:** one coordinated release. Rename `data/abstraction/` to `data/schema/`, adopt the
-hierarchy, delete `kind`, and cut every consumer together. There is no incremental path by design
+hierarchy, and cut every consumer together (`kind` is already gone — step 1). There is no incremental path by design
 (see the shape section) — so land it when you can cut them all at once, not piecemeal.
 
 ⚠️ **Unlike everything else in this plane, this one rewrites ROWS.** `doc.schema` changes value on
@@ -313,18 +339,15 @@ Do not sweep this one with sed.
 
 ##### Suggested order (each step is independently verifiable)
 
-1. **synapsd, `kind` removal first, ids untouched.** ~104 `kind` refs in `src/` (index.js 35,
-   SchemaRegistry 33, Document 10) — but ~14 of those in `utils/filters.js` are the geo-filter's
-   own `kind` local and are NOT part of this; check before sweeping. Rename `kindField` ->
-   `subtypeField`, delete `kind`/`kindPrefix`/`kindBitmapKeys()`/`stampDerivedKind()`/
-   `resolveKind()`/`data/kind/*` and the kind stamping in the v3 migration. `tests/kind-bitmaps.test.js`
-   is repurposed or deleted here. Suite must be green before touching an id.
-2. **synapsd, ids + hierarchy.** Registry map, per-schema `DOCUMENT_SCHEMA_NAME` constants,
+1. ~~**synapsd, `kind` removal first, ids untouched.**~~ **DONE 2026-08-04** — see above.
+2. **synapsd, ids + hierarchy.** Wire `resolveSubtype()` into the id (`data/schema/application` +
+   `/flatpak`) — it exists and is tested precisely so this step wires up a function instead of
+   writing one. This is where the subtype axis comes back on. Registry map, per-schema `DOCUMENT_SCHEMA_NAME` constants,
    `DERIVED_FEATURE_PREFIXES` (`data/abstraction/` -> `data/schema/`), `ENGINE_OWNED_FACET_NAMESPACES`
-   (drop `abstraction`, `schema` is already sealed — Rev A), `DEVICE_SCHEMA_NAME`, semantic
+   (drop `abstraction`; `schema` is already sealed — Rev A; leave `kind` reserved), `DEVICE_SCHEMA_NAME`, semantic
    `embeddableSchemas` default, and the id strings in every test.
 3. **synapsd, the v4 migration.** Schema version 3, same explicit opt-in gate as v2. Maps old id ->
-   new id per row, rewrites `doc.schema`, drops `kind`, then `#replayDerivedPlane`. Write the
+   new id per row, rewrites `doc.schema`, then `#replayDerivedPlane`. Write the
    old->new map ONCE, as an exported constant, and let the consumers import it where they can.
 4. **Consumers, one repo per commit**, parent last (it is the only one that can hold a stale
    submodule pointer). Then one release that bumps all pointers together.
@@ -335,7 +358,8 @@ Do not sweep this one with sed.
 
 - **`data/abstraction/todo` -> `data/schema/task`. DECIDED 2026-08-04 (user), half-done.** The CLASS
   rename landed in Rev A; only the ID is left, and it waits here because ids cannot move one at a
-  time. Consumer cost is ~6 hits outside tests (web ui 4, webdav 1, agent prompt 1).
+  time. ⚠️ `schemas/core/Task.js` therefore has a class/id mismatch on purpose — do not "fix" it
+  outside this step. Consumer cost is ~6 hits outside tests (web ui 4, webdav 1, agent prompt 1).
   - ❌ **Do NOT introduce `Task` as a superclass with `Todo extends Task`.** A todo has no field a
     task lacks, so the subclass would carry no behaviour — exactly the empty subclass Rev A just
     deleted (`abstractions/Document.js`), and exactly what the register-vs-derive rule refuses.
@@ -539,14 +563,14 @@ Biggest single methods: `putMany` (317), `#resolveParsed` (154), `start` (148), 
 
 **Extraction order, cheapest and safest first:**
 
-1. **Migration / reindex / rebuild (~445).** Zero coupling to the query path — it touches
-   `documents` and `bitmapIndex` only, and `#replayDerivedPlane` is already the shared seam between
-   `#migrateToV3` and `rebuildL3`. Most of it was written in one go and has 16 dedicated tests.
-   Cleanest possible first cut.
-2. **Module-level pure derivation helpers (~250 of "everything else").** `mimeBitmapKeys`,
-   `kindBitmapKeys`, `facetFieldKeys`, `documentFeatureKeys`, `documentRelations`,
-   `validateDocumentRelations`, `stampDerivedKind`, `mergeDedupePreservedFields`, `envFlag` — no
-   `this`, trivially testable in isolation, currently sitting above the class for no reason.
+1. ~~**Migration / reindex / rebuild (~445).**~~ **Half of this evaporated 2026-08-04** — the
+   migration code was DELETED rather than extracted (see below), taking ~330 lines with it. What is
+   left in this group is `rebuildL3` + `#replayDerivedPlane` + the four `reindex*` methods, which
+   are live maintenance APIs rather than one-time code. Still the cheapest extraction, just smaller.
+2. **Module-level pure derivation helpers (~200 of "everything else").** `mimeBitmapKeys`,
+   `facetFieldKeys`, `documentFeatureKeys`, `documentRelations`, `validateDocumentRelations`,
+   `mergeDedupePreservedFields` — no `this`, trivially testable in isolation, currently sitting
+   above the class for no reason. (`kindBitmapKeys`, `stampDerivedKind` and `envFlag` are gone.)
 3. **Membership & location-derived features (~349).** Already concentrated
    (`#deviceFeaturesFromLocations`, `#backendFeaturesFromLocations`, `#locationDerivedFeatures`,
    `#removeStaleLocationMembership`, `#applyMembership`).
@@ -558,6 +582,43 @@ Do NOT attempt this as one commit. The reason `index.js` is safe to touch at all
 all four write paths funnel through `#applyMembership` and all reads through `#resolveParsed`;
 an extraction that blurs those two choke points costs more than the line count does.
 
+
+### Migrations: removed from the engine — DONE 2026-08-04
+
+**Decision (user):** no back-compat, and one-time migration code does not live in the codebase.
+Write a script when a migration is actually needed.
+
+What went, across both repos (~400 lines that ran on hot paths for work that happens once in a
+database's life):
+
+| removed | was |
+|---|---|
+| synapsd `#migrateToV3` (100), `#migrateBitmapKeys` (50), `#migrateEmbedBitmapKeys` (12) + `LEGACY_EMBED_BITMAP_KEYS` | version/marker-gated, on open |
+| synapsd `#migrateOnOpen`, `lastMigrationStats`, `migrate: true`, `CANVAS_SYNAPSD_MIGRATE`, `envFlag()` | the opt-in path — **zero external callers**, it existed for the script and the tests |
+| synapsd `scripts/migrate-v3.js`, `tests/migrate-v3.test.js` (16 tests) | every live DB is already at v2 (user) |
+| synapsd `internal/migrations/kind-axis-removed` marker | added hours earlier in Rev B step 1; `rebuildL3()` already drops `data/kind/*` and never re-derives it, so the marker was a second way to do one thing |
+| parent `WorkspaceStoredIndex.#migrateLegacyStoredLayout` (~25) | ran on every workspace start |
+| parent boot call to `runPerUserIndexMigration` | ran on every server boot |
+
+**KEPT, deliberately:**
+
+- **The version GATE.** `SCHEMA_VERSION` + the refusal at `start()`, ~15 lines. Deleting the check
+  would not make a stale database someone else's problem, it would make it SILENT DATA LOSS: current
+  code reading a pre-v2 row never promotes `metadata.features`, so asserted tags existing only in
+  bitmaps — the one class of state with no rebuild source — vanish on the next write with no error.
+  A non-empty DB below `SCHEMA_VERSION` now throws and says to migrate with a one-off script; an
+  empty one is stamped. Covered by `tests/schema-version-gate.test.js`.
+- **`rebuildL3()` / `#replayDerivedPlane` / the `reindex*` methods.** Not migration — the executable
+  derived-plane invariant and the live repair path. `tests/rebuild-l3.test.js` carries the invariant
+  test rescued from the deleted migration suite, reseeded through the normal write path.
+- **`migrateDocumentMemberships()` / `migrateBitmapKey()`.** Live APIs that happen to say "migrate".
+- **Parent `001-per-user-indexes`** moved to `scripts/migrate-001-per-user-indexes.js` with a CLI
+  entry (`--db` / `--users`), still exporting `runPerUserIndexMigration` so its existing test drives
+  it unchanged. Marker-guarded and idempotent, as before.
+
+⚠️ **The rule going forward:** a migration is a script in `scripts/`, run by hand against a backup,
+and it stamps the version key when done. If a change makes old rows unreadable, bump
+`SCHEMA_VERSION` — the gate turns that into a loud refusal instead of a corrupt database.
 
 ### Open: post-v3 rough edges
 
@@ -587,11 +648,11 @@ deliberate decision rather than a drive-by fix.
   writes the field when it changes, and `undefined ?? null === null`, so it skips. Anything built
   through `BaseDocument` gets an explicit `null`. Functionally identical; inconsistent if you grep
   raw rows.
-- **Migration and rebuild are single-document loops.** The v3 row pass does a per-document `put`
-  rather than one batched transaction, and the reverse scan holds a `docId → tags` Map in memory for
-  the whole run. Fine at ~5k (pre-prod: 4953 docs, instant); neither is designed for 1M.
-  `rebuildL3()` has the same shape. Measure on the wikipedia set before relying on it.
-- **`reindexSearchIndex({rebuild:true}) is owed on migrated databases.** The FTS fix (objects were
+- **`rebuildL3()` is a single-document loop.** Per-document `put` rather than one batched
+  transaction. Fine at ~5k (pre-prod: 4953 docs, instant); not designed for 1M. Measure on the
+  wikipedia set before relying on it. (The v3 migration had the same shape and the same caveat; it
+  is gone — see below.)
+- **`reindexSearchIndex({rebuild:true})` is owed on migrated databases.** The FTS fix (objects were
   indexed as the literal `"[object Object]"`) changes indexed content for `data/abstraction/document`,
   Identity `identifiers`/`channels`/`links` and Email `from`/`to`. The migration deliberately does
   not force it — it is a content change, not a structural one.
