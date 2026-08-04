@@ -113,10 +113,10 @@ describe('device presence bitmaps', () => {
     });
 
     test('removing a device via a SCHEMA-LESS update({data}) unticks presence', async () => {
-        // THE DRIFT BUG (regression test — fails without BaseDocument.deriveLocations).
+        // THE DRIFT BUG (regression test — fails without Document.deriveLocations).
         //
         // Dotfile/Application derived locations in their CONSTRUCTOR only, while
-        // BaseDocument.update() overwrote `data` without re-deriving. Two things
+        // Document.update() overwrote `data` without re-deriving. Two things
         // make this subtle:
         //
         //  1. It is only reachable with a schema-LESS payload. #updateOne runs

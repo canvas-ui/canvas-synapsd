@@ -1,12 +1,11 @@
 import { afterEach, describe, expect, test } from '@jest/globals';
 
 import schemaRegistry from '../src/schemas/SchemaRegistry.js';
-import BaseDocument from '../src/schemas/BaseDocument.js';
-import Document from '../src/schemas/abstractions/Document.js';
-import Device from '../src/schemas/abstractions/Device.js';
-import Identity from '../src/schemas/abstractions/Identity.js';
-import Message from '../src/schemas/abstractions/Message.js';
-import Todo from '../src/schemas/abstractions/Todo.js';
+import Document from '../src/schemas/Document.js';
+import Device from '../src/schemas/core/Device.js';
+import Identity from '../src/schemas/core/Identity.js';
+import Message from '../src/schemas/core/Message.js';
+import Task from '../src/schemas/core/Task.js';
 import { facetBitmapKeysForTest } from '../src/index.js';
 
 // The v3 core entity set. Ids stay `data/abstraction/*` under D1(c) — the model
@@ -30,7 +29,7 @@ const APP_IDS = [
     'data/abstraction/dotfile',
 ];
 
-class Widget extends BaseDocument {
+class Widget extends Document {
     constructor(options = {}) {
         options.schema = options.schema || 'data/abstraction/widget';
         super(options);
@@ -45,11 +44,11 @@ describe('SchemaRegistry v3', () => {
     });
 
     describe('core set', () => {
-        test('every core id resolves to a BaseDocument subclass', () => {
+        test('every core id resolves to a Document subclass', () => {
             for (const id of CORE_IDS) {
                 expect(schemaRegistry.hasSchema(id)).toBe(true);
                 const SchemaClass = schemaRegistry.getSchema(id);
-                expect(SchemaClass.prototype instanceof BaseDocument || SchemaClass === BaseDocument).toBe(true);
+                expect(SchemaClass.prototype instanceof Document || SchemaClass === Document).toBe(true);
                 expect(schemaRegistry.getSchemaEntry(id).tier).toBe('core');
             }
         });
@@ -69,8 +68,17 @@ describe('SchemaRegistry v3', () => {
             expect(schemaRegistry.getSchema('data/abstraction/identity')).toBe(Identity);
         });
 
-        test("the 'BaseDocument' alias is gone", () => {
+        test("the legacy 'BaseDocument' schema id is gone", () => {
             expect(schemaRegistry.hasSchema('BaseDocument')).toBe(false);
+            expect(schemaRegistry.hasSchema('Document')).toBe(false);
+        });
+
+        // Rev A merged abstractions/Document.js into the base class, so the id
+        // and the base now resolve to the same constructor. Asserted rather than
+        // assumed: the merge is only safe while the base carries the abstraction's
+        // schema id + version defaults.
+        test('data/abstraction/document resolves to the base class itself', () => {
+            expect(schemaRegistry.getSchema('data/abstraction/document')).toBe(Document);
         });
 
         test('document is stamped 3.0 — it used to validate against 2.2 while stamping 2.0', () => {
@@ -116,12 +124,12 @@ describe('SchemaRegistry v3', () => {
             expect(schemaRegistry.getSchema('data/abstraction/file')).not.toBe(Widget);
         });
 
-        test('rejects a non-BaseDocument class', () => {
+        test('rejects a non-Document class', () => {
             class NotADocument {}
             expect(() => schemaRegistry.registerSchema('data/abstraction/widget', NotADocument))
-                .toThrow(/must be registered with a BaseDocument subclass/);
+                .toThrow(/must be registered with a Document subclass/);
             expect(() => schemaRegistry.registerSchema('data/abstraction/widget', { dataSchema: {} }))
-                .toThrow(/must be registered with a BaseDocument subclass/);
+                .toThrow(/must be registered with a Document subclass/);
         });
 
         test('rejects an empty id', () => {
@@ -137,10 +145,10 @@ describe('SchemaRegistry v3', () => {
     });
 
     // The generic-engine goal: a consumer registers its own abstraction by
-    // extending BaseDocument or a core schema, declares its OWN fts/vector fields
+    // extending Document or a core schema, declares its OWN fts/vector fields
     // per SCHEMA (never per write), and still gets the base mandatory fields
     // enforced. This is class inheritance doing the work — `static indexOptions`
-    // resolves through the prototype chain, so BaseDocument finds it via
+    // resolves through the prototype chain, so Document finds it via
     // `this.constructor` with no registry import and therefore no import cycle.
     describe('consumer-registered abstraction extending a core schema', () => {
         class Phone extends Device {
@@ -196,9 +204,9 @@ describe('SchemaRegistry v3', () => {
             })).toThrow();
         });
 
-        test('a registered subclass is still a BaseDocument', () => {
+        test('a registered subclass is still a Document', () => {
             const phone = new Phone({ data: { deviceId: 'p1', name: 'Pixel' } });
-            expect(phone instanceof BaseDocument).toBe(true);
+            expect(phone instanceof Document).toBe(true);
             expect(phone instanceof Device).toBe(true);
         });
     });
@@ -277,19 +285,21 @@ describe('SchemaRegistry v3', () => {
 // declaring it on the class — same pattern as indexOptions and mergeOnDedupe.
 describe('facetFields', () => {
     test('todo declares its own status facet instead of the engine hardcoding it', () => {
-        expect(Todo.facetFields).toEqual(['data.status']);
+        expect(Task.facetFields).toEqual(['data.status']);
     });
 
     test('engine-owned namespaces are refused, so a schema cannot write the derived axes', () => {
-        class Sneaky extends BaseDocument {
-            static facetFields = ['data.kind', 'data.mime', 'data.backend', 'data.colour'];
+        class Sneaky extends Document {
+            static facetFields = ['data.kind', 'data.mime', 'data.backend', 'data.schema', 'data.colour'];
             constructor(options = {}) {
                 options.schema = options.schema || 'data/abstraction/sneaky';
                 super(options);
             }
         }
 
-        const doc = new Sneaky({ data: { kind: 'pwned', mime: 'pwned', backend: 'pwned', colour: 'red' } });
+        const doc = new Sneaky({
+            data: { kind: 'pwned', mime: 'pwned', backend: 'pwned', schema: 'pwned', colour: 'red' },
+        });
         const keys = facetBitmapKeysForTest(doc);
 
         expect(keys).toContain('data/colour/red');
@@ -297,6 +307,71 @@ describe('facetFields', () => {
             expect(key.startsWith('data/kind/')).toBe(false);
             expect(key.startsWith('data/mime/')).toBe(false);
             expect(key.startsWith('data/backend/')).toBe(false);
+            // `schema` is reserved AHEAD of `data/schema/*` existing: Rev B renames
+            // `data/abstraction/*` to it, and a consumer facet squatting the
+            // namespace meanwhile would land inside the identity axis on the day
+            // the rename ships.
+            expect(key.startsWith('data/schema/')).toBe(false);
         }
+    });
+});
+
+// `jsonSchema` used to be hand-written per class as an EXAMPLE object
+// (`{ schema, data: { title: 'string' } }`) — no enum, no required/optional, no
+// range. Consumers could not learn anything from it, so they copied the facts
+// instead (the web ui still mirrors the task status list by hand). It is now
+// DERIVED from the same zod `dataSchema` validation uses, so the two cannot drift.
+describe('jsonSchema derivation', () => {
+    test('carries the enum a consumer would otherwise hand-copy', () => {
+        const data = Task.jsonSchema.properties.data;
+
+        expect(data.properties.status.enum).toEqual([
+            'pending', 'in-progress', 'completed', 'cancelled',
+        ]);
+        // The RFC 5545 priority scale — invisible in the old stub.
+        expect(data.properties.priority).toMatchObject({ type: 'integer', minimum: 1, maximum: 9 });
+        // Required-vs-optional falls out of `.optional()`, so a form builder can
+        // render it without knowing anything about synapsd.
+        expect(data.required).toEqual(['title']);
+        expect(Identity.jsonSchema.properties.data.properties.type.enum)
+            .toEqual(['person', 'organization', 'service', 'bot']);
+    });
+
+    test('every registered document schema converts, and layer types return null', () => {
+        for (const id of schemaRegistry.listSchemas()) {
+            const derived = schemaRegistry.getJsonSchema(id);
+
+            if (id.startsWith('internal/layers/')) {
+                // Layer classes are not documents and carry no zod data schema.
+                // Explicitly null rather than a throw, so listing every schema is safe.
+                expect(derived).toBeNull();
+                continue;
+            }
+
+            expect(derived.$schema).toBe('http://json-schema.org/draft-07/schema#');
+            expect(derived.type).toBe('object');
+            // $id is stamped by the REGISTRY (the class does not know its id).
+            expect(derived.$id).toBe(id);
+        }
+    });
+
+    test('subclasses inherit the derivation instead of overriding it', () => {
+        // `this` in the static getter is the class it was accessed on, so each
+        // subclass converts its OWN dataSchema. A subclass that reintroduced a
+        // hand-written stub would fail here: stubs have no $schema.
+        for (const SchemaClass of [Document, Task, Device, Identity, Message]) {
+            expect(SchemaClass.jsonSchema.$schema).toBe('http://json-schema.org/draft-07/schema#');
+        }
+        // Document declares the getter; nothing else may. An own `jsonSchema` on a
+        // subclass means someone put a stub back.
+        for (const SchemaClass of [Task, Device, Identity, Message]) {
+            expect(Object.getOwnPropertyDescriptor(SchemaClass, 'jsonSchema')).toBeUndefined();
+        }
+        expect(Task.jsonSchema).not.toEqual(Device.jsonSchema);
+    });
+
+    test('conversion is memoized per class — it is served on a public route', () => {
+        expect(Task.jsonSchema).toBe(Task.jsonSchema);
+        expect(Task.jsonSchema).not.toBe(Device.jsonSchema);
     });
 });

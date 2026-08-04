@@ -1,14 +1,19 @@
 'use strict';
 
-import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
+import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { z } from 'zod';
 
+// ⚠️ The CLASS is `Task` (renamed from `Todo` 2026-08-04); the schema ID is still
+// `data/abstraction/todo`. That mismatch is deliberate and temporary: the class
+// name is local to this repo and free to fix, the id is a consumer-visible string
+// that changes to `data/schema/task` in Rev B along with every other id. Do NOT
+// "fix" the id here on its own — it is not migratable in isolation (see TODO.md).
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/todo';
 const DOCUMENT_SCHEMA_VERSION = '3.0';
 
 // Task lifecycle aligned with VTODO (RFC 5545) STATUS / JSCalendar (RFC 8984)
 // progress: pending=NEEDS-ACTION, in-progress=IN-PROCESS, completed, cancelled.
-const TODO_STATUSES = ['pending', 'in-progress', 'completed', 'cancelled'];
+const TASK_STATUSES = ['pending', 'in-progress', 'completed', 'cancelled'];
 
 // The timeline a due date lands on. Deliberately NOT 'content' — content means
 // "when the content came into existence" (EXIF capture etc.); due dates are a
@@ -21,7 +26,7 @@ const documentDataSchema = z.object({
     data: z.object({
         title: z.string(),
         description: z.string().optional(),
-        status: z.enum(TODO_STATUSES).optional(),
+        status: z.enum(TASK_STATUSES).optional(),
         // Legacy boolean kept as accepted input + always emitted in sync with
         // status, so old clients keep working (completed === status 'completed').
         completed: z.boolean().optional(),
@@ -33,11 +38,11 @@ const documentDataSchema = z.object({
     metadata: z.object({}).passthrough().optional(),
 });
 
-export default class Todo extends Document {
+export default class Task extends Document {
 
-    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
-    // Todo's status genuinely IS per-document (unlike application install status,
+    // Task's status genuinely IS per-document (unlike application install status,
     // which is per-device and lives in locations[].metadata). Declared here rather
     // than hardcoded in the engine.
     static facetFields = ['data.status'];
@@ -53,8 +58,8 @@ export default class Todo extends Document {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
 
-        Todo.#normalizeStatus(options.data);
-        options.timelines = Todo.#deriveTimelines(options);
+        Task.#normalizeStatus(options.data);
+        options.timelines = Task.#deriveTimelines(options);
 
         super(options);
     }
@@ -83,13 +88,13 @@ export default class Todo extends Document {
     }
 
     /**
-     * Create a Todo from minimal data
-     * @param {Object} data - Todo data
-     * @returns {Todo} New Todo instance
+     * Create a Task from minimal data
+     * @param {Object} data - Task data
+     * @returns {Task} New Task instance
      */
     static fromData(data) {
         data.schema = DOCUMENT_SCHEMA_NAME;
-        return new Todo(data);
+        return new Task(data);
     }
 
     static get dataSchema() {
@@ -98,15 +103,6 @@ export default class Todo extends Document {
 
     static get schema() {
         return baseDocumentSchema;
-    }
-
-    static get jsonSchema() {
-        return {
-            schema: DOCUMENT_SCHEMA_NAME,
-            data: {
-                title: 'string',
-            },
-        };
     }
 
     static validate(document) {
@@ -118,4 +114,4 @@ export default class Todo extends Document {
     }
 }
 
-export { TODO_STATUSES, TASKS_TIMELINE };
+export { TASK_STATUSES, TASKS_TIMELINE };

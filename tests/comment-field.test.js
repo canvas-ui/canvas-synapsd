@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import Db from '../src/index.js';
-import Note from '../src/schemas/abstractions/Note.js';
+import Note from '../src/schemas/app/Note.js';
 
 const NOTE_SCHEMA = 'data/abstraction/note';
 const TAB_SCHEMA = 'data/abstraction/tab';
@@ -15,7 +15,7 @@ const tab = (url, comment) => ({ schema: TAB_SCHEMA, data: { url, title: url }, 
 
 // The user-authored comment: a top-level field (not under data, so no checksum
 // churn), always FTS'd, and tracked by the feature/has-comment presence bitmap.
-describe('BaseDocument comment field', () => {
+describe('Document comment field', () => {
     let rootPath;
     let db;
 

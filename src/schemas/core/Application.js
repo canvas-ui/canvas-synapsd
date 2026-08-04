@@ -17,7 +17,7 @@
  * - local     : arbitrary local app, generally not reinstallable remotely
  */
 
-import Document, { documentSchema } from '../BaseDocument.js';
+import Document, { documentSchema } from '../Document.js';
 import { z } from 'zod';
 import { pathPattern, normalizeHomePlaceholder, deviceFileUrl, deviceUrl } from '../../utils/path-helpers.js';
 
@@ -101,7 +101,7 @@ const applicationPayloadSchema = Document.extendDataSchema(
 
 export default class Application extends Document {
 
-    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = {
         ftsSearchFields: ['data.appId', 'data.name', 'data.type', 'data.description', 'locationUrls'],
@@ -206,21 +206,6 @@ export default class Application extends Document {
 
     static get dataSchema() { return applicationPayloadSchema; }
     static get schema() { return documentSchema; }
-
-    static get jsonSchema() {
-        return {
-            schema: DOCUMENT_SCHEMA_NAME,
-            data: {
-                appId: 'string',
-                name: 'string',
-                type: '"appimage"|"flatpak"|"snap"|"portable"|"system"|"local"',
-                description: 'string',
-                tags: 'string[]',
-                source: 'Record<string, any>',
-                installs: 'Record<deviceId, { status: string, path?: string, version?: string }>',
-            },
-        };
-    }
 
     static validate(document) { return documentSchema.parse(document); }
     static validateData(documentData) { return applicationPayloadSchema.parse(documentData); }

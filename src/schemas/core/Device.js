@@ -1,6 +1,6 @@
 'use strict';
 
-import Document, { documentSchema } from '../BaseDocument.js';
+import Document, { documentSchema } from '../Document.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/device';
@@ -29,7 +29,7 @@ const documentDataSchema = z.object({
 
 export default class Device extends Document {
 
-    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = {
         ftsSearchFields: ['data.name', 'data.deviceId', 'data.alias', 'data.hostname', 'data.description'],
@@ -55,26 +55,6 @@ export default class Device extends Document {
 
     static get schema() {
         return documentSchema;
-    }
-
-    static get jsonSchema() {
-        return {
-            schema: DOCUMENT_SCHEMA_NAME,
-            data: {
-                deviceId: 'string',
-                name: 'string',
-                description: 'string',
-                platform: 'string',
-                arch: 'string',
-                type: 'string',
-                username: 'string',
-                hostname: 'string',
-                fqdn: 'string',
-                alias: 'string',
-                createdAt: 'string',
-                lastSeen: 'string',
-            },
-        };
     }
 
     static validate(document) {

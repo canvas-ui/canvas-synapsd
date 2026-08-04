@@ -23,7 +23,7 @@
  * A single entry in the repo can be mapped to different locations on different devices.
  */
 
-import Document, { documentSchema } from '../BaseDocument.js';
+import Document, { documentSchema } from '../Document.js';
 import { z } from 'zod';
 import { pathPattern, normalizeHomePlaceholder, deviceFileUrl, normalizeDotfileUrl, dotfileEntryPath } from '../../utils/path-helpers.js';
 
@@ -71,7 +71,7 @@ const documentDataSchema = z
  *******************/
 export default class Dotfile extends Document {
 
-    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     // Record fields that MERGE with the stored document instead of replacing it
     // when a write resolves to an existing doc by checksum. Declared by the
@@ -147,7 +147,6 @@ export default class Dotfile extends Document {
      * Utility helpers
      * ------------------*/
 
-
     /* --------------------
      * Static helpers
      * ------------------*/
@@ -164,19 +163,6 @@ export default class Dotfile extends Document {
 
     static get dataSchema() { return documentDataSchema; }
     static get schema() { return documentSchema; }
-
-    static get jsonSchema() {
-        return {
-            schema: DOCUMENT_SCHEMA_NAME,
-            data: {
-                url: 'string',
-                type: '"file"|"folder"',
-                links: 'Record<deviceId, localPath>',
-                description: 'string',
-                tags: 'string[]',
-            },
-        };
-    }
 
     static validate(document) { return documentSchema.parse(document); }
     static validateData(docData) { return documentDataSchema.parse(docData); }

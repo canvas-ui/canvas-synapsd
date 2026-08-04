@@ -1,6 +1,6 @@
 'use strict';
 
-import Document, { documentSchema as baseDocumentSchema } from '../BaseDocument.js';
+import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/message';
@@ -84,7 +84,7 @@ const documentDataSchema = z.object({
 
 export default class Message extends Document {
 
-    // Index configuration is SCHEMA-level, resolved by BaseDocument from this
+    // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = {
         ftsSearchFields: ['data.text', 'data.sender.name', 'data.sender.displayName', 'data.channel.name'],
@@ -223,13 +223,6 @@ export default class Message extends Document {
 
     static get schema() {
         return baseDocumentSchema;
-    }
-
-    static get jsonSchema() {
-        return {
-            schema: DOCUMENT_SCHEMA_NAME,
-            data: {},
-        };
     }
 
     static validate(document) {

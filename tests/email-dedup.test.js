@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import Db from '../src/index.js';
-import Email from '../src/schemas/abstractions/Email.js';
+import Email from '../src/schemas/core/Email.js';
 
 // A minimal mailparser-shaped object.
 function parsed({ messageId, subject = 'Quarterly report', from = 'alice@example.com', text = 'see attached', date = new Date('2024-01-01T00:00:00Z') }) {

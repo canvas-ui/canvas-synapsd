@@ -12,7 +12,12 @@ import {
     isThisQuarter,
     isThisYear,
 } from 'date-fns';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import { generateChecksum } from '../utils/crypto.js';
+
+// Derived JSON Schemas, memoized per class. WeakMap so an unregistered consumer
+// class does not pin its conversion for the process lifetime.
+const jsonSchemaCache = new WeakMap();
 
 // Document constants
 const DOCUMENT_SCHEMA_NAME = 'data/abstraction/document';
@@ -36,17 +41,22 @@ const NON_CONTENT_DATA_KEYS = ['relations'];
 // indistinguishable from a derived one while being immune to the derivation's own
 // stale-diff — i.e. it could never be unticked. Same reasoning that made
 // `device/*` a strip rather than a merge on the write routes.
-// ⚠️ This list contains ONLY what the engine actually derives TODAY. The v3 plan
-// also names `data/backend/*`, `data/source/*` and `data/no-location`, but nothing
-// derives those — the parent ASSERTS them (WorkspaceStoredIndex builds them from
-// the backend descriptor; the orphan lifecycle writes data/no-location). Stripping
-// a key that has no deriver does not make it derived, it makes it unsettable.
-// Add each one here in the SAME commit that adds its deriver — `data/source/*`
-// from `locations[].metadata.provider` is already an open Phase 3 item.
+// ⚠️ This list contains ONLY what the engine actually derives TODAY. Stripping a
+// key that has no deriver does not make it derived, it makes it unsettable — so
+// each entry is added in the SAME commit that adds its deriver.
+//
+// `data/backend/` joined the list in Rev A (2026-08-04): v3 made it derived from
+// `locations[]` (`#backendFeaturesFromLocations`, including the declared
+// `location.metadata.backend` case), so the parent no longer asserts it and an
+// asserted copy would be immune to that derivation's stale-diff.
+// Deliberately still ABSENT: `data/source/*` (folded into `data/backend/*` by the
+// v3 migration, nothing emits it) and `data/no-location` (asserted by the parent's
+// orphan lifecycle — it carries intent, not just location count; see TODO.md).
 const DERIVED_FEATURE_PREFIXES = [
     'data/abstraction/',    // index.js: pushes parsed.schema
     'data/mime/',           // index.js: mimeBitmapKeys from metadata.contentType
     'data/kind/',           // index.js: kindBitmapKeys from the registry
+    'data/backend/',        // index.js: #backendFeaturesFromLocations
     'feature/',             // index.js: feature/has-comment
     'device/',              // index.js: #deviceFeaturesFromLocations
 ];
@@ -224,10 +234,19 @@ const documentSchema = z.object({
 });
 
 /**
- * Base Document class
+ * Document — the base class every schema extends, AND the class registered for
+ * `data/abstraction/document` itself.
+ *
+ * Renamed from `BaseDocument` 2026-08-04 (Rev A). There used to be a separate
+ * `abstractions/Document.js` subclass sitting on top of this one; it added a
+ * constructor that pinned the schema id/version this class already defaults to,
+ * an `indexOptions` static identical to the defaults below, and validate/
+ * validateData overrides that forwarded to `super`. It carried no behaviour, so
+ * the two collapsed into this file rather than the base keeping a name that
+ * existed only to avoid the collision.
  */
 
-class BaseDocument {
+class Document {
 
     /**
      * Constructor
@@ -332,17 +351,20 @@ class BaseDocument {
     }
 
     /**
-     * Create a BaseDocument from minimal data
-     * @param {Object} data - Note data
-     * @returns {Note} New Note instance
+     * Create a Document from minimal data.
+     * The schema id is defaulted before validation (the merged
+     * `abstractions/Document.js` did this), so `fromData({ data })` works the
+     * same way it does on every subclass.
+     * @param {Object} data - Document data
+     * @returns {Document} New Document instance
      */
     static fromData(data) {
-        if (!BaseDocument.validateData(data)) {
+        const documentData = { ...data, schema: data?.schema ?? DOCUMENT_SCHEMA_NAME };
+        if (!Document.validateData(documentData)) {
             throw new Error('Invalid document data');
         };
 
-        const document = new BaseDocument(data);
-        return document;
+        return new Document(documentData);
     }
 
     static get dataSchema() {
@@ -353,17 +375,44 @@ class BaseDocument {
         return documentSchema;
     }
 
+    /**
+     * JSON Schema (draft-07) for this schema's DATA envelope, DERIVED from the
+     * class's zod `dataSchema`.
+     *
+     * Until 2026-08-04 every class hand-wrote this as an example object
+     * (`{ schema, data: { title: 'string' } }`). It carried no enum, no
+     * required/optional, no range and no nesting — so a consumer could not learn
+     * the four task statuses or the 1–9 priority range from it and had to
+     * duplicate them by hand (the web ui's `useTodoFields.ts` still says
+     * "Mirrors synapsd Todo.js STATUS"). Deriving removes the copy AND the drift:
+     * there is one source of truth, and it is the one validation already uses.
+     *
+     * Inherited by every subclass — `this` is the class it was accessed on, so
+     * `Email.jsonSchema` converts Email's own `dataSchema`. A subclass overriding
+     * this is almost certainly reintroducing a hand-written stub.
+     *
+     * `$refStrategy: 'none'` inlines everything: consumers of this endpoint are
+     * form builders and other languages' validators, and a self-contained
+     * document is worth more to them than de-duplicated `$ref`s.
+     *
+     * @returns {object} JSON Schema draft-07
+     */
     static get jsonSchema() {
-        return {
-            schema: DOCUMENT_SCHEMA_NAME,
-            data: {},
-        };
+        const cached = jsonSchemaCache.get(this);
+        if (cached) { return cached; }
+
+        // Conversion walks the whole zod tree, so it is memoized per CLASS (not
+        // per instance): schemas are immutable statics and this is served on a
+        // public route.
+        const derived = zodToJsonSchema(this.dataSchema, { $refStrategy: 'none' });
+        jsonSchemaCache.set(this, derived);
+        return derived;
     }
 
     /**
      * Update the document with new data
      * @param {Object} data - New data to update the document with
-     * @returns {BaseDocument} Updated document instance
+     * @returns {Document} Updated document instance
      */
     update(data) {
         if (!data) {return this;}
@@ -494,7 +543,7 @@ class BaseDocument {
      * @static
      */
     static validate(document) {
-        return BaseDocument.schema.parse(document);
+        return Document.schema.parse(document);
     }
 
     validateData() {
@@ -512,9 +561,8 @@ class BaseDocument {
      * @static
      */
     static validateData(data) {
-        return BaseDocument.dataSchema.parse(data);
+        return Document.dataSchema.parse(data);
     }
-
 
     /**
      * Utils
@@ -758,6 +806,6 @@ class BaseDocument {
 }
 
 // Export document class and schemas
-export default BaseDocument;
+export default Document;
 export { documentDataSchema, documentSchema, locationSchema, timelineEntrySchema };
 export { DERIVED_FEATURE_PREFIXES, PRESERVED_FEATURE_PREFIXES, normalizeFeatureArray };

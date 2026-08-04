@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import Db from '../src/index.js';
-import Todo from '../src/schemas/abstractions/Todo.js';
+import Task from '../src/schemas/core/Task.js';
 
 const TODO_SCHEMA = 'data/abstraction/todo';
 
@@ -55,17 +55,17 @@ describe('todo schema + tasks timeline', () => {
     });
 
     test('legacy completed:true maps to status completed, both stay in sync', async () => {
-        const legacy = Todo.fromData({ data: { title: 'old client', completed: true } });
+        const legacy = Task.fromData({ data: { title: 'old client', completed: true } });
         expect(legacy.data.status).toBe('completed');
         expect(legacy.data.completed).toBe(true);
 
-        const canceled = Todo.fromData({ data: { title: 'nope', status: 'cancelled' } });
+        const canceled = Task.fromData({ data: { title: 'nope', status: 'cancelled' } });
         expect(canceled.data.completed).toBe(false);
     });
 
     test('same title, different due date → different checksums (no dedup collision)', async () => {
-        const tue = Todo.fromData({ data: { title: 'Call plumber', dueDate: iso(inDays(1)) } });
-        const fri = Todo.fromData({ data: { title: 'Call plumber', dueDate: iso(inDays(4)) } });
+        const tue = Task.fromData({ data: { title: 'Call plumber', dueDate: iso(inDays(1)) } });
+        const fri = Task.fromData({ data: { title: 'Call plumber', dueDate: iso(inDays(4)) } });
         expect(tue.getPrimaryChecksum()).not.toBe(fri.getPrimaryChecksum());
     });
 
@@ -132,8 +132,8 @@ describe('todo schema + tasks timeline', () => {
     });
 
     test('priority validates the RFC 5545 1..9 scale', () => {
-        expect(() => Todo.validateData({ schema: TODO_SCHEMA, data: { title: 'x', priority: 5 } })).not.toThrow();
-        expect(() => Todo.validateData({ schema: TODO_SCHEMA, data: { title: 'x', priority: 0 } })).toThrow();
-        expect(() => Todo.validateData({ schema: TODO_SCHEMA, data: { title: 'x', priority: 10 } })).toThrow();
+        expect(() => Task.validateData({ schema: TODO_SCHEMA, data: { title: 'x', priority: 5 } })).not.toThrow();
+        expect(() => Task.validateData({ schema: TODO_SCHEMA, data: { title: 'x', priority: 0 } })).toThrow();
+        expect(() => Task.validateData({ schema: TODO_SCHEMA, data: { title: 'x', priority: 10 } })).toThrow();
     });
 });

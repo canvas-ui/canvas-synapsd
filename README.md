@@ -486,7 +486,7 @@ const msg = await db.put({
 
 - Relations are validated at ingest: an unknown predicate, an inverse-style name, or a non-integer `to` throws. A relation that can never become an edge must not be stored, or the row would claim a relationship the graph does not have.
 - Dangling `to` ids are **allowed** (logged at debug). Edges to documents that do not exist yet are filtered by candidate-set intersection at query time anyway, and forbidding them would make ingest order significant.
-- `data.relations` is **structural, not content**: `BaseDocument.contentData()` strips it from every whole-`data` projection (checksum, FTS, embedding). Asserting an edge therefore does not fork the document's identity, pollute its search text, or trigger a re-embed. A document with no relations projects byte-identically to before.
+- `data.relations` is **structural, not content**: `Document.contentData()` strips it from every whole-`data` projection (checksum, FTS, embedding). Asserting an edge therefore does not fork the document's identity, pollute its search text, or trigger a re-embed. A document with no relations projects byte-identically to before.
 
 ### Provenance: asserted vs derived
 
@@ -544,13 +544,15 @@ A `rel` operand has no stable bitmap key (it is a dupsort scan), so it marks the
 
 ## Schemas
 
-A schema is a `BaseDocument` subclass plus a registration record. The registry (`src/schemas/SchemaRegistry.js`) is a singleton with three tiers:
+A schema is a `Document` subclass plus a registration record. The registry (`src/schemas/SchemaRegistry.js`) is a singleton with three tiers:
 
-| Tier | What | Ids |
-|------|------|-----|
-| `core` | synapsd's own primitives. Sealed — cannot be re-registered or removed. | `document`, `file`, `message`, `email`, `event`, `todo`, `identity`, `device`, `application` |
-| `app` | Consumer abstractions, registered through the same code path a third party would use. Bundled here pending the parent's own `registerSchema()` calls. | `note`, `tab`, `link`, `dotfile` |
-| `internal` | Tree layer abstractions. | `internal/layers/{canvas,context,label,system,universe,workspace,project,task}` |
+| Tier | Folder | What | Ids |
+|------|--------|------|-----|
+| `core` | `schemas/core/` | synapsd's own primitives. Sealed — cannot be re-registered or removed. | `document`, `file`, `message`, `email`, `event`, `todo`, `identity`, `device`, `application` |
+| `app` | `schemas/app/` | Consumer abstractions, registered through the same code path a third party would use. Bundled here pending the parent's own `registerSchema()` calls. | `note`, `tab`, `link`, `dotfile` |
+| `internal` | `schemas/internal/` | Tree layer abstractions. | `internal/layers/{canvas,context,label,system,universe,workspace,project}` |
+
+The tier is the folder, so a bundled app schema moving out of the repo is a directory-level move rather than a hunt through one flat `abstractions/` folder. `data/abstraction/document` has no file of its own: it registers `schemas/Document.js`, the base class itself.
 
 Ids stay `data/abstraction/*` in v3; the entity rename is deferred to its own release. **`kind` is the axis to migrate to** — `data/kind/browser/tab` answers what `data/abstraction/tab` answers today, so a consumer can switch on its own cadence.
 
@@ -560,9 +562,9 @@ v3 schema changes: `Contact` → `Identity` (with `data.type` of `person|organiz
 
 ```js
 import schemaRegistry from '@canvas/synapsd/src/schemas/SchemaRegistry.js';
-import BaseDocument from '@canvas/synapsd/src/schemas/BaseDocument.js';
+import Document from '@canvas/synapsd/src/schemas/Document.js';
 
-class Widget extends BaseDocument {
+class Widget extends Document {
     static indexOptions = {
         ftsSearchFields: ['data.title', 'data.body'],
         vectorEmbeddingFields: ['data.title'],
@@ -588,14 +590,22 @@ schemaRegistry.registerSchema('data/abstraction/widget', Widget, {
 
 Rules the registry enforces rather than documents:
 
-- The class must be a `BaseDocument` subclass; core ids cannot be re-registered (re-pointing `data/abstraction/file` at a foreign class would silently change what it means for everyone).
+- The class must be a `Document` subclass; core ids cannot be re-registered (re-pointing `data/abstraction/file` at a foreign class would silently change what it means for everyone).
 - `kind` and `kindField` are mutually exclusive — a schema has one kind axis.
 - `kindField` requires `kindPrefix` (see **Kind** above for why).
-- Passing `options.indexOptions` **writes `SchemaClass.indexOptions`** rather than storing a parallel copy. `static indexOptions` on the class is the one source of truth: `BaseDocument` resolves it at construction time and cannot import the registry without a cycle.
+- Passing `options.indexOptions` **writes `SchemaClass.indexOptions`** rather than storing a parallel copy. `static indexOptions` on the class is the one source of truth: `Document` resolves it at construction time and cannot import the registry without a cycle.
 
 `indexOptions` fields: `checksumAlgorithms` (default `['sha1','sha256']`), `checksumFields`, `ftsSearchFields`, `vectorEmbeddingFields` (all default to `['data']`), and `embeddingOptions`. Field paths are dotted and resolved against the *document* (so `locationUrls` and other getters work); the literal `'data'` resolves to `contentData()`, i.e. `data` minus `relations`.
 
-`static facetFields = ['data.status']` gives a schema the derived-facet machinery: the leaf field name becomes the namespace (`data/status/*`), ticked and stale-unticked on every write. Engine-owned namespaces (`abstraction`, `kind`, `mime`, `backend`, `source`, `dataset`, `no-location`) are refused.
+`static facetFields = ['data.status']` gives a schema the derived-facet machinery: the leaf field name becomes the namespace (`data/status/*`), ticked and stale-unticked on every write. Engine-owned namespaces (`abstraction`, `schema`, `kind`, `mime`, `backend`, `source`, `dataset`, `no-location`) are refused.
+
+### Publishing a schema to consumers
+
+`static get dataSchema()` (zod) is the only shape you write. **`jsonSchema` is derived from it** — `Document.jsonSchema` converts the class's own `dataSchema` to JSON Schema draft-07 (memoized per class), so a subclass never declares one. `schemaRegistry.getJsonSchema(id)` stamps `$id` and serves it on `GET /data/abstraction/:abstraction.json`.
+
+This is the point of the registry: a consumer **fetches** a schema instead of copying it. The derived document carries the enums, ranges and required/optional facts that validation already enforces — the four task statuses, `priority` 1–9, the identity `type` enum — so a form builder or another language's validator can be driven straight off the endpoint. Before 2026-08-04 each class hand-wrote `jsonSchema` as an example object (`{ schema, data: { title: 'string' } }`) carrying none of that, which is why consumers duplicated the values by hand and drifted.
+
+Internal layer types are not documents and have no `dataSchema`; `getJsonSchema()` returns `null` for them rather than throwing, so iterating `listSchemas()` is safe.
 
 Introspection: `db.listSchemas(prefix?)`, `db.getSchema(id)`, `db.hasSchema(id)`, `db.getDataSchema(id)`, `db.getJsonSchema(id)`. On the registry itself: `getSchemaEntry(id)` (returns `{ SchemaClass, tier, kind, kindField, kindPrefix, indexOptions }`), `resolveKind(id, doc)`, `unregisterSchema(id)`.
 
