@@ -495,7 +495,7 @@ Already works: a subclass declaring `static indexOptions` gets its own fts/vecto
 declaring none inherits its parent's; base mandatory fields stay enforced; `registerSchema()`
 accepts it. `kindField`/`kindPrefix`/`facetFields`/`mergeOnDedupe` are all schema-declared.
 
-Three gaps (0 is half-fixed):
+Three gaps (0 is half-fixed, 1 is done):
 
 0. **Nothing worth fetching is exported — so consumers COPY schemas (user, 2026-08-04).** The
    intent of a registry is that consumers fetch a schema and hand it to *their* consumers. Today
@@ -523,12 +523,23 @@ Three gaps (0 is half-fixed):
    two-segment hierarchical id), so fold the fix in there rather than making a separate pass.
    Then the consumer half: point the web ui at `…/…json` and delete its copied enums.
 
-1. **No parent-aware data-schema helper.** `Phone.dataSchema` inherits `Device.dataSchema`
-   unchanged, so a consumer's own fields are accepted (passthrough) but never *validated*.
-   `extendDataSchema()` builds a fresh wrapper rather than extending the parent's payload. ⚠️ Fixing
-   it needs care: `Document.dataSchema.shape.data` is a `z.record`, not a `z.object`, so a naive
-   `.merge()` breaks every schema currently calling `Document.extendDataSchema`. Add a separate
-   explicit helper. Small; can ride any commit.
+1. [x] ~~**No parent-aware data-schema helper.**~~ **DONE 2026-08-04.**
+   `Document.mergeDataSchema(super.dataSchema, extraShape)` merges the parent's `data` shape with
+   the subclass's own, so `class Phone extends Device` validates `deviceId`/`name` AND `imei`.
+   Added as a SEPARATE helper exactly as this entry warned — `Document.dataSchema.shape.data` is a
+   `z.record`, so making `extendDataSchema()` merge would have changed behaviour for every current
+   caller; the record case simply contributes no named fields.
+   Two things the original note did not anticipate, both handled and tested:
+   - **The parent must be passed IN, as `super.dataSchema`.** The first cut resolved it internally
+     via `Object.getPrototypeOf(this).dataSchema` — reading `this.dataSchema` recurses forever,
+     since the caller IS the subclass's own getter. That worked but was fragile and ugly (user,
+     2026-08-04). `super` is a language primitive for "the class I extend", bound lexically, so the
+     helper became a PURE function: no `this`, no prototype walk, nothing to rebind, and a class
+     with no superclass cannot express the call at all — one less error branch to guard.
+   - `Application.dataSchema` is a **`ZodEffects`** (`.refine()`), which has no introspectable
+     shape. Rebuilding the object around it would SILENTLY DROP the cross-field rule, leaving a
+     subclass with weaker validation than its parent — so it throws instead.
+   `tests/merge-data-schema.test.js` (8 cases).
 2. **No registration ROUTE.** Registration is in-process JS only. Its own rev — an API design
    problem more than an engine one: a class cannot be transmitted over HTTP, so it needs a
    declarative descriptor compiled server-side into a zod schema + index options. Open questions:

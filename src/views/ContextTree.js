@@ -48,7 +48,6 @@ class ContextTree extends EventEmitter {
 
     // Data store
     #dataStore = null; // Single data store for layers and the persistent tree structure
-    #showHiddenLayers;
     #bitmapCollection = null;
     #treeId = null;
     #treeName = null;
@@ -66,7 +65,7 @@ class ContextTree extends EventEmitter {
             delimiter: '.',
             newListener: false,
             maxListeners: 100,
-            ...(options.eventEmitterOptions || {})
+            ...(options.eventEmitterOptions || {}),
         });
 
         if (!options.dataStore) { throw new Error('ContextTree requires a dataStore reference'); }
@@ -84,7 +83,6 @@ class ContextTree extends EventEmitter {
         this.#settings = options.settings && typeof options.settings === 'object' ? options.settings : {};
 
         // Options
-        this.#showHiddenLayers = options.showHiddenLayers || false;
 
         // Root node
         this.rootLayer = null;
@@ -129,7 +127,7 @@ class ContextTree extends EventEmitter {
     // Keep the cached instance name in sync when the tree is renamed in the
     // registry, otherwise callers that read `tree.name` (e.g. persisting a
     // share's treeName) capture the stale construction-time name.
-    set name(value) { if (value) this.#treeName = String(value); }
+    set name(value) { if (value) {this.#treeName = String(value);} }
     get type() { return 'context'; }
     get settings() { return this.#settings; }
     get collection() { return this.#bitmapCollection; }
@@ -334,7 +332,7 @@ class ContextTree extends EventEmitter {
             this.#emitTreeEvent(EVENTS.TREE_LAYER_MERGED, {
                 source: sourceLayer.name,
                 targets: targetIds,
-                affected
+                affected,
             });
             return { data: affected, count: affected.length, error: null };
         } catch (error) {
@@ -371,7 +369,7 @@ class ContextTree extends EventEmitter {
             this.#emitTreeEvent(EVENTS.TREE_LAYER_SUBTRACTED, {
                 source: sourceLayer.name,
                 targets: targetIds,
-                affected
+                affected,
             });
             return { data: affected, count: affected.length, error: null };
         } catch (error) {
@@ -1260,7 +1258,7 @@ class ContextTree extends EventEmitter {
         return normalizedPath.split('/').slice(0, -1).join('/') || '/';
     }
 
-    #buildPathArray(sort = true) {
+    #buildPathArray() {
         const paths = [];
         // Traversal uses node.payload.name which is assumed to be normalized (by LayerIndex/BaseLayer)
         const traverseTree = (node, parentPath) => {
@@ -1273,9 +1271,9 @@ class ContextTree extends EventEmitter {
 
             if (node.children.size > 0) {
                 paths.push(displayPath); // Add intermediate paths too
-            for (const child of node.getSortedChildren()) {
-                traverseTree(child, displayPath); // Pass the constructed path
-            }
+                for (const child of node.getSortedChildren()) {
+                    traverseTree(child, displayPath); // Pass the constructed path
+                }
             } else {
                 paths.push(displayPath); // Add leaf paths
             }

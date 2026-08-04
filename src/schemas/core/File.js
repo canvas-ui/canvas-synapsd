@@ -96,7 +96,7 @@ export default class File extends Document {
      * @returns {string} Resolved URI
      */
     static resolveUri(uri, variables = {}) {
-        if (!uri || typeof uri !== 'string') return uri;
+        if (!uri || typeof uri !== 'string') {return uri;}
 
         return uri.replace(/\{([A-Z0-9_]+)\}/g, (match, variable) => {
             return variables[variable] !== undefined ? variables[variable] : match;

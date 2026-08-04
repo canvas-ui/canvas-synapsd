@@ -35,7 +35,7 @@ function generateKeys(n) {
 
 function elapsed(start) {
     const ms = performance.now() - start;
-    if (ms < 1000) return `${ms.toFixed(1)}ms`;
+    if (ms < 1000) {return `${ms.toFixed(1)}ms`;}
     return `${(ms / 1000).toFixed(3)}s`;
 }
 

@@ -24,8 +24,8 @@ export default class BitSlicedIndex {
      * @param {number} bitDepth - Number of bits (default 64)
      */
     constructor(prefix, bitmapIndex, bitDepth = 64) {
-        if (!prefix) throw new Error('Prefix required');
-        if (!bitmapIndex) throw new Error('BitmapIndex required');
+        if (!prefix) {throw new Error('Prefix required');}
+        if (!bitmapIndex) {throw new Error('BitmapIndex required');}
 
         this.prefix = prefix;
         this.bitmapIndex = bitmapIndex;
@@ -43,7 +43,7 @@ export default class BitSlicedIndex {
      * @param {number|BigInt} value - Integer value (must be non-negative)
      */
     async setValue(id, value) {
-        let bigValue = BigInt(value);
+        const bigValue = BigInt(value);
         if (bigValue < 0n || bigValue >= (1n << BigInt(this.bitDepth))) {
             throw new Error(`Value ${value} out of range for bit depth ${this.bitDepth}`);
         }
@@ -136,7 +136,7 @@ export default class BitSlicedIndex {
             case 'lte':
                 return this._lte(BigInt(value), ebm);
             case 'BETWEEN':
-                if (!Array.isArray(value) || value.length !== 2) throw new Error('BETWEEN requires [min, max]');
+                if (!Array.isArray(value) || value.length !== 2) {throw new Error('BETWEEN requires [min, max]');}
                 return this._between(BigInt(value[0]), BigInt(value[1]), ebm);
             default:
                 throw new Error(`Unknown operator: ${operator}`);
@@ -185,7 +185,7 @@ export default class BitSlicedIndex {
     }
 
     async _eq(value, ebm) {
-        let result = ebm.clone();
+        const result = ebm.clone();
 
         for (let i = 0n; i < BigInt(this.bitDepth); i++) {
             const bit = (value >> i) & 1n;
@@ -197,7 +197,7 @@ export default class BitSlicedIndex {
                 result.andNotInPlace(slice);
             }
 
-            if (result.isEmpty) break;
+            if (result.isEmpty) {break;}
         }
         return result;
     }
@@ -223,7 +223,7 @@ export default class BitSlicedIndex {
                 keep.andInPlace(slice);
             }
 
-            if (keep.isEmpty) break;
+            if (keep.isEmpty) {break;}
         }
 
         return result;
@@ -245,7 +245,7 @@ export default class BitSlicedIndex {
                 keep.andInPlace(slice);
             }
 
-            if (keep.isEmpty && result.isEmpty) break;
+            if (keep.isEmpty && result.isEmpty) {break;}
         }
 
         result.orInPlace(keep);
@@ -263,10 +263,10 @@ export default class BitSlicedIndex {
     }
 
     async _between(min, max, ebm) {
-        if (min > max) return new RoaringBitmap32();
+        if (min > max) {return new RoaringBitmap32();}
 
         const gteMin = await this._gte(min, ebm);
-        if (gteMin.isEmpty) return gteMin;
+        if (gteMin.isEmpty) {return gteMin;}
 
         const lteMax = await this._lte(max, ebm);
         return RoaringBitmap32.and(gteMin, lteMax);

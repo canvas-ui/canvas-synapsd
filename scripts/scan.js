@@ -328,12 +328,12 @@ function detectMimeBatch(filePaths) {
         const batch = filePaths.slice(i, i + batchSize);
         try {
             const out = execSync(
-                `file --mime-type -F '|||' --files-from -`,
+                'file --mime-type -F \'|||\' --files-from -',
                 { input: batch.join('\n'), maxBuffer: 10 * 1024 * 1024, encoding: 'utf8' },
             );
             for (const line of out.trim().split('\n')) {
                 const sep = line.lastIndexOf('|||');
-                if (sep === -1) continue;
+                if (sep === -1) {continue;}
                 const fp = line.slice(0, sep).trim();
                 const mime = line.slice(sep + 3).trim();
                 MIME_CACHE.set(fp, mime);
@@ -380,7 +380,7 @@ function printResults(results) {
 
 function elapsed(start) {
     const ms = performance.now() - start;
-    if (ms < 1000) return `${ms.toFixed(0)}ms`;
+    if (ms < 1000) {return `${ms.toFixed(0)}ms`;}
     return `${(ms / 1000).toFixed(2)}s`;
 }
 
@@ -412,7 +412,7 @@ async function main() {
         backupOnOpen: false,
         backupOnClose: false,
         compression: true,
-     });
+    });
 
     const t0 = performance.now();
     await db.start();

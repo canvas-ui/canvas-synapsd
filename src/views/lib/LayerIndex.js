@@ -17,7 +17,7 @@ class LayerIndex {
     #nameToLayerMap = new Map();
     #initialized = false;
 
-    constructor(dataStore, options = {}) {
+    constructor(dataStore, _options = {}) {
         if (!dataStore) { throw new Error('A LayerIndex dataStore reference required'); }
         this.#store = dataStore;
     }
@@ -176,14 +176,14 @@ class LayerIndex {
         return layer.name;
     }
 
-    isInternalLayerName(name) {
+    isInternalLayerName(_name) {
         // Consider normalizing name here if needed for comparison
         // const normalizedName = this.normalizeLayerName(name);
         // const layer = this.getLayerByName(normalizedName); // Use normalized lookup
         return false; //layer && builtInLayers.find((layer) => layer.name === normalizedName);
     }
 
-    isInternalLayerID(id) {
+    isInternalLayerID(_id) {
         //const layer = this.getLayerByID(id);
         return false; //layer && builtInLayers.find((layer) => layer.id === id);
     }

@@ -123,7 +123,7 @@ export default class TimelineIndex {
     async deleteTimeline(name) {
         this.#assertTimelineName(name);
         const keys = await this.bitmapIndex.listBitmaps(`internal/ts/${this.#timelineKey(name)}`);
-        if (keys.length === 0) return false;
+        if (keys.length === 0) {return false;}
 
         for (const key of keys) {
             await this.bitmapIndex.deleteBitmap(key);
@@ -603,13 +603,13 @@ export default class TimelineIndex {
 
     #selectQueryScales(queryScale, options = {}) {
         if (options.scale || options.scales) { return this.#selectScales(options.scales || options.scale); }
-        if (!queryScale) return [...SCALES];
+        if (!queryScale) {return [...SCALES];}
         this.#normalizeScale(queryScale);
         return [...SCALES];
     }
 
     #selectScales(scales) {
-        if (!scales) return [...SCALES];
+        if (!scales) {return [...SCALES];}
         const selected = Array.isArray(scales) ? scales : [scales];
         return selected.map(scale => this.#normalizeScale(scale));
     }
@@ -665,7 +665,7 @@ export default class TimelineIndex {
 
         const startValue = this.#convertValue(start, scale);
         const endValue = this.#convertValue(end, scale);
-        if (startValue > endValue) { throw new Error(`Invalid timeline interval: start must be <= end`); }
+        if (startValue > endValue) { throw new Error('Invalid timeline interval: start must be <= end'); }
 
         return { scale, start: startValue, end: endValue };
     }
@@ -712,7 +712,7 @@ export default class TimelineIndex {
         if (input instanceof Date) { return { scale: 'ms', value: BigInt(input.getTime()) }; }
         if (typeof input === 'number') {
             if (!Number.isFinite(input)) { throw new Error(`Invalid timeline number: ${input}`); }
-            if (!Number.isInteger(input)) { throw new Error(`Timeline numbers must be integers or explicit scaled objects`); }
+            if (!Number.isInteger(input)) { throw new Error('Timeline numbers must be integers or explicit scaled objects'); }
             return { scale: 'ms', value: BigInt(input) };
         }
         if (typeof input !== 'string') { throw new Error(`Unsupported timeline value: ${String(input)}`); }
@@ -721,7 +721,7 @@ export default class TimelineIndex {
         if (!value) { throw new Error('Timeline value cannot be empty'); }
 
         const relative = this.#parseRelativeAge(value);
-        if (relative) return relative;
+        if (relative) {return relative;}
 
         if (/^-?\d{1,6}$/.test(value)) {
             return { scale: 'year', value: BigInt(value) - 1970n };
@@ -749,7 +749,7 @@ export default class TimelineIndex {
     }
 
     #parseValueForScale(input, scale) {
-        if (typeof input === 'bigint') return input;
+        if (typeof input === 'bigint') {return input;}
         if (typeof input === 'number') {
             if (!Number.isFinite(input) || !Number.isInteger(input)) {
                 throw new Error(`Invalid ${scale} timeline value: ${input}`);
@@ -767,7 +767,7 @@ export default class TimelineIndex {
 
     #parseRelativeAge(value) {
         const match = value.match(/^(-?\d+(?:\.\d+)?)\s*(gya|gyr|bya|mya|myr|kya|kyr)$/i);
-        if (!match) return null;
+        if (!match) {return null;}
 
         const scale = this.#normalizeScale(match[2]);
         const amount = this.#decimalToBigInt(match[1]);
@@ -800,7 +800,7 @@ export default class TimelineIndex {
         }
 
         const calendarRange = this.#convertCalendarRange(sourceScale, targetScale, range);
-        if (calendarRange) return calendarRange;
+        if (calendarRange) {return calendarRange;}
 
         const sourceIndex = SCALE_ORDER.get(sourceScale);
         const targetIndex = SCALE_ORDER.get(targetScale);
@@ -823,7 +823,7 @@ export default class TimelineIndex {
     #convertValue(endpoint, targetScale) {
         const sourceScale = this.#normalizeScale(endpoint.scale);
         const target = this.#normalizeScale(targetScale);
-        if (sourceScale === target) return endpoint.value;
+        if (sourceScale === target) {return endpoint.value;}
 
         const sourceIndex = SCALE_ORDER.get(sourceScale);
         const targetIndex = SCALE_ORDER.get(target);
@@ -832,7 +832,7 @@ export default class TimelineIndex {
         }
 
         const calendarValue = this.#convertCalendarValue(sourceScale, target, endpoint.value);
-        if (calendarValue !== null) return calendarValue;
+        if (calendarValue !== null) {return calendarValue;}
 
         return this.#floorDiv(endpoint.value, this.#factorBetween(target, sourceScale));
     }
@@ -915,12 +915,12 @@ export default class TimelineIndex {
     }
 
     #decodeTimelineKey(key) {
-        if (!key) return null;
+        if (!key) {return null;}
         return key.replace(/_x([0-9a-f]+)_/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
     }
 
     #decimalToBigInt(value) {
-        if (!value.includes('.')) return BigInt(value);
+        if (!value.includes('.')) {return BigInt(value);}
         return BigInt(Math.trunc(Number(value)));
     }
 
@@ -933,7 +933,7 @@ export default class TimelineIndex {
     #convertCalendarRange(sourceScale, targetScale, range) {
         const start = this.#convertCalendarBoundary(sourceScale, targetScale, range.start, 'start');
         const end = this.#convertCalendarBoundary(sourceScale, targetScale, range.end, 'end');
-        if (start === null || end === null) return null;
+        if (start === null || end === null) {return null;}
         return { start, end };
     }
 
@@ -985,19 +985,19 @@ export default class TimelineIndex {
     }
 
     #convertCalendarValue(sourceScale, targetScale, value) {
-        if (sourceScale === 'day' && targetScale === 'month') return this.#monthFromDay(value);
-        if (sourceScale === 'day' && targetScale === 'year') return this.#yearFromDay(value);
-        if (sourceScale === 'month' && targetScale === 'year') return this.#floorDiv(value, 12n);
-        if (sourceScale === 'second' && targetScale === 'day') return this.#floorDiv(value, 86400n);
-        if (sourceScale === 'ms' && targetScale === 'day') return this.#floorDiv(value, 86400000n);
-        if (sourceScale === 'ns' && targetScale === 'day') return this.#floorDiv(value, 86400000000000n);
-        if (sourceScale === 'ms' && targetScale === 'second') return this.#floorDiv(value, 1000n);
-        if (sourceScale === 'ns' && targetScale === 'second') return this.#floorDiv(value, 1000000000n);
-        if (sourceScale === 'ns' && targetScale === 'ms') return this.#floorDiv(value, 1000000n);
+        if (sourceScale === 'day' && targetScale === 'month') {return this.#monthFromDay(value);}
+        if (sourceScale === 'day' && targetScale === 'year') {return this.#yearFromDay(value);}
+        if (sourceScale === 'month' && targetScale === 'year') {return this.#floorDiv(value, 12n);}
+        if (sourceScale === 'second' && targetScale === 'day') {return this.#floorDiv(value, 86400n);}
+        if (sourceScale === 'ms' && targetScale === 'day') {return this.#floorDiv(value, 86400000n);}
+        if (sourceScale === 'ns' && targetScale === 'day') {return this.#floorDiv(value, 86400000000000n);}
+        if (sourceScale === 'ms' && targetScale === 'second') {return this.#floorDiv(value, 1000n);}
+        if (sourceScale === 'ns' && targetScale === 'second') {return this.#floorDiv(value, 1000000000n);}
+        if (sourceScale === 'ns' && targetScale === 'ms') {return this.#floorDiv(value, 1000000n);}
         if (['second', 'ms', 'ns'].includes(sourceScale) && ['month', 'year'].includes(targetScale)) {
             return this.#convertCalendarValue('day', targetScale, this.#convertCalendarValue(sourceScale, 'day', value));
         }
-        if (sourceScale === 'day' && targetScale === 'Gyr') return this.#convertValue({ scale: 'year', value: this.#yearFromDay(value) }, targetScale);
+        if (sourceScale === 'day' && targetScale === 'Gyr') {return this.#convertValue({ scale: 'year', value: this.#yearFromDay(value) }, targetScale);}
         if (sourceScale === 'month' && ['Gyr', 'Myr', 'Kyr'].includes(targetScale)) {
             return this.#convertValue({ scale: 'year', value: this.#floorDiv(value, 12n) }, targetScale);
         }
