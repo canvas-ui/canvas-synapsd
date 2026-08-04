@@ -1,5 +1,3 @@
-import debugMessage from 'debug';
-const debug = debugMessage('synapsd:tree:layer');
 
 import { ulid } from 'ulid';
 

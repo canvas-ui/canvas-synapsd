@@ -50,7 +50,7 @@ function randomTitle() {
 
 function elapsed(start) {
     const ms = performance.now() - start;
-    if (ms < 1000) return `${ms.toFixed(1)}ms`;
+    if (ms < 1000) {return `${ms.toFixed(1)}ms`;}
     return `${(ms / 1000).toFixed(3)}s`;
 }
 
@@ -71,7 +71,7 @@ async function main() {
 
     // Benchmark putMany
     const t1 = performance.now();
-    const ids = await db.putMany(tabs, { tree: 'browser', path: '/tabs/window-1' }, ['data/abstraction/tab']);
+    await db.putMany(tabs, { tree: 'browser', path: '/tabs/window-1' }, ['data/abstraction/tab']);
     const putManyTime = performance.now() - t1;
     console.log(`  putMany(${count}):  ${elapsed(t1)}  (${(count / (putManyTime / 1000)).toFixed(0)} docs/s)`);
 

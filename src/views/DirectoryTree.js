@@ -1,14 +1,12 @@
 'use strict';
 
 import EventEmitter from 'eventemitter2';
-import debugInstance from 'debug';
 import { ulid } from 'ulid';
 import TreeNode from './lib/TreeNode.js';
 import { EVENTS } from '../utils/events.js';
 import { buildTreeEventPayload } from './lib/treeEvents.js';
 import Canvas from '../schemas/internal/layers/Canvas.js';
 
-const debug = debugInstance('canvas:synapsd:directory-tree');
 
 const ROOT_NODE_ID = 'root';
 const INHERITED_LOCK_METADATA_KEY = 'inheritedLocks';
@@ -53,7 +51,7 @@ class DirectoryTree extends EventEmitter {
     get id() { return this.#treeId; }
     get name() { return this.#treeName; }
     // See ContextTree: keep cached instance name in sync on rename.
-    set name(value) { if (value) this.#treeName = String(value); }
+    set name(value) { if (value) {this.#treeName = String(value);} }
     get type() { return 'directory'; }
     get settings() { return this.#settings; }
     get collection() { return this.#collection; }
@@ -628,7 +626,7 @@ class DirectoryTree extends EventEmitter {
     #hasChildWithName(parent, name, excludeId = null) {
         const normalized = this.#normalizeSegmentForCompare(name);
         return Array.from(parent.children.values()).some((child) =>
-            child.id !== excludeId && this.#normalizeSegmentForCompare(child.payload.name) === normalized
+            child.id !== excludeId && this.#normalizeSegmentForCompare(child.payload.name) === normalized,
         );
     }
 

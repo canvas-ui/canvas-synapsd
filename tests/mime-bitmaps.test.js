@@ -95,7 +95,7 @@ describe('per-MIME-type presence bitmaps', () => {
         for (const key of await db.bitmapIndex.listBitmaps('data/mime/')) {
             await db.bitmapIndex.deleteBitmap(key);
         }
-        let gone = await db.list({ features: { allOf: ['data/mime/image'] } });
+        const gone = await db.list({ features: { allOf: ['data/mime/image'] } });
         expect(gone.map(d => d.id)).not.toContain(jpg);
 
         const res = await db.reindexMimeBitmaps();

@@ -31,8 +31,8 @@
     "typescript-eslint": "^8.57.1"
   },
   "scripts": {
-    "lint": "eslint \"**/*.js\"",
-    "lint:fix": "eslint \"**/*.js\" --fix",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "test": "node --experimental-vm-modules ../../../node_modules/jest/bin/jest.js"
   },
   "author": "me@idnc.sk",

@@ -1,7 +1,5 @@
 'use strict';
 
-import debugInstance from 'debug';
-const debug = debugInstance('canvas:synapsd:document-utils');
 
 import schemaRegistry from '../schemas/SchemaRegistry.js';
 import { isDocumentData, isDocumentInstance } from '../schemas/SchemaRegistry.js';

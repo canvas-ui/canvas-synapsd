@@ -438,7 +438,7 @@ class Db {
                 .map(folder => ({
                     name: folder,
                     path: path.join(this.backupOptions.backupPath, folder),
-                    date: folder.split('.')[0] // Extract YYYYMMDD part
+                    date: folder.split('.')[0], // Extract YYYYMMDD part
                 }))
                 .sort((a, b) => a.name.localeCompare(b.name)); // Sort chronologically
 

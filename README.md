@@ -582,6 +582,23 @@ schemaRegistry.registerSchema('data/abstraction/widget', Widget, {
 });
 ```
 
+A subclass of a core schema keeps its parent's validation with `mergeDataSchema()`:
+
+```js
+class Phone extends Device {
+    static get dataSchema() {
+        return Document.mergeDataSchema(super.dataSchema, { imei: z.string() });
+    }
+}
+// -> data.deviceId + data.name (Device's, required) AND data.imei are all enforced
+```
+
+Without it a subclass inherits the parent's `dataSchema` unchanged, so its own fields are accepted by passthrough but never *checked*; calling `extendDataSchema()` instead builds a fresh wrapper and drops the PARENT's field validation. Two helpers rather than one fix, because the base `Document` types `data` as `z.record(z.any())` — making `extendDataSchema()` merge would change behaviour for every schema already calling it. (That same record case means a `Document` subclass inherits no named fields, so its own shape stands alone.)
+
+The parent is passed in as **`super.dataSchema`** on purpose: the helper takes no `this` and does no prototype walking. `super` means exactly "the class I extend", bound where it is written, so it cannot be fooled by a rebound call — and a class with no superclass cannot express it at all, which removes a failure mode rather than guarding against one.
+
+It **throws** when the parent is a `ZodEffects` (wrapped in `.refine()`, as `Application` is): that refinement has no introspectable shape, so rebuilding around it would silently leave the subclass with weaker validation than its parent. Compose those by hand.
+
 Rules the registry enforces rather than documents:
 
 - The class must be a `Document` subclass; core ids cannot be re-registered (re-pointing `data/abstraction/file` at a foreign class would silently change what it means for everyone).

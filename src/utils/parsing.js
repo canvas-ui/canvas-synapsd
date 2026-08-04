@@ -1,7 +1,5 @@
 'use strict';
 
-import debugInstance from 'debug';
-const debug = debugInstance('canvas:synapsd:parsing');
 
 /**
  * Parse a single path string into layer array

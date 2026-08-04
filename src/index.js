@@ -23,9 +23,7 @@ import LmdbBackend from './backends/lmdb/index.js';
 
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
-import { normalizeFeatureArray } from './schemas/Document.js';
 import { predicateId } from './indexes/edges/predicates.js';
-import { normalizeDotfileUrl } from './utils/path-helpers.js';
 import { isDocumentData, isDocumentInstance } from './schemas/SchemaRegistry.js';
 
 // Indexes
@@ -38,7 +36,7 @@ import EdgeIndex from './indexes/edges/index.js';
 import LanceIndex from './indexes/lance/index.js';
 import VectorIndex from './indexes/lance/VectorIndex.js';
 import * as lancedb from '@lancedb/lancedb';
-import { normalizeBitmapKeys, normalizeBitmapKey, validateBitmapKey, ALLOWED_BITMAP_PREFIXES } from './indexes/bitmaps/lib/keys.js';
+import { normalizeBitmapKeys, normalizeBitmapKey, validateBitmapKey } from './indexes/bitmaps/lib/keys.js';
 import { deviceFacetsFromData } from './utils/device-facets.js';
 import SemanticEngine from './semantic/index.js';
 
@@ -50,7 +48,7 @@ import DirectoryTree from './views/DirectoryTree.js';
 import { parseContextSpecForInsert, parseBitmapArray } from './utils/parsing.js';
 import { parseFilters, applyTimelineFilter, applyGeoFilter } from './utils/filters.js';
 import { parseSpec } from './utils/spec.js';
-import { parseDocumentData, initializeDocument, parseInitializeDocument } from './utils/document.js';
+import { parseDocumentData, parseInitializeDocument } from './utils/document.js';
 import QuerySession from './session/QuerySession.js';
 import PrefixedStore from './utils/PrefixedStore.js';
 
@@ -640,7 +638,7 @@ class SynapsD extends EventEmitter {
             // Initialize Synapses inverted index
             this.#synapses = new Synapses(
                 this.#db.createDataset('synapses'),
-                this.bitmapIndex
+                this.bitmapIndex,
             );
 
             // Device facets (os/type) are derived onto every document present on a
@@ -1205,7 +1203,7 @@ class SynapsD extends EventEmitter {
                     // (empty diff for checksum-matched re-indexes), insert current.
                     if (existing && prevChecksums) {
                         const staleChecksums = prevChecksums.filter(c => !parsed.checksumArray.includes(c));
-                        if (staleChecksums.length) await this.#checksumIndex.deleteArray(staleChecksums);
+                        if (staleChecksums.length) {await this.#checksumIndex.deleteArray(staleChecksums);}
                     }
                     await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
 
@@ -1213,8 +1211,8 @@ class SynapsD extends EventEmitter {
                     if (!isUpdate) {
                         await this.#timelineIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
                     }
-                    if (parsed.updatedAt) await this.#timelineIndex.insert('crud:updated', parsed.id, parsed.updatedAt);
-                    if (existing && prevTimelineState) await this.#removeDocumentTimelines(parsed.id, prevTimelineState, parsed);
+                    if (parsed.updatedAt) {await this.#timelineIndex.insert('crud:updated', parsed.id, parsed.updatedAt);}
+                    if (existing && prevTimelineState) {await this.#removeDocumentTimelines(parsed.id, prevTimelineState, parsed);}
                     await this.#indexDocumentTimelines(parsed.id, parsed);
                     await this.#indexDocumentGeo(parsed.id, parsed);
                     this.#syncDocumentRelations(parsed.id, prevRelations, documentRelations(parsed));
@@ -1763,7 +1761,7 @@ class SynapsD extends EventEmitter {
                     await this.documents.put(parsed.id, parsed);
                     await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
                     await this.#timelineIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
-                    if (parsed.updatedAt) await this.#timelineIndex.insert('crud:updated', parsed.id, parsed.updatedAt);
+                    if (parsed.updatedAt) {await this.#timelineIndex.insert('crud:updated', parsed.id, parsed.updatedAt);}
                     await this.#indexDocumentTimelines(parsed.id, parsed);
                     await this.#indexDocumentGeo(parsed.id, parsed);
                     // One doc can be linked under multiple directory paths (folded dups).
@@ -2330,8 +2328,8 @@ class SynapsD extends EventEmitter {
                 if (staleFeatureKeys.length) { await this.#applyMembership('untick', parsedDocument.id, staleFeatureKeys); }
                 await this.#checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
                 await this.#timelineIndex.insert('crud:created', parsedDocument.id, parsedDocument.createdAt || new Date());
-                if (parsedDocument.updatedAt) await this.#timelineIndex.insert('crud:updated', parsedDocument.id, parsedDocument.updatedAt);
-                if (storedDocument) await this.#removeDocumentTimelines(parsedDocument.id, storedDocument, parsedDocument);
+                if (parsedDocument.updatedAt) {await this.#timelineIndex.insert('crud:updated', parsedDocument.id, parsedDocument.updatedAt);}
+                if (storedDocument) {await this.#removeDocumentTimelines(parsedDocument.id, storedDocument, parsedDocument);}
                 await this.#indexDocumentTimelines(parsedDocument.id, parsedDocument);
                 await this.#indexDocumentGeo(parsedDocument.id, parsedDocument);
                 this.#syncDocumentRelations(
@@ -2483,7 +2481,7 @@ class SynapsD extends EventEmitter {
     }
 
     async getBitmapsForDocument(id, prefix = '') {
-        if (!id) throw new Error('Document ID required');
+        if (!id) {throw new Error('Document ID required');}
 
         // Use the synapse reverse index (DocID -> membership keys) instead of
         // scanning + loading every bitmap and testing has(id). Synapse keys are
@@ -3484,7 +3482,7 @@ class SynapsD extends EventEmitter {
                 await this.bitmapIndex.tick(this.allDocumentsBitmap.key, updatedDocument.id);
                 await this.#checksumIndex.deleteArray(storedDocument.checksumArray);
                 await this.#checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
-                if (updatedDocument.updatedAt) await this.#timelineIndex.insert('crud:updated', updatedDocument.id, updatedDocument.updatedAt);
+                if (updatedDocument.updatedAt) {await this.#timelineIndex.insert('crud:updated', updatedDocument.id, updatedDocument.updatedAt);}
                 await this.#removeDocumentTimelines(updatedDocument.id, previousTimelineState, updatedDocument);
                 await this.#indexDocumentTimelines(updatedDocument.id, updatedDocument);
                 await this.#indexDocumentGeo(updatedDocument.id, updatedDocument);
@@ -3878,7 +3876,11 @@ class SynapsD extends EventEmitter {
      * @param {Array<string>} checksumStringArray - Array of checksum strings
      * @returns {Array<Document>} Array of document instances
      */
-    async getDocumentsByChecksumStringArray(checksumStringArray, contextSpec = '/', options = { parse: true }) {
+    // ⚠️ `contextSpec` is accepted and IGNORED — this method has no context scoping
+    // and never had any. Kept in the signature only so the positional `options` arg
+    // does not shift under any caller; there are currently none in this monorepo, so
+    // deleting the whole method is the better fix if that stays true.
+    async getDocumentsByChecksumStringArray(checksumStringArray, _contextSpec = '/', options = { parse: true }) {
         if (!Array.isArray(checksumStringArray)) {
             throw new Error('Checksum string array must be an array');
         }
@@ -4172,7 +4174,7 @@ class SynapsD extends EventEmitter {
             value &&
             typeof value === 'object' &&
             !Array.isArray(value) &&
-            ['context', 'directory', 'features', 'attributes', 'emitEvent', 'provenance'].some((key) => Object.prototype.hasOwnProperty.call(value, key))
+            ['context', 'directory', 'features', 'attributes', 'emitEvent', 'provenance'].some((key) => Object.prototype.hasOwnProperty.call(value, key)),
         );
     }
 

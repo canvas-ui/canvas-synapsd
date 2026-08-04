@@ -56,7 +56,7 @@ export default class TreeNode {
 
     getSortedChildren() {
         return Array.from(this.children.values()).sort((a, b) =>
-            a.payload.name.localeCompare(b.payload.name)
+            a.payload.name.localeCompare(b.payload.name),
         );
     }
 }

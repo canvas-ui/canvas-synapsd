@@ -709,7 +709,7 @@ class Document {
                 if (current === null || current === undefined) {return undefined;}
                 return current[key];
             }, obj);
-        } catch (error) {
+        } catch {
             return undefined;
         }
     }
@@ -802,6 +802,71 @@ class Document {
             data: shape.passthrough(),
             metadata: z.any().optional(),
         });
+    }
+
+    /**
+     * Merge a PARENT data-schema with a subclass's own fields, so the subclass
+     * validates both.
+     *
+     * ```js
+     * class Phone extends Device {
+     *     static get dataSchema() {
+     *         return Document.mergeDataSchema(super.dataSchema, { imei: z.string() });
+     *     }
+     * }
+     * ```
+     * -> `data.deviceId` (Device's, required) AND `data.imei` are both enforced.
+     *
+     * Without this a subclass inherits its parent's `dataSchema` unchanged, so its
+     * own fields are accepted by passthrough but never checked; calling
+     * `extendDataSchema()` instead builds a fresh wrapper and drops the PARENT's
+     * validation. Either way something goes unchecked.
+     *
+     * **The parent is passed in as `super.dataSchema`, deliberately.** This function
+     * takes no `this` and does no prototype walking: `super` is a language primitive
+     * meaning exactly "the class I extend", bound lexically where it is written, so
+     * it cannot be fooled by a rebound call the way `Object.getPrototypeOf(this)`
+     * can — and a class with no superclass simply cannot express it, which removes
+     * a whole failure mode instead of guarding it.
+     *
+     * A SEPARATE helper rather than a fix to `extendDataSchema`: the base
+     * `Document.dataSchema` types `data` as `z.record(z.any())`, so making the
+     * existing one merge would change behaviour for every schema already calling it.
+     * That same record case is why a `z.record` parent contributes no named fields
+     * here — there is nothing to inherit, so the subclass's shape stands alone.
+     *
+     * ⚠️ Throws when the parent is a `ZodEffects` — i.e. it wrapped its schema in
+     * `.refine()`/`.superRefine()` (`Application` does). That refinement is a
+     * cross-field rule with no introspectable shape, and rebuilding the object
+     * around it would SILENTLY DROP it, leaving the subclass with weaker validation
+     * than its parent. Compose those by hand.
+     *
+     * @param {z.ZodObject} parentSchema the inherited schema — pass `super.dataSchema`
+     * @param {object|z.ZodRawShape} extraShape fields to add to `data`
+     * @returns {z.ZodObject}
+     */
+    static mergeDataSchema(parentSchema, extraShape = {}) {
+        if (!(parentSchema instanceof z.ZodObject)) {
+            throw new Error(
+                'mergeDataSchema: the parent schema is not a plain object schema (most likely it is ' +
+                'wrapped in .refine()/.superRefine(), or `super.dataSchema` was not passed). ' +
+                'Rebuilding a refined schema would drop the refinement — compose it explicitly.',
+            );
+        }
+
+        const extra = (extraShape instanceof z.ZodType) ? extraShape : z.object(extraShape);
+        if (!(extra instanceof z.ZodObject)) {
+            throw new Error('mergeDataSchema: extraShape must be an object shape or a ZodObject');
+        }
+
+        const parentData = parentSchema.shape.data;
+        const merged = (parentData instanceof z.ZodObject)
+            ? parentData.extend(extra.shape)
+            : extra;
+
+        // Spread the parent's own wrapper keys rather than restating them, so a
+        // parent that added to the envelope keeps it.
+        return z.object({ ...parentSchema.shape, data: merged.passthrough() });
     }
 
 }

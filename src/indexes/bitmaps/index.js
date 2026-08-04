@@ -788,14 +788,6 @@ class BitmapIndex {
         }
     }
 
-    #batchSaveBitmapsSync(keyArray, bitmapArray) {
-        const keys = Array.isArray(keyArray) ? keyArray : [keyArray];
-        const bitmaps = Array.isArray(bitmapArray) ? bitmapArray : [bitmapArray];
-        for (let i = 0; i < keys.length; i++) {
-            this.#saveBitmapSync(keys[i], bitmaps[i]);
-        }
-    }
-
     #loadBitmapSync(key) { // LMDB get() is sync
         debug(`Loading bitmap with key ID "${key}" from persistent store`);
 
@@ -831,23 +823,6 @@ class BitmapIndex {
         }
     }
 
-    #batchLoadBitmapsSync(keyArray) {
-        const keys = Array.isArray(keyArray) ? keyArray : [keyArray];
-        const bitmaps = [];
-        // TODO: Create a initializeBitmap() method that will take a buffer and initialize a bitmap
-        // Then use a this.dataset.getMany() method to load multiple bitmaps with one query
-        // Then initialize them into the cache
-        // Premature optimization is the root of all evil.
-        // Hence the implementation below :)
-        for (const key of keys) {
-            if (this.cache.has(key)) {
-                bitmaps.push(this.cache.get(key));
-            } else {
-                bitmaps.push(this.#loadBitmapSync(key));
-            }
-        }
-        return bitmaps;
-    }
 
 }
 

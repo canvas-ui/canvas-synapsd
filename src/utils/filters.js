@@ -1,10 +1,8 @@
 'use strict';
 
-import debugInstance from 'debug';
 import { createRequire } from 'module';
 import TimelineIndex from '../indexes/inverted/Timeline.js';
 
-const debug = debugInstance('canvas:synapsd:filters');
 const require = createRequire(import.meta.url);
 const { RoaringBitmap32 } = require('roaring');
 
