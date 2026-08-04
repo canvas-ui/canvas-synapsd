@@ -8,7 +8,7 @@ SynapsD is a small KV database built on top of `LMDB` with `roaring-bitmap` and 
 
 This module is meant to index all data from configured data sources of a Workspace (files, emails, notes, browser tabs, github repos, dotfiles etc), and provide a unified virtual fs-like tree abstraction on top that should ideally mimick whatever mental model you need to make work with your data more efficient.
 
-> **v3.x** — the *refactor-v3* pass has landed (schema version 2). Existing databases must be migrated before they will open; see **Migration and rebuild**.
+> **v3.x** — the *refactor-v3* pass has landed (schema version 2). A database below that version refuses to open, and the engine carries no migration code to fix it; see **Schema version and rebuild**.
 
 ## Architecture at a glance
 
@@ -20,7 +20,7 @@ SynapsD is one of three deliberately separated services, and stays honest about 
 
 This split buys a few properties that show up everywhere in the API:
 
-- **Documents are the source of truth; indexes are derived cache.** Timelines, mime facets, `kind`, backend and device presence, geo cells, asserted edges — all re-derived from document state on every write, so they cannot drift, and `rebuildL3()` reconstructs them from rows alone. v3 completed this for user tags: `features[]` now lives on the document.
+- **Documents are the source of truth; indexes are derived cache.** Timelines, mime facets, backend and device presence, geo cells, asserted edges — all re-derived from document state on every write, so they cannot drift, and `rebuildL3()` reconstructs them from rows alone. v3 completed this for user tags: `features[]` now lives on the document.
 - **Membership is cheap and plural.** A document is stored once; appearing in ten trees, five tags, and three timelines costs bitmap bits, not copies.
 - **The dense stack is optional.** No embedding service (or `semantic.enabled: false`) means vector/hybrid queries degrade gracefully to FTS; nothing else changes.
 - **Crash-resumable ingestion.** The embedding work-ledger is a persistent bitmap diff (`getUnembeddedDocIds`), so an external embedder can resume after a restart without rescanning a single document.
@@ -32,7 +32,7 @@ This split buys a few properties that show up everywhere in the API:
 | **L0** | Bytes. Not here — StoreD owns them; synapsd only stores `locations[]` URLs. | — |
 | **L1** | Document rows (`documents` dataset): the JSON payload, checksums, timestamps. The source of truth. | nothing (this *is* the truth) |
 | **L2** | View membership: context/directory tree bitmaps (`context/*`, `vfs/*`). Human-authored placement. | nothing (also truth) |
-| **L3** | Everything derived: feature/facet bitmaps, `kind`, mime, backend/device presence, timelines, geo cells, asserted edges, FTS/vector rows. | L1 + extractors — `rebuildL3()` |
+| **L3** | Everything derived: feature/facet bitmaps, mime, backend/device presence, timelines, geo cells, asserted edges, FTS/vector rows. | L1 + extractors — `rebuildL3()` |
 
 The invariant that keeps this honest: drop L3, recompute it from L1, and the index must come back identical. If it does not, something is storing state with no source.
 
@@ -71,7 +71,7 @@ const hits = await db.query('draft', { paths: ['ctx:/work/project-a'] });
 await db.shutdown();   // `stop()` is an alias
 ```
 
-Constructor options: `path` (required, alias `rootPath`), `backupOnOpen`, `backupOnClose`, `compression`, `eventEmitterOptions`, `migrate` (see **Migration**), `semantic` (see **Semantic search**). `backend` accepts only `'lmdb'`.
+Constructor options: `path` (required, alias `rootPath`), `backupOnOpen`, `backupOnClose`, `compression`, `eventEmitterOptions`, `semantic` (see **Semantic search**). `backend` accepts only `'lmdb'`.
 
 All examples below assume a started `db`.
 
@@ -92,7 +92,6 @@ The stored row shape (v3):
     data: { /* schema-specific payload */ }, // replaced wholesale on update
     comment: 'sofa from the cozmo bar',      // user-authored free text, top-level
 
-    kind: 'note',                            // DERIVED subtype axis (see below)
     features: ['tag/inbox', 'custom/client/acme'],   // ASSERTED bitmap keys
     locations: [{ url: 'stored://local/ab12…', metadata: {} }],
     timelines: [{ name: 'content', start: '2023-07-04' }],
@@ -104,26 +103,25 @@ The stored row shape (v3):
 }
 ```
 
-Three v3 changes worth knowing before you write anything:
+Three changes worth knowing before you write anything:
 
-- **`features[]` is top-level and asserted-only.** It moved off `metadata.features`. `metadata` holds *extracted facts written by derivers*; `features[]` holds *membership a human or client asserted*. Derived prefixes (`data/abstraction/`, `data/mime/`, `data/kind/`, `feature/`, `device/`, plus each schema's own facet namespaces) are **stripped on the way in** — a stored copy of a derived key would be indistinguishable from a derived one while being immune to the derivation's own stale-diff, i.e. it could never be unticked. `data/dataset/*` is *preserved* across an update that omits it, so a client re-putting its own tag array cannot drop ingest provenance.
+- **`features[]` is top-level and asserted-only.** It moved off `metadata.features`. `metadata` holds *extracted facts written by derivers*; `features[]` holds *membership a human or client asserted*. Derived prefixes (`data/abstraction/`, `data/mime/`, `data/backend/`, `feature/`, `device/`, plus each schema's own facet namespaces) are **stripped on the way in** — a stored copy of a derived key would be indistinguishable from a derived one while being immune to the derivation's own stale-diff, i.e. it could never be unticked. `data/dataset/*` is *preserved* across an update that omits it, so a client re-putting its own tag array cannot drop ingest provenance.
 - **`indexOptions` is no longer on the row.** It is schema-level configuration (`static indexOptions` on the schema class), identical for every document of a schema — ~414 B of byte-identical JSON per row, ~2.9 GB at 7M rows. Legacy rows carrying it are ignored on read. There is consequently **no per-document index override**.
-- **`kind` is derived, never client-authoritative.** Whatever a caller sends is overwritten from the schema registration.
+- **There is no `kind` field.** The v3 subtype axis was removed 2026-08-04 — see below.
 
 Reading a document back gives you a schema instance (`parse: false` for the raw stored object).
 
-### Kind
+### Subtypes (the removed `kind` axis)
 
-`kind` is a subtype axis derived from the schema *registration* and mirrored into **hierarchical** `data/kind/*` bitmaps, exactly like `data/mime/*`: a `browser/tab` ticks both `data/kind/browser` and `data/kind/browser/tab`, so "everything browser-ish" is one key with no enumeration of children.
+**`kind` and `data/kind/*` were removed 2026-08-04.** v3 introduced them as a subtype axis derived from the schema registration — a `kind` row field mirrored into hierarchical bitmaps. They are gone, and nothing replaced them yet.
 
-A registration declares either a literal `kind`, or a `kindField` (a dotted path read per document) plus a mandatory `kindPrefix`. The prefix is enforced rather than conventional: kind values are persisted in bitmap keys and are therefore append-only, so an unprefixed generic value (`file`, `person`, `calendar`) that later collides with another schema's is not fixable without a migration.
+The reason is that a subtype is not a second axis: it is part of *what a thing is*, so it belongs in the schema id. Rev B adopts a hierarchical id (`data/schema/application/flatpak`, `data/schema/message/email`), where the subtype is a path segment and the parent id is already a roll-up — the property `data/kind/*` existed to provide. Two axes for one fact meant two things to derive, keep consistent and query.
 
-```js
-db.list({ features: ['data/kind/browser'] });          // tabs, and anything else browser-ish
-db.list({ features: ['data/kind/event/calendar'] });   // only calendar events
-```
+Removal was free because the axis had **zero consumers** (measured across every repo): nobody had migrated to it before it was superseded.
 
-> Inherited caveat from `data/mime/*`: `listBitmaps(prefix)` range-scans `prefix + '/'`, so a bare `data/kind/browser` key is invisible to a prefix listing of *its own* namespace — list `data/kind/` instead. Key-based AND/OR/ANDNOT queries are unaffected.
+In the meantime the subtype axis is **dark**. A registration may still declare `subtypeField: 'data.type'` and `schemaRegistry.resolveSubtype(id, doc)` resolves it — one raw segment, unprefixed, since scoping is the id's job — but nothing indexes the result until the ids land. Query the schema id (`data/abstraction/application`) or filter on `data.type`.
+
+An existing database sheds its stale `data/kind/*` bitmaps on the next open, tracked by its own run-once marker rather than a schema-version bump: a database already stamped at the current version never re-enters the migration block, and it is precisely those databases that have the leftovers. The namespace is also refused in `features[]`, so a client cannot re-assert what nothing derives.
 
 ### Trees
 
@@ -153,7 +151,6 @@ Features are flat bitmap keys ticked on a document. They carry a `who says so?` 
 | `data/dataset/*` | Ingest provenance (see **Datasets**) | yes, preserved across updates |
 | `data/no-location` | The app — orphan marker (see below) | yes, in `features[]` |
 | `data/abstraction/*` | Derived from `schema` | no — derived every write |
-| `data/kind/*` | Derived from the schema registration | no |
 | `data/mime/*` | Derived from `metadata.contentType` (hierarchical: type + full type) | no |
 | `data/backend/*` | Derived from `locations[]` (hierarchical: scheme + scheme/authority) | no |
 | `data/<facet>/*` | Derived from a schema's `static facetFields` (e.g. `data/status/*` from Todo's `data.status`) | no |
@@ -554,9 +551,9 @@ A schema is a `Document` subclass plus a registration record. The registry (`src
 
 The tier is the folder, so a bundled app schema moving out of the repo is a directory-level move rather than a hunt through one flat `abstractions/` folder. `data/abstraction/document` has no file of its own: it registers `schemas/Document.js`, the base class itself.
 
-Ids stay `data/abstraction/*` in v3; the entity rename is deferred to its own release. **`kind` is the axis to migrate to** — `data/kind/browser/tab` answers what `data/abstraction/tab` answers today, so a consumer can switch on its own cadence.
+Ids are still `data/abstraction/*`; the rename to `data/schema/*` plus hierarchy adoption is a coordinated cross-repo release (Rev B in TODO.md). There is no interim axis to migrate to — the v3 `kind` axis that was meant to serve that purpose went unused and was removed.
 
-v3 schema changes: `Contact` → `Identity` (with `data.type` of `person|organization|service|bot` driving `data/kind/identity/*`), `Bucket` deleted, `Event` added.
+v3 schema changes: `Contact` → `Identity` (with a `data.type` of `person|organization|service|bot`), `Bucket` deleted, `Event` added. `Todo` was renamed `Task` 2026-08-04 (the class only — its id follows in Rev B).
 
 ### Registering your own
 
@@ -581,23 +578,18 @@ class Widget extends Document {
 }
 
 schemaRegistry.registerSchema('data/abstraction/widget', Widget, {
-    kindField: 'data.type',    // per-document discriminator...
-    kindPrefix: 'widget',      // ...always prefixed: data/kind/widget/<value>
+    subtypeField: 'data.type',   // per-document subtype discriminator (see Subtypes)
 });
-// or a literal:
-// schemaRegistry.registerSchema('data/abstraction/widget', Widget, { kind: 'widget' });
 ```
 
 Rules the registry enforces rather than documents:
 
 - The class must be a `Document` subclass; core ids cannot be re-registered (re-pointing `data/abstraction/file` at a foreign class would silently change what it means for everyone).
-- `kind` and `kindField` are mutually exclusive — a schema has one kind axis.
-- `kindField` requires `kindPrefix` (see **Kind** above for why).
 - Passing `options.indexOptions` **writes `SchemaClass.indexOptions`** rather than storing a parallel copy. `static indexOptions` on the class is the one source of truth: `Document` resolves it at construction time and cannot import the registry without a cycle.
 
 `indexOptions` fields: `checksumAlgorithms` (default `['sha1','sha256']`), `checksumFields`, `ftsSearchFields`, `vectorEmbeddingFields` (all default to `['data']`), and `embeddingOptions`. Field paths are dotted and resolved against the *document* (so `locationUrls` and other getters work); the literal `'data'` resolves to `contentData()`, i.e. `data` minus `relations`.
 
-`static facetFields = ['data.status']` gives a schema the derived-facet machinery: the leaf field name becomes the namespace (`data/status/*`), ticked and stale-unticked on every write. Engine-owned namespaces (`abstraction`, `schema`, `kind`, `mime`, `backend`, `source`, `dataset`, `no-location`) are refused.
+`static facetFields = ['data.status']` gives a schema the derived-facet machinery: the leaf field name becomes the namespace (`data/status/*`), ticked and stale-unticked on every write. Engine-owned namespaces (`abstraction`, `schema`, `kind`, `mime`, `backend`, `source`, `dataset`, `no-location`) are refused — `kind` stays reserved although its axis is gone, because a migrated database can still carry residue in that namespace.
 
 ### Publishing a schema to consumers
 
@@ -607,7 +599,7 @@ This is the point of the registry: a consumer **fetches** a schema instead of co
 
 Internal layer types are not documents and have no `dataSchema`; `getJsonSchema()` returns `null` for them rather than throwing, so iterating `listSchemas()` is safe.
 
-Introspection: `db.listSchemas(prefix?)`, `db.getSchema(id)`, `db.hasSchema(id)`, `db.getDataSchema(id)`, `db.getJsonSchema(id)`. On the registry itself: `getSchemaEntry(id)` (returns `{ SchemaClass, tier, kind, kindField, kindPrefix, indexOptions }`), `resolveKind(id, doc)`, `unregisterSchema(id)`.
+Introspection: `db.listSchemas(prefix?)`, `db.getSchema(id)`, `db.hasSchema(id)`, `db.getDataSchema(id)`, `db.getJsonSchema(id)`. On the registry itself: `getSchemaEntry(id)` (returns `{ SchemaClass, tier, subtypeField, indexOptions }`), `resolveSubtype(id, doc)`, `unregisterSchema(id)`.
 
 ## Querying
 
@@ -753,7 +745,7 @@ internal/embed/vectors/<space>/<model-slug>   presence ("this doc has vectors")
 internal/embed/seen/<space>/<model-slug>      processed (including deliberate skips)
 ```
 
-A namespace must never also be a key: `listBitmaps()` range-scans `prefix + '/'`, so a bare `internal/embed/vectors/text` sitting above `internal/embed/vectors/text/<slug>` would be invisible to a prefix query of its own namespace. That is exactly what the pre-v3 `internal/lance/vectors` key did — it was the text presence bitmap *and* the parent path of the image one. Legacy keys are migrated to the baseline slug once at start.
+A namespace must never also be a key: `listBitmaps()` range-scans `prefix + '/'`, so a bare `internal/embed/vectors/text` sitting above `internal/embed/vectors/text/<slug>` would be invisible to a prefix query of its own namespace. That is exactly what the pre-v3 `internal/lance/vectors` key did — it was the text presence bitmap *and* the parent path of the image one. (The one-time remap of those legacy keys went with the rest of the migration code; `migrateBitmapKey(legacy, canonical)` is still there as a live API if an old key ever turns up.)
 
 The `image` space is **cross-modal**: photos are embedded from bytes, and at query time the *text* query is embedded by the same encoder family into the same joint space. Two consequences baked into the defaults:
 
@@ -874,7 +866,7 @@ const recentDocs = await db.list({
 
 - **`content`**: when the content itself came into existence (EXIF capture date for photos).
 - **`tasks`**: Todo due dates (point-mode, derived from `data.dueDate` by the Todo schema). `t:tasks:today` means "due today"; `sortBy: 'tasks'` orders by due date.
-- **`events`**: `Event` documents (`calendar` / `alert` / `activity`), derived from `data.start` / `data.end`. One timeline for all three types, with `data/kind/event/*` discriminating — because the founding query is "show me everything happening under /work/customer-foo", and a calendar app, an alert panel and an activity feed are three lenses on one set.
+- **`events`**: `Event` documents (`calendar` / `alert` / `activity`), derived from `data.start` / `data.end`. One timeline for all three types, with `data.type` discriminating — because the founding query is "show me everything happening under /work/customer-foo", and a calendar app, an alert panel and an activity feed are three lenses on one set.
 
 #### Event recurrence: the envelope model
 
@@ -1031,26 +1023,21 @@ await db.listDatasets();                              // [{ name, key, documentC
 await db.deleteDataset('scan-2026-08', { dropDocuments: true });
 ```
 
-## Migration and rebuild
+## Schema version and rebuild
 
-The v3 refactor bumped the persisted schema version to **2**. The migration **rewrites every document row**, which is why a stale database **refuses to open** rather than migrating implicitly on a server restart — it is an operator action, taken deliberately, ideally after a backup.
+**There is no migration code in this engine (removed 2026-08-04).** One-time migrations were living on the startup path, gated behind a persisted version, running an `O(all-docs)` check on every open for work that happens once in a database's life. They are operator actions; write a one-off script against a backup instead.
 
-```sh
-# Per workspace DB directory, e.g. server/users/<user>/workspaces/<ws>/db
-node scripts/migrate-v3.js -d <workspace-db-dir> --dry-run
-node scripts/migrate-v3.js -d <workspace-db-dir>
+What stayed is the **refusal**. `SCHEMA_VERSION` (currently **2**) is the row format this build writes; a *non-empty* database below it throws at `start()`:
+
+```
+synapsd: database is at schema v1, this build needs v2. Migration code was removed
+from the engine; migrate the database with a one-off script against a backup, then
+stamp internal/schemaVersion to 2.
 ```
 
-Or programmatically: `new SynapsD({ path, migrate: true })`, or by environment: `CANVAS_SYNAPSD_MIGRATE=true` (accepts `1`/`true`/`yes`/`on`). The env var exists because `migrate` is a whole-database switch and the DB is usually constructed deep inside a host process — canvas-server opens one per workspace — where threading a flag down means touching every call site. After `start()`, `db.lastMigrationStats` holds the counters (`null` when nothing ran). A brand-new or empty database is stamped and skips the gate.
+Deleting that check would not make a stale database someone else's problem — it would make it **silent data loss**. Current code reading a pre-v2 row never promotes `metadata.features`, so asserted tags that exist only in bitmaps — the one class of state with no rebuild source, which is *why* `features[]` moved onto the row — would be dropped on the next write, with no error anywhere.
 
-What the migration does — all of it idempotent, since every step makes the row match what current code would produce:
-
-1. Recovers asserted tags that existed **only** in bitmaps (pre-2026-07-15 rows had no doc-side record — the last state with no rebuild source, which is the whole reason `features[]` moved onto the row).
-2. Drops the derived namespaces this rev removed or reshaped: `rel/*`, `data/source/*`, `data/backend/*`, `data/kind/*`.
-3. Per row: drops `indexOptions`; moves `metadata.features` → root `features[]` (stripping derived keys); migrates Dotfile `data.repoPath` → normalized `data.url`; stamps `kind`.
-4. Replays the derived plane from the rewritten rows — facet/kind/mime bitmaps, location-derived device and backend features, asserted feature membership, and asserted edges from `data.relations`.
-
-It does **not** rename schema ids: `data/abstraction/*` stays, so the one document class with no rebuild source outside the DB (tabs) is never re-keyed.
+A brand-new or empty database is stamped and skips the refusal, so a fresh install never trips it. Bump `SCHEMA_VERSION` when a change makes rows written by this build unreadable by the previous one.
 
 ### `rebuildL3()`
 
@@ -1065,7 +1052,7 @@ await db.rebuildL3({ timelines: true, search: true });  // + crud timelines, + F
 | Option | Default | Effect |
 |--------|---------|--------|
 | `edges` | `true` | Drop and re-derive edges. With `src`, only that source's derived edges (asserted ones have no meta row and are reproduced from the rows anyway); without it, the whole edge plane is cleared |
-| `bitmaps` | `true` | Drop and re-derive `data/kind/*`, `data/backend/*`, `data/mime/*` |
+| `bitmaps` | `true` | Drop and re-derive `data/backend/*`, `data/mime/*` (and drop the retired `data/kind/*`) |
 | `timelines` | `false` | `reindexCrudTimelines()` |
 | `search` | `false` | `reindexSearchIndex({ rebuild: true })` |
 | `embeddings` | `false` | `reindexEmbeddings()` (expensive) |
@@ -1145,7 +1132,7 @@ Legacy method names like `findDocuments`, `ftsQuery`, and `insertDocument` are n
 
 `createTree(name, type?, options?)`, `listTrees(type?)`, `getTree(nameOrId)`, `deleteTree(nameOrId)`, `renameTree(nameOrId, newName)`, `getTreePaths(nameOrId)`, `getTreeJson(nameOrId)`, `getDefaultContextTree()`, `getDefaultDirectoryTree()`, `listDocumentTreePaths(id, tree)`, `listDocumentTreeMemberships(id, tree)`, `hasDocumentTreeMembership(id, tree)`, `migrateDocumentMemberships(fromId, toId, opts?)`
 
-`listSchemas(prefix?)`, `getSchema(id)`, `hasSchema(id)`, `getDataSchema(id)`, `getJsonSchema(id)` — registration itself goes through the `schemaRegistry` singleton (`registerSchema` / `unregisterSchema` / `getSchemaEntry` / `resolveKind`).
+`listSchemas(prefix?)`, `getSchema(id)`, `hasSchema(id)`, `getDataSchema(id)`, `getJsonSchema(id)` — registration itself goes through the `schemaRegistry` singleton (`registerSchema` / `unregisterSchema` / `getSchemaEntry` / `resolveSubtype`).
 
 ### Maintenance and introspection
 
@@ -1155,7 +1142,7 @@ Legacy method names like `findDocuments`, `ftsQuery`, and `insertDocument` are n
 | `setSearchTuning(tuning)` | `{ imageMaxDistance, searchWeights }` at runtime |
 | `storeDocumentEmbeddings(docId, schema, updatedAt, chunks, opts?)` | Externally-computed vectors; `opts = { space }` |
 | `getUnembeddedDocIds(space?, schemas?)` | Embedding work-ledger; pure bitmap read, restart-safe |
-| `rebuildL3(opts?)` | Umbrella L3 rebuild (see **Migration and rebuild**) |
+| `rebuildL3(opts?)` | Umbrella L3 rebuild (see **Schema version and rebuild**) |
 | `reindexCrudTimelines(opts?)` | `{ scanned, created, updated }` |
 | `reindexSearchIndex(opts?)` | Backfill or rebuild FTS, idempotent |
 | `reindexEmbeddings(opts?)` | Reports the embedding gap for an external embedder |
@@ -1163,13 +1150,12 @@ Legacy method names like `findDocuments`, `ftsQuery`, and `insertDocument` are n
 | `listDatasets()` / `deleteDataset(name, opts?)` | |
 | `dumpDocuments(dstDir, …)` / `dumpBitmaps(dstDir, keys?)` | |
 
-Sub-index handles: `db.timeline`, `db.geo`, `db.bitmapIndex`, `db.checksumIndex`, `db.synapses`, `db.edges`, `db.semantic`, `db.internalStore`, `db.lastMigrationStats`.
+Sub-index handles: `db.timeline`, `db.geo`, `db.bitmapIndex`, `db.checksumIndex`, `db.synapses`, `db.edges`, `db.semantic`, `db.internalStore`.
 
 ## Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/migrate-v3.js -d <db-dir> [--dry-run]` | Apply the v3 schema migration |
 | `scripts/reindex-crud.js -d <db-dir>` | Rebuild the `crud:*` timelines |
 | `scripts/scan.js` | Recursively scan a directory into a DB, or query it (see `scripts/scan.readme.md`) |
 | `scripts/bench-putmany.js`, `scripts/bench-tick-bitmaps.js` | Write-path benchmarks |

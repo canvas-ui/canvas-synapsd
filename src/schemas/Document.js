@@ -36,7 +36,7 @@ const DOCUMENT_DATA_VECTOR_EMBEDDING_FIELDS = ['data'];
 const NON_CONTENT_DATA_KEYS = ['relations'];
 
 // Feature namespaces the ENGINE derives on every write from document state
-// (schema id, contentType, locations, kind, device presence, orphan status).
+// (schema id, contentType, locations, device presence, orphan status).
 // They must never be stored in the asserted array: a stored copy is
 // indistinguishable from a derived one while being immune to the derivation's own
 // stale-diff — i.e. it could never be unticked. Same reasoning that made
@@ -55,7 +55,6 @@ const NON_CONTENT_DATA_KEYS = ['relations'];
 const DERIVED_FEATURE_PREFIXES = [
     'data/abstraction/',    // index.js: pushes parsed.schema
     'data/mime/',           // index.js: mimeBitmapKeys from metadata.contentType
-    'data/kind/',           // index.js: kindBitmapKeys from the registry
     'data/backend/',        // index.js: #backendFeaturesFromLocations
     'feature/',             // index.js: feature/has-comment
     'device/',              // index.js: #deviceFeaturesFromLocations
@@ -74,6 +73,17 @@ function facetPrefixesFor(facetFields) {
         .map((namespace) => `data/${namespace}/`);
 }
 
+// RETIRED namespaces: nothing derives them any more, but the asserted array must
+// still refuse them, so a client cannot resurrect a dead axis whose keys look
+// exactly like the engine's former output. Kept SEPARATE from the derived list
+// above so that list stays literally true — "what the engine derives today".
+//
+// `data/kind/` was the v3 subtype axis, removed 2026-08-04 when the schema
+// hierarchy replaced it (the subtype is a segment of the schema id now). It had
+// zero consumers, so the removal was externally free; blocking re-assertion keeps
+// it that way.
+const RETIRED_FEATURE_PREFIXES = ['data/kind/'];
+
 // Asserted, but stamped by INGEST rather than by the client. Preserved across an
 // update that omits them, so a client re-putting its own tag array cannot silently
 // drop the provenance of how the document got here.
@@ -89,8 +99,10 @@ const isPreservedFeature = (key) => PRESERVED_FEATURE_PREFIXES.some((prefix) => 
  * @returns {Array<string>}
  */
 function normalizeFeatureArray(input, previous = [], facetFields = []) {
-    const derivedPrefixes = [...DERIVED_FEATURE_PREFIXES, ...facetPrefixesFor(facetFields)];
-    const isDerived = (key) => derivedPrefixes.some((prefix) => key.startsWith(prefix));
+    const refusedPrefixes = [
+        ...DERIVED_FEATURE_PREFIXES, ...RETIRED_FEATURE_PREFIXES, ...facetPrefixesFor(facetFields),
+    ];
+    const isDerived = (key) => refusedPrefixes.some((prefix) => key.startsWith(prefix));
     const out = [];
     const seen = new Set();
     const add = (key) => {
@@ -188,15 +200,11 @@ const documentSchema = z.object({
     // and is the one text class that can never be regenerated — user-editable only.
     comment: z.string().optional(),
 
-    // v3 subtype axis. DERIVED from the schema registration (a literal `kind`, or
-    // a `kindField` read off the document under the entity prefix), stamped at
-    // ingest and mirrored into hierarchical `data/kind/*` bitmaps. Never
-    // client-authoritative: whatever a caller sends is overwritten by the derived
-    // value, exactly like device/* tags. Present on the row so it round-trips
-    // through the constructor on read and so a rebuild can verify itself.
-    // Outside checksumFields — a kind is a projection of data that is already
-    // checksummed, so it must not fork identity.
-    kind: z.string().nullable().optional(),
+    // NOTE: there is no `kind` field. The v3 subtype axis was removed 2026-08-04:
+    // the schema hierarchy carries the subtype in the id itself, so a second axis
+    // (and a row field mirroring it) was one representation too many. Legacy rows
+    // may still carry `kind`; it is ignored on read and dropped the next time the
+    // document is written, exactly like the retired `indexOptions` field.
 
     // ASSERTED feature membership — tags a human or client put on this document
     // (`tag/*`, `custom/*`, `client/*`), plus ingest provenance (`data/dataset/*`).
@@ -302,12 +310,6 @@ class Document {
 
         // User-authored free-text comment (see documentSchema). Empty string = none.
         this.comment = typeof options.comment === 'string' ? options.comment : '';
-
-        // Derived subtype axis (see documentSchema). Carried through the
-        // constructor so a stored row rehydrates with it; the authoritative value
-        // is re-stamped from the registry on every write, so a client cannot pin
-        // a stale or invented kind.
-        this.kind = typeof options.kind === 'string' ? options.kind : null;
 
         // Locations: canonical source-of-truth for where the data lives ({ url, metadata? }).
         this.locations = Array.isArray(options.locations) ? options.locations : [];
@@ -764,7 +766,6 @@ class Document {
             schemaVersion: this.schemaVersion,
             data: this.data,
             comment: this.comment,
-            kind: this.kind,
             features: this.features,
             locations: this.locations,
             timelines: this.timelines,
@@ -808,4 +809,4 @@ class Document {
 // Export document class and schemas
 export default Document;
 export { documentDataSchema, documentSchema, locationSchema, timelineEntrySchema };
-export { DERIVED_FEATURE_PREFIXES, PRESERVED_FEATURE_PREFIXES, normalizeFeatureArray };
+export { DERIVED_FEATURE_PREFIXES, RETIRED_FEATURE_PREFIXES, PRESERVED_FEATURE_PREFIXES, normalizeFeatureArray };

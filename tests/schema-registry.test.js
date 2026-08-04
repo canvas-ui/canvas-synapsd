@@ -97,7 +97,7 @@ describe('SchemaRegistry v3', () => {
         test('round-trips an app schema through the public API', () => {
             expect(schemaRegistry.hasSchema('data/abstraction/widget')).toBe(false);
 
-            schemaRegistry.registerSchema('data/abstraction/widget', Widget, { kind: 'widget' });
+            schemaRegistry.registerSchema('data/abstraction/widget', Widget, { subtypeField: 'data.type' });
 
             expect(schemaRegistry.getSchema('data/abstraction/widget')).toBe(Widget);
             expect(schemaRegistry.listSchemas('data/')).toContain('data/abstraction/widget');
@@ -137,10 +137,10 @@ describe('SchemaRegistry v3', () => {
             expect(() => schemaRegistry.registerSchema('   ', Widget)).toThrow(/non-empty string/);
         });
 
-        test('rejects declaring both a literal kind and a kindField', () => {
+        test('rejects a non-string subtypeField', () => {
             expect(() => schemaRegistry.registerSchema('data/abstraction/widget', Widget, {
-                kind: 'widget', kindField: 'data.type',
-            })).toThrow(/one kind axis/);
+                subtypeField: 42,
+            })).toThrow(/dotted field path string/);
         });
     });
 
@@ -179,7 +179,7 @@ describe('SchemaRegistry v3', () => {
         });
 
         test('a subclass declares its own index fields per schema, not per write', () => {
-            schemaRegistry.registerSchema('data/abstraction/phone', Phone, { kind: 'phone' });
+            schemaRegistry.registerSchema('data/abstraction/phone', Phone, {});
 
             const phone = new Phone({ data: { deviceId: 'p1', name: 'Pixel', maker: 'Google', hwRelease: '2024' } });
 
@@ -211,43 +211,40 @@ describe('SchemaRegistry v3', () => {
         });
     });
 
-    describe('resolveKind', () => {
-        test('returns a literal kind', () => {
-            expect(schemaRegistry.resolveKind('data/abstraction/tab')).toBe('browser/tab');
-            expect(schemaRegistry.resolveKind('data/abstraction/note')).toBe('note');
+    // `resolveSubtype` replaces v3's `resolveKind`. It returns ONE RAW SEGMENT:
+    // scoping used to need `kindPrefix` because every kind shared one flat
+    // namespace, whereas a subtype hangs under the schema id that owns it.
+    //
+    // ⚠️ Nothing indexes the result yet — the `data/kind/*` axis was deleted and
+    // the replacement is a segment of the schema id, which lands with the ids in
+    // Rev B. These tests keep the resolver honest in the meantime.
+    describe('resolveSubtype', () => {
+        test('reads the declared field off the document, unprefixed', () => {
+            expect(schemaRegistry.resolveSubtype('data/abstraction/application', { data: { type: 'flatpak' } }))
+                .toBe('flatpak');
+            expect(schemaRegistry.resolveSubtype('data/abstraction/identity', { data: { type: 'person' } }))
+                .toBe('person');
+            expect(schemaRegistry.resolveSubtype('data/abstraction/dotfile', { data: { type: 'folder' } }))
+                .toBe('folder');
         });
 
-        test('reads a kindField off the document, always under the entity prefix', () => {
-            // Decided 2026-08-03: kindField values are ALWAYS prefixed with the
-            // entity. Bare 'flatpak'/'person' would be unfixable if another schema
-            // later claimed the same value — bitmap keys are append-only.
-            expect(schemaRegistry.resolveKind('data/abstraction/application', { data: { type: 'flatpak' } }))
-                .toBe('application/flatpak');
-            expect(schemaRegistry.resolveKind('data/abstraction/identity', { data: { type: 'person' } }))
-                .toBe('identity/person');
+        test('returns null when the schema declares no subtype axis, or the field is absent', () => {
+            expect(schemaRegistry.resolveSubtype('data/abstraction/file', { data: { type: 'x' } })).toBeNull();
+            expect(schemaRegistry.resolveSubtype('data/abstraction/application')).toBeNull();
+            expect(schemaRegistry.resolveSubtype('data/abstraction/application', {})).toBeNull();
+            expect(schemaRegistry.resolveSubtype('data/abstraction/application', { data: {} })).toBeNull();
+            expect(schemaRegistry.resolveSubtype('data/abstraction/application', { data: { type: '  ' } })).toBeNull();
+            expect(schemaRegistry.resolveSubtype('data/abstraction/nonexistent', { data: { type: 'x' } })).toBeNull();
         });
 
-        test('a kindField registration without a kindPrefix is refused', () => {
-            expect(() => schemaRegistry.registerSchema('data/abstraction/widget', Widget, {
-                kindField: 'data.type',
-            })).toThrow(/kindField without kindPrefix/);
-        });
-
-        test('prefixed values are hierarchical, so the parent segment is a roll-up query', () => {
-            // A dotfile can be a directory — the file-vs-folder axis is a kind, not
-            // a second entity, and the parent segment makes "any dotfile" one key.
-            expect(schemaRegistry.resolveKind('data/abstraction/dotfile', { data: { type: 'folder' } }))
-                .toBe('dotfile/folder');
-            expect(schemaRegistry.resolveKind('data/abstraction/dotfile', { data: { type: 'file' } }))
-                .toBe('dotfile/file');
-        });
-
-        test('returns null when the schema declares no kind axis, or the field is absent', () => {
-            expect(schemaRegistry.resolveKind('data/abstraction/file')).toBeNull();
-            expect(schemaRegistry.resolveKind('data/abstraction/application', {})).toBeNull();
-            expect(schemaRegistry.resolveKind('data/abstraction/application', { data: {} })).toBeNull();
-            expect(schemaRegistry.resolveKind('data/abstraction/application', { data: { type: '' } })).toBeNull();
-            expect(schemaRegistry.resolveKind('data/abstraction/nonexistent')).toBeNull();
+        test('the v3 kind resolver is gone, not aliased', () => {
+            expect(schemaRegistry.resolveKind).toBeUndefined();
+            for (const id of schemaRegistry.listSchemas('data/')) {
+                const entry = schemaRegistry.getSchemaEntry(id);
+                expect(entry.kind).toBeUndefined();
+                expect(entry.kindField).toBeUndefined();
+                expect(entry.kindPrefix).toBeUndefined();
+            }
         });
     });
 

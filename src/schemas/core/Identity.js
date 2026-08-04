@@ -48,10 +48,12 @@ const organizationSchema = z.object({
 const identityPayloadSchema = Document.extendDataSchema(
     z.object({
         displayName: z.string(),
-        // Subtype axis. `type` (not `kind`) because `kind` becomes a RESERVED
-        // top-level row field in v3; a data-level `kind` beside a top-level one
-        // would read as the same thing and is exactly the collision the registry's
-        // `kindField: 'data.type'` indirection exists to avoid.
+        // Subtype axis, named `type` rather than `kind`. The original reason was
+        // avoiding a collision with v3's reserved top-level `kind` row field; that
+        // field is gone (removed 2026-08-04) but the name stays, because `kind`
+        // remains a reserved facet namespace and `data.type` is what the registry's
+        // `subtypeField` points at — the segment that becomes part of the schema id
+        // in Rev B.
         // 'team' -> organization and 'integration' -> service under the old enum;
         // there are 0 documents, so this is a pure code change.
         type: z.enum(['person', 'organization', 'service', 'bot']).optional(),

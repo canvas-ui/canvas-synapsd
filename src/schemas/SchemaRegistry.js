@@ -33,25 +33,27 @@ import Workspace from './internal/layers/Workspace.js';
 import Project from './internal/layers/Project.js';
 
 /**
- * The CORE entity set — synapsd's own primitives. Ids stay `data/abstraction/*`
- * under D1(c): the v3 model lands, the id rename is deferred to its own rev gated
- * on a coordinated submodule release. `kind` is what consumers migrate to; see
- * TODO.md.
+ * The CORE entity set — synapsd's own primitives. Ids are still `data/abstraction/*`;
+ * the rename to `data/schema/*` plus hierarchy adoption is Rev B, a coordinated
+ * cross-repo release (see TODO.md).
  *
- * `kind` values are HIERARCHICAL (the `data/mime/*` precedent) — a `browser/tab`
- * ticks both `data/kind/browser` and `data/kind/browser/tab`, so "everything
- * browser-ish" is one key with no enumeration of children.
+ * `subtypeField` names a per-document discriminator (`data.type`). It is DECLARED
+ * here and resolved by `resolveSubtype()`, but nothing indexes it yet: the v3
+ * `data/kind/*` axis it used to feed was removed 2026-08-04, and its replacement
+ * is a SEGMENT of the schema id (`data/schema/application/flatpak`), which lands
+ * with the ids in Rev B. So the subtype axis is deliberately dark in between —
+ * that is safe only because `data/kind/*` had zero consumers (measured).
  */
 const CORE_SCHEMAS = {
     'data/abstraction/document': { SchemaClass: Document },
     'data/abstraction/file': { SchemaClass: File },
     'data/abstraction/message': { SchemaClass: Message },
-    'data/abstraction/email': { SchemaClass: Email, kind: 'email' },
-    'data/abstraction/event': { SchemaClass: Event, kindField: 'data.type', kindPrefix: 'event' },
+    'data/abstraction/email': { SchemaClass: Email },
+    'data/abstraction/event': { SchemaClass: Event, subtypeField: 'data.type' },
     'data/abstraction/todo': { SchemaClass: Task },
-    'data/abstraction/identity': { SchemaClass: Identity, kindField: 'data.type', kindPrefix: 'identity' },
+    'data/abstraction/identity': { SchemaClass: Identity, subtypeField: 'data.type' },
     'data/abstraction/device': { SchemaClass: Device },
-    'data/abstraction/application': { SchemaClass: Application, kindField: 'data.type', kindPrefix: 'application' },
+    'data/abstraction/application': { SchemaClass: Application, subtypeField: 'data.type' },
 };
 
 /**
@@ -60,10 +62,10 @@ const CORE_SCHEMAS = {
  * eventual move is a deletion here, not a rewrite.
  */
 const APP_SCHEMAS = {
-    'data/abstraction/note': { SchemaClass: Note, kind: 'note' },
-    'data/abstraction/tab': { SchemaClass: Tab, kind: 'browser/tab' },
-    'data/abstraction/link': { SchemaClass: Link, kind: 'link' },
-    'data/abstraction/dotfile': { SchemaClass: Dotfile, kindField: 'data.type', kindPrefix: 'dotfile' },
+    'data/abstraction/note': { SchemaClass: Note },
+    'data/abstraction/tab': { SchemaClass: Tab },
+    'data/abstraction/link': { SchemaClass: Link },
+    'data/abstraction/dotfile': { SchemaClass: Dotfile, subtypeField: 'data.type' },
 };
 
 const INTERNAL_SCHEMAS = {
@@ -107,7 +109,7 @@ export function isDocumentData(obj) {
 
 class SchemaRegistry {
 
-    // schemaId -> { SchemaClass, tier, kind?, kindField?, kindPrefix?, indexOptions? }
+    // schemaId -> { SchemaClass, tier, subtypeField?, indexOptions? }
     #entries = new Map();
 
     constructor() {
@@ -125,11 +127,8 @@ class SchemaRegistry {
      * @param {string} schemaId          e.g. 'data/abstraction/note'
      * @param {Function} SchemaClass     a Document subclass
      * @param {object} [options]
-     * @param {string} [options.kind]        literal kind value, e.g. 'browser/tab'
-     * @param {string} [options.kindField]   dotted path to a subtype discriminator,
-     *                                       e.g. 'data.type' — resolved per document
-     * @param {string} [options.kindPrefix]  parent segment prepended to a kindField
-     *                                       value, e.g. 'dotfile' -> 'dotfile/folder'
+     * @param {string} [options.subtypeField] dotted path to a per-document subtype
+     *                                        discriminator, e.g. 'data.type'
      * @param {object} [options.indexOptions] fts/vector/checksum field lists
      * @returns {SchemaRegistry} this, for chaining
      */
@@ -146,24 +145,8 @@ class SchemaRegistry {
             throw new Error(`registerSchema: ${schemaId} is a core schema and cannot be re-registered`);
         }
 
-        if (options.kind && options.kindField) {
-            throw new Error(
-                `registerSchema: ${schemaId} sets both kind and kindField — a schema has one kind axis, ` +
-                'either a literal or a per-document field, not both',
-            );
-        }
-
-        // Enforced, not conventional: kind values are persisted in bitmap keys and
-        // are therefore append-only, so an unprefixed generic value ('file',
-        // 'person', 'calendar') that later collides with another schema's is not
-        // fixable without a migration. Decided 2026-08-03 — always prefix with the
-        // entity, no per-schema judgment call.
-        if (options.kindField && !options.kindPrefix) {
-            throw new Error(
-                `registerSchema: ${schemaId} sets kindField without kindPrefix — kind values derived ` +
-                'from a document field must be prefixed with the entity (e.g. kindPrefix: \'widget\' ' +
-                'yields data/kind/widget/<value>), so they cannot collide across schemas',
-            );
+        if (options.subtypeField !== undefined && typeof options.subtypeField !== 'string') {
+            throw new Error(`registerSchema: ${schemaId} subtypeField must be a dotted field path string`);
         }
 
         // `static indexOptions` on the class is the ONE source of truth — that is
@@ -178,9 +161,7 @@ class SchemaRegistry {
         this.#entries.set(schemaId, {
             SchemaClass,
             tier: 'app',
-            kind: options.kind,
-            kindField: options.kindField,
-            kindPrefix: options.kindPrefix,
+            subtypeField: options.subtypeField,
         });
 
         return this;
@@ -209,8 +190,8 @@ class SchemaRegistry {
     }
 
     /**
-     * Get the full registration record — the shape Phase 3's row work reads
-     * `kind` and `indexOptions` from, so ingest never reads them off the row.
+     * Get the full registration record — the shape ingest reads `subtypeField`
+     * and `indexOptions` from, so it never reads them off the row.
      * @param {string} schemaId Schema identifier
      * @returns {object} Registration entry
      * @throws {Error} If schema is not found
@@ -227,29 +208,31 @@ class SchemaRegistry {
     }
 
     /**
-     * Resolve the `kind` value for a document: a literal from the registration, or
-     * the registration's `kindField` read off the document (optionally under a
-     * parent segment). Returns null when the schema declares no kind axis.
+     * Resolve a document's SUBTYPE — the registration's `subtypeField` read off the
+     * document. Returns null when the schema declares no subtype axis, or the field
+     * is absent/empty.
      *
-     * Hierarchical by construction — the caller ticks every parent segment, so
-     * 'dotfile/folder' also answers to 'dotfile'.
+     * One raw segment, never a path: in Rev B this becomes the last segment of the
+     * schema id (`data/schema/application` + `/flatpak`), so scoping is the id's
+     * job. That is why the v3 `kindPrefix` has no successor here.
+     *
+     * ⚠️ Nothing indexes this yet — see the CORE_SCHEMAS note. It is live and tested
+     * so Rev B wires an existing function into the id instead of rewriting one.
      *
      * @param {string} schemaId
      * @param {object} [document] document instance or plain object
      * @returns {string|null}
      */
-    resolveKind(schemaId, document = null) {
+    resolveSubtype(schemaId, document = null) {
         const entry = this.#entries.get(schemaId);
-        if (!entry) { return null; }
-        if (entry.kind) { return entry.kind; }
-        if (!entry.kindField || !document) { return null; }
+        if (!entry || !entry.subtypeField || !document) { return null; }
 
-        const value = entry.kindField
+        const value = entry.subtypeField
             .split('.')
             .reduce((acc, segment) => (acc == null ? acc : acc[segment]), document);
 
-        if (typeof value !== 'string' || value === '') { return null; }
-        return entry.kindPrefix ? `${entry.kindPrefix}/${value}` : value;
+        if (typeof value !== 'string' || value.trim() === '') { return null; }
+        return value.trim();
     }
 
     /**
