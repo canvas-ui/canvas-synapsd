@@ -40,13 +40,33 @@ import { parseArgs } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 import { open } from 'lmdb';
+import { createRequire } from 'node:module';
+const { RoaringBitmap32 } = createRequire(import.meta.url)('roaring');
 
 import { SCHEMA_ID_RENAMES } from '../src/schemas/rename-map.js';
 
 const TARGET_VERSION = 3;
-const MIN_SOURCE_VERSION = 2;
 const VERSION_KEY = 'internal/schemaVersion';
 const OLD_PREFIX = 'data/abstraction/';
+
+// ── Pre-v2 leg ───────────────────────────────────────────────────────────────
+// Live dev databases turned out to still be at v1 (or unversioned) — the v2
+// migration (#migrateToV3, deleted from the engine 2026-08-04) never ran on
+// them. Its ROW work is folded in here for `applied < 2` databases:
+//   - metadata.features -> root features[] (asserted-only; derived keys are
+//     recomputed and would otherwise be un-untickable)
+//   - recover asserted tags that exist ONLY in bitmaps (the one class of state
+//     with no rebuild source — the entire reason features moved onto the row)
+//   - drop per-row indexOptions (schema-level since v2)
+//   - drop bitmap namespaces v2 retired that rebuildL3 does not know about
+//     (rel/* -> dupsort edges, data/source/* -> folded into data/backend/*)
+// Kind stamping is deliberately NOT reproduced: the axis was removed.
+
+// Prefixes a row may legitimately ASSERT (everything else is derived state the
+// rebuild recomputes). Mirrors normalizeFeatureArray minus per-schema facets.
+const ASSERTED_KEY_RE = /^(tag\/|custom\/|client\/|data\/dataset\/|data\/no-location$)/;
+const RECOVERY_PREFIXES = ['tag/', 'custom/', 'client/', 'data/dataset/'];
+const PRE_V2_DROP_PREFIXES = ['rel/', 'data/source/'];
 
 const OPTS = {
     db: { type: 'string', short: 'd' },
@@ -149,31 +169,96 @@ async function main() {
         await env.close();
         process.exit(1);
     }
-    if (applied < MIN_SOURCE_VERSION && applied !== 0) {
-        console.error(`Refusing: database is at schema v${applied}; migrate it to v${MIN_SOURCE_VERSION} first.`);
-        await env.close();
-        process.exit(1);
+    const preV2 = applied < 2;
+    if (preV2) { console.log(`database is at schema v${applied} — running the pre-v2 row work too (features promotion + bitmap-tag recovery)`); }
+
+    // Pre-v2: recover asserted tags living only in bitmaps, BEFORE the row pass.
+    const assertedByDoc = new Map();
+    let bitmapsDroppedRaw = 0;
+    if (preV2) {
+        const bitmaps = env.openDB('bitmaps');
+        for (const { key, value } of bitmaps.getRange()) {
+            if (typeof key !== 'string') { continue; }
+            if (RECOVERY_PREFIXES.some((p) => key.startsWith(p))) {
+                let roaring;
+                try { roaring = RoaringBitmap32.deserialize(value, true); } catch { continue; }
+                for (const id of roaring) {
+                    if (!assertedByDoc.has(id)) { assertedByDoc.set(id, new Set()); }
+                    assertedByDoc.get(id).add(key);
+                }
+            } else if (PRE_V2_DROP_PREFIXES.some((p) => key.startsWith(p))) {
+                if (!dryRun) { bitmaps.removeSync(key); }
+                bitmapsDroppedRaw++;
+            }
+        }
+        console.log(`pre-v2: recovered asserted keys for ${assertedByDoc.size} docs, dropped ${bitmapsDroppedRaw} retired bitmaps (rel/, data/source/)`);
     }
 
     let rows = 0;
     let rowsChanged = 0;
-    let unknownOldIds = new Set();
+    let featuresMoved = 0;
+    let indexOptionsDropped = 0;
+    const unknownOldIds = new Set();
+    const BATCH = 2000;
+    let batch = [];
+    const flush = () => {
+        if (batch.length === 0) { return; }
+        const entries = batch;
+        batch = [];
+        documents.transactionSync(() => {
+            for (const [key, row] of entries) { documents.putSync(key, row); }
+        });
+    };
+
     for (const { key, value } of documents.getRange()) {
         rows++;
         if (!value || typeof value !== 'object') { continue; }
-        const next = renameId(value.schema);
-        if (next) {
-            if (!dryRun) { documents.putSync(key, { ...value, schema: next }); }
-            rowsChanged++;
-        } else if (typeof value.schema === 'string' && value.schema.startsWith(OLD_PREFIX)) {
-            unknownOldIds.add(value.schema);
+        let row = value;
+        let changed = false;
+
+        const next = renameId(row.schema);
+        if (next) { row = { ...row, schema: next }; changed = true; }
+        else if (typeof row.schema === 'string' && row.schema.startsWith(OLD_PREFIX)) {
+            unknownOldIds.add(row.schema);
         }
+
+        if (preV2) {
+            if (row === value) { row = { ...row }; }
+            if (row.indexOptions !== undefined) { delete row.indexOptions; indexOptionsDropped++; changed = true; }
+            const legacy = Array.isArray(row.metadata?.features) ? row.metadata.features : [];
+            const recovered = assertedByDoc.get(Number(key));
+            if (legacy.length > 0 || recovered || !Array.isArray(row.features)) {
+                const before = Array.isArray(row.features) ? row.features : [];
+                const merged = [...before, ...legacy, ...(recovered ? [...recovered] : [])];
+                const seen = new Set();
+                row.features = merged.filter((k) =>
+                    typeof k === 'string' && ASSERTED_KEY_RE.test(k) && !seen.has(k) && seen.add(k));
+                if (legacy.length > 0 || recovered) { featuresMoved++; }
+                changed = true;
+            }
+            if (row.metadata && row.metadata.features !== undefined) {
+                row.metadata = { ...row.metadata };
+                delete row.metadata.features;
+                changed = true;
+            }
+        }
+
+        if (changed) {
+            rowsChanged++;
+            if (!dryRun) {
+                batch.push([key, row]);
+                if (batch.length >= BATCH) { flush(); }
+            }
+        }
+        if (rows % 100000 === 0) { console.log(`  … ${rows} rows scanned`); }
     }
+    if (!dryRun) { flush(); }
     if (unknownOldIds.size > 0) {
         console.error(`Refusing: rows carry old-prefix ids with no rename entry: ${[...unknownOldIds].join(', ')}`);
         await env.close();
         process.exit(1);
     }
+    if (preV2) { console.log(`pre-v2: ${featuresMoved} rows had features promoted/recovered, ${indexOptionsDropped} indexOptions dropped`); }
 
     // Layer querySpec.features (canvas "stored db view" layers and directory
     // nodes persist under tree/<treeId>/layer/<layerId> in the internal store).
