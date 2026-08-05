@@ -4,11 +4,22 @@
 
 # SynapsD
 
-SynapsD is a small KV database built on top of `LMDB` with `roaring-bitmap` and `lancedb` based indexes, primarily used as an in-process index and, secondarily, as a JSON document store for [Canvas Workspaces](https://github.com/canvas-ui/canvas-server).
+SynapsD is a small in-process database for indexing *everything you touch* — files, emails, notes, browser tabs, git repos, dotfiles — and querying it all through one composable filter language. Built on `LMDB` with `roaring-bitmap` and `LanceDB` indexes, it is primarily the index and, secondarily, the JSON document store behind [Canvas Workspaces](https://github.com/canvas-ui/canvas-server).
 
-This module is meant to index all data from configured data sources of a Workspace (files, emails, notes, browser tabs, github repos, dotfiles etc), and provide a unified virtual fs-like tree abstraction on top that should ideally mimick whatever mental model you need to make work with your data more efficient.
+The core idea: store a document **once**, then let it appear in as many views as your mental model needs — a project tree, a tag, a timeline, a map, a dataset — because each appearance costs bitmap bits, not copies. Every feature below narrows the same candidate set, so they all combine freely in a single query.
 
-> **v3.x** — the *refactor-v3* pass and the Rev B id rename have landed (schema version **3**, hierarchical `data/schema/*` ids since 2026-08-05). A database below that version refuses to open, and the engine carries no migration code to fix it — run `scripts/migrate-schema-v3.js`; see **Schema version and rebuild**.
+## Highlights
+
+- **[Context trees](#trees)** — virtual, filesystem-like trees over your data. A path is a logical AND of the layers along it: `ctx:/work/customer-a/devops/issues` is "everything linked to all three", and shortening the path *widens* the result — zoom-out for free. One document can live in many trees; placement is cheap and reversible.
+- **[Bitmap-powered search](#the-query-spec)** — membership, tags, facets, mime types, device presence and schema identity are all roaring bitmaps, so "files in `/work/customer-a`, tagged `finance`, not in staging" is a set intersection, not a table scan. Counts, existence checks and live standing views come straight off the bitmaps, [without loading a single document](#refining-a-query-over-time).
+- **[Multi-timeline support](#timelines-and-intervals)** — any number of named time axes per document, from nanoseconds to gigayears on one grammar: "updated today", "due this week", "Roman Empire, 27 BCE–476 CE", open-ended "still alive" intervals, and [zeitgeist queries](#multi-timeline-retrieval-mode-grouped-zeitgeist) that answer "what does this date mean across wikipedia AND my life" in one call.
+- **[Vector search](#semantic-search-vectors)** — BM25 full-text and dense-vector kNN fused with RRF, running only on documents that already survived the structural filter. SynapsD stores and namespaces vectors but **owns no model** — an external embedder fills the spaces through a three-call contract, and without one everything degrades gracefully to FTS.
+- **[Datasets](#datasets)** — named ingest partitions (`data/dataset/wikipedia`, `data/dataset/personal`) you can toggle in and out of *every* query like lenses, and drop wholesale — wipe an imported corpus without touching your own documents.
+- **[Typed edges](#relations-and-edges)** — a directed document graph (`mentions`, `replies-to`, `authored-by`, …) that composes into the same pipeline as everything else: "everything mentioning Alice, in this context, tagged important" is a one-hop scan ANDed into the candidate bitmap.
+- **[Spatial index](#spatial-index-s2)** — "photos within 5 km", "everything in this map viewport" as a single range query over S2 cells.
+- **[Schemas that publish themselves](#schemas)** — hierarchical ids (`data/schema/message/email` *is a* `data/schema/message`), zod validation, and derived JSON Schema consumers can fetch instead of hand-copying enums.
+
+> **v3.x** — the *refactor-v3* pass and the Rev B id rename have landed (schema version **3**, hierarchical `data/schema/*` ids since 2026-08-05). A database below that version refuses to open, and the engine carries no migration code to fix it — run `scripts/migrate-schema-v3.js`; see **[Schema version and rebuild](#schema-version-and-rebuild)**.
 
 ## Architecture at a glance
 
@@ -35,18 +46,6 @@ This split buys a few properties that show up everywhere in the API:
 | **L3** | Everything derived: feature/facet bitmaps, mime, backend/device presence, timelines, geo cells, asserted edges, FTS/vector rows. | L1 + extractors — `rebuildL3()` |
 
 The invariant that keeps this honest: drop L3, recompute it from L1, and the index must come back identical. If it does not, something is storing state with no source.
-
-## What it is good for
-
-Everything below composes into a single query spec, which is the point of the whole design:
-
-- **Membership** without a join: "files in `/work/customer-a`, tagged `finance`, not in staging" is a bitmap intersection, not a table scan.
-- **Ranked retrieval** scoped by membership: BM25 full-text and dense-vector kNN fused (RRF), running only on documents that already survived the structural filter.
-- **Graph adjacency** as set algebra: "everything mentioning Alice, in this context, tagged important" is a one-hop dupsort scan ANDed into the same candidate bitmap.
-- **Time**, at any scale: "updated today", "due today", "Roman Empire, 27 BCE to 476 CE", "the Quaternary". Same filter grammar, from nanoseconds to gigayears, including open-ended ("still alive") intervals.
-- **Space**: "photos within 5 km of here", "everything in this map viewport", as one range query over an S2 cell index.
-- **Live views**: a query object that stays open and tells you the instant a newly ingested document enters or leaves the result set.
-- **Zero-fetch probes**: counts, existence, and "any pending todos in here?" answered from bitmaps without loading a single document body.
 
 ## Quick start
 
