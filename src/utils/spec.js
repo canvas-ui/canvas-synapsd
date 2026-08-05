@@ -211,6 +211,10 @@ export function parseSpec(rawSpec = {}) {
             offset: pick('offset'),
             page: pick('page'),
             parse: pick('parse'),
+            // Return the matching document ids only, skipping the LMDB fetch and
+            // parse entirely. For callers that already hold the documents and
+            // only need to know whether the result set moved (cache revalidation).
+            idsOnly: pick('idsOnly'),
             groupBy: pick('groupBy'),
             // Optional cosine-distance floor for the dense side of vector/hybrid
             // search: drop kNN neighbours outside [minDistance, maxDistance] before

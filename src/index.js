@@ -3020,6 +3020,16 @@ class SynapsD extends EventEmitter {
     // bitmap===null => unconstrained (all docs / search-all); empty => no survivors.
     async rank(bitmap, match = null, options = {}) {
         const parseDocuments = options.parse !== false;
+        // idsOnly short-circuits the LMDB fetch: the result array holds document
+        // ids instead of documents, with the same count/totalCount/error shape.
+        const idsOnly = options.idsOnly === true;
+        const idResult = (ids, totalCount, error = null) => {
+            const result = [...ids];
+            result.count = result.length;
+            result.totalCount = totalCount;
+            result.error = error;
+            return result;
+        };
 
         if (match == null) {
             const providedLimit = Number.isFinite(options.limit) ? Number(options.limit) : undefined;
@@ -3053,6 +3063,7 @@ class SynapsD extends EventEmitter {
                 const ids = keyed.concat(missing);
                 const totalCount = ids.length;
                 const slicedIds = limit === 0 ? ids : ids.slice(offset, offset + limit);
+                if (idsOnly) { return idResult(slicedIds, totalCount); }
                 const docs = await this.documents.getMany(slicedIds);
                 const resultArray = parseDocuments ? this.#safeParseDocuments(docs) : docs;
                 resultArray.count = resultArray.length;
@@ -3064,12 +3075,14 @@ class SynapsD extends EventEmitter {
             if (bitmap === null) {
                 const totalCount = await this.documents.getCount();
                 const pagedDocs = [];
+                const pagedIds = [];
                 let seen = 0;
-                for await (const { value } of this.documents.getRange({ reverse: descending })) {
+                for await (const { key, value } of this.documents.getRange({ reverse: descending })) {
                     if (seen++ < offset) { continue; }
-                    pagedDocs.push(value);
-                    if (limit > 0 && pagedDocs.length >= limit) { break; }
+                    if (idsOnly) { pagedIds.push(key); } else { pagedDocs.push(value); }
+                    if (limit > 0 && (idsOnly ? pagedIds.length : pagedDocs.length) >= limit) { break; }
                 }
+                if (idsOnly) { return idResult(pagedIds, totalCount); }
                 const resultArray = parseDocuments ? this.#safeParseDocuments(pagedDocs) : pagedDocs;
                 resultArray.count = resultArray.length;
                 resultArray.totalCount = totalCount;
@@ -3082,6 +3095,7 @@ class SynapsD extends EventEmitter {
             if (descending) { ids.reverse(); }
             const totalCount = ids.length;
             const slicedIds = limit === 0 ? ids : ids.slice(offset, offset + limit);
+            if (idsOnly) { return idResult(slicedIds, totalCount); }
             const docs = await this.documents.getMany(slicedIds);
             const resultArray = parseDocuments ? this.#safeParseDocuments(docs) : docs;
             resultArray.count = resultArray.length;
@@ -3098,6 +3112,7 @@ class SynapsD extends EventEmitter {
         if (bitmap !== null && bitmap.isEmpty) { return this.#emptyResult(); }
         const scopedIds = bitmap ? bitmap.toArray() : [];
         const { pageIds, totalCount, error } = await this.#rankIds(scopedIds, queryString, options);
+        if (idsOnly) { return idResult(pageIds, totalCount, error); }
 
         const docs = pageIds.length > 0 ? await this.documents.getMany(pageIds) : [];
         const result = this.#safeParseDocuments(docs);
