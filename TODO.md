@@ -866,6 +866,15 @@ Functional requirements:
       both DELETED. Regression test in query-and-membership.test.js asserts the gate filters.
 - [] Ensure all batch methods are using the accompanied backend(LMDB/Lance) batch methods too whereever it makes sense
 - [] Add backup/restore or dump/import functionality internally
+- [] **Threshold-gated LMDB compaction on start** (discussed 2026-08-05, after the v3 migration
+  grew the test DB's data.mdb 1.86G -> 3.36G in copy-on-write pages). NOT unconditional — LMDB
+  reuses freed pages, so steady-state DBs gain nothing from a full-file copy on every open, and
+  workspace DBs open lazily (an unconditional compact turns first access after a deploy into a
+  stall). Gate on reclaimable bytes from env stats (e.g. >25% of file AND >=128MB), and reuse the
+  `backupOnOpen` machinery: it ALREADY produces a compacted copy on open and then archives it while
+  the server keeps running on the bloated file — swap the compacted copy in as the live file and
+  keep the old file as that generation's backup. One copy pass, both outcomes. Sequence lives in
+  `backends/lmdb/index.js`: open -> stat -> copy-compact -> close -> atomic rename -> reopen.
 - [] Add DB snapshot/restore option(on top of versioning? fetaures) to enable undo/redo ops || db op logs + traversal
 LMDB copy/snapshot - mdb_copy (or the env .copy() API) gives a consistent point-in-time snapshot of the whole store without stopping writers. Wire it to a workspace.snapshot() that copies the data dir to a timestamped folder. Simplest possible "undo" net.
 
