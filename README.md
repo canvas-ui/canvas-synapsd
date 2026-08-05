@@ -8,7 +8,7 @@ SynapsD is a small KV database built on top of `LMDB` with `roaring-bitmap` and 
 
 This module is meant to index all data from configured data sources of a Workspace (files, emails, notes, browser tabs, github repos, dotfiles etc), and provide a unified virtual fs-like tree abstraction on top that should ideally mimick whatever mental model you need to make work with your data more efficient.
 
-> **v3.x** — the *refactor-v3* pass has landed (schema version 2). A database below that version refuses to open, and the engine carries no migration code to fix it; see **Schema version and rebuild**.
+> **v3.x** — the *refactor-v3* pass and the Rev B id rename have landed (schema version **3**, hierarchical `data/schema/*` ids since 2026-08-05). A database below that version refuses to open, and the engine carries no migration code to fix it — run `scripts/migrate-schema-v3.js`; see **Schema version and rebuild**.
 
 ## Architecture at a glance
 
@@ -71,7 +71,7 @@ const hits = await db.query('draft', { paths: ['ctx:/work/project-a'] });
 await db.shutdown();   // `stop()` is an alias
 ```
 
-Constructor options: `path` (required, alias `rootPath`), `backupOnOpen`, `backupOnClose`, `compression`, `eventEmitterOptions`, `semantic` (see **Semantic search**). `backend` accepts only `'lmdb'`.
+Constructor options: `path` (required, alias `rootPath`), `backupOnOpen`, `backupOnClose`, `backupRetentionDays` (age-based backup retention keyed off the dated backup folders, default **7**; the newest backup always survives), `maxBackupRetention` (optional folder-count cap on top of the age rule, off by default), `compression`, `eventEmitterOptions`, `semantic` (see **Semantic search**). `backend` accepts only `'lmdb'`.
 
 All examples below assume a started `db`.
 
@@ -1043,17 +1043,26 @@ await db.deleteDataset('scan-2026-08', { dropDocuments: true });
 
 **There is no migration code in this engine (removed 2026-08-04).** One-time migrations were living on the startup path, gated behind a persisted version, running an `O(all-docs)` check on every open for work that happens once in a database's life. They are operator actions; write a one-off script against a backup instead.
 
-What stayed is the **refusal**. `SCHEMA_VERSION` (currently **2**) is the row format this build writes; a *non-empty* database below it throws at `start()`:
+What stayed is the **refusal**. `SCHEMA_VERSION` (currently **3** — the Rev B hierarchical id rename) is the row format this build writes; a *non-empty* database below it throws at `start()`:
 
 ```
-synapsd: database is at schema v1, this build needs v2. Migration code was removed
+synapsd: database is at schema v2, this build needs v3. Migration code was removed
 from the engine; migrate the database with a one-off script against a backup, then
-stamp internal/schemaVersion to 2.
+stamp internal/schemaVersion to 3.
 ```
 
 Deleting that check would not make a stale database someone else's problem — it would make it **silent data loss**. Current code reading a pre-v2 row never promotes `metadata.features`, so asserted tags that exist only in bitmaps — the one class of state with no rebuild source, which is *why* `features[]` moved onto the row — would be dropped on the next write, with no error anywhere.
 
 A brand-new or empty database is stamped and skips the refusal, so a fresh install never trips it. Bump `SCHEMA_VERSION` when a change makes rows written by this build unreadable by the previous one.
+
+The one-off script for the current version is **`scripts/migrate-schema-v3.js`** — run it by hand against a backup:
+
+```bash
+node scripts/migrate-schema-v3.js -d <workspace>/db [--hooks <workspace>/hooks] [--dry-run]
+node scripts/migrate-schema-v3.js --users-root <server>/server/users   # every workspace at once
+```
+
+It rewrites `doc.schema` through the exported `SCHEMA_ID_RENAMES`, migrates the id-bearing config that would otherwise fail *silently* (canvas layer `querySpec.features`, workspace hook `rules.json`), handles pre-v2 databases too (features promotion + bitmap-only tag recovery), stamps the version **last** (a killed run stays refused by the gate — just re-run), then reopens and runs `rebuildL3()` + the FTS rebuild. Migration logic stays in `scripts/`, not the engine, at least until the schema design fully crystalizes.
 
 ### `rebuildL3()`
 
