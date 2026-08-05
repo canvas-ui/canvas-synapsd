@@ -690,10 +690,16 @@ deliberate decision rather than a drive-by fix.
   writes the field when it changes, and `undefined ?? null === null`, so it skips. Anything built
   through `BaseDocument` gets an explicit `null`. Functionally identical; inconsistent if you grep
   raw rows.
-- **`rebuildL3()` is a single-document loop.** Per-document `put` rather than one batched
-  transaction. Fine at ~5k (pre-prod: 4953 docs, instant); not designed for 1M. Measure on the
-  wikipedia set before relying on it. (The v3 migration had the same shape and the same caveat; it
-  is gone — see below.)
+- **`rebuildL3()` is a single-document loop — MEASURED 2026-08-05, needs batching before wikipedia.**
+  Per-document `put` rather than one batched transaction. Fine at ~5k (pre-prod: 4953 docs,
+  instant). On the 1.2M-row `test` workspace (all `data/schema/file`, filesystem-import shape) the
+  bitmap replay ran **>60 minutes without finishing** and was killed; rows+stamp were already done
+  (the migration script does its own batched row pass in 2000-row transactions — ~2 min for the same
+  1.2M rows, which is the shape the replay wants). Nice-to-have: batch `#replayDerivedPlane` —
+  accumulate per-bitmap tick sets across a chunk of docs and apply per bitmap, instead of
+  per-doc `#applyMembership` round-trips. That `test` workspace still owes a
+  `rebuildL3({bitmaps,edges})` + `reindexSearchIndex({rebuild:true})` when someone next cares
+  about it.
 - **`reindexSearchIndex({rebuild:true})` is owed on migrated databases.** The FTS fix (objects were
   indexed as the literal `"[object Object]"`) changes indexed content for `data/abstraction/document`,
   Identity `identifiers`/`channels`/`links` and Email `from`/`to`. The migration deliberately does
