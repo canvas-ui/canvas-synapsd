@@ -71,6 +71,7 @@ const PRE_V2_DROP_PREFIXES = ['rel/', 'data/source/'];
 const OPTS = {
     db: { type: 'string', short: 'd' },
     hooks: { type: 'string' },
+    'users-root': { type: 'string' },
     'dry-run': { type: 'boolean', default: false },
     help: { type: 'boolean', short: 'h', default: false },
 };
@@ -80,13 +81,17 @@ function usage() {
 
 Usage:
   node scripts/migrate-schema-v3.js -d <workspace-db-dir> [--hooks <hooks-dir>] [--dry-run]
+  node scripts/migrate-schema-v3.js --users-root <server-users-dir> [--dry-run]
 
 Options:
-  -d, --db <dir>     Path to the workspace SynapsD database directory (required)
-      --hooks <dir>  Workspace hooks dir holding rules.json / rules/*.json
-                     (default: <db-dir>/../hooks when it exists)
-      --dry-run      Report what would change, write nothing
-  -h, --help         Show this help
+  -d, --db <dir>         Path to ONE workspace SynapsD database directory
+      --hooks <dir>      Workspace hooks dir holding rules.json / rules/*.json
+                         (default: <db-dir>/../hooks when it exists)
+      --users-root <dir> Migrate EVERY workspace found under a server users dir
+                         (<root>/<user>/{workspaces,Workspaces,agents}/<name>/db);
+                         per-workspace hooks dirs are picked up automatically
+      --dry-run          Report what would change, write nothing
+  -h, --help             Show this help
 `);
 }
 
@@ -136,28 +141,9 @@ function migrateJsonDeep(node) {
     return changed ? result : null;
 }
 
-async function main() {
-    let parsed;
-    try {
-        parsed = parseArgs({ options: OPTS, allowPositionals: false });
-    } catch (e) {
-        console.error(`Argument error: ${e.message}`);
-        usage();
-        process.exit(1);
-    }
-
-    const { db: dbDir, hooks, 'dry-run': dryRun, help } = parsed.values;
-    if (help) { usage(); return; }
-    if (!dbDir) {
-        console.error('Error: -d/--db <workspace-db-dir> is required.');
-        usage();
-        process.exit(1);
-    }
-
-    const hooksDir = hooks ?? (fs.existsSync(path.join(dbDir, '..', 'hooks'))
-        ? path.join(dbDir, '..', 'hooks')
-        : null);
-
+// Migrate ONE workspace database. Throws on refusal (multi-DB mode reports and
+// continues with the next workspace instead of dying on the first bad one).
+async function migrateDatabase(dbDir, hooksDir, dryRun) {
     // ── Raw pass: rows + config + stamp ──────────────────────────────────────
     const env = open({ path: dbDir, maxDbs: 64, compression: true });
     const documents = env.openDB('documents');
@@ -165,9 +151,8 @@ async function main() {
 
     const applied = Number(internal.get(VERSION_KEY)) || 0;
     if (applied > TARGET_VERSION) {
-        console.error(`Refusing: database is at schema v${applied}, newer than this script's target v${TARGET_VERSION}.`);
         await env.close();
-        process.exit(1);
+        throw new Error(`database is at schema v${applied}, newer than this script's target v${TARGET_VERSION}`);
     }
     const preV2 = applied < 2;
     if (preV2) { console.log(`database is at schema v${applied} — running the pre-v2 row work too (features promotion + bitmap-tag recovery)`); }
@@ -254,9 +239,8 @@ async function main() {
     }
     if (!dryRun) { flush(); }
     if (unknownOldIds.size > 0) {
-        console.error(`Refusing: rows carry old-prefix ids with no rename entry: ${[...unknownOldIds].join(', ')}`);
         await env.close();
-        process.exit(1);
+        throw new Error(`rows carry old-prefix ids with no rename entry: ${[...unknownOldIds].join(', ')}`);
     }
     if (preV2) { console.log(`pre-v2: ${featuresMoved} rows had features promoted/recovered, ${indexOptionsDropped} indexOptions dropped`); }
 
@@ -351,6 +335,76 @@ async function main() {
         await db.shutdown();
     }
     console.log('done.');
+}
+
+// Discover workspace db dirs under a server users root: matches the layouts
+// seen in the wild — <root>/<user>/{workspaces,Workspaces,agents}/<name>/db —
+// and only returns dirs that actually hold an LMDB file.
+function discoverDatabases(usersRoot) {
+    const found = [];
+    for (const user of fs.readdirSync(usersRoot, { withFileTypes: true })) {
+        if (!user.isDirectory()) { continue; }
+        for (const bucket of ['workspaces', 'Workspaces', 'agents']) {
+            const bucketPath = path.join(usersRoot, user.name, bucket);
+            if (!fs.existsSync(bucketPath)) { continue; }
+            for (const ws of fs.readdirSync(bucketPath, { withFileTypes: true })) {
+                if (!ws.isDirectory()) { continue; }
+                const dbDir = path.join(bucketPath, ws.name, 'db');
+                if (fs.existsSync(path.join(dbDir, 'data.mdb'))) { found.push(dbDir); }
+            }
+        }
+    }
+    return found;
+}
+
+const defaultHooksFor = (dbDir) =>
+    fs.existsSync(path.join(dbDir, '..', 'hooks')) ? path.join(dbDir, '..', 'hooks') : null;
+
+async function main() {
+    let parsed;
+    try {
+        parsed = parseArgs({ options: OPTS, allowPositionals: false });
+    } catch (e) {
+        console.error(`Argument error: ${e.message}`);
+        usage();
+        process.exit(1);
+    }
+
+    const { db: dbDir, hooks, 'users-root': usersRoot, 'dry-run': dryRun, help } = parsed.values;
+    if (help) { usage(); return; }
+    if (!dbDir && !usersRoot) {
+        console.error('Error: either -d/--db <workspace-db-dir> or --users-root <server-users-dir> is required.');
+        usage();
+        process.exit(1);
+    }
+
+    if (dbDir) {
+        const hooksDir = hooks ?? defaultHooksFor(dbDir);
+        await migrateDatabase(dbDir, hooksDir, dryRun);
+        return;
+    }
+
+    // Multi-DB mode: every workspace under the users root, sequentially. One bad
+    // database reports and does not stop the rest; exit code reflects failures.
+    const targets = discoverDatabases(usersRoot);
+    console.log(`found ${targets.length} workspace database(s) under ${usersRoot}\n`);
+    const failures = [];
+    for (const target of targets) {
+        console.log(`━━ ${target}`);
+        try {
+            await migrateDatabase(target, defaultHooksFor(target), dryRun);
+        } catch (error) {
+            console.error(`✖ FAILED: ${error.message}`);
+            failures.push({ target, message: error.message });
+        }
+        console.log('');
+    }
+    if (failures.length > 0) {
+        console.error(`${failures.length} of ${targets.length} database(s) failed:`);
+        for (const f of failures) { console.error(`  - ${f.target}: ${f.message}`); }
+        process.exit(1);
+    }
+    console.log(`all ${targets.length} database(s) migrated.`);
 }
 
 main().catch((error) => {
