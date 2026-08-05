@@ -34,10 +34,16 @@ class Db {
                 path: options.path,
                 backupPath: options.backupPath ?? path.join(options.path, 'backup'),
 
-                // Backup options
+                // Backup options. Retention is AGE-based (days, keyed off the
+                // YYYYMMDD folder name) — the old count-based default punished
+                // restart-heavy days, since every open mints a new `.N` folder
+                // and "keep 14 folders" could mean two days of real coverage.
+                // maxBackupRetention (a folder-count cap) is still honored when
+                // set explicitly, as a belt on top of the age rule.
                 backupOnOpen: options.backupOnOpen ?? true,
                 backupOnClose: options.backupOnClose ?? false,
-                maxBackupRetention: options.maxBackupRetention ?? 14,
+                backupRetentionDays: options.backupRetentionDays ?? 7,
+                maxBackupRetention: options.maxBackupRetention ?? null,
 
                 // Internals
                 maxDbs: options.maxDbs ?? 64,
@@ -70,6 +76,7 @@ class Db {
             backupOnOpen: options.backupOnOpen,
             backupOnClose: options.backupOnClose,
             compact: options.backupCompact,
+            backupRetentionDays: options.backupRetentionDays,
             maxBackupRetention: options.maxBackupRetention,
         };
 
@@ -442,7 +449,28 @@ class Db {
                 }))
                 .sort((a, b) => a.name.localeCompare(b.name)); // Sort chronologically
 
-            const foldersToDelete = backupFolders.slice(0, Math.max(0, backupFolders.length - this.backupOptions.maxBackupRetention));
+            // Age rule: drop folders whose date is older than the retention
+            // window. YYYYMMDD compares correctly as a string. The NEWEST folder
+            // is always kept regardless of age — a database untouched for months
+            // must not lose its only backup to the age rule.
+            const days = this.backupOptions.backupRetentionDays;
+            const cutoff = Number.isFinite(days) && days > 0
+                ? new Date(Date.now() - days * 86400000).toISOString().split('T')[0].replace(/-/g, '')
+                : null;
+
+            const deletable = new Set();
+            for (const folder of backupFolders.slice(0, -1)) { // never the newest
+                if (cutoff && folder.date < cutoff) { deletable.add(folder.name); }
+            }
+            // Optional count cap on top of the age rule (explicit opt-in only).
+            const cap = this.backupOptions.maxBackupRetention;
+            if (Number.isFinite(cap) && cap > 0 && backupFolders.length > cap) {
+                for (const folder of backupFolders.slice(0, backupFolders.length - cap)) {
+                    deletable.add(folder.name);
+                }
+            }
+
+            const foldersToDelete = backupFolders.filter(f => deletable.has(f.name));
 
             foldersToDelete.forEach(folder => {
                 fs.rmSync(folder.path, { recursive: true, force: true });
