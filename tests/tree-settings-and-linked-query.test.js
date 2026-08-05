@@ -109,6 +109,25 @@ describe('tree settings bag + linkContextRoot + linked/unlinked query', () => {
         expect(tree.pathExists('/imap/me@idnc.sk')).toBe(false);
     });
 
+    test('DirectoryTree.list() hydrates the documents ticked at a path', async () => {
+        // getDocumentsByIdArray answers with an envelope ({ data, count, error }),
+        // never a bare array. An Array.isArray() guard on the result therefore
+        // returned [] for every call — the bitmap was found, the documents were
+        // fetched, and then silently dropped. WebDAV directory-tree listings
+        // (Trees/<dir tree>/…) showed folders but never files because of it.
+        const id = await db.put(note('filed here'), {
+            context: null,
+            directory: { tree: 'directory', path: '/inbox' },
+        });
+
+        const tree = db.getTree('directory');
+        expect((await tree.find('/inbox')).size).toBe(1);
+
+        const docs = await tree.list({ path: '/inbox' });
+        expect(docs.map((doc) => doc.id)).toEqual([id]);
+        expect(docs[0].data.title).toBe('filed here');
+    });
+
     test('listTreeDocuments filters by linkage into other trees', async () => {
         await createMirrorTree();
 
