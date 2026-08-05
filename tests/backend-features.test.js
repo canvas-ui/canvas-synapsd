@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 
-const FILE = 'data/abstraction/file';
+const FILE = 'data/schema/file';
 
 const blob = (checksum, locations) => ({
     schema: FILE,

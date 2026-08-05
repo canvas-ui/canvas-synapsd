@@ -3,7 +3,7 @@
 import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { z } from 'zod';
 
-const DOCUMENT_SCHEMA_NAME = 'data/abstraction/file';
+const DOCUMENT_SCHEMA_NAME = 'data/schema/file';
 const DOCUMENT_SCHEMA_VERSION = '3.0';
 
 // A File is a pure blob: its identity is the checksum, its bytes live in

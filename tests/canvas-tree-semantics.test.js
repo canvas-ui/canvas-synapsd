@@ -129,12 +129,12 @@ describe('canvas tree semantics', () => {
             const tree = db.getDefaultContextTree();
 
             await db.put({
-                schema: 'data/abstraction/file',
+                schema: 'data/schema/file',
                 data: { filename: 'invoice.pdf', mime: 'application/pdf' },
                 checksumArray: ['sha256:file'],
             }, { context: { tree: tree.id, path: '/dev' } });
             await db.put({
-                schema: 'data/abstraction/note',
+                schema: 'data/schema/note',
                 data: { content: 'note' },
             }, { context: { tree: tree.id, path: '/dev' } });
             await tree.insertPath('/Files', {
@@ -143,12 +143,12 @@ describe('canvas tree semantics', () => {
 
             const result = await db.list({
                 context: { tree: tree.id, path: '/Files' },
-                features: { allOf: ['data/abstraction/file'] },
+                features: { allOf: ['data/schema/file'] },
             });
 
             expect(result.error).toBeNull();
             expect(result.count).toBe(1);
-            expect(result[0].schema).toBe('data/abstraction/file');
+            expect(result[0].schema).toBe('data/schema/file');
         } finally {
             await db.shutdown().catch(() => null);
             await fs.rm(dbPath, { recursive: true, force: true });
@@ -180,7 +180,7 @@ describe('canvas tree semantics', () => {
             await db.start();
             const tree = db.getDefaultContextTree();
             const sourceDoc = {
-                schema: 'data/abstraction/note',
+                schema: 'data/schema/note',
                 data: { content: 'malaga note' },
                 checksumArray: ['sha256/malaga-note'],
             };

@@ -6,7 +6,7 @@ import path from 'node:path';
 import Db from '../src/index.js';
 import Task from '../src/schemas/core/Task.js';
 
-const TODO_SCHEMA = 'data/abstraction/todo';
+const TODO_SCHEMA = 'data/schema/task';
 
 const iso = (d) => d.toISOString();
 const today = () => { const d = new Date(); d.setHours(18, 0, 0, 0); return d; };
@@ -115,7 +115,7 @@ describe('todo schema + tasks timeline', () => {
         await db.put({ schema: TODO_SCHEMA, data: { title: 'far future', dueDate: iso(inDays(30)) } });
 
         const res = await db.list({
-            features: ['data/abstraction/todo'],
+            features: ['data/schema/task'],
             // '+' on a raw bitmap key is stripped to the AND default (regression:
             // it used to leak into the key and silently match nothing).
             filters: ['+data/status/pending', `+t:tasks:${iso(inDays(0)).slice(0, 10)}..${iso(inDays(7)).slice(0, 10)}`],
@@ -126,7 +126,7 @@ describe('todo schema + tasks timeline', () => {
     });
 
     test('non-todo docs with a data.status string do not pollute the axis', async () => {
-        await db.put({ schema: 'data/abstraction/note', data: { title: 'note', content: 'x', status: 'pending' } });
+        await db.put({ schema: 'data/schema/note', data: { title: 'note', content: 'x', status: 'pending' } });
         const pendingIds = await db.list({ filters: ['data/status/pending'], limit: 0 });
         expect(pendingIds).toHaveLength(0);
     });

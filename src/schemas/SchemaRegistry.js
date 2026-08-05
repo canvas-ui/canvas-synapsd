@@ -1,7 +1,11 @@
 'use strict';
 
-// Base document — also the class registered for `data/abstraction/document`.
+// Base document — also the class registered for `data/schema/document`.
 import Document from './Document.js';
+
+// The Rev B old->new id map, re-exported here so consumers already importing the
+// registry need no second import path.
+export { SCHEMA_ID_RENAMES } from './rename-map.js';
 
 // Core schemas — synapsd's own primitives (schemas/core/).
 import Email from './core/Email.js';
@@ -33,27 +37,29 @@ import Workspace from './internal/layers/Workspace.js';
 import Project from './internal/layers/Project.js';
 
 /**
- * The CORE entity set — synapsd's own primitives. Ids are still `data/abstraction/*`;
- * the rename to `data/schema/*` plus hierarchy adoption is Rev B, a coordinated
- * cross-repo release (see TODO.md).
+ * The CORE entity set — synapsd's own primitives. Ids are hierarchical
+ * `data/schema/*` (Rev B, 2026-08-05): the id IS the axis, and a multi-segment id
+ * ticks every ancestor segment (`data/schema/message/email` ticks
+ * `data/schema/message` too — see schemaBitmapKeys in index.js).
  *
- * `subtypeField` names a per-document discriminator (`data.type`). It is DECLARED
- * here and resolved by `resolveSubtype()`, but nothing indexes it yet: the v3
- * `data/kind/*` axis it used to feed was removed 2026-08-04, and its replacement
- * is a SEGMENT of the schema id (`data/schema/application/flatpak`), which lands
- * with the ids in Rev B. So the subtype axis is deliberately dark in between —
- * that is safe only because `data/kind/*` had zero consumers (measured).
+ * `subtypeField` names a per-document discriminator (`data.type`). It is resolved
+ * by `resolveSubtype()` and indexed as a DERIVED SEGMENT of the schema id: an
+ * Application doc with `data.type: 'flatpak'` also ticks
+ * `data/schema/application/flatpak`. Register-vs-derive rule: a subtype that needs
+ * its own validation or identity gets registered as its own id with a class
+ * (message/email); a mere discriminator on one class stays derived (this field).
+ * Consumers query both kinds of key identically.
  */
 const CORE_SCHEMAS = {
-    'data/abstraction/document': { SchemaClass: Document },
-    'data/abstraction/file': { SchemaClass: File },
-    'data/abstraction/message': { SchemaClass: Message },
-    'data/abstraction/email': { SchemaClass: Email },
-    'data/abstraction/event': { SchemaClass: Event, subtypeField: 'data.type' },
-    'data/abstraction/todo': { SchemaClass: Task },
-    'data/abstraction/identity': { SchemaClass: Identity, subtypeField: 'data.type' },
-    'data/abstraction/device': { SchemaClass: Device },
-    'data/abstraction/application': { SchemaClass: Application, subtypeField: 'data.type' },
+    'data/schema/document': { SchemaClass: Document },
+    'data/schema/file': { SchemaClass: File },
+    'data/schema/message': { SchemaClass: Message },
+    'data/schema/message/email': { SchemaClass: Email },
+    'data/schema/event': { SchemaClass: Event, subtypeField: 'data.type' },
+    'data/schema/task': { SchemaClass: Task },
+    'data/schema/identity': { SchemaClass: Identity, subtypeField: 'data.type' },
+    'data/schema/device': { SchemaClass: Device },
+    'data/schema/application': { SchemaClass: Application, subtypeField: 'data.type' },
 };
 
 /**
@@ -62,10 +68,10 @@ const CORE_SCHEMAS = {
  * eventual move is a deletion here, not a rewrite.
  */
 const APP_SCHEMAS = {
-    'data/abstraction/note': { SchemaClass: Note },
-    'data/abstraction/tab': { SchemaClass: Tab },
-    'data/abstraction/link': { SchemaClass: Link },
-    'data/abstraction/dotfile': { SchemaClass: Dotfile, subtypeField: 'data.type' },
+    'data/schema/note': { SchemaClass: Note },
+    'data/schema/tab': { SchemaClass: Tab },
+    'data/schema/link': { SchemaClass: Link },
+    'data/schema/dotfile': { SchemaClass: Dotfile, subtypeField: 'data.type' },
 };
 
 const INTERNAL_SCHEMAS = {
@@ -122,9 +128,9 @@ class SchemaRegistry {
      * This is the API app-level consumers (canvas-server, and eventually third
      * parties) use instead of editing this file. Core ids are sealed: they are
      * synapsd's own primitives and re-pointing one at a foreign class would let a
-     * consumer silently change what `data/abstraction/file` means for everyone.
+     * consumer silently change what `data/schema/file` means for everyone.
      *
-     * @param {string} schemaId          e.g. 'data/abstraction/note'
+     * @param {string} schemaId          e.g. 'data/schema/note'
      * @param {Function} SchemaClass     a Document subclass
      * @param {object} [options]
      * @param {string} [options.subtypeField] dotted path to a per-document subtype
@@ -199,6 +205,18 @@ class SchemaRegistry {
     getSchemaEntry(schemaId) {
         const entry = this.#entries.get(schemaId);
         if (!entry) {
+            // Exact-match only, deliberately: a derived subtype key
+            // (data/schema/application/flatpak) is a real BITMAP key but not a
+            // schema id — resolving it here to the parent would let an unknown
+            // or mistyped subtype construct and validate as the parent class,
+            // silently. Name the real schema instead of guessing; callers that
+            // legitimately hold a bitmap key use resolveSchemaId().
+            const ancestor = this.resolveSchemaId(schemaId);
+            if (ancestor && ancestor !== schemaId) {
+                throw new Error(
+                    `${schemaId} is a derived subtype bitmap key, not a schema id — the schema is ${ancestor}`,
+                );
+            }
             throw new Error(`Schema not found: ${schemaId}`);
         }
         // Read `indexOptions` through to the class static rather than caching a
@@ -212,12 +230,10 @@ class SchemaRegistry {
      * document. Returns null when the schema declares no subtype axis, or the field
      * is absent/empty.
      *
-     * One raw segment, never a path: in Rev B this becomes the last segment of the
-     * schema id (`data/schema/application` + `/flatpak`), so scoping is the id's
-     * job. That is why the v3 `kindPrefix` has no successor here.
-     *
-     * ⚠️ Nothing indexes this yet — see the CORE_SCHEMAS note. It is live and tested
-     * so Rev B wires an existing function into the id instead of rewriting one.
+     * One raw segment, never a path: it becomes the last segment of the schema id
+     * (`data/schema/application` + `/flatpak`), so scoping is the id's job. That is
+     * why the v3 `kindPrefix` has no successor here. Indexed by schemaBitmapKeys()
+     * in index.js on every write since Rev B (2026-08-05).
      *
      * @param {string} schemaId
      * @param {object} [document] document instance or plain object
@@ -263,6 +279,50 @@ class SchemaRegistry {
         const derived = SchemaClass.jsonSchema;
         if (!derived) { return null; }
         return { $id: schemaId, ...derived };
+    }
+
+    /**
+     * Resolve a bitmap KEY to the nearest registered schema id — identity on a
+     * registered id, ancestor walk on a derived subtype key
+     * (`data/schema/application/flatpak` -> `data/schema/application`), null when
+     * no registered ancestor exists. This is the explicit bridge between the
+     * membership plane (where derived subtype keys are real) and the identity
+     * plane (where only registered ids exist); getSchema() stays exact-match.
+     *
+     * @param {string} key schema id or schema-derived bitmap key
+     * @returns {string|null} registered schema id, or null
+     */
+    resolveSchemaId(key) {
+        if (typeof key !== 'string' || key === '') { return null; }
+        let candidate = key;
+        while (candidate) {
+            if (this.#entries.has(candidate)) { return candidate; }
+            const slash = candidate.lastIndexOf('/');
+            if (slash <= 0) { break; }
+            candidate = candidate.slice(0, slash);
+        }
+        return null;
+    }
+
+    /**
+     * Serializable registration record for one schema id — what an HTTP consumer
+     * gets instead of the class (a class JSON-serializes to `{}`, which is the bug
+     * this method exists to fix). Field lists come from the class statics through
+     * getSchemaEntry(), so they cannot drift from what documents actually use.
+     *
+     * @param {string} schemaId Schema identifier
+     * @returns {object} { id, tier, subtypeField, indexOptions, jsonSchema }
+     * @throws {Error} If schema is not found
+     */
+    getSchemaDescriptor(schemaId) {
+        const entry = this.getSchemaEntry(schemaId);
+        return {
+            id: schemaId,
+            tier: entry.tier,
+            subtypeField: entry.subtypeField ?? null,
+            indexOptions: entry.indexOptions ?? null,
+            jsonSchema: this.getJsonSchema(schemaId),
+        };
     }
 
     /**

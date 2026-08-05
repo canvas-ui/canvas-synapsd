@@ -8,30 +8,30 @@ import Message from '../src/schemas/core/Message.js';
 import Task from '../src/schemas/core/Task.js';
 import { facetBitmapKeysForTest } from '../src/index.js';
 
-// The v3 core entity set. Ids stay `data/abstraction/*` under D1(c) — the model
+// The v3 core entity set. Ids stay `data/schema/*` under D1(c) — the model
 // changes, the id rename is deferred to its own rev — so these strings are
 // load-bearing and NOT a sweep target.
 const CORE_IDS = [
-    'data/abstraction/document',
-    'data/abstraction/file',
-    'data/abstraction/message',
-    'data/abstraction/email',
-    'data/abstraction/todo',
-    'data/abstraction/identity',
-    'data/abstraction/device',
-    'data/abstraction/application',
+    'data/schema/document',
+    'data/schema/file',
+    'data/schema/message',
+    'data/schema/message/email',
+    'data/schema/task',
+    'data/schema/identity',
+    'data/schema/device',
+    'data/schema/application',
 ];
 
 const APP_IDS = [
-    'data/abstraction/note',
-    'data/abstraction/tab',
-    'data/abstraction/link',
-    'data/abstraction/dotfile',
+    'data/schema/note',
+    'data/schema/tab',
+    'data/schema/link',
+    'data/schema/dotfile',
 ];
 
 class Widget extends Document {
     constructor(options = {}) {
-        options.schema = options.schema || 'data/abstraction/widget';
+        options.schema = options.schema || 'data/schema/widget';
         super(options);
     }
 }
@@ -40,7 +40,7 @@ describe('SchemaRegistry v3', () => {
     afterEach(() => {
         // registerSchema mutates a singleton; leaking a registration would make
         // sibling tests order-dependent.
-        try { schemaRegistry.unregisterSchema('data/abstraction/widget'); } catch { /* not registered */ }
+        try { schemaRegistry.unregisterSchema('data/schema/widget'); } catch { /* not registered */ }
     });
 
     describe('core set', () => {
@@ -54,18 +54,18 @@ describe('SchemaRegistry v3', () => {
         });
 
         test('message is registered — getSchema on it used to throw while the parent chat service wrote it', () => {
-            expect(() => schemaRegistry.getSchema('data/abstraction/message')).not.toThrow();
-            expect(schemaRegistry.getSchema('data/abstraction/message')).toBe(Message);
+            expect(() => schemaRegistry.getSchema('data/schema/message')).not.toThrow();
+            expect(schemaRegistry.getSchema('data/schema/message')).toBe(Message);
         });
 
         test('contact and bucket ids are gone', () => {
-            expect(schemaRegistry.hasSchema('data/abstraction/contact')).toBe(false);
-            expect(schemaRegistry.hasSchema('data/abstraction/bucket')).toBe(false);
-            expect(() => schemaRegistry.getSchema('data/abstraction/contact')).toThrow(/Schema not found/);
+            expect(schemaRegistry.hasSchema('data/schema/contact')).toBe(false);
+            expect(schemaRegistry.hasSchema('data/schema/bucket')).toBe(false);
+            expect(() => schemaRegistry.getSchema('data/schema/contact')).toThrow(/Schema not found/);
         });
 
         test('contact is replaced by identity', () => {
-            expect(schemaRegistry.getSchema('data/abstraction/identity')).toBe(Identity);
+            expect(schemaRegistry.getSchema('data/schema/identity')).toBe(Identity);
         });
 
         test("the legacy 'BaseDocument' schema id is gone", () => {
@@ -77,12 +77,12 @@ describe('SchemaRegistry v3', () => {
         // and the base now resolve to the same constructor. Asserted rather than
         // assumed: the merge is only safe while the base carries the abstraction's
         // schema id + version defaults.
-        test('data/abstraction/document resolves to the base class itself', () => {
-            expect(schemaRegistry.getSchema('data/abstraction/document')).toBe(Document);
+        test('data/schema/document resolves to the base class itself', () => {
+            expect(schemaRegistry.getSchema('data/schema/document')).toBe(Document);
         });
 
         test('document is stamped 3.0 — it used to validate against 2.2 while stamping 2.0', () => {
-            const doc = new Document({ schema: 'data/abstraction/document', data: { title: 'x' } });
+            const doc = new Document({ schema: 'data/schema/document', data: { title: 'x' } });
             expect(doc.schemaVersion).toBe('3.0');
         });
 
@@ -95,40 +95,40 @@ describe('SchemaRegistry v3', () => {
 
     describe('registerSchema', () => {
         test('round-trips an app schema through the public API', () => {
-            expect(schemaRegistry.hasSchema('data/abstraction/widget')).toBe(false);
+            expect(schemaRegistry.hasSchema('data/schema/widget')).toBe(false);
 
-            schemaRegistry.registerSchema('data/abstraction/widget', Widget, { subtypeField: 'data.type' });
+            schemaRegistry.registerSchema('data/schema/widget', Widget, { subtypeField: 'data.type' });
 
-            expect(schemaRegistry.getSchema('data/abstraction/widget')).toBe(Widget);
-            expect(schemaRegistry.listSchemas('data/')).toContain('data/abstraction/widget');
-            expect(schemaRegistry.getSchemaEntry('data/abstraction/widget').tier).toBe('app');
+            expect(schemaRegistry.getSchema('data/schema/widget')).toBe(Widget);
+            expect(schemaRegistry.listSchemas('data/')).toContain('data/schema/widget');
+            expect(schemaRegistry.getSchemaEntry('data/schema/widget').tier).toBe('app');
 
-            expect(schemaRegistry.unregisterSchema('data/abstraction/widget')).toBe(true);
-            expect(schemaRegistry.hasSchema('data/abstraction/widget')).toBe(false);
+            expect(schemaRegistry.unregisterSchema('data/schema/widget')).toBe(true);
+            expect(schemaRegistry.hasSchema('data/schema/widget')).toBe(false);
         });
 
         test('carries indexOptions on the registration, not the row', () => {
-            schemaRegistry.registerSchema('data/abstraction/widget', Widget, {
+            schemaRegistry.registerSchema('data/schema/widget', Widget, {
                 indexOptions: { ftsSearchFields: ['data.label'] },
             });
-            expect(schemaRegistry.getSchemaEntry('data/abstraction/widget').indexOptions)
+            expect(schemaRegistry.getSchemaEntry('data/schema/widget').indexOptions)
                 .toEqual({ ftsSearchFields: ['data.label'] });
         });
 
         test('core ids are sealed against re-registration and removal', () => {
-            expect(() => schemaRegistry.registerSchema('data/abstraction/file', Widget))
+            expect(() => schemaRegistry.registerSchema('data/schema/file', Widget))
                 .toThrow(/core schema and cannot be re-registered/);
-            expect(() => schemaRegistry.unregisterSchema('data/abstraction/file'))
+            expect(() => schemaRegistry.unregisterSchema('data/schema/file'))
                 .toThrow(/core schema and cannot be removed/);
             // ...and the core registration is untouched by the failed attempt.
-            expect(schemaRegistry.getSchema('data/abstraction/file')).not.toBe(Widget);
+            expect(schemaRegistry.getSchema('data/schema/file')).not.toBe(Widget);
         });
 
         test('rejects a non-Document class', () => {
             class NotADocument {}
-            expect(() => schemaRegistry.registerSchema('data/abstraction/widget', NotADocument))
+            expect(() => schemaRegistry.registerSchema('data/schema/widget', NotADocument))
                 .toThrow(/must be registered with a Document subclass/);
-            expect(() => schemaRegistry.registerSchema('data/abstraction/widget', { dataSchema: {} }))
+            expect(() => schemaRegistry.registerSchema('data/schema/widget', { dataSchema: {} }))
                 .toThrow(/must be registered with a Document subclass/);
         });
 
@@ -138,7 +138,7 @@ describe('SchemaRegistry v3', () => {
         });
 
         test('rejects a non-string subtypeField', () => {
-            expect(() => schemaRegistry.registerSchema('data/abstraction/widget', Widget, {
+            expect(() => schemaRegistry.registerSchema('data/schema/widget', Widget, {
                 subtypeField: 42,
             })).toThrow(/dotted field path string/);
         });
@@ -159,7 +159,7 @@ describe('SchemaRegistry v3', () => {
             };
 
             constructor(options = {}) {
-                options.schema = options.schema || 'data/abstraction/phone';
+                options.schema = options.schema || 'data/schema/phone';
                 super(options);
             }
         }
@@ -167,29 +167,29 @@ describe('SchemaRegistry v3', () => {
         // Declares nothing of its own — must inherit its parent's configuration.
         class Tablet extends Device {
             constructor(options = {}) {
-                options.schema = options.schema || 'data/abstraction/tablet';
+                options.schema = options.schema || 'data/schema/tablet';
                 super(options);
             }
         }
 
         afterEach(() => {
-            for (const id of ['data/abstraction/phone', 'data/abstraction/tablet']) {
+            for (const id of ['data/schema/phone', 'data/schema/tablet']) {
                 try { schemaRegistry.unregisterSchema(id); } catch { /* not registered */ }
             }
         });
 
         test('a subclass declares its own index fields per schema, not per write', () => {
-            schemaRegistry.registerSchema('data/abstraction/phone', Phone, {});
+            schemaRegistry.registerSchema('data/schema/phone', Phone, {});
 
             const phone = new Phone({ data: { deviceId: 'p1', name: 'Pixel', maker: 'Google', hwRelease: '2024' } });
 
             expect(phone.indexOptions.ftsSearchFields).toEqual(['data.maker', 'data.hwRelease']);
             expect(phone.generateFtsData()).toEqual(['Google', '2024']);
-            expect(schemaRegistry.getSchema('data/abstraction/phone')).toBe(Phone);
+            expect(schemaRegistry.getSchema('data/schema/phone')).toBe(Phone);
         });
 
         test('a subclass declaring none inherits its parent index options', () => {
-            schemaRegistry.registerSchema('data/abstraction/tablet', Tablet);
+            schemaRegistry.registerSchema('data/schema/tablet', Tablet);
 
             const tablet = new Tablet({ data: { deviceId: 't1', name: 'Tab' } });
             expect(tablet.indexOptions.ftsSearchFields).toEqual(Device.indexOptions.ftsSearchFields);
@@ -199,7 +199,7 @@ describe('SchemaRegistry v3', () => {
             // Device requires data.deviceId; a consumer subclass cannot opt out of
             // its parent's contract by registering.
             expect(() => Phone.validateData({
-                schema: 'data/abstraction/phone',
+                schema: 'data/schema/phone',
                 data: { name: 'no deviceId' },
             })).toThrow();
         });
@@ -220,21 +220,21 @@ describe('SchemaRegistry v3', () => {
     // Rev B. These tests keep the resolver honest in the meantime.
     describe('resolveSubtype', () => {
         test('reads the declared field off the document, unprefixed', () => {
-            expect(schemaRegistry.resolveSubtype('data/abstraction/application', { data: { type: 'flatpak' } }))
+            expect(schemaRegistry.resolveSubtype('data/schema/application', { data: { type: 'flatpak' } }))
                 .toBe('flatpak');
-            expect(schemaRegistry.resolveSubtype('data/abstraction/identity', { data: { type: 'person' } }))
+            expect(schemaRegistry.resolveSubtype('data/schema/identity', { data: { type: 'person' } }))
                 .toBe('person');
-            expect(schemaRegistry.resolveSubtype('data/abstraction/dotfile', { data: { type: 'folder' } }))
+            expect(schemaRegistry.resolveSubtype('data/schema/dotfile', { data: { type: 'folder' } }))
                 .toBe('folder');
         });
 
         test('returns null when the schema declares no subtype axis, or the field is absent', () => {
-            expect(schemaRegistry.resolveSubtype('data/abstraction/file', { data: { type: 'x' } })).toBeNull();
-            expect(schemaRegistry.resolveSubtype('data/abstraction/application')).toBeNull();
-            expect(schemaRegistry.resolveSubtype('data/abstraction/application', {})).toBeNull();
-            expect(schemaRegistry.resolveSubtype('data/abstraction/application', { data: {} })).toBeNull();
-            expect(schemaRegistry.resolveSubtype('data/abstraction/application', { data: { type: '  ' } })).toBeNull();
-            expect(schemaRegistry.resolveSubtype('data/abstraction/nonexistent', { data: { type: 'x' } })).toBeNull();
+            expect(schemaRegistry.resolveSubtype('data/schema/file', { data: { type: 'x' } })).toBeNull();
+            expect(schemaRegistry.resolveSubtype('data/schema/application')).toBeNull();
+            expect(schemaRegistry.resolveSubtype('data/schema/application', {})).toBeNull();
+            expect(schemaRegistry.resolveSubtype('data/schema/application', { data: {} })).toBeNull();
+            expect(schemaRegistry.resolveSubtype('data/schema/application', { data: { type: '  ' } })).toBeNull();
+            expect(schemaRegistry.resolveSubtype('data/schema/nonexistent', { data: { type: 'x' } })).toBeNull();
         });
 
         test('the v3 kind resolver is gone, not aliased', () => {
@@ -252,7 +252,7 @@ describe('SchemaRegistry v3', () => {
         test('carries a type discriminator, not a data-level kind that would shadow the row field', () => {
             const identity = Identity.fromData({ data: { displayName: 'Alice', type: 'person' } });
             expect(identity.data.type).toBe('person');
-            expect(identity.schema).toBe('data/abstraction/identity');
+            expect(identity.schema).toBe('data/schema/identity');
             expect(identity.schemaVersion).toBe('3.0');
         });
 
@@ -270,7 +270,7 @@ describe('SchemaRegistry v3', () => {
 
         test('rejects the retired contact enum values', () => {
             expect(() => Identity.validateData({
-                schema: 'data/abstraction/identity',
+                schema: 'data/schema/identity',
                 data: { displayName: 'Team', type: 'team' },
             })).toThrow();
         });
@@ -289,7 +289,7 @@ describe('facetFields', () => {
         class Sneaky extends Document {
             static facetFields = ['data.kind', 'data.mime', 'data.backend', 'data.schema', 'data.colour'];
             constructor(options = {}) {
-                options.schema = options.schema || 'data/abstraction/sneaky';
+                options.schema = options.schema || 'data/schema/sneaky';
                 super(options);
             }
         }
@@ -305,7 +305,7 @@ describe('facetFields', () => {
             expect(key.startsWith('data/mime/')).toBe(false);
             expect(key.startsWith('data/backend/')).toBe(false);
             // `schema` is reserved AHEAD of `data/schema/*` existing: Rev B renames
-            // `data/abstraction/*` to it, and a consumer facet squatting the
+            // `data/schema/*` to it, and a consumer facet squatting the
             // namespace meanwhile would land inside the identity axis on the day
             // the rename ships.
             expect(key.startsWith('data/schema/')).toBe(false);

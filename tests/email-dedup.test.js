@@ -51,7 +51,7 @@ describe('Email ingestion dedup', () => {
         const [id2] = await db.putMany([e2]);
         expect(id2).toBe(id1);
 
-        const all = await db.list({ features: { allOf: ['data/abstraction/email'] }, limit: 0 });
+        const all = await db.list({ features: { allOf: ['data/schema/message/email'] }, limit: 0 });
         expect(all.length).toBe(1);
     });
 

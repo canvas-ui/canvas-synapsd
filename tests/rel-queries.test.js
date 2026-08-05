@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 
-const NOTE = 'data/abstraction/note';
+const NOTE = 'data/schema/note';
 const note = (title, relations) => ({
     schema: NOTE,
     data: { title, content: title, ...(relations ? { relations } : {}) },
@@ -195,7 +195,7 @@ describe('filters fail loudly instead of silently widening or emptying', () => {
 
     test('a VALID timeline filter still works, and an unknown timeline is simply empty', async () => {
         const id = await db.put({
-            schema: 'data/abstraction/todo',
+            schema: 'data/schema/task',
             data: { title: 'due today', dueDate: new Date().toISOString() },
         });
 

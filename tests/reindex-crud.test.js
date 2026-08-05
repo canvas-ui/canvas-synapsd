@@ -6,7 +6,7 @@ import path from 'node:path';
 import SynapsD from '../src/index.js';
 import TimelineIndex from '../src/indexes/inverted/Timeline.js';
 
-const NOTE = (title) => ({ schema: 'data/abstraction/note', data: { title, content: title } });
+const NOTE = (title) => ({ schema: 'data/schema/note', data: { title, content: title } });
 // crud timeframe tokens ('thisYear') are resolved to absolute bounds at the
 // filter layer; for a direct timeline query we expand them the same way.
 const thisYear = () => TimelineIndex.getTimeframeBounds('thisYear');

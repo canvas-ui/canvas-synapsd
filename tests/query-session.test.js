@@ -7,7 +7,7 @@ import Db from '../src/index.js';
 import QuerySession from '../src/session/QuerySession.js';
 import { EVENTS } from '../src/utils/events.js';
 
-const NOTE = (title, extra = {}) => ({ schema: 'data/abstraction/note', data: { title, content: title }, ...extra });
+const NOTE = (title, extra = {}) => ({ schema: 'data/schema/note', data: { title, content: title }, ...extra });
 const sorted = (a) => [...a].sort((x, y) => x - y);
 const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms)); // let debounced recompute fire
 

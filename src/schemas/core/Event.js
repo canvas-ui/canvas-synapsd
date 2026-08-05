@@ -3,7 +3,7 @@
 import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { z } from 'zod';
 
-const DOCUMENT_SCHEMA_NAME = 'data/abstraction/event';
+const DOCUMENT_SCHEMA_NAME = 'data/schema/event';
 const DOCUMENT_SCHEMA_VERSION = '3.0';
 
 // The three things a time-bound entry can be. Deliberately one entity with a

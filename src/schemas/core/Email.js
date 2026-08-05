@@ -4,14 +4,18 @@ import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { generateChecksum } from '../../utils/crypto.js';
 import { z } from 'zod';
 
-const DOCUMENT_SCHEMA_NAME = 'data/abstraction/email';
+const DOCUMENT_SCHEMA_NAME = 'data/schema/message/email';
 // 3.1: attachments use `url` (stored://) + `checksum`; ad-hoc `storageRef` removed.
 const DOCUMENT_SCHEMA_VERSION = '3.0';
+// Boolean mailbox flags, NOT subtypes — under `feature/` (a derived prefix), never
+// under the schema id: since the hierarchy ticks ancestor segments (Rev B), a key
+// like `data/schema/message/email/sent` would be indistinguishable from a subtype
+// of email. Moved out of the identity axis 2026-08-05.
 const EMAIL_FEATURE_BITMAPS = {
-    sent: 'data/abstraction/email/sent',
-    received: 'data/abstraction/email/received',
-    attachment: 'data/abstraction/email/attachment',
-    flagged: 'data/abstraction/email/flagged',
+    sent: 'feature/email/sent',
+    received: 'feature/email/received',
+    attachment: 'feature/email/attachment',
+    flagged: 'feature/email/flagged',
 };
 const DEFAULT_EMAIL_SUBJECT = '(no subject)';
 

@@ -27,7 +27,7 @@ import Document, { documentSchema } from '../Document.js';
 import { z } from 'zod';
 import { pathPattern, normalizeHomePlaceholder, deviceFileUrl, normalizeDotfileUrl, dotfileEntryPath } from '../../utils/path-helpers.js';
 
-const DOCUMENT_SCHEMA_NAME = 'data/abstraction/dotfile';
+const DOCUMENT_SCHEMA_NAME = 'data/schema/dotfile';
 const DOCUMENT_SCHEMA_VERSION = '3.0';
 
 /*******************

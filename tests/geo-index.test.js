@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 
-const FILE_SCHEMA = 'data/abstraction/file';
+const FILE_SCHEMA = 'data/schema/file';
 
 const photo = (name, geo) => ({
     schema: FILE_SCHEMA,

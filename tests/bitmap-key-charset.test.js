@@ -6,7 +6,7 @@ import path from 'node:path';
 import Db from '../src/index.js';
 import { normalizeBitmapKey } from '../src/indexes/bitmaps/lib/keys.js';
 
-const NOTE_SCHEMA = 'data/abstraction/note';
+const NOTE_SCHEMA = 'data/schema/note';
 const note = (title) => ({ schema: NOTE_SCHEMA, data: { title, content: title } });
 
 async function open(rootPath) {
@@ -103,7 +103,7 @@ describe('hasBitmap answers, it does not raise', () => {
 
     test('a well-formed key still answers truthfully', async () => {
         const id = await db.put({
-            schema: 'data/abstraction/note',
+            schema: 'data/schema/note',
             data: { title: 'n', content: 'n' },
             comment: 'creates feature/has-comment',
         });

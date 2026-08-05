@@ -6,8 +6,8 @@ import path from 'node:path';
 import Db from '../src/index.js';
 import Note from '../src/schemas/app/Note.js';
 
-const NOTE_SCHEMA = 'data/abstraction/note';
-const TAB_SCHEMA = 'data/abstraction/tab';
+const NOTE_SCHEMA = 'data/schema/note';
+const TAB_SCHEMA = 'data/schema/tab';
 const COMMENT_KEY = 'feature/has-comment';
 
 const note = (title, comment) => ({ schema: NOTE_SCHEMA, data: { title, content: title }, ...(comment !== undefined ? { comment } : {}) });

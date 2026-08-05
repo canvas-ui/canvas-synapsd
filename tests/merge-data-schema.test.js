@@ -21,7 +21,7 @@ describe('mergeDataSchema', () => {
     }
 
     describe('merging an object-shaped parent', () => {
-        const parse = (data) => Phone.dataSchema.safeParse({ schema: 'data/abstraction/phone', data });
+        const parse = (data) => Phone.dataSchema.safeParse({ schema: 'data/schema/phone', data });
 
         test('validates the parent fields AND the subclass fields', () => {
             expect(parse({ deviceId: 'p1', name: 'Pixel', imei: '123' }).success).toBe(true);
@@ -46,7 +46,7 @@ describe('mergeDataSchema', () => {
 
         test('the parent schema is untouched — merging returns a new schema', () => {
             expect(Device.dataSchema.safeParse({
-                schema: 'data/abstraction/device',
+                schema: 'data/schema/device',
                 data: { deviceId: 'd1', name: 'Laptop' },
             }).success).toBe(true);
             expect(Device.dataSchema.shape.data.shape.imei).toBeUndefined();
