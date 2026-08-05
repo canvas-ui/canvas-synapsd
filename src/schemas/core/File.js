@@ -12,6 +12,15 @@ const DOCUMENT_SCHEMA_VERSION = '3.0';
 // docs, so a File carries none — the same bytes may be named differently at
 // each location, and names are searched via `locationUrls`, not treated as
 // identity.
+//
+// NAMES. Each location keeps whatever that backend really calls the bytes (an
+// IMAP attachment's name, the copy on a NAS). Those are facts about copies, not
+// about the document, and `locations` is append-ordered and rebuilt per backend
+// scan — so position must never decide what a consumer displays. The document's
+// own name is `metadata.filename`: absent until someone renames it, at which
+// point it is the answer everywhere. Resolution order for consumers is in
+// `displayFilename()` (transports/webdav/vfs-shared.js, mirrored in the web UI's
+// document-display.ts).
 const fileDataSchema = z.object({}).passthrough();
 
 // Schema for the full File document, making checksumArray mandatory
@@ -28,8 +37,11 @@ export default class File extends Document {
         // Checksums are computed upstream by `stored` (content-addressed blob);
         // declare the real algorithms so the doc doesn't report Base's sha1 default.
         checksumAlgorithms: ['sha256', 'md5'],
-        // Names live in the location URLs (one blob, many aliases) — index those.
-        ftsSearchFields: ['locationUrls'],
+        // Names live in the location URLs (one blob, many aliases) — index those,
+        // plus the document's own name so a renamed file is findable by the name
+        // the user gave it. Additive: documents without metadata.filename index
+        // exactly as before, so no reindex is required for existing rows.
+        ftsSearchFields: ['locationUrls', 'metadata.filename'],
         vectorEmbeddingFields: ['locationUrls'],
         // File relies on external checksumArray, so we don't modify checksumFields here
     };
