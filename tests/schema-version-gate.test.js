@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 
-const NOTE = 'data/abstraction/note';
+const NOTE = 'data/schema/note';
 
 // Migration code was removed from the engine 2026-08-04 — migrations are one-time
 // operator actions and were living on the startup path. The REFUSAL stayed, and it
@@ -34,7 +34,7 @@ describe('schema version gate', () => {
 
     test('a fresh database is stamped, and reopening it stays clean', async () => {
         await open();
-        expect(Number(db.internalStore.get('internal/schemaVersion'))).toBe(2);
+        expect(Number(db.internalStore.get('internal/schemaVersion'))).toBe(3);
         await db.shutdown();
 
         await expect(open()).resolves.toBeDefined();
@@ -48,16 +48,16 @@ describe('schema version gate', () => {
         await db.shutdown();
 
         await expect(open()).resolves.toBeDefined();
-        expect(Number(db.internalStore.get('internal/schemaVersion'))).toBe(2);
+        expect(Number(db.internalStore.get('internal/schemaVersion'))).toBe(3);
     });
 
     test('a NON-empty database below the current version refuses to open', async () => {
         await open();
         await db.put({ schema: NOTE, data: { title: 'n', content: 'c' } });
-        await db.internalStore.put('internal/schemaVersion', 1);
+        await db.internalStore.put('internal/schemaVersion', 2);
         await db.shutdown();
         db = null;
 
-        await expect(open()).rejects.toThrow(/is at schema v1, this build needs v2/);
+        await expect(open()).rejects.toThrow(/is at schema v2, this build needs v3/);
     });
 });

@@ -3,12 +3,7 @@
 import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { z } from 'zod';
 
-// ⚠️ The CLASS is `Task` (renamed from `Todo` 2026-08-04); the schema ID is still
-// `data/abstraction/todo`. That mismatch is deliberate and temporary: the class
-// name is local to this repo and free to fix, the id is a consumer-visible string
-// that changes to `data/schema/task` in Rev B along with every other id. Do NOT
-// "fix" the id here on its own — it is not migratable in isolation (see TODO.md).
-const DOCUMENT_SCHEMA_NAME = 'data/abstraction/todo';
+const DOCUMENT_SCHEMA_NAME = 'data/schema/task';
 const DOCUMENT_SCHEMA_VERSION = '3.0';
 
 // Task lifecycle aligned with VTODO (RFC 5545) STATUS / JSCalendar (RFC 8984)

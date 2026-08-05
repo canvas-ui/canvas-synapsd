@@ -58,7 +58,7 @@ await db.start();
 
 const id = await db.put(
     {
-        schema: 'data/abstraction/note',
+        schema: 'data/schema/note',
         data: { title: 'Hello', content: 'First draft' },
         features: ['tag/inbox'],
     },
@@ -86,7 +86,7 @@ The stored row shape (v3):
 ```js
 {
     id: 42,                                  // integer, assigned by the DB
-    schema: 'data/abstraction/note',         // registry id
+    schema: 'data/schema/note',         // registry id
     schemaVersion: '3.0',
 
     data: { /* schema-specific payload */ }, // replaced wholesale on update
@@ -105,23 +105,22 @@ The stored row shape (v3):
 
 Three changes worth knowing before you write anything:
 
-- **`features[]` is top-level and asserted-only.** It moved off `metadata.features`. `metadata` holds *extracted facts written by derivers*; `features[]` holds *membership a human or client asserted*. Derived prefixes (`data/abstraction/`, `data/mime/`, `data/backend/`, `feature/`, `device/`, plus each schema's own facet namespaces) are **stripped on the way in** — a stored copy of a derived key would be indistinguishable from a derived one while being immune to the derivation's own stale-diff, i.e. it could never be unticked. `data/dataset/*` is *preserved* across an update that omits it, so a client re-putting its own tag array cannot drop ingest provenance.
+- **`features[]` is top-level and asserted-only.** It moved off `metadata.features`. `metadata` holds *extracted facts written by derivers*; `features[]` holds *membership a human or client asserted*. Derived prefixes (`data/schema/`, `data/mime/`, `data/backend/`, `feature/`, `device/`, plus each schema's own facet namespaces) are **stripped on the way in** — a stored copy of a derived key would be indistinguishable from a derived one while being immune to the derivation's own stale-diff, i.e. it could never be unticked. `data/dataset/*` is *preserved* across an update that omits it, so a client re-putting its own tag array cannot drop ingest provenance.
 - **`indexOptions` is no longer on the row.** It is schema-level configuration (`static indexOptions` on the schema class), identical for every document of a schema — ~414 B of byte-identical JSON per row, ~2.9 GB at 7M rows. Legacy rows carrying it are ignored on read. There is consequently **no per-document index override**.
 - **There is no `kind` field.** The v3 subtype axis was removed 2026-08-04 — see below.
 
 Reading a document back gives you a schema instance (`parse: false` for the raw stored object).
 
-### Subtypes (the removed `kind` axis)
+### Subtypes (the schema-id hierarchy)
 
-**`kind` and `data/kind/*` were removed 2026-08-04.** v3 introduced them as a subtype axis derived from the schema registration — a `kind` row field mirrored into hierarchical bitmaps. They are gone, and nothing replaced them yet.
+The schema id is **hierarchical** (Rev B, 2026-08-05), and every segment below `data/schema/` is ticked on write — parent and child alike, so the parent key is always a roll-up. A subtype is not a second axis: it is part of *what a thing is*, so it lives in the id. Two segment sources, one rule:
 
-The reason is that a subtype is not a second axis: it is part of *what a thing is*, so it belongs in the schema id. Rev B adopts a hierarchical id (`data/schema/application/flatpak`, `data/schema/message/email`), where the subtype is a path segment and the parent id is already a roll-up — the property `data/kind/*` existed to provide. Two axes for one fact meant two things to derive, keep consistent and query.
+- **Registered** child ids (`data/schema/message/email`) have their own class, validation and checksum identity, and appear in the registry.
+- **Derived** subtype segments come from a registration's `subtypeField: 'data.type'` (`data/schema/application/flatpak`): real, queryable bitmap keys that are **not** registry entries and never a `doc.schema` value. `getSchema()` throws on one (naming the real schema); `resolveSchemaId(key)` walks a bitmap key up to the nearest registered id.
 
-Removal was free because the axis had **zero consumers** (measured across every repo): nobody had migrated to it before it was superseded.
+Enumerate schemas from `listSchemas()`, never from bitmap keys — a bitmap listing of `data/schema` contains derived subtype keys that are not schemas.
 
-In the meantime the subtype axis is **dark**. A registration may still declare `subtypeField: 'data.type'` and `schemaRegistry.resolveSubtype(id, doc)` resolves it — one raw segment, unprefixed, since scoping is the id's job — but nothing indexes the result until the ids land. Query the schema id (`data/abstraction/application`) or filter on `data.type`.
-
-An existing database sheds its stale `data/kind/*` bitmaps on the next open, tracked by its own run-once marker rather than a schema-version bump: a database already stamped at the current version never re-enters the migration block, and it is precisely those databases that have the leftovers. The namespace is also refused in `features[]`, so a client cannot re-assert what nothing derives.
+Two predecessors of this design are retired and their namespaces refused in `features[]` (a client cannot re-assert what nothing derives; `rebuildL3()` sheds any residue): the v3 `kind`/`data/kind/*` axis (removed 2026-08-04, zero consumers), and the flat `data/abstraction/*` namespace itself (renamed 2026-08-05; rows are migrated by `scripts/migrate-schema-v3.js`).
 
 ### Trees
 
@@ -150,7 +149,7 @@ Features are flat bitmap keys ticked on a document. They carry a `who says so?` 
 | `client/*` | The writing client | yes, in `features[]` |
 | `data/dataset/*` | Ingest provenance (see **Datasets**) | yes, preserved across updates |
 | `data/no-location` | The app — orphan marker (see below) | yes, in `features[]` |
-| `data/abstraction/*` | Derived from `schema` | no — derived every write |
+| `data/schema/*` | Derived from `schema` | no — derived every write |
 | `data/mime/*` | Derived from `metadata.contentType` (hierarchical: type + full type) | no |
 | `data/backend/*` | Derived from `locations[]` (hierarchical: scheme + scheme/authority) | no |
 | `data/<facet>/*` | Derived from a schema's `static facetFields` (e.g. `data/status/*` from Todo's `data.status`) | no |
@@ -212,12 +211,12 @@ const page = await db.query('quarterly invoice', {
 
     // ---- WHAT: features ---------------------------------------------------
     features: [
-        'data/abstraction/file',     // anyOf (OR within the bucket)
+        'data/schema/file',     // anyOf (OR within the bucket)
         '+tag/finance',              // allOf (required)
         '!tag/deleted',              // noneOf (excluded)
     ],
     // Object form, equivalent:
-    // features: { allOf: ['tag/finance'], anyOf: ['data/abstraction/file'], noneOf: ['tag/deleted'] },
+    // features: { allOf: ['tag/finance'], anyOf: ['data/schema/file'], noneOf: ['tag/deleted'] },
 
     // ---- WHEN / WHERE-ON-EARTH: filters -----------------------------------
     filters: [
@@ -334,7 +333,7 @@ Write methods tick every feature you pass, **unioned with the document's own `fe
 ```js
 const id = await db.put(
     {
-        schema: 'data/abstraction/note',
+        schema: 'data/schema/note',
         data: { title: 'Hello', content: 'First draft' },
         features: ['tag/inbox'],
     },
@@ -343,8 +342,8 @@ const id = await db.put(
 
 const ids = await db.putMany(
     [
-        { schema: 'data/abstraction/note', data: { title: 'A', content: 'Alpha' } },
-        { schema: 'data/abstraction/note', data: { title: 'B', content: 'Beta' } },
+        { schema: 'data/schema/note', data: { title: 'A', content: 'Alpha' } },
+        { schema: 'data/schema/note', data: { title: 'B', content: 'Beta' } },
     ],
     { context: { tree: 'projects', path: ['/work/project-a', '/work/shared'] } },
 );
@@ -360,7 +359,7 @@ A schema may declare `static mergeOnDedupe = ['data.links']` for record fields t
 const doc = await db.get(id);
 const rawDoc = await db.get(id, { parse: false });
 const docByChecksum = await db.getByChecksumString('sha256/…');
-const noteByChecksum = await db.getByChecksumString('sha256/…', { schema: 'data/abstraction/note' });
+const noteByChecksum = await db.getByChecksumString('sha256/…', { schema: 'data/schema/note' });
 
 // Existence probes, no document fetched
 const existsAnywhere = await db.has(id);
@@ -469,10 +468,10 @@ Every predicate takes the **document** as subject, never the entity it points at
 A document declares its own edges in `data.relations`, an array of `{ p, to }`. They are derived into the edge index on every write, as a diff against the previous row — an update that drops an entry drops the edge.
 
 ```js
-const alice = await db.put({ schema: 'data/abstraction/identity', data: { displayName: 'Alice' } });
+const alice = await db.put({ schema: 'data/schema/identity', data: { displayName: 'Alice' } });
 
 const msg = await db.put({
-    schema: 'data/abstraction/note',
+    schema: 'data/schema/note',
     data: {
         title: 'standup',
         content: 'Alice is taking the migration',
@@ -549,9 +548,9 @@ A schema is a `Document` subclass plus a registration record. The registry (`src
 | `app` | `schemas/app/` | Consumer abstractions, registered through the same code path a third party would use. Bundled here pending the parent's own `registerSchema()` calls. | `note`, `tab`, `link`, `dotfile` |
 | `internal` | `schemas/internal/` | Tree layer abstractions. | `internal/layers/{canvas,context,label,system,universe,workspace,project}` |
 
-The tier is the folder, so a bundled app schema moving out of the repo is a directory-level move rather than a hunt through one flat `abstractions/` folder. `data/abstraction/document` has no file of its own: it registers `schemas/Document.js`, the base class itself.
+The tier is the folder, so a bundled app schema moving out of the repo is a directory-level move rather than a hunt through one flat `abstractions/` folder. `data/schema/document` has no file of its own: it registers `schemas/Document.js`, the base class itself.
 
-Ids are still `data/abstraction/*`; the rename to `data/schema/*` plus hierarchy adoption is a coordinated cross-repo release (Rev B in TODO.md). There is no interim axis to migrate to — the v3 `kind` axis that was meant to serve that purpose went unused and was removed.
+Ids are hierarchical `data/schema/*` since Rev B (2026-08-05); the old flat `data/abstraction/*` namespace is retired, and `SCHEMA_ID_RENAMES` (exported from the registry) records the old→new mapping the migration script executes.
 
 v3 schema changes: `Contact` → `Identity` (with a `data.type` of `person|organization|service|bot`), `Bucket` deleted, `Event` added. `Todo` was renamed `Task` 2026-08-04 (the class only — its id follows in Rev B).
 
@@ -570,14 +569,14 @@ class Widget extends Document {
     static facetFields = ['data.condition'];   // -> data/condition/<value> bitmaps
 
     constructor(options = {}) {
-        options.schema = options.schema || 'data/abstraction/widget';
+        options.schema = options.schema || 'data/schema/widget';
         super(options);
     }
 
     static get dataSchema() { /* zod */ }
 }
 
-schemaRegistry.registerSchema('data/abstraction/widget', Widget, {
+schemaRegistry.registerSchema('data/schema/widget', Widget, {
     subtypeField: 'data.type',   // per-document subtype discriminator (see Subtypes)
 });
 ```
@@ -601,7 +600,7 @@ It **throws** when the parent is a `ZodEffects` (wrapped in `.refine()`, as `App
 
 Rules the registry enforces rather than documents:
 
-- The class must be a `Document` subclass; core ids cannot be re-registered (re-pointing `data/abstraction/file` at a foreign class would silently change what it means for everyone).
+- The class must be a `Document` subclass; core ids cannot be re-registered (re-pointing `data/schema/file` at a foreign class would silently change what it means for everyone).
 - Passing `options.indexOptions` **writes `SchemaClass.indexOptions`** rather than storing a parallel copy. `static indexOptions` on the class is the one source of truth: `Document` resolves it at construction time and cannot import the registry without a cycle.
 
 `indexOptions` fields: `checksumAlgorithms` (default `['sha1','sha256']`), `checksumFields`, `ftsSearchFields`, `vectorEmbeddingFields` (all default to `['data']`), and `embeddingOptions`. Field paths are dotted and resolved against the *document* (so `locationUrls` and other getters work); the literal `'data'` resolves to `contentData()`, i.e. `data` minus `relations`.
@@ -610,7 +609,7 @@ Rules the registry enforces rather than documents:
 
 ### Publishing a schema to consumers
 
-`static get dataSchema()` (zod) is the only shape you write. **`jsonSchema` is derived from it** — `Document.jsonSchema` converts the class's own `dataSchema` to JSON Schema draft-07 (memoized per class), so a subclass never declares one. `schemaRegistry.getJsonSchema(id)` stamps `$id` and serves it on `GET /data/abstraction/:abstraction.json`.
+`static get dataSchema()` (zod) is the only shape you write. **`jsonSchema` is derived from it** — `Document.jsonSchema` converts the class's own `dataSchema` to JSON Schema draft-07 (memoized per class), so a subclass never declares one. `schemaRegistry.getJsonSchema(id)` stamps `$id`; the parent serves it on `GET /rest/v2/schemas/data/schema/<id>.json` (a splat route, since an id can span two segments).
 
 This is the point of the registry: a consumer **fetches** a schema instead of copying it. The derived document carries the enums, ranges and required/optional facts that validation already enforces — the four task statuses, `priority` 1–9, the identity `type` enum — so a form builder or another language's validator can be driven straight off the endpoint. Before 2026-08-04 each class hand-wrote `jsonSchema` as an example object (`{ schema, data: { title: 'string' } }`) carrying none of that, which is why consumers duplicated the values by hand and drifted.
 
@@ -628,7 +627,7 @@ Equivalent to `query(null, spec)`. Returns documents matching the candidate set 
 // All files in a path, excluding deleted, updated today
 const docs = await db.list({
     paths: ['ctx:/foo/bar'],
-    features: { allOf: ['data/abstraction/file'], noneOf: ['tag/deleted'] },
+    features: { allOf: ['data/schema/file'], noneOf: ['tag/deleted'] },
     filters: ['t:crud:updated:today'],
     limit: 100,
 });
@@ -636,12 +635,12 @@ const docs = await db.list({
 // Directory tree, multiple paths (non-default tree, so use the selector)
 const exactDirectoryMatches = await db.list({
     directory: { tree: 'filesystem', path: ['/docs/contracts', '/docs/invoices'] },
-    features: ['data/abstraction/file'],
+    features: ['data/schema/file'],
 });
 
 // Zero-fetch facet probe: any pending todos here?
 const pending = await db.list({
-    features: ['data/abstraction/todo'],
+    features: ['data/schema/task'],
     filters: ['data/status/pending'],
 });
 
@@ -656,7 +655,7 @@ const fromAccount = await db.list({ features: ['data/backend/imap/user@example.c
 ```js
 const ranked = await db.query('invoice', {
     paths: ['ctx:/finance/2026'],
-    features: ['data/abstraction/file', 'tag/finance'],
+    features: ['data/schema/file', 'tag/finance'],
     limit: 20,
 });
 
@@ -672,7 +671,7 @@ const same = await db.search({ query: 'invoice', paths: ['ctx:/finance/2026'], l
 // Sorting happens on the id set BEFORE pagination, so page 1 is already in order.
 const page = await db.list({
     paths: ['ctx:/house-build'],
-    features: ['data/abstraction/file'],
+    features: ['data/schema/file'],
     sortBy: 'content',
     order: 'asc',
     limit: 50,
@@ -727,7 +726,7 @@ For ad-hoc drill-down without a session object, fold a stack of text queries: ea
 ```js
 const page = await db.searchRefined(
     ['car', 'red', 'market'],
-    { context: { tree: 'projects', path: '/inbox' }, features: ['data/abstraction/email'] },
+    { context: { tree: 'projects', path: '/inbox' }, features: ['data/schema/message/email'] },
     { limit: 20 },
 );
 ```
@@ -778,7 +777,7 @@ const db = new SynapsD({
         enabled: true,
         dim: 384,
         embedQuery: (text, space) => embedd.embedQuery(text, space),
-        embeddableSchemas: ['data/abstraction/note'],
+        embeddableSchemas: ['data/schema/note'],
         // spaces: { … }
     },
 });
@@ -789,7 +788,7 @@ const db = new SynapsD({
 | `enabled` | `true` | Open the dense stack; `false` is FTS-only |
 | `dim` | `384` | Text-space vector dimension |
 | `embedQuery` | `null` | Injected query embedder `(text, space) => vector`; absent → FTS fallback |
-| `embeddableSchemas` | `['data/abstraction/note']` | Default candidate schemas for the unembedded-gap ledger |
+| `embeddableSchemas` | `['data/schema/note']` | Default candidate schemas for the unembedded-gap ledger |
 | `spaces` | text + image (above) | Per-space `{ table, model, dim, bitmapKey, seenKey, annIndex }` |
 | `imageMaxDistance` | `0.945` | Cosine floor for the image kNN leg. ⚠️ Calibrated against **SigLIP base fp32** — the figure is model-specific and must be re-measured for a different image encoder (use `debug: true`, see below). `CANVAS_IMAGE_MAX_DISTANCE` env override; `null`/`0` = no floor |
 | `searchWeights` | `{ fts: 2, dense: 1, image: 2 }` | Hybrid RRF fusion weights. FTS outweighs dense because text kNN has no relevance floor; image ties FTS because it *is* floored |
@@ -917,7 +916,7 @@ Documents can also carry app-extracted timeline entries at the root. SynapsD ind
 
 ```js
 const articleId = await db.put({
-    schema: 'data/abstraction/document',
+    schema: 'data/schema/document',
     data: { title: 'Magna Carta', text: 'Agreed at Runnymede in 1215.' },
     timelines: [{ name: 'wikipedia', start: '1215', end: '1215' }],
 });
@@ -933,7 +932,7 @@ The trick that keeps this one BSI instead of a per-cell bitmap zoo: S2 ids are h
 
 ```js
 const inView = await db.list({
-    features: ['data/abstraction/file'],
+    features: ['data/schema/file'],
     filters: ['geo:bbox:47.5,15.5,48.8,17.8', 't:content:2023-01-01..2023-12-31'],
     sortBy: 'content',
 });
@@ -1011,7 +1010,7 @@ SynapsD has no built-in concept of "incoming" or "staging". If your app needs on
 await db.createTree('incoming', 'directory');
 
 const id = await db.put(
-    { schema: 'data/abstraction/email', data: { subject: 'Invoice', from: 'billing@example.com' } },
+    { schema: 'data/schema/message/email', data: { subject: 'Invoice', from: 'billing@example.com' } },
     { directory: { tree: 'incoming', path: '/email/imap/account-a/inbox' } },
 );
 

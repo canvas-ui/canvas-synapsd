@@ -8,7 +8,7 @@ import schemaRegistry from '../src/schemas/SchemaRegistry.js';
 import Document from '../src/schemas/Document.js';
 import Note from '../src/schemas/app/Note.js';
 
-const NOTE = 'data/abstraction/note';
+const NOTE = 'data/schema/note';
 
 // indexOptions was byte-identical config repeated on EVERY row — ~461 B on a
 // measured note, ~3.2 GB at 7M rows — for something that is a property of the
@@ -86,7 +86,7 @@ describe('indexOptions off the row', () => {
 
     test('the base default still applies to a schema declaring none', () => {
         class Bare extends Document {}
-        const doc = new Bare({ schema: 'data/abstraction/bare', data: { x: 1 } });
+        const doc = new Bare({ schema: 'data/schema/bare', data: { x: 1 } });
 
         expect(doc.indexOptions.checksumFields).toEqual(['data']);
         expect(doc.indexOptions.ftsSearchFields).toEqual(['data']);
@@ -95,12 +95,12 @@ describe('indexOptions off the row', () => {
     test('registerSchema indexOptions actually apply to constructed documents', () => {
         class Widget extends Document {
             constructor(options = {}) {
-                options.schema = options.schema || 'data/abstraction/widget';
+                options.schema = options.schema || 'data/schema/widget';
                 super(options);
             }
         }
 
-        schemaRegistry.registerSchema('data/abstraction/widget', Widget, {
+        schemaRegistry.registerSchema('data/schema/widget', Widget, {
             indexOptions: { checksumFields: ['data.label'], ftsSearchFields: ['data.label'] },
         });
 
@@ -109,10 +109,10 @@ describe('indexOptions off the row', () => {
             // looking authoritative — Document resolves from the class static.
             const doc = new Widget({ data: { label: 'w' } });
             expect(doc.indexOptions.checksumFields).toEqual(['data.label']);
-            expect(schemaRegistry.getSchemaEntry('data/abstraction/widget').indexOptions.checksumFields)
+            expect(schemaRegistry.getSchemaEntry('data/schema/widget').indexOptions.checksumFields)
                 .toEqual(['data.label']);
         } finally {
-            schemaRegistry.unregisterSchema('data/abstraction/widget');
+            schemaRegistry.unregisterSchema('data/schema/widget');
         }
     });
 

@@ -5,8 +5,8 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 
-const FILE_SCHEMA = 'data/abstraction/file';
-const NOTE_SCHEMA = 'data/abstraction/note';
+const FILE_SCHEMA = 'data/schema/file';
+const NOTE_SCHEMA = 'data/schema/note';
 
 // A blob/File doc: mime lives in metadata.contentType (doc-level invariant).
 let seq = 0;

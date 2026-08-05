@@ -5,8 +5,8 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 
-const NOTE = 'data/abstraction/note';
-const DOC = 'data/abstraction/document';
+const NOTE = 'data/schema/note';
+const DOC = 'data/schema/document';
 
 // `data.relations` is where a document DECLARES its asserted edges. Phase 4
 // derives real edges from it; this phase only has to accept it — and, critically,
@@ -70,7 +70,7 @@ describe('data.relations acceptance', () => {
             data: { title: 'searchable', body: 'body', relations: [{ p: 'mentions', to: 100999 }] },
         }));
 
-        // data/abstraction/document declares ftsSearchFields: ['data'] — the whole
+        // data/schema/document declares ftsSearchFields: ['data'] — the whole
         // object — so this asserts the real content is indexed while the graph
         // structure is not.
         const fts = JSON.stringify(doc.generateFtsData());

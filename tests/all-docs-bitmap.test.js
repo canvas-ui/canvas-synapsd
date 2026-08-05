@@ -7,7 +7,7 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 
-const NOTE_SCHEMA = 'data/abstraction/note';
+const NOTE_SCHEMA = 'data/schema/note';
 
 function note(title) {
     return { schema: NOTE_SCHEMA, data: { title, content: title } };

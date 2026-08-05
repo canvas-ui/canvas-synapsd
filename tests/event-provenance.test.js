@@ -6,7 +6,7 @@ import path from 'node:path';
 import Db from '../src/index.js';
 import { createEvent } from '../src/utils/events.js';
 
-const tab = (url) => ({ schema: 'data/abstraction/tab', data: { url } });
+const tab = (url) => ({ schema: 'data/schema/tab', data: { url } });
 
 // Every event envelope must carry an eventId (idempotency key) and provenance
 // (origin/causedBy/depth) so the workspace automation layer can recognize and

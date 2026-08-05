@@ -20,11 +20,11 @@ describe('vector provenance + dim guard', () => {
         await vi.initialize();
         expect(vi.isReady).toBe(true);
 
-        await vi.upsertChunks(1, 'data/abstraction/note', '2026-07-17T00:00:00Z', [
+        await vi.upsertChunks(1, 'data/schema/note', '2026-07-17T00:00:00Z', [
             { chunkId: 0, text: 'hello', vector: vec(8) },
         ]);
         // Per-push model override wins over the space-level default.
-        await vi.upsertChunks(2, 'data/abstraction/note', '2026-07-17T00:00:00Z', [
+        await vi.upsertChunks(2, 'data/schema/note', '2026-07-17T00:00:00Z', [
             { chunkId: 0, text: 'world', vector: vec(8, 0.1) },
         ], { model: 'test-model-b' });
 
@@ -43,7 +43,7 @@ describe('vector provenance + dim guard', () => {
         const rootPath = await tmpRoot();
         const v8 = new VectorIndex({ rootPath, tableName: 'vec_guard', dim: 8 });
         await v8.initialize();
-        await v8.upsertChunks(7, 'data/abstraction/note', '2026-07-17T00:00:00Z', [
+        await v8.upsertChunks(7, 'data/schema/note', '2026-07-17T00:00:00Z', [
             { chunkId: 0, text: 'precious', vector: vec(8) },
         ]);
 
@@ -74,7 +74,7 @@ describe('vector provenance + dim guard', () => {
         await v16.initialize();
         expect(v16.isReady).toBe(true);
 
-        await v16.upsertChunks(3, 'data/abstraction/note', '2026-07-17T00:00:00Z', [
+        await v16.upsertChunks(3, 'data/schema/note', '2026-07-17T00:00:00Z', [
             { chunkId: 0, text: 'resized', vector: vec(16) },
         ]);
         const db = await lancedb.connect(rootPath);
@@ -96,7 +96,7 @@ describe('vector provenance + dim guard', () => {
         ]);
         const table = await db.createEmptyTable('vec_legacy', legacySchema);
         await table.add([{
-            id: 42, chunkId: 0, schema: 'data/abstraction/note',
+            id: 42, chunkId: 0, schema: 'data/schema/note',
             updatedAt: '2026-01-01T00:00:00Z', chunkText: 'old row', vector: vec(8),
         }]);
 
@@ -105,7 +105,7 @@ describe('vector provenance + dim guard', () => {
         expect(vi.isReady).toBe(true);
 
         // Old row got the backfill defaults; a new upsert carries real provenance.
-        await vi.upsertChunks(43, 'data/abstraction/note', '2026-07-17T00:00:00Z', [
+        await vi.upsertChunks(43, 'data/schema/note', '2026-07-17T00:00:00Z', [
             { chunkId: 0, text: 'new row', vector: vec(8, 0.2) },
         ]);
         const rows = await (await db.openTable('vec_legacy')).query().toArray();

@@ -10,10 +10,10 @@ import SynapsD from '../src/index.js';
 // "unembedded gap" is a durable bitmap ledger. These tests exercise that ledger
 // with a deterministic fake embedder — no fastembed download, no worker.
 
-const NOTE = (title) => ({ schema: 'data/abstraction/note', data: { title, content: title } });
+const NOTE = (title) => ({ schema: 'data/schema/note', data: { title, content: title } });
 const DIM = 384;
 const fakeVec = (seed) => Array.from({ length: DIM }, (_, i) => ((seed + i) % 7) / 7);
-const NOTE_SCHEMAS = ['data/abstraction/note'];
+const NOTE_SCHEMAS = ['data/schema/note'];
 const sorted = (a) => [...a].sort((x, y) => x - y);
 
 describe('embedding ledger (store-only synapsd)', () => {
@@ -44,14 +44,14 @@ describe('embedding ledger (store-only synapsd)', () => {
         expect(sorted(await db.getUnembeddedDocIds('text', NOTE_SCHEMAS))).toEqual(sorted([id1, id2]));
 
         // Embed id1 (real chunk vector) → leaves the gap AND ticks presence.
-        await db.storeDocumentEmbeddings(id1, 'data/abstraction/note', new Date().toISOString(),
+        await db.storeDocumentEmbeddings(id1, 'data/schema/note', new Date().toISOString(),
             [{ chunkId: 0, text: 'alpha', vector: fakeVec(id1) }], { space: 'text' });
         expect(await db.getUnembeddedDocIds('text', NOTE_SCHEMAS)).toEqual([id2]);
         let stats = await db.getStats();
         expect(stats.semantic.vector.embeddedDocs).toBe(1);
 
         // "Skip" id2 (0 chunks) → leaves the gap (seen) but does NOT tick presence.
-        await db.storeDocumentEmbeddings(id2, 'data/abstraction/note', new Date().toISOString(),
+        await db.storeDocumentEmbeddings(id2, 'data/schema/note', new Date().toISOString(),
             [], { space: 'text' });
         expect(await db.getUnembeddedDocIds('text', NOTE_SCHEMAS)).toEqual([]);
         stats = await db.getStats();
@@ -66,13 +66,13 @@ describe('embedding ledger (store-only synapsd)', () => {
 
     test('content update drops a doc back into the gap', async () => {
         const id = await db.put(NOTE('gamma'));
-        await db.storeDocumentEmbeddings(id, 'data/abstraction/note', new Date().toISOString(),
+        await db.storeDocumentEmbeddings(id, 'data/schema/note', new Date().toISOString(),
             [{ chunkId: 0, text: 'gamma', vector: fakeVec(id) }], { space: 'text' });
         expect(await db.getUnembeddedDocIds('text', NOTE_SCHEMAS)).toEqual([]);
 
         // Update content (put with id routes to update) → doc should reappear in
         // the gap for re-embedding.
-        await db.put({ id, schema: 'data/abstraction/note', data: { title: 'gamma', content: 'gamma changed' } });
+        await db.put({ id, schema: 'data/schema/note', data: { title: 'gamma', content: 'gamma changed' } });
         expect(await db.getUnembeddedDocIds('text', NOTE_SCHEMAS)).toEqual([id]);
     });
 });

@@ -61,7 +61,7 @@ const DEFAULT_LIST_LIMIT = 100;
 // Row-format version of the database. Bump when a change makes rows written by
 // this build unreadable by the previous one; a database below it is REFUSED at
 // open (see start()) rather than migrated — there is no migration code here.
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const SCHEMA_VERSION_KEY = 'internal/schemaVersion';
 
 // Presence bitmap for docs carrying a non-empty user-authored comment. A `feature/`
@@ -107,17 +107,19 @@ function mimeBitmapKeys(doc) {
 // facet writing into that namespace would be indistinguishable from the residue.
 // Retired, not free.
 //
-// `schema` is sealed AHEAD of its own namespace existing (Rev A, 2026-08-04):
-// `data/abstraction/*` becomes `data/schema/*` in Rev B, and a consumer that
-// declared `facetFields: ['data.schema']` in the meantime would be writing into
-// the identity axis itself the day the rename lands. Cheaper to reserve it now
-// than to break someone then.
+// `abstraction` joined the retired set with `kind` (Rev B, 2026-08-05):
+// `data/schema/*` became `data/schema/*`, a migrated database can still
+// carry residue in the old namespace, and a consumer facet writing into it would
+// be indistinguishable from that residue. Retired, not free.
+//
+// `schema` was sealed AHEAD of its own namespace existing (Rev A, 2026-08-04) and
+// is now the live identity axis itself.
 const ENGINE_OWNED_FACET_NAMESPACES = new Set([
     'abstraction', 'schema', 'kind', 'mime', 'backend', 'source', 'dataset', 'no-location',
 ]);
 
 // Device documents are the source of truth for the derived device/os|type facets.
-const DEVICE_SCHEMA_NAME = 'data/abstraction/device';
+const DEVICE_SCHEMA_NAME = 'data/schema/device';
 function facetFieldKeys(doc) {
     const fields = doc?.constructor?.facetFields;
     if (!Array.isArray(fields) || fields.length === 0) { return []; }
@@ -146,7 +148,7 @@ function facetFieldKeys(doc) {
 // v3 moved this off `metadata` (which holds EXTRACTED facts written by derivers)
 // to a top-level array (ASSERTED membership written by humans/clients). The
 // array is asserted-only: Document strips DERIVED prefixes on the way in, so
-// this function never sees a `data/abstraction/*` or `device/*` key it would tick
+// this function never sees a `data/schema/*` or `device/*` key it would tick
 // without owning the corresponding untick.
 //
 // Invalid keys are skipped rather than thrown: a document written by an older or
@@ -256,8 +258,68 @@ function mergeDedupePreservedFields(parsed, existing) {
 // rather than only through a full put/read round-trip.
 export function facetBitmapKeysForTest(doc) { return facetBitmapKeys(doc); }
 
+// Schema-declared feature bitmaps (`static getFeatureBitmapArray(doc)` — Email's
+// `feature/email/*` mailbox flags). Derived from row state like every other facet,
+// so they ride the facet plane's tick/stale-untick symmetry and #replayDerivedPlane
+// reproduces them: before Rev B they were only ticked when ingest passed them as
+// insert-time features, which made them tick-only (a flag change never unticked)
+// and invisible to a rebuild.
+function classDeclaredFeatureKeys(doc) {
+    const cls = doc?.constructor;
+    if (typeof cls?.getFeatureBitmapArray !== 'function') { return []; }
+    const keys = cls.getFeatureBitmapArray(doc);
+    return Array.isArray(keys) ? keys : [];
+}
+
 function facetBitmapKeys(doc) {
-    return [...mimeBitmapKeys(doc), ...facetFieldKeys(doc)];
+    return [...mimeBitmapKeys(doc), ...facetFieldKeys(doc), ...classDeclaredFeatureKeys(doc)];
+}
+
+// ── Schema identity keys ─────────────────────────────────────────────────────
+// The hierarchical expansion of a doc's schema id, plus its derived subtype.
+// One rule, no special cases: EVERY segment below `data/schema/` is ticked —
+// `data/schema/message/email` ticks `data/schema/message` AND itself, an
+// Application doc with `data.type: 'flatpak'` additionally ticks
+// `data/schema/application/flatpak`. The parent key is therefore always a
+// roll-up, and consumers cannot tell (and need not care) whether a child
+// segment came from a REGISTERED id (message/email, its own class + identity)
+// or a DERIVED subtype (application/flatpak, a bitmap key only — never a
+// `doc.schema` value, never a registry entry).
+//
+// This is ancestor ticking — the thing v3 deliberately killed — and NOT a
+// reversal: v3 killed the CLASS-chain expansion (`Tab extends Link` making tabs
+// answer to "all links" as a side effect of code reuse). What expands here is
+// the ID PATH, where every segment is a modelling decision written into the id
+// itself. Same mechanism, opposite provenance.
+//
+// Tick and untick paths MUST both use this function (stale diffs are computed
+// against the same expansion), or parent/subtype keys would never untick.
+const SCHEMA_BITMAP_PREFIX = 'data/schema/';
+export function schemaBitmapKeysForTest(doc) { return schemaBitmapKeys(doc); }
+
+function schemaBitmapKeys(doc) {
+    const id = doc?.schema;
+    if (typeof id !== 'string' || id === '') { return []; }
+    // Foreign/legacy id shapes (no hierarchy defined for them): tick verbatim,
+    // exactly what the old single-push sites did.
+    if (!id.startsWith(SCHEMA_BITMAP_PREFIX)) { return [id]; }
+
+    const keys = [];
+    let slash = id.indexOf('/', SCHEMA_BITMAP_PREFIX.length);
+    while (slash !== -1) {
+        keys.push(id.slice(0, slash));
+        slash = id.indexOf('/', slash + 1);
+    }
+    keys.push(id);
+
+    const subtype = schemaRegistry.resolveSubtype(id, doc);
+    if (subtype) {
+        // normalizeBitmapKey downstream lowercases and replaces invalid chars,
+        // but a subtype containing '/' would silently mint fake hierarchy levels
+        // — refuse that here rather than normalize it away.
+        if (!subtype.includes('/')) { keys.push(`${id}/${subtype}`); }
+    }
+    return keys;
 }
 
 // Union extra locations into a document by url (used by in-batch content dedup,
@@ -371,7 +433,7 @@ class SynapsD extends EventEmitter {
     #synapses;
     #edges;
 
-    // deviceId -> { os, type }, projected from data/abstraction/device documents.
+    // deviceId -> { os, type }, projected from data/schema/device documents.
     #deviceFacets = new Map();
 
     // Active deferred-membership buffer. Bitmap ticks/unticks are NOT bound to the
@@ -472,7 +534,7 @@ class SynapsD extends EventEmitter {
             embedQuery: typeof sem.embedQuery === 'function' ? sem.embedQuery : null,
             // Default candidate schemas for the unembedded-gap ledger when a caller
             // passes none. embedd normally supplies per-space candidate schemas.
-            embeddableSchemas: new Set(sem.embeddableSchemas || ['data/abstraction/note']),
+            embeddableSchemas: new Set(sem.embeddableSchemas || ['data/schema/note']),
             // Vector "spaces": one LanceDB table per embedding model/dim. The
             // embedd service pushes vectors keyed by space and supplies these; the
             // defaults describe the baseline models so a workspace running without
@@ -632,6 +694,11 @@ class SynapsD extends EventEmitter {
 
             // 'tasks' (Task due dates) is a point-event axis — instants, not
             // intervals — so it gets the cheaper single-BSI storage.
+            // DECIDED 2026-08-05: this hardcode is legitimate and Task stays a
+            // core schema BECAUSE of it — the engine registering one point axis
+            // for its own primitive is cheaper than a schema-declared timeline
+            // registration mechanism nothing else needs yet. Revisit only if a
+            // second schema wants its own point timeline.
             this.#timelineIndex = new TimelineIndex(this.bitmapIndex, { pointTimelines: ['tasks'] });
             this.#geoIndex = new GeoIndex(this.bitmapIndex);
 
@@ -1085,7 +1152,10 @@ class SynapsD extends EventEmitter {
                                 : [],
                         };
                         prevFacetKeys = facetBitmapKeys(existing);
-                        prevFeatureKeys = documentFeatureKeys(existing);
+                        // Schema keys join the snapshot so the stale-diff below can
+                        // untick a subtype segment the update moved away from
+                        // (data.type change -> different derived child key).
+                        prevFeatureKeys = [...documentFeatureKeys(existing), ...schemaBitmapKeys(existing)];
                         prevRelations = documentRelations(existing);
                         // Merge input onto existing (preserves locations, metadata,
                         // parentId chain; regenerates checksums when data changed).
@@ -1117,7 +1187,7 @@ class SynapsD extends EventEmitter {
                                 : [],
                         };
                         prevFacetKeys = facetBitmapKeys(existing);
-                        prevFeatureKeys = documentFeatureKeys(existing);
+                        prevFeatureKeys = [...documentFeatureKeys(existing), ...schemaBitmapKeys(existing)];
                         prevRelations = documentRelations(existing);
                     }
                 }
@@ -1143,8 +1213,8 @@ class SynapsD extends EventEmitter {
                 for (const key of documentFeatureKeys(parsed)) {
                     if (!docFeatures.includes(key)) { docFeatures.push(key); }
                 }
-                if (!docFeatures.includes(parsed.schema)) {
-                    docFeatures.push(parsed.schema);
+                for (const key of schemaBitmapKeys(parsed)) {
+                    if (!docFeatures.includes(key)) { docFeatures.push(key); }
                 }
 
                 validateDocumentRelations(parsed);
@@ -1729,8 +1799,8 @@ class SynapsD extends EventEmitter {
                 for (const key of documentFeatureKeys(parsed)) {
                     if (!docFeatures.includes(key)) { docFeatures.push(key); }
                 }
-                if (!docFeatures.includes(parsed.schema)) {
-                    docFeatures.push(parsed.schema);
+                for (const key of schemaBitmapKeys(parsed)) {
+                    if (!docFeatures.includes(key)) { docFeatures.push(key); }
                 }
 
                 const entry = { parsed, docFeatures, directorySpecs: [directorySpec] };
@@ -1850,8 +1920,8 @@ class SynapsD extends EventEmitter {
             for (const key of documentFeatureKeys(doc)) {
                 if (!docFeatures.includes(key)) { docFeatures.push(key); }
             }
-            if (!docFeatures.includes(doc.schema)) {
-                docFeatures.push(doc.schema);
+            for (const key of schemaBitmapKeys(doc)) {
+                if (!docFeatures.includes(key)) { docFeatures.push(key); }
             }
             toProcess.push({ index, id, docFeatures });
         }
@@ -2312,13 +2382,15 @@ class SynapsD extends EventEmitter {
         for (const key of documentFeatureKeys(parsedDocument)) {
             if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
         }
-        if (!featureBitmaps.includes(parsedDocument.schema)) {
-            featureBitmaps.push(parsedDocument.schema);
+        for (const key of schemaBitmapKeys(parsedDocument)) {
+            if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
         }
         // A re-put that drops a feature must untick its bitmap, or removals would
-        // never take (same reasoning as the facet keys below).
+        // never take (same reasoning as the facet keys below). Schema keys are in
+        // the diff too, so a subtype the re-put moved away from unticks.
         const staleFeatureKeys = storedDocument
-            ? documentFeatureKeys(storedDocument).filter((k) => !featureBitmaps.includes(k))
+            ? [...documentFeatureKeys(storedDocument), ...schemaBitmapKeys(storedDocument)]
+                .filter((k) => !featureBitmaps.includes(k))
             : [];
 
         try {
@@ -2403,8 +2475,8 @@ class SynapsD extends EventEmitter {
         }
 
         const featureBitmaps = parseBitmapArray(featureBitmapArray).filter(Boolean);
-        if (!featureBitmaps.includes(storedDocument.schema)) {
-            featureBitmaps.push(storedDocument.schema);
+        for (const key of schemaBitmapKeys(storedDocument)) {
+            if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
         }
 
         await this.#withDeferredMembership(async () => {
@@ -3455,8 +3527,9 @@ class SynapsD extends EventEmitter {
         // change unticks stale ones.
         const previousFacetKeys = facetBitmapKeys(storedDocument);
         // Same for declarative features: captured before update() mutates the
-        // document in place, so an edit that removes a tag can untick it.
-        const previousFeatureKeys = documentFeatureKeys(storedDocument);
+        // document in place, so an edit that removes a tag can untick it. Schema
+        // keys join the snapshot so a data.type change unticks the old subtype.
+        const previousFeatureKeys = [...documentFeatureKeys(storedDocument), ...schemaBitmapKeys(storedDocument)];
         // Same again for asserted relations — update() mutates storedDocument in
         // place, so this must be read before it.
         const previousRelations = documentRelations(storedDocument);
@@ -3470,8 +3543,8 @@ class SynapsD extends EventEmitter {
         for (const key of documentFeatureKeys(updatedDocument)) {
             if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
         }
-        if (!featureBitmaps.includes(updatedDocument.schema)) {
-            featureBitmaps.push(updatedDocument.schema);
+        for (const key of schemaBitmapKeys(updatedDocument)) {
+            if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
         }
         const staleFeatureKeys = previousFeatureKeys.filter((k) => !featureBitmaps.includes(k));
 
@@ -4429,7 +4502,7 @@ class SynapsD extends EventEmitter {
      *   device/os/<os>         — the OS of each device it is present on
      *   device/type/<type>     — the type (laptop/desktop/server/…) of each
      *
-     * os/type are resolved through the device's own `data/abstraction/device`
+     * os/type are resolved through the device's own `data/schema/device`
      * document (the single source of truth) via #deviceFacets, so
      * "all applications available on Windows" is a plain bitmap AND rather than
      * a join. An unregistered device contributes only its id — the facets appear
@@ -5173,7 +5246,7 @@ class SynapsD extends EventEmitter {
                 ...facetBitmapKeys(doc),
                 ...this.#locationDerivedFeatures(doc.locations),
                 ...documentFeatureKeys(doc),
-                doc.schema,
+                ...schemaBitmapKeys(doc),
             ];
             await this.#applyMembership('tick', id, normalizeBitmapKeys(derived));
 
@@ -5238,9 +5311,11 @@ class SynapsD extends EventEmitter {
         }
 
         if (bitmaps) {
-            // `data/kind` is dropped but NOT re-derived: the axis was removed
-            // 2026-08-04, so a rebuild is also how a v3-era database sheds it.
-            for (const prefix of ['data/kind', 'data/backend', 'data/mime']) {
+            // `data/kind` and `data/abstraction` are dropped but NOT re-derived:
+            // both axes are retired (2026-08-04 / 2026-08-05), so a rebuild is
+            // also how a migrated database sheds their residue. `data/schema` and
+            // `feature/email` are dropped AND re-derived by the replay below.
+            for (const prefix of ['data/kind', 'data/abstraction', 'data/schema', 'data/backend', 'data/mime', 'feature/email']) {
                 for (const key of await this.bitmapIndex.listBitmaps(prefix)) {
                     await this.bitmapIndex.deleteBitmap(key);
                     stats.bitmapsDropped++;

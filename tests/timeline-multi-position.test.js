@@ -6,7 +6,7 @@ import path from 'node:path';
 import Db from '../src/index.js';
 
 const note = (title, timelines) => ({
-    schema: 'data/abstraction/note',
+    schema: 'data/schema/note',
     data: { title, content: title },
     ...(timelines ? { timelines } : {}),
 });

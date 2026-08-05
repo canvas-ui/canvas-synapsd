@@ -3,7 +3,7 @@
 import Document, { documentSchema } from '../Document.js';
 import { z } from 'zod';
 
-const DOCUMENT_SCHEMA_NAME = 'data/abstraction/tab';
+const DOCUMENT_SCHEMA_NAME = 'data/schema/tab';
 const DOCUMENT_SCHEMA_VERSION = '3.0';
 
 const documentDataSchema = z.object({

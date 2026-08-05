@@ -5,9 +5,9 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 
-const DOTFILE_SCHEMA = 'data/abstraction/dotfile';
-const APP_SCHEMA = 'data/abstraction/application';
-const NOTE_SCHEMA = 'data/abstraction/note';
+const DOTFILE_SCHEMA = 'data/schema/dotfile';
+const APP_SCHEMA = 'data/schema/application';
+const NOTE_SCHEMA = 'data/schema/note';
 
 const DEV_A = 'device-aaa';
 const DEV_B = 'device-bbb';
@@ -206,7 +206,7 @@ describe('device presence bitmaps', () => {
     });
 });
 
-const DEVICE_SCHEMA = 'data/abstraction/device';
+const DEVICE_SCHEMA = 'data/schema/device';
 
 function device(deviceId, name, platform, type) {
     return { schema: DEVICE_SCHEMA, data: { deviceId, name, platform, type } };
@@ -248,7 +248,7 @@ describe('install status gates presence', () => {
         const gone = await db.put(app('com.example.Gone', { [DEV_A]: { status: 'missing' } }));
 
         const missing = await db.list({
-            features: { allOf: ['data/abstraction/application'], noneOf: [`device/id/${DEV_A}`] },
+            features: { allOf: ['data/schema/application'], noneOf: [`device/id/${DEV_A}`] },
         });
         const ids = (Array.isArray(missing) ? missing : missing.data ?? []).map((d) => d.id);
 
@@ -309,7 +309,7 @@ describe('derived device/os and device/type facets', () => {
         const linApp = await db.put(app('com.example.Lin', { [DEV_B]: { status: 'available' } }));
 
         const result = await db.list({
-            features: { allOf: ['data/abstraction/application', 'device/os/windows'] },
+            features: { allOf: ['data/schema/application', 'device/os/windows'] },
         });
         const ids = (Array.isArray(result) ? result : result.data ?? []).map((d) => d.id);
 

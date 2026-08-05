@@ -20,7 +20,7 @@ import { generateChecksum } from '../utils/crypto.js';
 const jsonSchemaCache = new WeakMap();
 
 // Document constants
-const DOCUMENT_SCHEMA_NAME = 'data/abstraction/document';
+const DOCUMENT_SCHEMA_NAME = 'data/schema/document';
 const DOCUMENT_SCHEMA_VERSION = '3.0';
 const DOCUMENT_DATA_CHECKSUM_ALGORITHMS = ['sha1', 'sha256'];
 const DOCUMENT_DATA_CHECKSUM_FIELDS = ['data'];
@@ -53,10 +53,10 @@ const NON_CONTENT_DATA_KEYS = ['relations'];
 // v3 migration, nothing emits it) and `data/no-location` (asserted by the parent's
 // orphan lifecycle — it carries intent, not just location count; see TODO.md).
 const DERIVED_FEATURE_PREFIXES = [
-    'data/abstraction/',    // index.js: pushes parsed.schema
+    'data/schema/',         // index.js: schemaBitmapKeys (id segments + derived subtype)
     'data/mime/',           // index.js: mimeBitmapKeys from metadata.contentType
     'data/backend/',        // index.js: #backendFeaturesFromLocations
-    'feature/',             // index.js: feature/has-comment
+    'feature/',             // index.js: feature/has-comment, feature/email/* flags
     'device/',              // index.js: #deviceFeaturesFromLocations
 ];
 
@@ -82,7 +82,11 @@ function facetPrefixesFor(facetFields) {
 // hierarchy replaced it (the subtype is a segment of the schema id now). It had
 // zero consumers, so the removal was externally free; blocking re-assertion keeps
 // it that way.
-const RETIRED_FEATURE_PREFIXES = ['data/kind/'];
+// `data/abstraction/` is the pre-Rev-B schema namespace (renamed to `data/schema/`
+// 2026-08-05). A migrated database can still carry residue under it, and an
+// asserted copy would be indistinguishable from that residue while nothing left
+// unticks it.
+const RETIRED_FEATURE_PREFIXES = ['data/kind/', 'data/abstraction/'];
 
 // Asserted, but stamped by INGEST rather than by the client. Preserved across an
 // update that omits them, so a client re-putting its own tag array cannot silently
@@ -243,7 +247,7 @@ const documentSchema = z.object({
 
 /**
  * Document — the base class every schema extends, AND the class registered for
- * `data/abstraction/document` itself.
+ * `data/schema/document` itself.
  *
  * Renamed from `BaseDocument` 2026-08-04 (Rev A). There used to be a separate
  * `abstractions/Document.js` subclass sitting on top of this one; it added a

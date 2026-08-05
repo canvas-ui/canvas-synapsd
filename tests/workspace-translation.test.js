@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import Workspace from '../../../core/workspace/Workspace.js';
 
-const NOTE_SCHEMA = 'data/abstraction/note';
+const NOTE_SCHEMA = 'data/schema/note';
 
 class MemoryConfig {
     constructor(seed = {}) {

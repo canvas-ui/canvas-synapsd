@@ -5,9 +5,9 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 
-const NOTE = 'data/abstraction/note';
-const TAB = 'data/abstraction/tab';
-const FILE = 'data/abstraction/file';
+const NOTE = 'data/schema/note';
+const TAB = 'data/schema/tab';
+const FILE = 'data/schema/file';
 
 // The derived-plane invariant, executable: drop every derived structure and
 // recompute it from documents + extractors, and the index must come back

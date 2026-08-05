@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 
-const NOTE_SCHEMA = 'data/abstraction/note';
+const NOTE_SCHEMA = 'data/schema/note';
 const note = (title) => ({ schema: NOTE_SCHEMA, data: { title, content: title } });
 
 // Semantic disabled: this suite exercises the bitmap/synapse transaction path

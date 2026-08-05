@@ -6,9 +6,9 @@ import path from 'node:path';
 import Db from '../src/index.js';
 import { normalizeDotfileUrl, dotfileEntryPath } from '../src/utils/path-helpers.js';
 
-const DOTFILE = 'data/abstraction/dotfile';
-const TAB = 'data/abstraction/tab';
-const LINK = 'data/abstraction/link';
+const DOTFILE = 'data/schema/dotfile';
+const TAB = 'data/schema/tab';
+const LINK = 'data/schema/link';
 
 const dotfile = (url, links = {}, type = 'file') => ({
     schema: DOTFILE,

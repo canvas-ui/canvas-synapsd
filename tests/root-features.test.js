@@ -6,7 +6,7 @@ import path from 'node:path';
 import Db from '../src/index.js';
 import Note from '../src/schemas/app/Note.js';
 
-const NOTE = 'data/abstraction/note';
+const NOTE = 'data/schema/note';
 const note = (title, features) => ({
     schema: NOTE,
     data: { title, content: title },
@@ -64,7 +64,7 @@ describe('root features[]', () => {
         // unticked. Same reasoning that made device/* a strip, not a merge.
         const id = await db.put(note('sneaky', [
             'tag/keep',
-            'data/abstraction/file',
+            'data/schema/file',
             'data/mime/image/png',
             'data/kind/browser/tab',
             'device/id/other-machine',
@@ -72,7 +72,7 @@ describe('root features[]', () => {
         ]));
 
         expect((await db.get(id)).features).toEqual(['tag/keep']);
-        expect(await hasBitmap('data/abstraction/file', id)).toBe(false);
+        expect(await hasBitmap('data/schema/file', id)).toBe(false);
         expect(await hasBitmap('data/mime/image/png', id)).toBe(false);
         expect(await hasBitmap('device/id/other-machine', id)).toBe(false);
     });
@@ -213,7 +213,7 @@ describe('schema-declared facet namespaces are derived, not assertable', () => {
 
     test('a client cannot assert data/status/* on a schema that derives it', async () => {
         const id = await db.put({
-            schema: 'data/abstraction/todo',
+            schema: 'data/schema/task',
             data: { title: 'ship it', status: 'pending' },
             features: ['tag/urgent', 'data/status/completed'],
         });
@@ -232,11 +232,11 @@ describe('schema-declared facet namespaces are derived, not assertable', () => {
 
     test('changing the derived status unticks the old facet', async () => {
         const id = await db.put({
-            schema: 'data/abstraction/todo',
+            schema: 'data/schema/task',
             data: { title: 'ship it', status: 'pending' },
         });
 
-        await db.put({ id, schema: 'data/abstraction/todo', data: { title: 'ship it', status: 'completed' } });
+        await db.put({ id, schema: 'data/schema/task', data: { title: 'ship it', status: 'completed' } });
 
         const pending = await db.list({ features: ['data/status/pending'], limit: 0 });
         expect(pending.map((d) => d.id)).not.toContain(id);

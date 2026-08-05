@@ -144,7 +144,39 @@ Shipped across 7 phases + 2b; `TODO.refactor-v3.md` deleted. `README.md` and the
 reference for what exists. Only OPEN items follow.
 
 
-### Open: schema hierarchy + `data/schema/*` rename (designed 2026-08-03)
+### Schema hierarchy + `data/schema/*` rename — LANDED IN FULL 2026-08-05
+
+Rev A landed 2026-08-04, Rev B steps 1–5 landed 2026-08-04/05. What shipped in the final cut
+(2026-08-05), beyond what the sections below already record:
+
+- Ids are hierarchical `data/schema/*`; `schemaBitmapKeys()` ticks EVERY segment below the prefix
+  (registered children like `message/email` AND derived subtype segments like
+  `application/flatpak`), with tick/untick symmetry through the same expansion. This is ID-PATH
+  ancestor ticking, NOT a reversal of v3's class-chain kill — each segment is a modelling decision
+  in the id, never an accident of class reuse.
+- **Registry lookup stays EXACT-MATCH** (decided 2026-08-05, reviewed): no `getSubschema()`, no
+  last-segment fallback (an unknown subtype would silently construct as the parent).
+  `getSchema()` throws on a derived key naming the real schema; `resolveSchemaId(key)` is the
+  explicit bitmap-key -> registered-ancestor bridge. Enumerate schemas from `listSchemas()`,
+  never from bitmap keys.
+- **Email flags moved to `feature/email/*`** (decided 2026-08-05): under the hierarchy,
+  `data/schema/message/email/sent` would read as a subtype. They are schema-declared derived
+  facets now (`classDeclaredFeatureKeys` rides the facet plane), so flag changes untick and
+  `rebuildL3()` reproduces them — both were broken before (tick-only, invisible to rebuild).
+- **Task stays core; the `pointTimelines: ['tasks']` hardcode is declared legitimate** (decided
+  2026-08-05). No schema-declared timeline mechanism until a second schema needs one.
+- **No `message/chat` class** this round — the chat service keeps writing `data/schema/message`.
+- Migration is `scripts/migrate-schema-v3.js` (schema version 3): raw row rewrite via exported
+  `SCHEMA_ID_RENAMES`, plus the id-bearing CONFIG nothing would ever error about — canvas layer
+  `querySpec.features` and workspace hook `rules.json` — then stamp LAST, reopen, `rebuildL3()`,
+  FTS rebuild (the one owed since the object-flattening fix). Verified: idempotent second run,
+  kill between row pass and stamp leaves the DB refused by the gate, not half-open.
+- Consumers cut in the same release: browser-extensions, ui/shell, ui/cli, ui/fuse (incl. the
+  `ends_with("todo")` write-path trap), ui/web (incl. the inlined anyOf/allOf prefix test),
+  parent (incl. the splat rewrite of `routes/schemas.js`, `classifier.js` short-name map now
+  carrying `email -> message/email` and `todo|task -> task`, webdav folder-from-last-segment).
+
+Historical design notes follow, unedited where already marked landed.
 
 Supersedes the earlier "`data/entity/*` rename" entry. Two revs: a local cleanup with no consumer
 impact, then the cross-repo rename. **Do them in that order** — the cleanup produces the property
@@ -266,7 +298,7 @@ Shipped exactly as scoped; 352 tests green (350 before, +2 regressions below).
 Repointed to `schemas/core/Email.js` in the same change. It is the ONLY deep import of a schema file
 from outside synapsd — everything else goes through `SchemaRegistry`.
 
-#### Rev B — the rename (cross-repo) — STEP 1 LANDED 2026-08-04, steps 2–5 open
+#### Rev B — the rename (cross-repo) — LANDED IN FULL 2026-08-05 (steps 2–5 shipped; see summary above)
 
 **Step 1 (`kind` removal) is DONE and shipped separately** — it is synapsd-local with zero external
 consumers, so it never needed the coordinated release. 350 tests green. What landed:
@@ -295,9 +327,7 @@ consumers, so it never needed the coordinated release. 350 tests green. What lan
 - `tests/kind-bitmaps.test.js` -> `tests/kind-axis-removed.test.js`. A removal needs a guard as much
   as a feature does — a resurrected axis is silent. Both new guards verified to fail without the fix.
 
-**Steps 2–5 remain** and are the genuinely coordinated part: id rename, hierarchy adoption, the
-row-rewriting migration, and 5 submodules + the parent cut in one release. That wants its own
-session with every consumer suite runnable — not a tail-end of a cleanup.
+**Steps 2–5 LANDED 2026-08-05** in one coordinated release, as designed.
 
 **Why now (user, 2026-08-03):** breaking changes are priced by installed base. Today that is one
 person. At 1500 users with integrations this becomes a deprecation cycle plus a compatibility shim
@@ -367,11 +397,9 @@ Do not sweep this one with sed.
     `subtypeField: 'data.type'` -> `data/schema/task/todo`.
   - ~~Naming collision with `internal/layers/task`~~ — **GONE 2026-08-04**, that layer type was
     deleted (see Rev A). There is only one Task now.
-  - **Still open: tier.** `Note` is `app`, task is `core`, and it is hard to say why. The real smell
-    underneath is that the ENGINE registers the `tasks` point-timeline in its own constructor
-    (`index.js:700`, `pointTimelines: ['tasks']`) — engine knowledge of one schema. Either task is
-    core and that hardcode is legitimate, or it moves to `app/` and the timeline registration
-    becomes schema-declared. Decide the hardcode first; the tier follows.
+  - ~~Still open: tier.~~ **RESOLVED 2026-08-05 (user): task stays `core`, the
+    `pointTimelines: ['tasks']` hardcode is legitimate** (comment at the hardcode records it).
+    Schema-declared timeline registration waits until a second schema wants a point timeline.
 - ~~Does the `kind` row field survive?~~ **RESOLVED 2026-08-03: no, removed entirely.** See the
   shape section above. Consumers needing the subtype read the schema id (it is in the path) or
   `data.type`; no per-schema knowledge leaks, because the subtype is visible in the id itself —
@@ -518,10 +546,13 @@ Three gaps (0 is half-fixed, 1 is done):
      `schemas.length`, i.e. the constructor's ARITY, as the result count. This endpoint has never
      returned anything a consumer could use. It should serve the registration record (id, tier,
      subtype axis, indexOptions field lists) or the derived JSON Schema, not the class.
-   Sequencing: the derivation is DONE. What remains is the `:abstraction` route returning a class,
-   and that route is being rewritten in Rev B anyway (its single path param cannot match a
-   two-segment hierarchical id), so fold the fix in there rather than making a separate pass.
-   Then the consumer half: point the web ui at `…/…json` and delete its copied enums.
+   Sequencing: the derivation is DONE, and the ROUTE HALF LANDED 2026-08-05 with Rev B —
+   `GET /schemas/data/schema/*` (Fastify splat) serves `getSchemaDescriptor()` for the bare id
+   and `getJsonSchema()` for `<id>.json`; derived subtype keys resolve to their parent
+   descriptor instead of 404ing. **Still open (deliberate, user 2026-08-05): the consumer
+   half** — point the web ui at `…/….json` and delete its copied enums (`useTodoFields.ts`
+   status enum + `lib/todo.ts` styles). Kept out of the cutover to keep it mechanical; the
+   endpoint it needs now exists.
 
 1. [x] ~~**No parent-aware data-schema helper.**~~ **DONE 2026-08-04.**
    `Document.mergeDataSchema(super.dataSchema, extraShape)` merges the parent's `data` shape with

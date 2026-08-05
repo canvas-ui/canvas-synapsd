@@ -5,9 +5,9 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 
-const NOTE = 'data/abstraction/note';
-const TAB = 'data/abstraction/tab';
-const APP = 'data/abstraction/application';
+const NOTE = 'data/schema/note';
+const TAB = 'data/schema/tab';
+const APP = 'data/schema/application';
 
 // The v3 `kind` axis — a `kind` row field mirrored into hierarchical
 // `data/kind/*` bitmaps — was REMOVED 2026-08-04. The schema hierarchy carries

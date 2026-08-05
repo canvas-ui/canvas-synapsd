@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 
-const NOTE = (title) => ({ schema: 'data/abstraction/note', data: { title, content: title } });
+const NOTE = (title) => ({ schema: 'data/schema/note', data: { title, content: title } });
 const sorted = (a) => [...a].sort((x, y) => x - y);
 
 // Lance/FTS is not available in the test env. These cover the structured (slice)

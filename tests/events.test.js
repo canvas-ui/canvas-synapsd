@@ -6,8 +6,8 @@ import path from 'node:path';
 import Db from '../src/index.js';
 import schemaRegistry from '../src/schemas/SchemaRegistry.js';
 
-const EVENT_SCHEMA = 'data/abstraction/event';
-const TODO_SCHEMA = 'data/abstraction/todo';
+const EVENT_SCHEMA = 'data/schema/event';
+const TODO_SCHEMA = 'data/schema/task';
 
 const at = (h, dayOffset = 0) => {
     const d = new Date();

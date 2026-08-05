@@ -5,7 +5,7 @@
  *
  * `device/os/<os>` and `device/type/<type>` are DERIVED facets: a document is
  * tagged with the OS/type of the devices it is actually present on, resolved
- * through that device's own `data/abstraction/device` document. The Device doc
+ * through that device's own `data/schema/device` document. The Device doc
  * is the single source of truth; these keys are a queryable projection of it.
  *
  * NOTE: deliberately mirrors `canvas-server/src/utils/device-features.js` so the
@@ -41,7 +41,7 @@ export function normalizeDeviceType(value) {
 
 /**
  * Extract the queryable facets from a Device document's data payload.
- * @param {object} deviceData `doc.data` of a data/abstraction/device document
+ * @param {object} deviceData `doc.data` of a data/schema/device document
  * @returns {{os: string|null, type: string|null}}
  */
 export function deviceFacetsFromData(deviceData = {}) {
