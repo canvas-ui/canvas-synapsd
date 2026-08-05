@@ -125,8 +125,12 @@ class DirectoryTree extends EventEmitter {
         const bitmap = await this.find(path);
         if (!bitmap || bitmap.size === 0) { return []; }
         const oids = bitmap.toArray().slice(0, limit);
-        const docs = await this.#db.getDocumentsByIdArray(oids, { parse });
-        return Array.isArray(docs) ? docs.filter(Boolean) : [];
+        // getDocumentsByIdArray always answers with an envelope ({ data, count,
+        // error }), never a bare array — an Array.isArray() guard alone silently
+        // returned nothing for every call.
+        const fetched = await this.#db.getDocumentsByIdArray(oids, { parse });
+        const docs = Array.isArray(fetched) ? fetched : (fetched?.data ?? []);
+        return docs.filter(Boolean);
     }
 
     async getPathByNodeId(nodeId) {
