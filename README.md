@@ -4,22 +4,22 @@
 
 # SynapsD
 
-SynapsD is a small in-process database for indexing *everything you touch* — files, emails, notes, browser tabs, git repos, dotfiles — and querying it all through one composable filter language. Built on `LMDB` with `roaring-bitmap` and `LanceDB` indexes, it is primarily the index and, secondarily, the JSON document store behind [Canvas Workspaces](https://github.com/canvas-ui/canvas-server).
+SynapsD is a small KV database built on top of `LMDB` with `roaring-bitmap` and `lancedb` based indexes, primarily used as an in-process index and, secondarily, as a JSON document store for [Canvas Workspaces](https://github.com/canvas-ui/canvas-server).
 
-The core idea: store a document **once**, then let it appear in as many views as your mental model needs — a project tree, a tag, a timeline, a map, a dataset — because each appearance costs bitmap bits, not copies. Every feature below narrows the same candidate set, so they all combine freely in a single query.
+This module is meant to index all data from configured data sources of a Workspace (files, emails, notes, browser tabs, github repos, dotfiles etc), and provide a unified virtual fs-like tree abstraction on top that should ideally mimick whatever mental model you need to make work with your data more efficient. A document is stored once and can appear in as many views as needed (a project tree, a tag, a timeline, a map, a dataset), each appearance costs bitmap bits, not copies; every feature below narrows the same candidate set, so they all combine freely in a single query.
 
 ## Highlights
 
-- **[Context trees](#trees)** — virtual, filesystem-like trees over your data. A path is a logical AND of the layers along it: `ctx:/work/customer-a/devops/issues` is "everything linked to all three", and shortening the path *widens* the result — zoom-out for free. One document can live in many trees; placement is cheap and reversible.
-- **[Bitmap-powered search](#the-query-spec)** — membership, tags, facets, mime types, device presence and schema identity are all roaring bitmaps, so "files in `/work/customer-a`, tagged `finance`, not in staging" is a set intersection, not a table scan. Counts, existence checks and live standing views come straight off the bitmaps, [without loading a single document](#refining-a-query-over-time).
-- **[Multi-timeline support](#timelines-and-intervals)** — any number of named time axes per document, from nanoseconds to gigayears on one grammar: "updated today", "due this week", "Roman Empire, 27 BCE–476 CE", open-ended "still alive" intervals, and [zeitgeist queries](#multi-timeline-retrieval-mode-grouped-zeitgeist) that answer "what does this date mean across wikipedia AND my life" in one call.
-- **[Vector search](#semantic-search-vectors)** — BM25 full-text and dense-vector kNN fused with RRF, running only on documents that already survived the structural filter. SynapsD stores and namespaces vectors but **owns no model** — an external embedder fills the spaces through a three-call contract, and without one everything degrades gracefully to FTS.
-- **[Datasets](#datasets)** — named ingest partitions (`data/dataset/wikipedia`, `data/dataset/personal`) you can toggle in and out of *every* query like lenses, and drop wholesale — wipe an imported corpus without touching your own documents.
-- **[Typed edges](#relations-and-edges)** — a directed document graph (`mentions`, `replies-to`, `authored-by`, …) that composes into the same pipeline as everything else: "everything mentioning Alice, in this context, tagged important" is a one-hop scan ANDed into the candidate bitmap.
-- **[Spatial index](#spatial-index-s2)** — "photos within 5 km", "everything in this map viewport" as a single range query over S2 cells.
-- **[Schemas that publish themselves](#schemas)** — hierarchical ids (`data/schema/message/email` *is a* `data/schema/message`), zod validation, and derived JSON Schema consumers can fetch instead of hand-copying enums.
+- **[Context trees](#trees)** - virtual, filesystem-like trees over your data. A path is a logical AND of the layers along it: `ctx:/work/customer-a/devops/issues` is "everything linked to all three", and shortening the path *widens* the result - zoom-out for free. One document can live in many trees; placement is cheap and reversible.
+- **[Bitmap-powered search](#the-query-spec)** - membership, tags, facets, mime types, device presence and schema identity are all roaring bitmaps, so "files in `/work/customer-a`, tagged `finance`, not in staging" is a set intersection, not a table scan. Counts, existence checks and live standing views come straight off the bitmaps, [without loading a single document](#refining-a-query-over-time).
+- **[Multi-timeline support](#timelines-and-intervals)** - any number of named time axes per document, from nanoseconds to gigayears on one grammar: "updated today", "due this week", "Roman Empire, 27 BCE–476 CE", open-ended "still alive" intervals, and [zeitgeist queries](#multi-timeline-retrieval-mode-grouped-zeitgeist) that answer "what does this date mean across wikipedia AND my life" in one call.
+- **[Vector search](#semantic-search-vectors)** - BM25 full-text and dense-vector kNN fused with RRF, running only on documents that already survived the structural filter. SynapsD stores and namespaces vectors but **owns no model** - an external embedder fills the spaces through a three-call contract, and without one everything degrades gracefully to FTS.
+- **[Datasets](#datasets)** - named ingest partitions (`data/dataset/wikipedia`, `data/dataset/personal`) you can toggle in and out of *every* query like lenses, and drop wholesale - wipe an imported corpus without touching your own documents.
+- **[Typed edges](#relations-and-edges)** - a directed document graph (`mentions`, `replies-to`, `authored-by`, …) that composes into the same pipeline as everything else: "everything mentioning Alice, in this context, tagged important" is a one-hop scan ANDed into the candidate bitmap.
+- **[Spatial index](#spatial-index-s2)** - "photos within 5 km", "everything in this map viewport" as a single range query over S2 cells.
+- **[Schemas that publish themselves](#schemas)** - hierarchical ids (`data/schema/message/email` *is a* `data/schema/message`), zod validation, and derived JSON Schema consumers can fetch instead of hand-copying enums.
 
-> **v3.x** — the *refactor-v3* pass and the Rev B id rename have landed (schema version **3**, hierarchical `data/schema/*` ids since 2026-08-05). A database below that version refuses to open, and the engine carries no migration code to fix it — run `scripts/migrate-schema-v3.js`; see **[Schema version and rebuild](#schema-version-and-rebuild)**.
+> **v3.x** - the *refactor-v3* pass and the Rev B id rename have landed (schema version **3**, hierarchical `data/schema/*` ids since 2026-08-05). A database below that version refuses to open, and the engine carries no migration code to fix it - run `scripts/migrate-schema-v3.js`; see **[Schema version and rebuild](#schema-version-and-rebuild)**.
 
 ## Architecture at a glance
 
@@ -27,11 +27,11 @@ SynapsD is one of three deliberately separated services, and stays honest about 
 
 - **SynapsD** (this module) is the index and JSON document store: roaring bitmaps for membership, bit-sliced indexes for time and space, a dupsort adjacency index for typed edges, LanceDB for lexical (BM25) and dense-vector search. It holds document *metadata and structure*, never blob bytes, and **owns no embedding model**.
 - **[StoreD](../stored)** owns the bytes: a cache-first blob store with content-addressable identity (checksums), pluggable backends (file, cacache, http, s3), and `stored://<backend>/<key>` URLs as the canonical fetch form. A synapsd `file` document carries `locations[]` pointing at StoreD; the blob itself lives there.
-- **Embedding is somebody else's job.** synapsd **stores and namespaces vectors; it does not produce them**. There is no model, no provider, no content router and no inference of any kind in this package. An external embedding service (`embedd` in canvas-server) pulls the backlog, embeds, and pushes chunk vectors back in through the API below. Any app can do the same — the contract is three calls, not a plugin system.
+- **Embedding is somebody else's job.** synapsd **stores and namespaces vectors; it does not produce them**. There is no model, no provider, no content router and no inference of any kind in this package. An external embedding service (`embedd` in canvas-server) pulls the backlog, embeds, and pushes chunk vectors back in through the API below. Any app can do the same - the contract is three calls, not a plugin system.
 
 This split buys a few properties that show up everywhere in the API:
 
-- **Documents are the source of truth; indexes are derived cache.** Timelines, mime facets, backend and device presence, geo cells, asserted edges — all re-derived from document state on every write, so they cannot drift, and `rebuildL3()` reconstructs them from rows alone. v3 completed this for user tags: `features[]` now lives on the document.
+- **Documents are the source of truth; indexes are derived cache.** Timelines, mime facets, backend and device presence, geo cells, asserted edges - all re-derived from document state on every write, so they cannot drift, and `rebuildL3()` reconstructs them from rows alone. v3 completed this for user tags: `features[]` now lives on the document.
 - **Membership is cheap and plural.** A document is stored once; appearing in ten trees, five tags, and three timelines costs bitmap bits, not copies.
 - **The dense stack is optional.** No embedding service (or `semantic.enabled: false`) means vector/hybrid queries degrade gracefully to FTS; nothing else changes.
 - **Crash-resumable ingestion.** The embedding work-ledger is a persistent bitmap diff (`getUnembeddedDocIds`), so an external embedder can resume after a restart without rescanning a single document.
@@ -40,10 +40,10 @@ This split buys a few properties that show up everywhere in the API:
 
 | Layer | What it is | Rebuildable from |
 |-------|------------|------------------|
-| **L0** | Bytes. Not here — StoreD owns them; synapsd only stores `locations[]` URLs. | — |
+| **L0** | Bytes. Not here - StoreD owns them; synapsd only stores `locations[]` URLs. | - |
 | **L1** | Document rows (`documents` dataset): the JSON payload, checksums, timestamps. The source of truth. | nothing (this *is* the truth) |
 | **L2** | View membership: context/directory tree bitmaps (`context/*`, `vfs/*`). Human-authored placement. | nothing (also truth) |
-| **L3** | Everything derived: feature/facet bitmaps, mime, backend/device presence, timelines, geo cells, asserted edges, FTS/vector rows. | L1 + extractors — `rebuildL3()` |
+| **L3** | Everything derived: feature/facet bitmaps, mime, backend/device presence, timelines, geo cells, asserted edges, FTS/vector rows. | L1 + extractors - `rebuildL3()` |
 
 The invariant that keeps this honest: drop L3, recompute it from L1, and the index must come back identical. If it does not, something is storing state with no source.
 
@@ -104,20 +104,20 @@ The stored row shape (v3):
 
 Three changes worth knowing before you write anything:
 
-- **`features[]` is top-level and asserted-only.** It moved off `metadata.features`. `metadata` holds *extracted facts written by derivers*; `features[]` holds *membership a human or client asserted*. Derived prefixes (`data/schema/`, `data/mime/`, `data/backend/`, `feature/`, `device/`, plus each schema's own facet namespaces) are **stripped on the way in** — a stored copy of a derived key would be indistinguishable from a derived one while being immune to the derivation's own stale-diff, i.e. it could never be unticked. `data/dataset/*` is *preserved* across an update that omits it, so a client re-putting its own tag array cannot drop ingest provenance.
-- **`indexOptions` is no longer on the row.** It is schema-level configuration (`static indexOptions` on the schema class), identical for every document of a schema — ~414 B of byte-identical JSON per row, ~2.9 GB at 7M rows. Legacy rows carrying it are ignored on read. There is consequently **no per-document index override**.
-- **There is no `kind` field.** The v3 subtype axis was removed 2026-08-04 — see below.
+- **`features[]` is top-level and asserted-only.** It moved off `metadata.features`. `metadata` holds *extracted facts written by derivers*; `features[]` holds *membership a human or client asserted*. Derived prefixes (`data/schema/`, `data/mime/`, `data/backend/`, `feature/`, `device/`, plus each schema's own facet namespaces) are **stripped on the way in** - a stored copy of a derived key would be indistinguishable from a derived one while being immune to the derivation's own stale-diff, i.e. it could never be unticked. `data/dataset/*` is *preserved* across an update that omits it, so a client re-putting its own tag array cannot drop ingest provenance.
+- **`indexOptions` is no longer on the row.** It is schema-level configuration (`static indexOptions` on the schema class), identical for every document of a schema - ~414 B of byte-identical JSON per row, ~2.9 GB at 7M rows. Legacy rows carrying it are ignored on read. There is consequently **no per-document index override**.
+- **There is no `kind` field.** The v3 subtype axis was removed 2026-08-04 - see below.
 
 Reading a document back gives you a schema instance (`parse: false` for the raw stored object).
 
 ### Subtypes (the schema-id hierarchy)
 
-The schema id is **hierarchical** (Rev B, 2026-08-05), and every segment below `data/schema/` is ticked on write — parent and child alike, so the parent key is always a roll-up. A subtype is not a second axis: it is part of *what a thing is*, so it lives in the id. Two segment sources, one rule:
+The schema id is **hierarchical** (Rev B, 2026-08-05), and every segment below `data/schema/` is ticked on write - parent and child alike, so the parent key is always a roll-up. A subtype is not a second axis: it is part of *what a thing is*, so it lives in the id. Two segment sources, one rule:
 
 - **Registered** child ids (`data/schema/message/email`) have their own class, validation and checksum identity, and appear in the registry.
 - **Derived** subtype segments come from a registration's `subtypeField: 'data.type'` (`data/schema/application/flatpak`): real, queryable bitmap keys that are **not** registry entries and never a `doc.schema` value. `getSchema()` throws on one (naming the real schema); `resolveSchemaId(key)` walks a bitmap key up to the nearest registered id.
 
-Enumerate schemas from `listSchemas()`, never from bitmap keys — a bitmap listing of `data/schema` contains derived subtype keys that are not schemas.
+Enumerate schemas from `listSchemas()`, never from bitmap keys - a bitmap listing of `data/schema` contains derived subtype keys that are not schemas.
 
 Two predecessors of this design are retired and their namespaces refused in `features[]` (a client cannot re-assert what nothing derives; `rebuildL3()` sheds any residue): the v3 `kind`/`data/kind/*` axis (removed 2026-08-04, zero consumers), and the flat `data/abstraction/*` namespace itself (renamed 2026-08-05; rows are migrated by `scripts/migrate-schema-v3.js`).
 
@@ -143,27 +143,27 @@ Features are flat bitmap keys ticked on a document. They carry a `who says so?` 
 
 | Prefix | Who says so | Stored on the document? |
 |--------|-------------|-------------------------|
-| `tag/*` | The user — free-form flat labels | yes, in `features[]` |
-| `custom/<axis>/<value>` | The user — structured | yes, in `features[]` |
+| `tag/*` | The user - free-form flat labels | yes, in `features[]` |
+| `custom/<axis>/<value>` | The user - structured | yes, in `features[]` |
 | `client/*` | The writing client | yes, in `features[]` |
 | `data/dataset/*` | Ingest provenance (see **Datasets**) | yes, preserved across updates |
-| `data/no-location` | The app — orphan marker (see below) | yes, in `features[]` |
-| `data/schema/*` | Derived from `schema` | no — derived every write |
+| `data/no-location` | The app - orphan marker (see below) | yes, in `features[]` |
+| `data/schema/*` | Derived from `schema` | no - derived every write |
 | `data/mime/*` | Derived from `metadata.contentType` (hierarchical: type + full type) | no |
 | `data/backend/*` | Derived from `locations[]` (hierarchical: scheme + scheme/authority) | no |
 | `data/<facet>/*` | Derived from a schema's `static facetFields` (e.g. `data/status/*` from Todo's `data.status`) | no |
 | `device/id\|os\|type/*` | Derived from `locations[]` + the device's own Device document | no |
 | `feature/*` | The engine observed it (`feature/has-comment`) | no |
-| `context/*`, `vfs/*` | Tree membership — bitmap-only, not on the row | no |
+| `context/*`, `vfs/*` | Tree membership - bitmap-only, not on the row | no |
 | `internal/*` | Engine-managed, hidden from default listings | no |
 
 Derived facet bitmaps are re-ticked and stale-unticked on every write from document state, so they cannot drift. Completing a todo moves it from `data/status/pending` to `data/status/completed` atomically with the document write, so an agent's "any pending todos here?" is a zero-fetch bitmap probe.
 
 Key charset: lowercased, `a-z 0-9 _ - . / @ : +`. `@` and `:` keep backend addresses readable (`data/backend/imap/user@domain.tld`); `+` keeps MIME subtypes intact (`data/mime/image/svg+xml`) and is only a query sigil in *leading* position.
 
-**`data/no-location`** marks a document whose last resolvable location vanished — index entry kept, bytes gone. It is **asserted by the application, not derived here**: synapsd has no deriver for it, so it behaves like a tag (set it, and it is indexed; drop it, and it unticks). In canvas-server the stored-index orphan lifecycle owns it, setting it alongside `orphanedAt` when the last location goes and clearing it on re-bind. It lives under `data/` rather than `tag/` so delete-protection and retention sweeps can find it by prefix. Making it derived (from `locations.length === 0`) is an open question, not a settled design.
+**`data/no-location`** marks a document whose last resolvable location vanished - index entry kept, bytes gone. It is **asserted by the application, not derived here**: synapsd has no deriver for it, so it behaves like a tag (set it, and it is indexed; drop it, and it unticks). In canvas-server the stored-index orphan lifecycle owns it, setting it alongside `orphanedAt` when the last location goes and clearing it on re-bind. It lives under `data/` rather than `tag/` so delete-protection and retention sweeps can find it by prefix. Making it derived (from `locations.length === 0`) is an open question, not a settled design.
 
-**`data/backend/*`** replaced the deleted `data/source/*`. Both used to be asserted by the parent; once both derive from `locations[]` they are two projections of the same fact, and the provider is a property of the backend, not of the document. Derivation is deliberately generic — synapsd parses a URL into scheme + authority and knows nothing about `stored`, S3 or IMAP. `file://` and `device://` are skipped (that is what `device/*` answers); a location may declare `metadata.backend` explicitly when the URL cannot carry it (device-anchored mounts).
+**`data/backend/*`** replaced the deleted `data/source/*`. Both used to be asserted by the parent; once both derive from `locations[]` they are two projections of the same fact, and the provider is a property of the backend, not of the document. Derivation is deliberately generic - synapsd parses a URL into scheme + authority and knows nothing about `stored`, S3 or IMAP. `file://` and `device://` are skipped (that is what `device/*` answers); a location may declare `metadata.backend` explicitly when the URL cannot carry it (device-anchored mounts).
 
 ### The query seam
 
@@ -179,7 +179,7 @@ list(spec)         = query(null, spec)
 
 There is one candidate-set resolver and one ranker. `list`, `query`, `search`, `searchRefined`, `searchCompound`, and `QuerySession` are all entry points onto that same seam, which is why any filter documented below works in all of them.
 
-`collectionKeys` are the actual bitmap keys consulted (`context/<treeId>/<layerId>`, `vfs/<treeId>/<nodeId>`, feature keys), so a live session can intersect them against `membership.changed` for precise invalidation. `coarse` marks a dependency with no stable key — temporal (BSI range), spatial (S2 BSI), or `rel` (dupsort scan) — which consumers must re-resolve rather than key-intersect.
+`collectionKeys` are the actual bitmap keys consulted (`context/<treeId>/<layerId>`, `vfs/<treeId>/<nodeId>`, feature keys), so a live session can intersect them against `membership.changed` for precise invalidation. `coarse` marks a dependency with no stable key - temporal (BSI range), spatial (S2 BSI), or `rel` (dupsort scan) - which consumers must re-resolve rather than key-intersect.
 
 ## The query spec
 
@@ -321,7 +321,7 @@ const projectTreeSpec = {
 };
 ```
 
-Write methods tick every feature you pass, **unioned with the document's own `features[]`** — the document is declarative, so storing a feature *is* the way to create the bitmap. Dropping a feature from `features[]` on a re-put unticks its bitmap. Sigils are stripped on writes: the `paths` grammar is authoritative and derives both the context and directory selectors, so a directory-only write does not also touch `ctx:/`.
+Write methods tick every feature you pass, **unioned with the document's own `features[]`** - the document is declarative, so storing a feature *is* the way to create the bitmap. Dropping a feature from `features[]` on a re-put unticks its bitmap. Sigils are stripped on writes: the `paths` grammar is authoritative and derives both the context and directory selectors, so a directory-only write does not also touch `ctx:/`.
 
 `provenance` rides on the emitted event so automation layers (workspace hooks and rules) can detect and bound their own cascades. Only `origin`, `causedBy`, and `depth` pass through; anything else is dropped. It defaults to `origin: 'user'`, `depth: 0`.
 
@@ -381,14 +381,14 @@ await db.getBitmapsForDocument(id);
 
 `put()` updates when `document.id` already exists.
 
-`put({ id, data })` **replaces** `data`; it does not deep-merge fields. To change a single field, read the document first and send the full updated `data` object. Fields with their own branch (`comment`, `features`, `locations`, `timelines`) are updated independently of `data` and deliberately do **not** regenerate checksums — editing a tag or a comment must never fork dedup identity or trigger a re-embed.
+`put({ id, data })` **replaces** `data`; it does not deep-merge fields. To change a single field, read the document first and send the full updated `data` object. Fields with their own branch (`comment`, `features`, `locations`, `timelines`) are updated independently of `data` and deliberately do **not** regenerate checksums - editing a tag or a comment must never fork dedup identity or trigger a re-embed.
 
 ```js
 // Change one data field
 const current = await db.get(id);
 await db.put({ id, schema: current.schema, data: { ...current.data, title: 'Updated title' } }, noteSpec);
 
-// Change only tags — no checksum churn, no re-embed
+// Change only tags - no checksum churn, no re-embed
 await db.put({ id, features: ['tag/important', 'tag/reviewed'] });
 ```
 
@@ -416,7 +416,7 @@ const linkResult = await db.linkMany([id1, id2], { context: { tree: 'projects', 
 const unlinkResult = await db.unlinkMany([id1, id2], { features: ['tag/inbox'] });
 ```
 
-> Feature keys ticked through `link()` are *bitmap-only* — they are not written back to `features[]`. For tags you want to survive an L3 rebuild and be visible to offline clients, put them on the document.
+> Feature keys ticked through `link()` are *bitmap-only* - they are not written back to `features[]`. For tags you want to survive an L3 rebuild and be visible to offline clients, put them on the document.
 
 Context-tree root `/` is a selector meaning "anything in this tree", not a real removable membership. Directory-tree root `/` is just the literal root folder.
 
@@ -460,11 +460,11 @@ A closed, append-only registry (`src/indexes/edges/predicates.js`). Ids are pers
 
 Every predicate takes the **document** as subject, never the entity it points at ("message authored-by identity", not "identity authors message").
 
-**Direction is an axis, not a name.** There are no inverse predicate names anywhere — not in the registry, not in persisted data, not in the query grammar. You express direction by which method you call (`outgoing` / `incoming`) or by a `dir` parameter. Inverse-style spellings (`mentioned-by`, `derives`, `authors`, …) are explicitly rejected with a pointer to the axis, because resolving them erases direction at the callsite and silently produces wrong forward scans.
+**Direction is an axis, not a name.** There are no inverse predicate names anywhere - not in the registry, not in persisted data, not in the query grammar. You express direction by which method you call (`outgoing` / `incoming`) or by a `dir` parameter. Inverse-style spellings (`mentioned-by`, `derives`, `authors`, …) are explicitly rejected with a pointer to the axis, because resolving them erases direction at the callsite and silently produces wrong forward scans.
 
 ### Asserted edges: `data.relations`
 
-A document declares its own edges in `data.relations`, an array of `{ p, to }`. They are derived into the edge index on every write, as a diff against the previous row — an update that drops an entry drops the edge.
+A document declares its own edges in `data.relations`, an array of `{ p, to }`. They are derived into the edge index on every write, as a diff against the previous row - an update that drops an entry drops the edge.
 
 ```js
 const alice = await db.put({ schema: 'data/schema/identity', data: { displayName: 'Alice' } });
@@ -487,7 +487,7 @@ const msg = await db.put({
 
 **Asserted edges write no meta row.** The absence of a meta record *is* the convention meaning "owned by a document's `data.relations`"; `edge()` synthesizes `{ src: 'doc' }` so callers never see the trick. Extractor and agent edges must pass `{ src: 'extractor:<name>' }` or `{ src: 'agent:<hookId>' }`.
 
-That split is what makes `removeEdges({ src })` + re-running the extractor a complete rebuild path for derived edges that can never touch asserted ones — and conversely, why a row update that drops a relation removes only the asserted edge between that pair, leaving an extractor's independent edge alone.
+That split is what makes `removeEdges({ src })` + re-running the extractor a complete rebuild path for derived edges that can never touch asserted ones - and conversely, why a row update that drops a relation removes only the asserted edge between that pair, leaving an extractor's independent edge alone.
 
 ```js
 // Document-aware facade (handles optional membership inheritance)
@@ -511,7 +511,7 @@ db.edges.removeEdges({ src: 'extractor:ner', p: 'mentions' });
 
 ### The `rel` query bucket
 
-Adjacency composes into the same candidate pipeline as paths and features — one hop, expressed as set algebra rather than a traversal API. Multi-hop traversal is deliberately out of scope for v3.
+Adjacency composes into the same candidate pipeline as paths and features - one hop, expressed as set algebra rather than a traversal API. Multi-hop traversal is deliberately out of scope for v3.
 
 ```js
 // Everything that mentions Alice, in /work, tagged important
@@ -533,7 +533,7 @@ await db.list({
 });
 ```
 
-`of` must be a positive integer document id (numeric strings are coerced); `dir` is `'out'` (default) or `'in'`; `op` is `anyOf` (default), `allOf`, or `noneOf`. All of this is validated at spec-parse time — an unknown or inverse-style predicate would otherwise be caught by the sigil combiner and silently *widen* the result set instead of failing.
+`of` must be a positive integer document id (numeric strings are coerced); `dir` is `'out'` (default) or `'in'`; `op` is `anyOf` (default), `allOf`, or `noneOf`. All of this is validated at spec-parse time - an unknown or inverse-style predicate would otherwise be caught by the sigil combiner and silently *widen* the result set instead of failing.
 
 A `rel` operand has no stable bitmap key (it is a dupsort scan), so it marks the candidate set `coarse`: a `QuerySession` re-resolves it rather than key-invalidating.
 
@@ -543,7 +543,7 @@ A schema is a `Document` subclass plus a registration record. The registry (`src
 
 | Tier | Folder | What | Ids |
 |------|--------|------|-----|
-| `core` | `schemas/core/` | synapsd's own primitives. Sealed — cannot be re-registered or removed. | `document`, `file`, `message`, `email`, `event`, `todo`, `identity`, `device`, `application` |
+| `core` | `schemas/core/` | synapsd's own primitives. Sealed - cannot be re-registered or removed. | `document`, `file`, `message`, `email`, `event`, `todo`, `identity`, `device`, `application` |
 | `app` | `schemas/app/` | Consumer abstractions, registered through the same code path a third party would use. Bundled here pending the parent's own `registerSchema()` calls. | `note`, `tab`, `link`, `dotfile` |
 | `internal` | `schemas/internal/` | Tree layer abstractions. | `internal/layers/{canvas,context,label,system,universe,workspace,project}` |
 
@@ -551,7 +551,7 @@ The tier is the folder, so a bundled app schema moving out of the repo is a dire
 
 Ids are hierarchical `data/schema/*` since Rev B (2026-08-05); the old flat `data/abstraction/*` namespace is retired, and `SCHEMA_ID_RENAMES` (exported from the registry) records the old→new mapping the migration script executes.
 
-v3 schema changes: `Contact` → `Identity` (with a `data.type` of `person|organization|service|bot`), `Bucket` deleted, `Event` added. `Todo` was renamed `Task` 2026-08-04 (the class only — its id follows in Rev B).
+v3 schema changes: `Contact` → `Identity` (with a `data.type` of `person|organization|service|bot`), `Bucket` deleted, `Event` added. `Todo` was renamed `Task` 2026-08-04 (the class only - its id follows in Rev B).
 
 ### Registering your own
 
@@ -591,9 +591,9 @@ class Phone extends Device {
 // -> data.deviceId + data.name (Device's, required) AND data.imei are all enforced
 ```
 
-Without it a subclass inherits the parent's `dataSchema` unchanged, so its own fields are accepted by passthrough but never *checked*; calling `extendDataSchema()` instead builds a fresh wrapper and drops the PARENT's field validation. Two helpers rather than one fix, because the base `Document` types `data` as `z.record(z.any())` — making `extendDataSchema()` merge would change behaviour for every schema already calling it. (That same record case means a `Document` subclass inherits no named fields, so its own shape stands alone.)
+Without it a subclass inherits the parent's `dataSchema` unchanged, so its own fields are accepted by passthrough but never *checked*; calling `extendDataSchema()` instead builds a fresh wrapper and drops the PARENT's field validation. Two helpers rather than one fix, because the base `Document` types `data` as `z.record(z.any())` - making `extendDataSchema()` merge would change behaviour for every schema already calling it. (That same record case means a `Document` subclass inherits no named fields, so its own shape stands alone.)
 
-The parent is passed in as **`super.dataSchema`** on purpose: the helper takes no `this` and does no prototype walking. `super` means exactly "the class I extend", bound where it is written, so it cannot be fooled by a rebound call — and a class with no superclass cannot express it at all, which removes a failure mode rather than guarding against one.
+The parent is passed in as **`super.dataSchema`** on purpose: the helper takes no `this` and does no prototype walking. `super` means exactly "the class I extend", bound where it is written, so it cannot be fooled by a rebound call - and a class with no superclass cannot express it at all, which removes a failure mode rather than guarding against one.
 
 It **throws** when the parent is a `ZodEffects` (wrapped in `.refine()`, as `Application` is): that refinement has no introspectable shape, so rebuilding around it would silently leave the subclass with weaker validation than its parent. Compose those by hand.
 
@@ -604,13 +604,13 @@ Rules the registry enforces rather than documents:
 
 `indexOptions` fields: `checksumAlgorithms` (default `['sha1','sha256']`), `checksumFields`, `ftsSearchFields`, `vectorEmbeddingFields` (all default to `['data']`), and `embeddingOptions`. Field paths are dotted and resolved against the *document* (so `locationUrls` and other getters work); the literal `'data'` resolves to `contentData()`, i.e. `data` minus `relations`.
 
-`static facetFields = ['data.status']` gives a schema the derived-facet machinery: the leaf field name becomes the namespace (`data/status/*`), ticked and stale-unticked on every write. Engine-owned namespaces (`abstraction`, `schema`, `kind`, `mime`, `backend`, `source`, `dataset`, `no-location`) are refused — `kind` stays reserved although its axis is gone, because a migrated database can still carry residue in that namespace.
+`static facetFields = ['data.status']` gives a schema the derived-facet machinery: the leaf field name becomes the namespace (`data/status/*`), ticked and stale-unticked on every write. Engine-owned namespaces (`abstraction`, `schema`, `kind`, `mime`, `backend`, `source`, `dataset`, `no-location`) are refused - `kind` stays reserved although its axis is gone, because a migrated database can still carry residue in that namespace.
 
 ### Publishing a schema to consumers
 
-`static get dataSchema()` (zod) is the only shape you write. **`jsonSchema` is derived from it** — `Document.jsonSchema` converts the class's own `dataSchema` to JSON Schema draft-07 (memoized per class), so a subclass never declares one. `schemaRegistry.getJsonSchema(id)` stamps `$id`; the parent serves it on `GET /rest/v2/schemas/data/schema/<id>.json` (a splat route, since an id can span two segments).
+`static get dataSchema()` (zod) is the only shape you write. **`jsonSchema` is derived from it** - `Document.jsonSchema` converts the class's own `dataSchema` to JSON Schema draft-07 (memoized per class), so a subclass never declares one. `schemaRegistry.getJsonSchema(id)` stamps `$id`; the parent serves it on `GET /rest/v2/schemas/data/schema/<id>.json` (a splat route, since an id can span two segments).
 
-This is the point of the registry: a consumer **fetches** a schema instead of copying it. The derived document carries the enums, ranges and required/optional facts that validation already enforces — the four task statuses, `priority` 1–9, the identity `type` enum — so a form builder or another language's validator can be driven straight off the endpoint. Before 2026-08-04 each class hand-wrote `jsonSchema` as an example object (`{ schema, data: { title: 'string' } }`) carrying none of that, which is why consumers duplicated the values by hand and drifted.
+This is the point of the registry: a consumer **fetches** a schema instead of copying it. The derived document carries the enums, ranges and required/optional facts that validation already enforces - the four task statuses, `priority` 1–9, the identity `type` enum - so a form builder or another language's validator can be driven straight off the endpoint. Before 2026-08-04 each class hand-wrote `jsonSchema` as an example object (`{ schema, data: { title: 'string' } }`) carrying none of that, which is why consumers duplicated the values by hand and drifted.
 
 Internal layer types are not documents and have no `dataSchema`; `getJsonSchema()` returns `null` for them rather than throwing, so iterating `listSchemas()` is safe.
 
@@ -742,7 +742,7 @@ The whole vector surface is: you push chunk vectors in, synapsd namespaces them 
 
 - **Document vectors arrive from outside** via `storeDocumentEmbeddings(docId, schema, updatedAt, chunks, { space })`. In canvas-server the `embedd` service is the producer; any app can push vectors the same way.
 - **Query embedding is an injected callback**: `semantic.embedQuery(text, space)`. When absent, `vector` and `hybrid` queries degrade to FTS.
-- **The durable work-ledger stays in synapsd**: a per-space "seen" bitmap plus `getUnembeddedDocIds(space, schemas)` — a pure bitmap diff (embeddable-schemas OR minus seen) that survives restarts.
+- **The durable work-ledger stays in synapsd**: a per-space "seen" bitmap plus `getUnembeddedDocIds(space, schemas)` - a pure bitmap diff (embeddable-schemas OR minus seen) that survives restarts.
 
 ### Vector spaces
 
@@ -760,11 +760,11 @@ internal/embed/vectors/<space>/<model-slug>   presence ("this doc has vectors")
 internal/embed/seen/<space>/<model-slug>      processed (including deliberate skips)
 ```
 
-A namespace must never also be a key: `listBitmaps()` range-scans `prefix + '/'`, so a bare `internal/embed/vectors/text` sitting above `internal/embed/vectors/text/<slug>` would be invisible to a prefix query of its own namespace. That is exactly what the pre-v3 `internal/lance/vectors` key did — it was the text presence bitmap *and* the parent path of the image one. (The one-time remap of those legacy keys went with the rest of the migration code; `migrateBitmapKey(legacy, canonical)` is still there as a live API if an old key ever turns up.)
+A namespace must never also be a key: `listBitmaps()` range-scans `prefix + '/'`, so a bare `internal/embed/vectors/text` sitting above `internal/embed/vectors/text/<slug>` would be invisible to a prefix query of its own namespace. That is exactly what the pre-v3 `internal/lance/vectors` key did - it was the text presence bitmap *and* the parent path of the image one. (The one-time remap of those legacy keys went with the rest of the migration code; `migrateBitmapKey(legacy, canonical)` is still there as a live API if an old key ever turns up.)
 
 The `image` space is **cross-modal**: photos are embedded from bytes, and at query time the *text* query is embedded by the same encoder family into the same joint space. Two consequences baked into the defaults:
 
-- **Exact kNN, no ANN index.** Lance's quantized ANN indexes train on the stored (image) distribution; a text query vector lands outside it and comes back with wildly inflated distances (measured: true 0.96 → ANN 1.49) that the relevance floor then rejects wholesale — silent zero results.
+- **Exact kNN, no ANN index.** Lance's quantized ANN indexes train on the stored (image) distribution; a text query vector lands outside it and comes back with wildly inflated distances (measured: true 0.96 → ANN 1.49) that the relevance floor then rejects wholesale - silent zero results.
 - **A cosine-distance floor** (`imageMaxDistance`, default `0.945`, calibrated against SigLIP base fp32) keeps unrelated photos out of every search, since image kNN returns its top-K for *any* query.
 
 ### Config and introspection
@@ -789,7 +789,7 @@ const db = new SynapsD({
 | `embedQuery` | `null` | Injected query embedder `(text, space) => vector`; absent → FTS fallback |
 | `embeddableSchemas` | `['data/schema/note']` | Default candidate schemas for the unembedded-gap ledger |
 | `spaces` | text + image (above) | Per-space `{ table, model, dim, bitmapKey, seenKey, annIndex }` |
-| `imageMaxDistance` | `0.945` | Cosine floor for the image kNN leg. ⚠️ Calibrated against **SigLIP base fp32** — the figure is model-specific and must be re-measured for a different image encoder (use `debug: true`, see below). `CANVAS_IMAGE_MAX_DISTANCE` env override; `null`/`0` = no floor |
+| `imageMaxDistance` | `0.945` | Cosine floor for the image kNN leg. ⚠️ Calibrated against **SigLIP base fp32** - the figure is model-specific and must be re-measured for a different image encoder (use `debug: true`, see below). `CANVAS_IMAGE_MAX_DISTANCE` env override; `null`/`0` = no floor |
 | `searchWeights` | `{ fts: 2, dense: 1, image: 2 }` | Hybrid RRF fusion weights. FTS outweighs dense because text kNN has no relevance floor; image ties FTS because it *is* floored |
 
 `setSearchTuning({ imageMaxDistance, searchWeights })` adjusts these at runtime. `await db.getStats()` returns a `.semantic` block for diagnostics UIs. Per-space helpers: `setVectorSpaces()`, `listVectorTables()`, `dropVectorTable()`, `clearSpace()`, `optimizeVectors()`.
@@ -859,12 +859,12 @@ Every requested timeline is present in the result (empty as `[]`). Because queri
 Canonical calendar and time semantics:
 
 - Proleptic Gregorian calendar internally; astronomical year numbering (`0` = 1 BCE).
-- Modern instants are treated as UTC-ish civil time. Leap seconds are ignored — this is a personal/workspace event database, not a spacecraft.
+- Modern instants are treated as UTC-ish civil time. Leap seconds are ignored - this is a personal/workspace event database, not a spacecraft.
 - Deep-time values should use scaled coordinates (`Gyr`, `Myr`, `Kyr`) instead of calendar dates.
 
 ### System CRUD timelines
 
-Document lifecycle events are automatically indexed into `crud:created`, `crud:updated`, and `crud:deleted` — **point-event** timelines pinned to **second** resolution (ms precision on a wall-clock lifecycle stamp is spurious and only widens the BSI).
+Document lifecycle events are automatically indexed into `crud:created`, `crud:updated`, and `crud:deleted` - **point-event** timelines pinned to **second** resolution (ms precision on a wall-clock lifecycle stamp is spurious and only widens the BSI).
 
 Formats: `t:crud:ACTION:TIMEFRAME` and `t:crud:ACTION:START..END`.
 
@@ -881,13 +881,13 @@ const recentDocs = await db.list({
 
 - **`content`**: when the content itself came into existence (EXIF capture date for photos).
 - **`tasks`**: Todo due dates (point-mode, derived from `data.dueDate` by the Todo schema). `t:tasks:today` means "due today"; `sortBy: 'tasks'` orders by due date.
-- **`events`**: `Event` documents (`calendar` / `alert` / `activity`), derived from `data.start` / `data.end`. One timeline for all three types, with `data.type` discriminating — because the founding query is "show me everything happening under /work/customer-foo", and a calendar app, an alert panel and an activity feed are three lenses on one set.
+- **`events`**: `Event` documents (`calendar` / `alert` / `activity`), derived from `data.start` / `data.end`. One timeline for all three types, with `data.type` discriminating - because the founding query is "show me everything happening under /work/customer-foo", and a calendar app, an alert panel and an activity feed are three lenses on one set.
 
 #### Event recurrence: the envelope model
 
-A recurring series cannot be expanded into N timeline entries on one document (one position per timeline, see above). Instead an `Event` carrying an RFC 5545 `data.recurrence` (`FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T235959Z`) gets a timeline entry spanning an **envelope** — first occurrence to `UNTIL`, or open when the rule never ends — and the client expands the RRULE to render real occurrences, exactly as a CalDAV client already does with `VEVENT`+`RRULE`.
+A recurring series cannot be expanded into N timeline entries on one document (one position per timeline, see above). Instead an `Event` carrying an RFC 5545 `data.recurrence` (`FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T235959Z`) gets a timeline entry spanning an **envelope** - first occurrence to `UNTIL`, or open when the rule never ends - and the client expands the RRULE to render real occurrences, exactly as a CalDAV client already does with `VEVENT`+`RRULE`.
 
-The envelope is a deliberate superset: a weekly standup answers a query for any day inside its span. That is the same candidate-set-then-refine contract as the rest of the engine, and it never *misses* an occurrence, which is the property that matters for a bitmap pre-filter. `COUNT=n` yields an **open** envelope rather than a computed last occurrence — an open envelope over-matches (the client filters), a short one would lose occurrences outright.
+The envelope is a deliberate superset: a weekly standup answers a query for any day inside its span. That is the same candidate-set-then-refine contract as the rest of the engine, and it never *misses* an occurrence, which is the property that matters for a bitmap pre-filter. `COUNT=n` yields an **open** envelope rather than a computed last occurrence - an open envelope over-matches (the client filters), a short one would lose occurrences outright.
 
 ### Custom timelines
 
@@ -921,11 +921,11 @@ const articleId = await db.put({
 });
 ```
 
-`name` is the timeline; `timeline` is accepted as an alias. `scale` is optional and inferred when safe. An omitted `end` means "instant"; an explicit `end: null` means an **open** (ongoing) interval. On update, SynapsD removes the document from timelines declared on the old or new document, then indexes the new entries — manually-added entries not declared on the document are left alone.
+`name` is the timeline; `timeline` is accepted as an alias. `scale` is optional and inferred when safe. An omitted `end` means "instant"; an explicit `end: null` means an **open** (ongoing) interval. On update, SynapsD removes the document from timelines declared on the old or new document, then indexes the new entries - manually-added entries not declared on the document are left alone.
 
 ## Spatial index (S2)
 
-Documents with GPS coordinates (`metadata.geo.lat` / `metadata.geo.lon`) are indexed into a single bit-sliced index over their **S2 cell id** at level 21 (~5 m, since GPS accuracy is 3 to 10 m and finer would be fake precision). Fully derived: coordinates appear and it is indexed; coordinates are removed or the document is deleted and it is dropped. Exact `(0, 0)` is rejected — `Number(null)` is 0 and finite, so a `{ lat: null, lon: null }` record would otherwise answer bbox queries covering Null Island.
+Documents with GPS coordinates (`metadata.geo.lat` / `metadata.geo.lon`) are indexed into a single bit-sliced index over their **S2 cell id** at level 21 (~5 m, since GPS accuracy is 3 to 10 m and finer would be fake precision). Fully derived: coordinates appear and it is indexed; coordinates are removed or the document is deleted and it is dropped. Exact `(0, 0)` is rejected - `Number(null)` is 0 and finite, so a `{ lat: null, lon: null }` record would otherwise answer bbox queries covering Null Island.
 
 The trick that keeps this one BSI instead of a per-cell bitmap zoo: S2 ids are hierarchical, so every ancestor cell covers one **contiguous id range** of its descendants. "In cell X" at any zoom level is a single `BETWEEN` range query. A region query runs the S2 region coverer (up to 20 cells) and ORs the per-cell ranges. Bitmap population is fixed at the slice width (~65) regardless of data density, precision, or query zoom.
 
@@ -979,7 +979,7 @@ const treeLayers = await db.bitmapIndex.listBitmaps(`context/${treeId}`);
 
 Load a bitmap with `getBitmap(key)`, which returns a `Bitmap` instance with `size`, `has(id)`, `toArray()`, and friends. Find which bitmaps contain a document via `getBitmapsForDocument(id, prefix?)` on the main `db` object.
 
-(canvas-server exposes an HTTP equivalent; its routes are documented in that project's `docs/API.md`, not here — synapsd itself has no HTTP surface.)
+(canvas-server exposes an HTTP equivalent; its routes are documented in that project's `docs/API.md`, not here - synapsd itself has no HTTP surface.)
 
 ## Trees
 
@@ -1027,9 +1027,9 @@ Datasets are path-independent ingest provenance: a `data/dataset/<name>` key sta
 
 They get their own algebra bucket in `resolveCandidates`. Every document implicitly belongs to a **virtual `default` dataset** (= stamped with none), and the candidate set is intersected with the union of *selected* datasets, with `default` selected to begin with:
 
-- `anyOf data/dataset/X` — **adds** X to the mix.
-- `allOf data/dataset/X` — shows only X (the ordinary feature AND constrains).
-- `noneOf data/dataset/X` — deselects X.
+- `anyOf data/dataset/X` - **adds** X to the mix.
+- `allOf data/dataset/X` - shows only X (the ordinary feature AND constrains).
+- `noneOf data/dataset/X` - deselects X.
 
 `anyOf`/`noneOf` dataset keys are pulled out of the generic feature buckets, because a plain OR-union would let dataset documents bypass the caller's other feature filters.
 
@@ -1042,7 +1042,7 @@ await db.deleteDataset('scan-2026-08', { dropDocuments: true });
 
 **There is no migration code in this engine (removed 2026-08-04).** One-time migrations were living on the startup path, gated behind a persisted version, running an `O(all-docs)` check on every open for work that happens once in a database's life. They are operator actions; write a one-off script against a backup instead.
 
-What stayed is the **refusal**. `SCHEMA_VERSION` (currently **3** — the Rev B hierarchical id rename) is the row format this build writes; a *non-empty* database below it throws at `start()`:
+What stayed is the **refusal**. `SCHEMA_VERSION` (currently **3** - the Rev B hierarchical id rename) is the row format this build writes; a *non-empty* database below it throws at `start()`:
 
 ```
 synapsd: database is at schema v2, this build needs v3. Migration code was removed
@@ -1050,22 +1050,22 @@ from the engine; migrate the database with a one-off script against a backup, th
 stamp internal/schemaVersion to 3.
 ```
 
-Deleting that check would not make a stale database someone else's problem — it would make it **silent data loss**. Current code reading a pre-v2 row never promotes `metadata.features`, so asserted tags that exist only in bitmaps — the one class of state with no rebuild source, which is *why* `features[]` moved onto the row — would be dropped on the next write, with no error anywhere.
+Deleting that check would not make a stale database someone else's problem - it would make it **silent data loss**. Current code reading a pre-v2 row never promotes `metadata.features`, so asserted tags that exist only in bitmaps - the one class of state with no rebuild source, which is *why* `features[]` moved onto the row - would be dropped on the next write, with no error anywhere.
 
 A brand-new or empty database is stamped and skips the refusal, so a fresh install never trips it. Bump `SCHEMA_VERSION` when a change makes rows written by this build unreadable by the previous one.
 
-The one-off script for the current version is **`scripts/migrate-schema-v3.js`** — run it by hand against a backup:
+The one-off script for the current version is **`scripts/migrate-schema-v3.js`** - run it by hand against a backup:
 
 ```bash
 node scripts/migrate-schema-v3.js -d <workspace>/db [--hooks <workspace>/hooks] [--dry-run]
 node scripts/migrate-schema-v3.js --users-root <server>/server/users   # every workspace at once
 ```
 
-It rewrites `doc.schema` through the exported `SCHEMA_ID_RENAMES`, migrates the id-bearing config that would otherwise fail *silently* (canvas layer `querySpec.features`, workspace hook `rules.json`), handles pre-v2 databases too (features promotion + bitmap-only tag recovery), stamps the version **last** (a killed run stays refused by the gate — just re-run), then reopens and runs `rebuildL3()` + the FTS rebuild. Migration logic stays in `scripts/`, not the engine, at least until the schema design fully crystalizes.
+It rewrites `doc.schema` through the exported `SCHEMA_ID_RENAMES`, migrates the id-bearing config that would otherwise fail *silently* (canvas layer `querySpec.features`, workspace hook `rules.json`), handles pre-v2 databases too (features promotion + bitmap-only tag recovery), stamps the version **last** (a killed run stays refused by the gate - just re-run), then reopens and runs `rebuildL3()` + the FTS rebuild. Migration logic stays in `scripts/`, not the engine, at least until the schema design fully crystalizes.
 
 ### `rebuildL3()`
 
-The same replay, available on demand — the rebuild invariant made executable. It composes the existing reindexers rather than paralleling them.
+The same replay, available on demand - the rebuild invariant made executable. It composes the existing reindexers rather than paralleling them.
 
 ```js
 await db.rebuildL3();                                   // edges + bitmaps (defaults)
@@ -1091,21 +1091,21 @@ Event names live in the frozen `EVENTS` map. Rename a constant there to rename t
 
 **Document CRUD**: `document.inserted`, `document.updated`, `document.removed`, `document.deleted`
 
-**Batch variants** — one event per bulk op, so a 1000-doc insert does not fan out into 1000 socket emits: `document.inserted.batch` (`{ ids, count, context, directory }`), `document.updated.batch`, `document.removed.batch`, `document.deleted.batch`. Back-compat: insert/update batches *also* emit the singular event once with `{ ids, batch: true }`. Batch-aware consumers should match on the `.batch` names.
+**Batch variants** - one event per bulk op, so a 1000-doc insert does not fan out into 1000 socket emits: `document.inserted.batch` (`{ ids, count, context, directory }`), `document.updated.batch`, `document.removed.batch`, `document.deleted.batch`. Back-compat: insert/update batches *also* emit the singular event once with `{ ids, batch: true }`. Batch-aware consumers should match on the `.batch` names.
 
 **Membership**:
 
 - `document.linked` / `document.unlinked`: first-class membership events carrying the **full document** plus what changed. The full document is the point: automation can match on *content*, which the membership-only `document.updated`/`document.removed` payloads cannot support. Back-compat: `link`/`unlink` also emit the older membership-only forms.
-- `membership.changed`: emitted post-commit with the exact collection bitmap keys ticked or unticked — `{ changes: [{ docId, op: 'tick'|'untick', keys }] }`. Drives precise live invalidation in `QuerySession`. Fires before the corresponding `document.*` event, so a session re-resolves against already-committed bitmaps.
+- `membership.changed`: emitted post-commit with the exact collection bitmap keys ticked or unticked - `{ changes: [{ docId, op: 'tick'|'untick', keys }] }`. Drives precise live invalidation in `QuerySession`. Fires before the corresponding `document.*` event, so a session re-resolves against already-committed bitmaps.
 
 **Tree management**: `tree.created`, `tree.deleted`, `tree.renamed`
 **Tree path**: `tree.path.inserted|moved|copied|removed|locked|unlocked`
 **Tree layer**: `tree.layer.merged|subtracted|converted|updated`
-**Tree document**: `tree.document.inserted[.batch]`, `tree.document.removed[.batch]`, `tree.document.deleted[.batch]` — tree-scoped mirrors of the document events, driving the web UI and browser extension.
+**Tree document**: `tree.document.inserted[.batch]`, `tree.document.removed[.batch]`, `tree.document.deleted[.batch]` - tree-scoped mirrors of the document events, driving the web UI and browser extension.
 **Tree lifecycle**: `tree.recalculated`, `tree.saved`, `tree.loaded`, `tree.error`
 **Datasets**: `dataset.deleted` (a literal string, not yet an `EVENTS` constant)
 
-Payloads are wrapped with `SynapsDEvent` (helpers `createEvent` / `createTreeEvent`). The envelope always carries `event`, `eventId` (usable as an idempotency key), `source`, an ISO `timestamp`, the **provenance** triple (`origin`, `causedBy`, `depth`), and `treeId`/`treeName`/`treeType` on tree-scoped events. That triple is what lets automation bound its own cascades — a rule reacting to `document.inserted` can stop when `depth` exceeds its budget or when it recognizes its own `causedBy` chain.
+Payloads are wrapped with `SynapsDEvent` (helpers `createEvent` / `createTreeEvent`). The envelope always carries `event`, `eventId` (usable as an idempotency key), `source`, an ISO `timestamp`, the **provenance** triple (`origin`, `causedBy`, `depth`), and `treeId`/`treeName`/`treeType` on tree-scoped events. That triple is what lets automation bound its own cascades - a rule reacting to `document.inserted` can stop when `depth` exceeds its budget or when it recognizes its own `causedBy` chain.
 
 ## Errors (`src/utils/errors.js`)
 
@@ -1156,7 +1156,7 @@ Legacy method names like `findDocuments`, `ftsQuery`, and `insertDocument` are n
 
 `createTree(name, type?, options?)`, `listTrees(type?)`, `getTree(nameOrId)`, `deleteTree(nameOrId)`, `renameTree(nameOrId, newName)`, `getTreePaths(nameOrId)`, `getTreeJson(nameOrId)`, `getDefaultContextTree()`, `getDefaultDirectoryTree()`, `listDocumentTreePaths(id, tree)`, `listDocumentTreeMemberships(id, tree)`, `hasDocumentTreeMembership(id, tree)`, `migrateDocumentMemberships(fromId, toId, opts?)`
 
-`listSchemas(prefix?)`, `getSchema(id)`, `hasSchema(id)`, `getDataSchema(id)`, `getJsonSchema(id)` — registration itself goes through the `schemaRegistry` singleton (`registerSchema` / `unregisterSchema` / `getSchemaEntry` / `resolveSubtype`).
+`listSchemas(prefix?)`, `getSchema(id)`, `hasSchema(id)`, `getDataSchema(id)`, `getJsonSchema(id)` - registration itself goes through the `schemaRegistry` singleton (`registerSchema` / `unregisterSchema` / `getSchemaEntry` / `resolveSubtype`).
 
 ### Maintenance and introspection
 
@@ -1186,12 +1186,12 @@ Sub-index handles: `db.timeline`, `db.geo`, `db.bitmapIndex`, `db.checksumIndex`
 
 ## Known limits
 
-- **One position per timeline** per document — declaring more throws (see **Timelines**). Multi-position indexing is wanted but not built.
+- **One position per timeline** per document - declaring more throws (see **Timelines**). Multi-position indexing is wanted but not built.
 - **`rel` is one hop.** Multi-hop traversal is deliberately out of scope.
 - **`g:`/`re:` filters** are recognised but unimplemented, and throw at parse time.
 - **Sigil consistency for raw bitmap keys**: raw keys in `filters` AND together, while `t:`/`geo:` tokens default to anyOf-OR. Known inconsistency, to be resolved in one sweep.
 - **Recipient edges** (email To/Cc → identity) are deferred: the role is distinct from authorship and cannot live in edge meta without colliding with the asserted-edge convention. `data.to`/`data.cc` stay ordinary fields until the reverse query is actually wanted.
-- **`link()` features are bitmap-only** and do not survive an L3 rebuild — put durable tags on the document.
+- **`link()` features are bitmap-only** and do not survive an L3 rebuild - put durable tags on the document.
 
 ## References
 
