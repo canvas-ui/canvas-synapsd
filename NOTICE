@@ -1,0 +1,85 @@
+Canvas SynapsD
+Copyright (C) 2025-2026 Jozef Melich
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+Contact:
+    lic@augmentd.eu       licensing
+    contrib@augmentd.eu   contributions
+    security@augmentd.eu   security
+
+PART OF CANVAS
+--------------
+
+SynapsD is the context-based document indexing engine behind Canvas.
+It provides context trees, bitmap indexes, document schemas and vector search.
+
+This repository is one component of the Canvas project. It is developed and
+released as part of Canvas, but it lives in its own repository:
+
+    this component   https://github.com/canvas-ui/canvas-synapsd
+    the project      https://github.com/canvas-ui/canvas-server
+
+Canvas components are not all licensed the same way. The server runtime and the
+services it embeds are dual-licensed. The standalone clients are AGPL-only. The
+COMPONENTS section of the project NOTICE lists which is which.
+
+NETWORK USE
+-----------
+
+This component is a library embedded in canvas-server rather than a network
+service of its own, but it forms part of a program that is made available to
+users over a network. Section 13 of the AGPL therefore applies to the combined
+work. If you run a modified Canvas and let users interact with it over a
+network, those users must be able to obtain the corresponding source of your
+modifications, including any you make to this component.
+
+canvas-server implements its side of that obligation. Every HTTP response
+carries an `X-Source-Code` header, and `GET /rest/v2/ping` (no authentication
+required) reports the running version, revision and source URL:
+
+    curl -sI https://your-host/ | grep -i x-source-code
+    curl -s  https://your-host/rest/v2/ping
+
+If you deploy a modified version, repoint these at the repository that publishes
+your changes. Set `CANVAS_SOURCE_URL`, and set `CANVAS_SOURCE_COMMIT` where the
+build has no git metadata. Removing the notice instead of repointing it does not
+satisfy the licence.
+
+COPYRIGHT AND COMMERCIAL LICENSING
+----------------------------------
+
+Copyright in this codebase is held by Jozef Melich. Augmentd s.r.o. holds an
+exclusive licence to it, including the right to grant sublicences, and is the
+entity authorised to issue commercial licences for Canvas.
+
+The AGPL is not the only option for this component. If its terms do not work for
+you, most often because you want to build a commercial or hosted product on
+Canvas without publishing your own changes, a separate commercial licence is
+available and no AGPL obligation applies to it. See COMMERCIAL.md.
+
+Enquiries: lic@augmentd.eu
+
+    Augmentd s.r.o.
+    DUETT Business Center
+    Námestie Osloboditeľov 3/A
+    040 01 Košice, Slovakia
+    Company ID: 45331936
+    VAT ID: SK2022968717
+    https://augmentd.eu
+
+THIRD-PARTY CODE
+----------------
+
+Third-party dependencies keep their own licences. See the dependency manifests
+and lockfiles for their terms. This notice covers Canvas code only.
