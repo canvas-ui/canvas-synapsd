@@ -131,6 +131,25 @@ export default class QuerySession {
         return lbl;
     }
 
+    /**
+     * Replace a cue's spec wholesale (upsert — creates the cue when absent).
+     * patch() merges buckets (arrays concat) for interactive refinement; a
+     * streaming producer re-emitting a full cue every tick (id-sets, anchor
+     * filters) must use set(), or the merged arrays accumulate forever.
+     */
+    async set(label, spec) {
+        this.#assertOpen();
+        const lbl = String(label);
+        const existing = this.#operands.get(lbl);
+        if (existing) { this.#unindexOperand(lbl, existing); this.#coarseLabels.delete(lbl); }
+        const frozenSpec = this.#mode === 'frozen' ? this.#freezeSpec(spec) : spec;
+        const operand = { spec, frozenSpec, bitmap: null, collectionKeys: [], coarse: false, dirty: false };
+        this.#operands.set(lbl, operand);
+        await this.#resolveOperand(lbl, operand);
+        await this.#recompute();
+        return lbl;
+    }
+
     /** Drop all cues; combined becomes the unconstrained sentinel. */
     async clear() {
         this.#assertOpen();

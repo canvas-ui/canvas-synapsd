@@ -172,4 +172,92 @@ describe('QuerySession', () => {
         const temporal = await db.resolveCandidates({ filters: ['t:crud:created:thisYear'] });
         expect(temporal.coarse).toBe(true);
     });
+
+    test('id-set operand: literal bitmap, no collection keys, not coarse', async () => {
+        const a = await db.put(NOTE('a'), { context: { path: '/Inbox' } });
+        const b = await db.put(NOTE('b'), { context: { path: '/Inbox' } });
+        await db.put(NOTE('c'), { context: { path: '/Inbox' } });
+
+        const resolved = await db.resolveCandidates({ ids: [a, b] });
+        expect(sorted(resolved.bitmap.toArray())).toEqual(sorted([a, b]));
+        expect(resolved.collectionKeys).toEqual([]);
+        expect(resolved.coarse).toBe(false);
+
+        // [] is a deliberately-empty constraint, distinct from absent.
+        const empty = await db.resolveCandidates({ ids: [] });
+        expect(empty.bitmap.size).toBe(0);
+        const absent = await db.resolveCandidates({});
+        expect(absent.bitmap).toBe(null);
+
+        // Composes under AND with the other buckets.
+        const composed = await db.resolveCandidates({ context: { path: '/Inbox' }, ids: [a] });
+        expect(composed.bitmap.toArray()).toEqual([a]);
+
+        // Malformed ids fail at parse time, like other spec buckets.
+        await expect(db.resolveCandidates({ ids: [0] })).rejects.toThrow(/positive uint32/);
+        await expect(db.resolveCandidates({ ids: 'nope' })).rejects.toThrow(/array/);
+    });
+
+    test('set() replaces a cue per tick; patch() would accumulate (streaming producer)', async () => {
+        const a = await db.put(NOTE('a'), { context: { path: '/Inbox' }, features: ['tag/important'] });
+        const b = await db.put(NOTE('b'), { context: { path: '/Inbox' }, features: ['tag/important'] });
+        const c = await db.put(NOTE('c'), { context: { path: '/Inbox' } }); // not important
+
+        const s = await db.openSession({ features: ['tag/important'] }, { mode: 'live', emit: 'delta' });
+        const events = [];
+        s.on('change', (p) => events.push(p));
+
+        // Tick 1: producer emits {a, c} — c is gated out by the feature cue.
+        await s.set('viewport', { ids: [a, c] });
+        expect(sorted(s.ids())).toEqual([a]);
+
+        // Tick 2: full replacement — a leaves, b enters. patch() would keep a.
+        await s.set('viewport', { ids: [b, c] });
+        expect(sorted(s.ids())).toEqual([b]);
+        const last = events[events.length - 1];
+        expect(last.added).toEqual([b]);
+        expect(last.removed).toEqual([a]);
+
+        // set() upserts: unknown label was created, labels() reflects it.
+        expect(s.labels()).toContain('viewport');
+
+        // A write elsewhere never dirties the literal cue (no keys), but still
+        // flows through the OTHER cue and intersects correctly.
+        const d = await db.put(NOTE('d'), { context: { path: '/Inbox' }, features: ['tag/important'] });
+        await tick();
+        expect(sorted(s.ids())).toEqual([b]); // d not in the viewport id-set → unchanged
+
+        await s.set('viewport', { ids: [b, d] });
+        expect(sorted(s.ids())).toEqual(sorted([b, d]));
+        s.close();
+    });
+
+    test('set() replaces non-id buckets too (anchor-filter style cue swap)', async () => {
+        const a1 = await db.put(NOTE('a1'), { context: { path: '/Projects/Alpha' } });
+        const b1 = await db.put(NOTE('b1'), { context: { path: '/Projects/Beta' } });
+
+        const s = await db.openSession([], { mode: 'frozen' });
+        await s.set('scope', { context: { path: '/Projects/Alpha' } });
+        expect(s.ids()).toEqual([a1]);
+
+        // Wholesale replacement — patch() would OR the two paths together.
+        await s.set('scope', { context: { path: '/Projects/Beta' } });
+        expect(s.ids()).toEqual([b1]);
+        s.close();
+    });
+
+    test('id-set cue survives serialize/rehydrate', async () => {
+        const a = await db.put(NOTE('a'), { context: { path: '/Inbox' } });
+        const b = await db.put(NOTE('b'), { context: { path: '/Inbox' } });
+
+        const s = await db.openSession([], { mode: 'live', emit: 'delta' });
+        await s.set('viewport', { ids: [a, b] });
+        const snapshot = s.serialize();
+        s.close();
+
+        const restored = await QuerySession.rehydrate(db, snapshot);
+        expect(sorted(restored.ids())).toEqual(sorted([a, b]));
+        expect(restored.labels()).toContain('viewport');
+        restored.close();
+    });
 });

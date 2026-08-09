@@ -185,6 +185,23 @@ export function parseRel(rawSpec = {}) {
     });
 }
 
+// ids: number[] — a literal candidate set supplied by an external producer
+// (kNN results, sensor anchor emissions, an agent-curated working set). It
+// resolves to a bitmap with no index dependency: no collection keys, never
+// coarse. [] is a deliberately-empty constraint; absent means unconstrained.
+function parseIds(spec) {
+    const raw = spec.ids;
+    if (raw === undefined || raw === null) { return null; }
+    if (!Array.isArray(raw)) { throw new Error('spec.ids must be an array of document ids'); }
+    return raw.map((v) => {
+        const n = typeof v === 'string' && /^\d+$/.test(v.trim()) ? parseInt(v, 10) : v;
+        if (!Number.isInteger(n) || n <= 0 || n > 0xFFFFFFFF) {
+            throw new Error(`spec.ids entries must be positive uint32 document ids (got ${JSON.stringify(v)})`);
+        }
+        return n;
+    });
+}
+
 export function parseSpec(rawSpec = {}) {
     if (!rawSpec || typeof rawSpec !== 'object' || Array.isArray(rawSpec)) {
         throw new Error('spec must be an object');
@@ -198,6 +215,7 @@ export function parseSpec(rawSpec = {}) {
         features: parseFeatures(rawSpec),
         filters: parseFilters(rawSpec),
         rel: parseRel(rawSpec),
+        ids: parseIds(rawSpec),
         options: {
             mode: (pick('mode') || 'hybrid').toLowerCase(),
             // Listing order (no-match path only): 'asc' (id/insertion order,

@@ -340,6 +340,31 @@ export default class VectorIndex {
         return { pageIds, totalCount, error: null, distances };
     }
 
+    /**
+     * The stored vector for a document — its lowest-numbered chunk row (image
+     * spaces hold one whole-image vector at chunk 0; text docs get their first
+     * chunk). Feeds "more like this" queries: the caller re-runs kNN with a
+     * vector that never leaves the process. Returns number[] or null.
+     */
+    async getDocVector(docId) {
+        const id = Number(docId);
+        if (!this.#table || !Number.isFinite(id)) { return null; }
+        try {
+            const rows = await this.#table.query()
+                .where(`id = ${id}`)
+                .select(['chunkId', 'vector'])
+                .limit(16)
+                .toArray();
+            if (rows.length === 0) { return null; }
+            rows.sort((a, b) => a.chunkId - b.chunkId);
+            const vec = rows[0].vector;
+            return vec ? Array.from(vec) : null;
+        } catch (e) {
+            debug(`getDocVector failed for ${id}: ${e.message}`);
+            return null;
+        }
+    }
+
     /** Vector-table health/size snapshot for diagnostics UIs. */
     async stats() {
         if (!this.#table) {
