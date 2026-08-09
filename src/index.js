@@ -2795,7 +2795,7 @@ class SynapsD extends EventEmitter {
     }
 
     async #resolveParsed(parsed) {
-        const { paths, features, filters, rel = [] } = parsed;
+        const { paths, features, filters, rel = [], ids = null } = parsed;
         const keys = [];
         // collectionKeys: the actual bitmap keys (collection vocabulary) consulted,
         // for precise QuerySession invalidation. coarse: this candidate set depends
@@ -2897,6 +2897,18 @@ class SynapsD extends EventEmitter {
             // coarse so consumers re-resolve rather than key-invalidate.
             coarse = true;
             if (bitmap) { bitmap.andInPlace(relBitmap); } else { bitmap = relBitmap; }
+            constrained = true;
+        }
+
+        // Literal id-set from an external producer (kNN results, sensor anchor
+        // emissions, an agent-curated working set). No collection keys and never
+        // coarse: the set only changes when the caller replaces it, so a live
+        // QuerySession caches it with zero invalidation cost. [] constrains to
+        // the empty set — distinct from absent (unconstrained).
+        if (ids) {
+            keys.push(`ids:${ids.length}`);
+            const idBitmap = new RoaringBitmap32(ids);
+            if (bitmap) { bitmap.andInPlace(idBitmap); } else { bitmap = idBitmap; }
             constrained = true;
         }
 
@@ -3301,6 +3313,101 @@ class SynapsD extends EventEmitter {
             throw new ArgumentError('Query must be a string', 'query');
         }
         return await this.query(queryString, spec);
+    }
+
+    /**
+     * Dense kNN with a CALLER-SUPPLIED query vector — the vector-in twin of the
+     * text search path. synapsd stays byte- and model-free: whoever computed the
+     * vector (embedd for an uploaded image, a sensor pipeline for a camera
+     * frame, getDocumentVector for "more like this") hands it over and this
+     * method only scopes + scans + materializes.
+     *
+     * `spec` is the usual structured scope (paths/features/filters/ids) resolved
+     * via resolveCandidates and pushed down into the Lance scan, so a camera
+     * frame arrives pre-filtered by the active context. Results are best-first
+     * in kNN order.
+     *
+     * @param {number[]} queryVector  query embedding (must match the space dim)
+     * @param {object}   spec         structured scope; {} = whole workspace
+     * @param {object}   options      { space='image', limit=25, offset=0,
+     *                                  minDistance, maxDistance, idsOnly,
+     *                                  excludeIds, withDistances }
+     * @returns docs[] (or ids[] with idsOnly) with .count/.totalCount/.error,
+     *          plus .debug.distances when withDistances is set
+     */
+    async searchByVector(queryVector, spec = {}, options = {}) {
+        if (!Array.isArray(queryVector) || queryVector.length === 0 || !queryVector.every(Number.isFinite)) {
+            throw new ArgumentError('searchByVector() expects a non-empty numeric query vector', 'queryVector');
+        }
+        const space = options.space || 'image';
+        const vi = await this.#getVectorSpace(space);
+        if (!vi || !vi.isReady) {
+            const empty = this.#emptyResult();
+            empty.error = `vector space '${space}' not available`;
+            return empty;
+        }
+        if (queryVector.length !== vi.dim) {
+            throw new ArgumentError(`query vector dim ${queryVector.length} != space '${space}' dim ${vi.dim}`, 'queryVector');
+        }
+
+        // Structured scope → candidate ids pushed down into the Lance scan.
+        const scope = (spec && Object.keys(spec).length > 0)
+            ? (await this.#resolveParsed(parseSpec(spec))).bitmap
+            : null;
+        if (scope && scope.isEmpty) { return this.#emptyResult(); }
+        const scopedIds = scope ? scope.toArray() : [];
+
+        const limit = Math.max(1, Number(options.limit ?? 25));
+        const offset = Math.max(0, Number(options.offset ?? 0));
+        const excludeIds = new Set((options.excludeIds || []).map(Number));
+        // Non-positive maxDistance disables the floor (explicit top-K opt-in),
+        // mirroring the text path's imageMaxDistance semantics.
+        const maxDistance = Number.isFinite(options.maxDistance) && options.maxDistance > 0 ? options.maxDistance : undefined;
+        const minDistance = Number.isFinite(options.minDistance) ? options.minDistance : undefined;
+
+        // Overfetch by the exclusion count so a filtered self-match (similarTo)
+        // still fills the page.
+        const res = await vi.vectorSearch(queryVector, scopedIds, {
+            limit: limit + excludeIds.size,
+            offset,
+            minDistance,
+            maxDistance,
+            withDistances: !!options.withDistances,
+        });
+        if (res.error) {
+            const empty = this.#emptyResult();
+            empty.error = res.error;
+            return empty;
+        }
+        const pageIds = (res.pageIds || []).filter((id) => !excludeIds.has(id)).slice(0, limit);
+        const totalCount = Math.max(0, (res.totalCount || 0) - excludeIds.size);
+
+        let result;
+        if (options.idsOnly === true) {
+            result = [...pageIds];
+        } else {
+            // getMany preserves input order → the page stays in kNN (best-first) order.
+            const docs = await this.documents.getMany(pageIds);
+            result = options.parse !== false ? this.#safeParseDocuments(docs) : docs;
+        }
+        result.count = result.length;
+        result.totalCount = totalCount;
+        result.error = null;
+        if (options.withDistances && res.distances) {
+            result.debug = { distances: pageIds.map((id) => ({ id, distance: res.distances[id] })) };
+        }
+        return result;
+    }
+
+    /**
+     * The stored embedding for a document in a named vector space (its first
+     * chunk row), or null. Powers "more like this document" without any vector
+     * crossing the API boundary — pair with searchByVector(excludeIds:[docId]).
+     */
+    async getDocumentVector(docId, space = 'image') {
+        const vi = await this.#getVectorSpace(space);
+        if (!vi || !vi.isReady) { return null; }
+        return await vi.getDocVector(docId);
     }
 
     /**

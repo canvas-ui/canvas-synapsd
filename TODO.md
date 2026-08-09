@@ -56,6 +56,9 @@ If you'd like, we can look deeper into how topological data analysis (TDA) was u
 
 # SynapsD
 
+## Apply a configurable layered mode view to returned documents
+- Good for AR
+
 ## Proper synapse support + schema refactor
 
 (partially implemented, needs to be extended)
