@@ -215,32 +215,6 @@ shape instead of a second axis.
 identities. Same reasoning retired `browser/*`: a synced tab behaves like a bookmark, so `browser`
 was never an entity grouping, it was provenance/behaviour. Use a facet or `tag/*`.
 
-**`kind` IS REMOVED ENTIRELY — decided 2026-08-03.** No `kind` row field, no `data/kind/*`
-namespace. The hierarchy IS the axis. What dies and what survives:
-
-| dies | survives, repointed |
-|---|---|
-| `kind` row field (documentSchema, ctor, toJSON) | the subtype DERIVATION (`kindField`) — rename to `subtypeField`; it now emits a schema-path SEGMENT instead of a separate axis |
-| `data/kind/*` bitmaps, `kindBitmapKeys()`, `stampDerivedKind()` | — |
-| `resolveKind()` returning a kind string | resolution folds into schema-id resolution |
-| `kindPrefix` **and its required-prefix guard** | unnecessary: the prefix IS the schema path (`data/schema/application` + `/flatpak`) |
-| kind stamping in the v3 migration | — |
-
-**`kind` removal is DONE (2026-08-04)** — see Rev B step 1 below for what landed. The
-"zero consumers outside synapsd" claim was re-verified at removal time across every repo and held,
-so it was shipped ahead of the coordinated release rather than with it.
-
-⚠️ **This deletes the incremental migration path, deliberately.** `kind` existed under D1(c) so
-consumers could move off `data/abstraction/*` before the rename. With it gone, Rev B is a
-COORDINATED CUTOVER across 6 submodules in one release — which is the trade already accepted
-("do it while it is merely tiresome"). Nobody should later ask why this was not phased: it was,
-the phasing vehicle went unused, and carrying it cost more than the cutover.
-
-**`:` as a separator was rejected**, empirically: `listBitmaps` scans `prefix + '/'`, so
-`data/schema/application:flatpak` is NOT a child of `data/schema/application` (verified — the
-slash form is found, the colon form is not). You would have to tick both keys anyway, so the
-bitmap plane saves nothing, and `doc.schema` would stop being the registry lookup key.
-
 #### Rev A — local cleanup — LANDED 2026-08-04
 
 Shipped exactly as scoped; 352 tests green (350 before, +2 regressions below).
@@ -298,50 +272,6 @@ Shipped exactly as scoped; 352 tests green (350 before, +2 regressions below).
 Repointed to `schemas/core/Email.js` in the same change. It is the ONLY deep import of a schema file
 from outside synapsd — everything else goes through `SchemaRegistry`.
 
-#### Rev B — the rename (cross-repo) — LANDED IN FULL 2026-08-05 (steps 2–5 shipped; see summary above)
-
-**Step 1 (`kind` removal) is DONE and shipped separately** — it is synapsd-local with zero external
-consumers, so it never needed the coordinated release. 350 tests green. What landed:
-
-- `kind` row field gone from `documentSchema`, the constructor and `toJSON`. `data/kind/*`,
-  `kindBitmapKeys()`, `stampDerivedKind()` and all three of its call sites gone; `facetBitmapKeys`
-  is mime + schema-declared facets now.
-- `resolveKind()` -> **`resolveSubtype()`**, `kindField` -> **`subtypeField`**. It returns ONE RAW
-  SEGMENT: `kindPrefix` has no successor, because a subtype is scoped by the schema id it hangs
-  under rather than by a prefix inside one flat namespace. Registrations still passing
-  `kind`/`kindField`/`kindPrefix` now THROW instead of being silently ignored.
-- ⚠️ **The subtype axis is deliberately DARK until step 2.** `subtypeField` is declared, resolved
-  and tested, but nothing indexes it — the replacement is a SEGMENT of the schema id, which lands
-  with the ids. Safe only because the axis had zero consumers; re-verified across every repo
-  2026-08-04 (every `.kind` hit outside synapsd is an unrelated local variable).
-- Two cleanup paths, because they reach different databases: the v3 migration drops the field and
-  the `data/kind` prefix inside the row pass it already performs, and a **separate run-once marker**
-  (`internal/migrations/kind-axis-removed`) drops the bitmaps on open. The marker is not optional —
-  a database already stamped at the current SCHEMA_VERSION never re-enters the migration block, and
-  those are exactly the databases holding residue. Bumping the version instead would re-arm the
-  explicit opt-in gate for a cleanup that rewrites no rows.
-- `data/kind/` is refused in `features[]` through a new `RETIRED_FEATURE_PREFIXES` list, kept
-  SEPARATE from `DERIVED_FEATURE_PREFIXES` so that list stays literally true ("what the engine
-  derives today"). Without it a client could assert a namespace nothing derives and nothing unticks.
-- `kind` stays in `ENGINE_OWNED_FACET_NAMESPACES`: retired, not free, while residue can exist.
-- `tests/kind-bitmaps.test.js` -> `tests/kind-axis-removed.test.js`. A removal needs a guard as much
-  as a feature does — a resurrected axis is silent. Both new guards verified to fail without the fix.
-
-**Steps 2–5 LANDED 2026-08-05** in one coordinated release, as designed.
-
-**Why now (user, 2026-08-03):** breaking changes are priced by installed base. Today that is one
-person. At 1500 users with integrations this becomes a deprecation cycle plus a compatibility shim
-maintained for a year. Do it while it is merely tiresome.
-
-**Sequence:** one coordinated release. Rename `data/abstraction/` to `data/schema/`, adopt the
-hierarchy, and cut every consumer together (`kind` is already gone — step 1). There is no incremental path by design
-(see the shape section) — so land it when you can cut them all at once, not piecemeal.
-
-⚠️ **Unlike everything else in this plane, this one rewrites ROWS.** `doc.schema` changes value on
-every document, and hierarchy adoption changes ids outright (`data/abstraction/email` ->
-`data/schema/message/email`). Bitmaps are derived and rebuild from `rebuildL3()`; the schema field
-does not. Schema version 3, same gate as v2.
-
 ##### Inventory, re-measured 2026-08-04
 
 The 2026-08-03 figure ("194 across 6 submodules") was close but miscounted the repo boundary. Actual:
@@ -383,32 +313,6 @@ Do not sweep this one with sed.
    submodule pointer). Then one release that bumps all pointers together.
 5. **`reindexSearchIndex({rebuild:true})` on migrated DBs** — already owed independently (see
    post-v3 rough edges), and this is the natural moment.
-
-##### Decisions still to make (none blocking, but decide before step 2)
-
-- **`data/abstraction/todo` -> `data/schema/task`. DECIDED 2026-08-04 (user), half-done.** The CLASS
-  rename landed in Rev A; only the ID is left, and it waits here because ids cannot move one at a
-  time. ⚠️ `schemas/core/Task.js` therefore has a class/id mismatch on purpose — do not "fix" it
-  outside this step. Consumer cost is ~6 hits outside tests (web ui 4, webdav 1, agent prompt 1).
-  - ❌ **Do NOT introduce `Task` as a superclass with `Todo extends Task`.** A todo has no field a
-    task lacks, so the subclass would carry no behaviour — exactly the empty subclass Rev A just
-    deleted (`abstractions/Document.js`), and exactly what the register-vs-derive rule refuses.
-    Subtypes, if they ever matter (chore/milestone/bug), come free as DERIVED segments via
-    `subtypeField: 'data.type'` -> `data/schema/task/todo`.
-  - ~~Naming collision with `internal/layers/task`~~ — **GONE 2026-08-04**, that layer type was
-    deleted (see Rev A). There is only one Task now.
-  - ~~Still open: tier.~~ **RESOLVED 2026-08-05 (user): task stays `core`, the
-    `pointTimelines: ['tasks']` hardcode is legitimate** (comment at the hardcode records it).
-    Schema-declared timeline registration waits until a second schema wants a point timeline.
-- ~~Does the `kind` row field survive?~~ **RESOLVED 2026-08-03: no, removed entirely.** See the
-  shape section above. Consumers needing the subtype read the schema id (it is in the path) or
-  `data.type`; no per-schema knowledge leaks, because the subtype is visible in the id itself —
-  which is precisely what the hierarchy buys.
-- ~~`Tab extends Link`~~ **DEFERRED ENTIRELY 2026-08-03.** Tab keeps its own class and its own
-  `data.url` identity; do NOT make it extend Link as part of this work. `extends` would be
-  cosmetic unless the field names unify (Link requires `data.uri`), and unifying is a data
-  migration for the ~2600 tabs — unrelated to the rename and not worth coupling to it.
-
 
 ### Open: multi-position timelines — blocks the wikipedia corpus
 
@@ -629,18 +533,6 @@ an extraction that blurs those two choke points costs more than the line count d
 
 **Decision (user):** no back-compat, and one-time migration code does not live in the codebase.
 Write a script when a migration is actually needed.
-
-What went, across both repos (~400 lines that ran on hot paths for work that happens once in a
-database's life):
-
-| removed | was |
-|---|---|
-| synapsd `#migrateToV3` (100), `#migrateBitmapKeys` (50), `#migrateEmbedBitmapKeys` (12) + `LEGACY_EMBED_BITMAP_KEYS` | version/marker-gated, on open |
-| synapsd `#migrateOnOpen`, `lastMigrationStats`, `migrate: true`, `CANVAS_SYNAPSD_MIGRATE`, `envFlag()` | the opt-in path — **zero external callers**, it existed for the script and the tests |
-| synapsd `scripts/migrate-v3.js`, `tests/migrate-v3.test.js` (16 tests) | every live DB is already at v2 (user) |
-| synapsd `internal/migrations/kind-axis-removed` marker | added hours earlier in Rev B step 1; `rebuildL3()` already drops `data/kind/*` and never re-derives it, so the marker was a second way to do one thing |
-| parent `WorkspaceStoredIndex.#migrateLegacyStoredLayout` (~25) | ran on every workspace start |
-| parent boot call to `runPerUserIndexMigration` | ran on every server boot |
 
 **KEPT, deliberately:**
 
