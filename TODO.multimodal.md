@@ -84,10 +84,113 @@ text-only; `POST /embedd/test` echoes `modality:'image'` but never exercises it)
       than text→image — the 0.945 text-calibrated floor is loose for frame queries; no
       implicit floor is applied on this path, clients pass maxDistance).
 
-## Slice B — search-by-video (client)
+## Slice A′ — typed match + fused multimodal search (SHIPPED 2026-08-09)
 
-- [ ] Client app: getUserMedia / file → canvas frame grab at 1–2 FPS → Slice A endpoint.
-- [ ] Sliding-window smoothing (see decision 6). Debounce UI on result-set delta, not per frame.
+Closes the "image hits photos, not notes" gap for queries that carry text, and generalizes
+the search API per the keep-the-seam decision: synapsd ranks (never sees base64), embedd
+makes vectors (never ranks), search surface takes {text?, image?} → embedd → vector legs →
+synapsd.
+
+- [x] **Typed match descriptor in synapsd**: `rank()`/`search()`/`query()` accept
+      `{ text?, vectors?: [{space, vector, weight?, minDistance?, maxDistance?}] }`
+      (string = classic path). Legs RRF-fuse with the built-in fts/dense/text→image legs
+      in every mode (hybrid, vector, and fts — explicit legs are never discarded);
+      legs-only match ranks pure-dense (single leg keeps exact kNN order); offline leg
+      space degrades to empty contribution, dim mismatch throws.
+- [x] **Fused mode end-to-end**: `Workspace.searchByImage({..., text })` builds the
+      descriptor; `POST /workspaces/:id/search/image` gains optional `q`. Image+text query
+      now returns notes AND photos in one RRF page. (Fused mode can't exclude the
+      similarTo self-match — RRF has no excludeIds; known, documented.)
+- [x] Tests: synapsd `search-by-vector.test.js` grew to 8 (legs-only, fusion, fts+legs,
+      validation/degradation); full suite green in the STANDALONE repo
+      (`~/Code/canvas/canvas-synapsd`, 381/381 after the workspace-translation test
+      relocated to canvas-server).
+- [ ] Remaining from the build order: live lens session (thin QuerySession wrapper over
+      `ids` + `set()` — Slice E), audio (CLAP + new space), frame→text second leg.
+
+### metadata.summary — reserved generated-content field (RAILS SHIPPED 2026-08-09)
+The indexing rails for captioner output are in place; only the PRODUCER is missing:
+
+- [x] `metadata.summary` reserved for generated content (`comment` stays human-only) —
+      lives under metadata (deriver territory, like EXIF), so writing it never touches
+      checksums: no dedup fork, no identity change. `doc.hasSummary` getter.
+- [x] Auto-FTS: `generateFtsData()` folds it in like the comment; a summary-only
+      metadata patch triggers the Lance FTS reindex (prevSummary in isContentChanged).
+- [x] Auto-embed: `SUMMARY_CHUNK_ID = -2` reserved text-space chunk (beside comment's
+      -1), batched in one embedText call (`#embedAuxChunks`); Workspace.resolveEmbeddingInput
+      passes `summary` on every return shape. A captioned photo is dense- AND
+      lexically-searchable by its description; the summary write → document.updated →
+      re-embed cascade is automatic.
+- [ ] Producer: the captioner loop. NEEDS DECISIONS — model/runtime (ollama vision chat?
+      transformers pipeline? openai-compatible VLM endpoint?), and where it lives
+      (embedd's queue/reconcile infra fits; ledger must key on PRIMARY CHECKSUM, not
+      updatedAt, or caption→update→recaption loops). Provenance: stamp
+      `metadata.summaryMeta = { model, generatedAt }` so re-captioning on model change
+      is a query.
+
+### Service topology — embedd → inferd, the general inference service
+DECIDED + RENAME SHIPPED 2026-08-09: `canvas-inferd` (name `neurald` rejected — it
+previously belonged to the agent service, now agentd; no npm package was ever published,
+so the rename was pure in-repo mechanics). First vision model: **qwen-vl**.
+
+Rename scope: `src/services/inferd/` (git mv, history intact), class `Inferd`, package
+`canvas-inferd`, route files, tests dir, all in-repo identifiers. WIRE-COMPAT PRESERVED
+deliberately until the webui migration lands: REST prefixes `/rest/v2/embedd` +
+`/workspaces/:id/embedd`, env vars `CANVAS_EMBEDD_*`, `config/embedd.json`,
+`workspace.json services.embedd`, ConfigStore name 'embedd', model-cache dir
+`<home>/embedd/models`. Follow-up: alias-then-rename the wire surface post-webui-migration.
+
+Rationale (kept for the record):
+- One loaded VLM (gemma4 / qwen-vl) serves BOTH `describe` (captions → metadata.summary)
+  and the experimental `extract` (hidden states → anchors). Two services = double load.
+- embedd already owns the hard plumbing a captioner needs: ProviderPool, 4-layer config,
+  SSRF endpoint guard, fork/worker isolation, queue + checksum-keyed reconcile ledger.
+- sensord stays a pure STREAM ORCHESTRATOR (feeds, sampling, scene-change, sessions,
+  hysteresis, deltas) — no weights, no native deps; calls the inference service. Boxes
+  without GPU still run log/mail feeds; camera lights up when a vision provider exists.
+- Capability model: providers declare embedText/embedImage (today) + describe (captioner)
+  + extract (later). Routing rules widen from "mime → space" to "mime → capability chain"
+  (image ⇒ embed@image + describe@summary; summary then auto-embeds via the -2 chunk —
+  the frame→text leg becomes configuration).
+- Queue needs a PRIORITY LANE before sensord becomes a caller (live frame > background
+  caption sweep > reindex) — build into the rename, not after.
+- Timing: rename BEFORE the packages/embedd filter-repo extraction (still unchecked in
+  TODO.monorepo-migration) so the package extracts once under its final name.
+
+### Frame→text leg — two candidate designs (build order #4, pick later)
+- **Captioner** (original plan): a small VLM capability in embedd/sensord (ollama vision
+  `/api/chat`, or a transformers pipeline) captions the frame → caption becomes a text leg.
+  NOTE: CLIP/SigLIP canNOT do this — they embed, they don't describe; the openai provider's
+  `messages` mode targets embedding servers, not chat. Captioning is NEW capability.
+- **SigLIP text bridge** (cheaper, no VLM): at ingest, embed each note's title/snippet
+  through SigLIP's TEXT encoder into the image space as a second presence (~64-token limit).
+  Then an image query's kNN in image space hits notes directly. No captioning, no new
+  runtime; costs one extra short-text vector per doc. Worth benchmarking FIRST.
+
+## Slice B — search-by-video "Lens" (SHIPPED 2026-08-09, webui unblocked)
+
+The webui landed in the monorepo (`~/Code/canvas/canvas/apps/web`); the camera app is in.
+
+- [x] **Lens applet** (`src/components/toolbox/applets/LensApplet.tsx`, registered in the
+      applet registry beside Notes/Todos → toolbox Apps tab + standalone `/apps/lens`,
+      bindable to a workspace path via the host's binding bar — a bound path pre-scopes
+      the search, `scope:'path'`): getUserMedia (`hooks/useWebcam`) → JPEG frame grab
+      (≤640px, q0.72) at 0.5/1/2 FPS → `POST /documents/search/image` via `services/lens.ts`
+      (ephemeral frames) → thumbnail/icon grid underneath. Optional text input = fused mode
+      (notes surface next to photos); `maxDistance` input + per-hit `d=…` chips (debug
+      distances) for live floor calibration.
+- [x] Majority-vote smoothing over the last 3 responses (incl. sticky-out re-adoption) —
+      no flicker on motion blur. Chained timeouts (frames never pile up), AbortController.
+- [x] Server unblock: `Permissions-Policy` was `camera=()` — now `(self)` for
+      camera/mic/geo (the SPA uses all three).
+- [x] Webui naming change: embedd → inferd sweep (files git mv'd, identifiers, API paths
+      now on the new canonical `/rest/v2/inferd` + `/:id/inferd`; server keeps `/embedd`
+      aliases at both levels + admin `/embedd/{status,pause,resume}` aliases).
+      `CANVAS_EMBEDD_*` env names preserved in user-facing strings.
+- [x] Summary-generation controls: workspace settings → Embeddings → "Summaries" fold —
+      per-modality (image live, audio/text declared but marked planned) enable +
+      provider + model, persisted via the validated `summarize` config block
+      (server: normalizeSummarize + key-wise layer merge; UI types updated).
 - [ ] Optional server nicety: accept a small batch of frames in one search call (amortize
       HTTP + let the server average vectors).
 

@@ -1119,6 +1119,7 @@ class SynapsD extends EventEmitter {
                 let prevChecksums = null;
                 let prevLocations = null;
                 let prevComment = null;
+                let prevSummary = null;
                 let prevTimelineState = null;
                 let prevFacetKeys = null;
                 let prevFeatureKeys = null;
@@ -1146,6 +1147,7 @@ class SynapsD extends EventEmitter {
                         prevChecksums = Array.isArray(existing.checksumArray) ? [...existing.checksumArray] : [];
                         prevLocations = Array.isArray(existing.locations) ? [...existing.locations] : [];
                         prevComment = typeof existing.comment === 'string' ? existing.comment : '';
+                        prevSummary = typeof existing.metadata?.summary === 'string' ? existing.metadata.summary : '';
                         prevTimelineState = {
                             timelines: Array.isArray(existing.timelines)
                                 ? existing.timelines.map(entry => ({ ...entry }))
@@ -1181,6 +1183,7 @@ class SynapsD extends EventEmitter {
                         prevChecksums = Array.isArray(existing.checksumArray) ? [...existing.checksumArray] : [];
                         prevLocations = Array.isArray(existing.locations) ? [...existing.locations] : [];
                         prevComment = typeof existing.comment === 'string' ? existing.comment : '';
+                        prevSummary = typeof existing.metadata?.summary === 'string' ? existing.metadata.summary : '';
                         prevTimelineState = {
                             timelines: Array.isArray(existing.timelines)
                                 ? existing.timelines.map(entry => ({ ...entry }))
@@ -1219,7 +1222,7 @@ class SynapsD extends EventEmitter {
 
                 validateDocumentRelations(parsed);
 
-                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures };
+                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevSummary, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures };
                 prepared.push(entry);
                 if (!isUpdate) {
                     const primaryChecksum = parsed.getPrimaryChecksum();
@@ -1318,6 +1321,9 @@ class SynapsD extends EventEmitter {
             // A comment-only edit leaves the checksum untouched but changes FTS text
             // (generateFtsData always includes the comment), so it must reindex too.
             if ((p.prevComment ?? '') !== (typeof p.parsed.comment === 'string' ? p.parsed.comment : '')) { return true; }
+            // Same for the generated summary: a metadata.summary patch (captioner
+            // writing back) changes FTS text without touching checksums.
+            if ((p.prevSummary ?? '') !== (typeof p.parsed.metadata?.summary === 'string' ? p.parsed.metadata.summary : '')) { return true; }
             const prev = p.prevChecksums;
             if (!Array.isArray(prev)) { return true; }
             const cur = p.parsed.checksumArray || [];
@@ -1729,9 +1735,11 @@ class SynapsD extends EventEmitter {
     /**
      * Store app-provided chunk vectors for a document (the non-JSON / media path —
      * server doesn't decode blobs, the embedd service computes and ships vectors).
-     * Content chunks use ordinal chunkIds (0..N). chunkId -1 is RESERVED for the
-     * doc's user-authored comment chunk (embedd's COMMENT_CHUNK_ID), so it never
-     * collides with content ordinals and keeps provenance at the vector layer.
+     * Content chunks use ordinal chunkIds (0..N). Negative chunkIds are RESERVED
+     * for auxiliary text chunks: -1 = user-authored comment (embedd's
+     * COMMENT_CHUNK_ID), -2 = generated summary (SUMMARY_CHUNK_ID,
+     * metadata.summary) — they never collide with content ordinals and keep
+     * provenance at the vector layer.
      * @param {number} docId
      * @param {string} schema
      * @param {string} updatedAt
@@ -3116,14 +3124,17 @@ class SynapsD extends EventEmitter {
             return resultArray;
         }
 
-        const queryString = typeof match === 'string' ? match : (match.text ?? null);
-        if (typeof queryString !== 'string') {
-            throw new ArgumentError('Query must be a string', 'query');
-        }
+        // Typed match: a plain string is the classic text query; an object is a
+        // descriptor { text?, vectors?: [{space, vector, weight?, minDistance?,
+        // maxDistance?}] }. Extra vector legs are caller-supplied embeddings
+        // (an image query via embedd, a camera frame, a stored doc vector) that
+        // fuse into the same RRF ranking as the built-in fts/dense/image legs.
+        const desc = this.#normalizeMatch(match);
+        const queryString = desc.text;
 
         if (bitmap !== null && bitmap.isEmpty) { return this.#emptyResult(); }
         const scopedIds = bitmap ? bitmap.toArray() : [];
-        const { pageIds, totalCount, error } = await this.#rankIds(scopedIds, queryString, options);
+        const { pageIds, totalCount, error } = await this.#rankIds(scopedIds, desc, options);
         if (idsOnly) { return idResult(pageIds, totalCount, error); }
 
         const docs = pageIds.length > 0 ? await this.documents.getMany(pageIds) : [];
@@ -3134,11 +3145,40 @@ class SynapsD extends EventEmitter {
         // Calibration aid: when debug is requested, attach the raw (unfloored)
         // image kNN distances for this query so a caller can pick imageMaxDistance
         // from real numbers. Best-effort; never fails the search.
-        if (options.debug) {
+        if (options.debug && queryString) {
             try { result.debug = { imageDistances: await this.#imageDistances(queryString, scopedIds, 25) }; }
             catch (e) { result.debug = { imageDistances: [], error: e.message }; }
         }
         return result;
+    }
+
+    // Match → { text: string|null, vectors: [{space, vector, weight?, minDistance?, maxDistance?}] }.
+    // Throws unless at least one leg (text or vector) is present and well-formed.
+    #normalizeMatch(match) {
+        if (typeof match === 'string') { return { text: match, vectors: [] }; }
+        if (!match || typeof match !== 'object' || Array.isArray(match)) {
+            throw new ArgumentError('match must be a query string or a { text?, vectors? } descriptor', 'match');
+        }
+        const text = match.text ?? match.query ?? null;
+        if (text !== null && typeof text !== 'string') {
+            throw new ArgumentError('match.text must be a string', 'match');
+        }
+        const vectors = match.vectors ?? [];
+        if (!Array.isArray(vectors)) {
+            throw new ArgumentError('match.vectors must be an array of { space, vector } legs', 'match');
+        }
+        for (const leg of vectors) {
+            if (!leg || typeof leg.space !== 'string' || !leg.space) {
+                throw new ArgumentError('each vector leg requires a space name', 'match');
+            }
+            if (!Array.isArray(leg.vector) || leg.vector.length === 0 || !leg.vector.every(Number.isFinite)) {
+                throw new ArgumentError(`vector leg for space '${leg.space}' requires a non-empty numeric vector`, 'match');
+            }
+        }
+        if ((text === null || text === '') && vectors.length === 0) {
+            throw new ArgumentError('match needs text and/or at least one vector leg', 'match');
+        }
+        return { text: typeof text === 'string' && text.length > 0 ? text : null, vectors };
     }
 
     /**
@@ -3151,7 +3191,13 @@ class SynapsD extends EventEmitter {
      * @param {number[]} scopedIds  candidate ids ([] = unscoped)
      * @returns {Promise<{pageIds:number[], totalCount:number, error:string|null}>}
      */
-    async #rankIds(scopedIds, queryString, options = {}) {
+    async #rankIds(scopedIds, match, options = {}) {
+        // Accept the classic string or a normalized { text, vectors } descriptor
+        // (rank() normalizes; internal callers still pass plain strings).
+        const desc = typeof match === 'string' ? { text: match, vectors: [] } : match;
+        const queryString = desc.text;
+        const legs = desc.vectors || [];
+
         // fts (BM25) | vector (kNN) | hybrid (RRF); vector/hybrid degrade to fts
         // when the dense stack is unavailable.
         let mode = (options.mode || 'hybrid').toLowerCase();
@@ -3159,16 +3205,42 @@ class SynapsD extends EventEmitter {
             debug(`rank: mode '${mode}' requested but vector index not ready; falling back to fts`);
             mode = 'fts';
         }
-        if (mode === 'fts' && (!this.#lanceIndex || !this.#lanceIndex.isReady)) {
+        if (mode === 'fts' && legs.length === 0 && (!this.#lanceIndex || !this.#lanceIndex.isReady)) {
             return { pageIds: [], totalCount: 0, error: 'FTS not initialized' };
         }
 
         const limit = Number.isFinite(options.limit) ? Math.max(0, Number(options.limit)) : 50;
         const offset = Math.max(0, Number.isFinite(options.offset) ? Number(options.offset) : 0);
+        const depth = Math.max((limit + offset) * 5, 100);
+
+        // Caller-supplied vector legs rank in their own spaces and fuse into
+        // whatever the text side produces. A leg whose space is offline degrades
+        // to an empty contribution (same philosophy as the hybrid text path:
+        // one failed leg must not blank a search another leg answered).
+        const legOperands = legs.length > 0
+            ? await Promise.all(legs.map((leg) => this.#vectorLegSearch(leg, scopedIds, depth)))
+            : [];
+        const legErrors = legOperands.filter((o) => o.error).map((o) => o.error);
+
+        // Legs-only match (no text): pure dense ranking. A single leg keeps its
+        // exact kNN order (no RRF noise); multiple legs fuse weighted.
+        if (!queryString) {
+            let ids;
+            if (legOperands.length === 1) {
+                ids = legOperands[0].ids;
+            } else {
+                ids = this.#rrfMerge(legOperands.map((o) => ({ ids: o.ids, weight: o.weight })));
+            }
+            const allFailed = legErrors.length === legOperands.length && legErrors.length > 0;
+            return {
+                pageIds: ids.slice(offset, offset + limit),
+                totalCount: ids.length,
+                error: allFailed ? legErrors.join('; ') : null,
+            };
+        }
 
         let pageIds, totalCount, error;
         if (mode === 'vector' || mode === 'hybrid') {
-            const depth = Math.max((limit + offset) * 5, 100);
             let queryVector = null;
             try {
                 // Query embedding is injected (embedd service); absent → FTS fallback.
@@ -3186,7 +3258,7 @@ class SynapsD extends EventEmitter {
             } catch (e) {
                 console.warn(`synapsd: rank image kNN failed, continuing without image results: ${e.message}`);
             }
-            if (!queryVector && imgIds.length === 0) {
+            if (!queryVector && imgIds.length === 0 && legOperands.length === 0) {
                 ({ pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit, offset }));
             } else if (mode === 'hybrid') {
                 // Fuse DOCUMENT-level FTS (every doc — tabs included) with dense
@@ -3209,6 +3281,7 @@ class SynapsD extends EventEmitter {
                     { ids: vec.pageIds || [], weight: w.dense },
                 ];
                 if (imgIds.length) { operands.push({ ids: imgIds, weight: w.image }); }
+                for (const o of legOperands) { operands.push({ ids: o.ids, weight: o.weight }); }
                 const fused = this.#rrfMerge(operands);
                 totalCount = fused.length;
                 pageIds = fused.slice(offset, offset + limit);
@@ -3225,12 +3298,12 @@ class SynapsD extends EventEmitter {
                 const vec = queryVector
                     ? await this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit: depth, offset: 0, minDistance: options.minDistance, maxDistance: options.maxDistance })
                     : { pageIds: [], error: null };
-                if (imgIds.length) {
+                if (imgIds.length || legOperands.length) {
                     const wv = this.#semanticConfig.searchWeights;
-                    const fused = this.#rrfMerge([
-                        { ids: vec.pageIds || [], weight: wv.dense },
-                        { ids: imgIds, weight: wv.image },
-                    ]);
+                    const operands = [{ ids: vec.pageIds || [], weight: wv.dense }];
+                    if (imgIds.length) { operands.push({ ids: imgIds, weight: wv.image }); }
+                    for (const o of legOperands) { operands.push({ ids: o.ids, weight: o.weight }); }
+                    const fused = this.#rrfMerge(operands);
                     totalCount = fused.length;
                     pageIds = fused.slice(offset, offset + limit);
                     error = vec.error || null;
@@ -3240,11 +3313,43 @@ class SynapsD extends EventEmitter {
                     error = vec.error || null;
                 }
             }
+        } else if (legOperands.length > 0) {
+            // fts mode + explicit vector legs: lexical ranks, legs still fuse —
+            // the caller supplied them on purpose.
+            const fts = (this.#lanceIndex && this.#lanceIndex.isReady)
+                ? await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit: depth, offset: 0 })
+                : { pageIds: [], error: 'FTS not initialized' };
+            const w = this.#semanticConfig.searchWeights;
+            const operands = [{ ids: fts.pageIds || [], weight: w.fts }];
+            for (const o of legOperands) { operands.push({ ids: o.ids, weight: o.weight }); }
+            const fused = this.#rrfMerge(operands);
+            totalCount = fused.length;
+            pageIds = fused.slice(offset, offset + limit);
+            error = null;
         } else {
             ({ pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit, offset }));
         }
 
         return { pageIds: pageIds || [], totalCount: totalCount ?? 0, error: error ?? null };
+    }
+
+    // One caller-supplied vector leg → a ranked-id RRF operand. Space offline or
+    // scan failure degrades to an empty contribution carrying its error; a dim
+    // mismatch is a caller bug and throws.
+    async #vectorLegSearch(leg, scopedIds, depth) {
+        const vi = await this.#getVectorSpace(leg.space);
+        if (!vi || !vi.isReady) {
+            return { ids: [], weight: 0, error: `vector space '${leg.space}' not available` };
+        }
+        if (leg.vector.length !== vi.dim) {
+            throw new ArgumentError(`vector leg dim ${leg.vector.length} != space '${leg.space}' dim ${vi.dim}`, 'match');
+        }
+        const w = this.#semanticConfig.searchWeights;
+        const weight = Number.isFinite(leg.weight) && leg.weight > 0 ? leg.weight : (w[leg.space] ?? 1);
+        const maxDistance = Number.isFinite(leg.maxDistance) && leg.maxDistance > 0 ? leg.maxDistance : undefined;
+        const minDistance = Number.isFinite(leg.minDistance) ? leg.minDistance : undefined;
+        const res = await vi.vectorSearch(leg.vector, scopedIds, { limit: depth, offset: 0, minDistance, maxDistance });
+        return { ids: res.pageIds || [], weight, error: res.error || null };
     }
 
     // Weighted Reciprocal Rank Fusion of ranked id lists → one ranking. A doc's
@@ -3308,11 +3413,14 @@ class SynapsD extends EventEmitter {
         if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
             throw new Error('search() expects a query spec object');
         }
-        const queryString = spec.query ?? spec.search ?? spec.q ?? null;
-        if (typeof queryString !== 'string') {
-            throw new ArgumentError('Query must be a string', 'query');
+        // A string is the classic text query; an object is a typed multimodal
+        // match descriptor { text?, vectors?: [{space, vector, ...}] } — see
+        // rank(). Validation lives in #normalizeMatch, shared by both entries.
+        const match = spec.query ?? spec.search ?? spec.q ?? null;
+        if (typeof match !== 'string' && (match === null || typeof match !== 'object' || Array.isArray(match))) {
+            throw new ArgumentError('Query must be a string or a { text?, vectors? } descriptor', 'query');
         }
-        return await this.query(queryString, spec);
+        return await this.query(match, spec);
     }
 
     /**
