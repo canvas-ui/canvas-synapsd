@@ -669,6 +669,11 @@ class Document {
             // ftsSearchFields (photos/files), so its comment alone makes it searchable.
             if (this.hasComment) { fieldValues.push(this.comment.trim()); }
 
+            // Same rule for the GENERATED summary (metadata.summary — written by
+            // derivers/captioners, never by users; `comment` stays human-only).
+            // A captioned photo becomes lexically searchable by its description.
+            if (this.hasSummary) { fieldValues.push(this.metadata.summary.trim()); }
+
             return fieldValues.length > 0 ? fieldValues : null;
         } catch (error) {
             console.error('Error generating FTS data:', error);
@@ -761,6 +766,17 @@ class Document {
     /** True when the doc carries a non-empty user-authored comment. */
     get hasComment() {
         return typeof this.comment === 'string' && this.comment.trim().length > 0;
+    }
+
+    /**
+     * True when the doc carries a non-empty GENERATED summary (metadata.summary).
+     * Reserved for deriver/captioner output — auto-folded into FTS and embedded
+     * as its own text-space chunk (embedd's SUMMARY_CHUNK_ID), like `comment`
+     * but machine-authored. Lives under metadata (extracted facts), so writing
+     * it never regenerates checksums: no dedup fork, no content-identity change.
+     */
+    get hasSummary() {
+        return typeof this.metadata?.summary === 'string' && this.metadata.summary.trim().length > 0;
     }
 
     toJSON() {

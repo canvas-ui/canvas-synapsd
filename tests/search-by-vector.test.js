@@ -44,9 +44,9 @@ describe('searchByVector / getDocumentVector', () => {
         });
         await db.start();
 
-        a = await db.put(NOTE('a'), { context: { path: '/Photos' } });
-        b = await db.put(NOTE('b'), { context: { path: '/Photos' } });
-        c = await db.put(NOTE('c'), { context: { path: '/Other' } });
+        a = await db.put(NOTE('alpha'), { context: { path: '/Photos' } });
+        b = await db.put(NOTE('bravo'), { context: { path: '/Photos' } });
+        c = await db.put(NOTE('gamma'), { context: { path: '/Other' } });
         const now = new Date().toISOString();
         await db.storeDocumentEmbeddings(a, 'data/schema/note', now, [{ chunkId: 0, text: '', vector: E1 }], { space: 'image' });
         await db.storeDocumentEmbeddings(b, 'data/schema/note', now, [{ chunkId: 0, text: '', vector: NEAR_E1 }], { space: 'image' });
@@ -91,7 +91,7 @@ describe('searchByVector / getDocumentVector', () => {
     test('materialized docs come back parsed, in kNN order', async () => {
         const docs = await db.searchByVector(E1, {}, { maxDistance: 0.5 });
         expect(docs.error).toBe(null);
-        expect(docs.map((d) => d.data.title)).toEqual(['a', 'b']);
+        expect(docs.map((d) => d.data.title)).toEqual(['alpha', 'bravo']);
         expect(docs.totalCount).toBe(2);
     });
 
@@ -104,6 +104,57 @@ describe('searchByVector / getDocumentVector', () => {
         expect([...similar]).toEqual([b]);                 // a filtered, b promoted to rank 0
 
         expect(await db.getDocumentVector(999999, 'image')).toBe(null);
+    });
+
+    test('typed match: legs-only descriptor through db.search()', async () => {
+        // Same ranking as searchByVector, but through the generic search path —
+        // a single leg keeps exact kNN order.
+        const res = await db.search({ query: { vectors: [{ space: 'image', vector: E1, maxDistance: 0.5 }] }, idsOnly: true });
+        expect(res.error).toBe(null);
+        expect([...res]).toEqual([a, b]);
+
+        // Structured scope composes as usual.
+        const scoped = await db.search({
+            query: { vectors: [{ space: 'image', vector: E1 }] },
+            context: { path: '/Other' },
+            idsOnly: true,
+        });
+        expect([...scoped]).toEqual([c]);
+    });
+
+    test('typed match: text leg + vector leg fuse via RRF', async () => {
+        // Text finds note 'c' lexically; the image leg ranks a,b. Fusion must
+        // surface all three — the caveman gap ("image hits photos, not notes")
+        // closes as soon as a text leg rides along.
+        const res = await db.search({
+            query: { text: 'gamma', vectors: [{ space: 'image', vector: E1, maxDistance: 0.5 }] },
+            idsOnly: true,
+        });
+        expect(res.error).toBe(null);
+        expect(new Set([...res])).toEqual(new Set([a, b, c]));
+
+        // fts mode does not discard explicit legs.
+        const fts = await db.search({
+            query: { text: 'gamma', vectors: [{ space: 'image', vector: E1, maxDistance: 0.5 }] },
+            mode: 'fts',
+            idsOnly: true,
+        });
+        expect(new Set([...fts])).toEqual(new Set([a, b, c]));
+    });
+
+    test('typed match: validation + offline-space degradation', async () => {
+        await expect(db.search({ query: {} })).rejects.toThrow(/text and\/or/);
+        await expect(db.search({ query: { vectors: [{ space: 'image', vector: ['x'] }] } })).rejects.toThrow(/numeric vector/);
+        await expect(db.search({ query: { vectors: [{ vector: E1 }] } })).rejects.toThrow(/space name/);
+        await expect(db.search({ query: 42 })).rejects.toThrow(/string or a/);
+
+        // Every leg offline → error envelope; nothing throws mid-query.
+        const offline = await db.search({ query: { vectors: [{ space: 'nope', vector: E1 }] }, idsOnly: true });
+        expect(offline.count).toBe(0);
+        expect(offline.error).toMatch(/not available/);
+
+        // Dim mismatch on a live space is a caller bug → throws.
+        await expect(db.search({ query: { vectors: [{ space: 'image', vector: [1, 2] }] } })).rejects.toThrow(/dim/);
     });
 
     test('argument + space guards', async () => {
