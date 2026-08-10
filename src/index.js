@@ -1624,12 +1624,15 @@ class SynapsD extends EventEmitter {
      * `opts.relativeImageFloor` switches the image side to the scope-adaptive
      * cutoff (see #imageVectorSearch) — used for refinement stages, where the
      * scope already established relevance and the absolute floor would empty out.
+     * `opts.imageDepth` bounds the kNN side separately: `limit` means "all
+     * matches" to FTS, but a kNN has no such notion and would happily return the
+     * whole library (see #foldQueryScope).
      * @returns {Promise<number[]>}
      */
     async #queryMatchSet(queryString, scopeIds, limit, opts = {}) {
         const [fts, img] = await Promise.all([
             this.#lanceIndex.ftsQuery(queryString, scopeIds, { limit, offset: 0 }).catch(() => ({ pageIds: [] })),
-            this.#imageVectorSearch(queryString, scopeIds, limit, { relativeFloor: !!opts.relativeImageFloor }).catch(() => []),
+            this.#imageVectorSearch(queryString, scopeIds, opts.imageDepth ?? limit, { relativeFloor: !!opts.relativeImageFloor }).catch(() => []),
         ]);
         const ids = new Set(fts.pageIds || []);
         for (const id of img) { ids.add(id); }
@@ -3557,7 +3560,7 @@ class SynapsD extends EventEmitter {
         // Fold all but the last query into a scope bitmap. Intermediate steps need
         // the FULL matching id set (not a page), so request a large internal limit;
         // scoped fts fetches every candidate, so the AND is exact for query 2+.
-        const scope = await this.#foldQueryScope(texts.slice(0, -1), base);
+        const scope = await this.#foldQueryScope(texts.slice(0, -1), base, options);
         if (scope && scope.isEmpty) { return this.#emptyResult(); }
 
         // Final query ranks + paginates within the folded scope. The scope came
@@ -3579,13 +3582,24 @@ class SynapsD extends EventEmitter {
      * @param {RoaringBitmap32|null} base  structured scope (null = all docs)
      * @returns {Promise<RoaringBitmap32|null>}
      */
-    async #foldQueryScope(texts, base) {
+    async #foldQueryScope(texts, base, options = {}) {
         const FOLD_LIMIT = 1_000_000;
+        // FOLD_LIMIT is right for FTS — "every lexical match" is a well-defined,
+        // finite set. It is meaningless for the image leg: a kNN ALWAYS returns
+        // its top-K, so asking for a million nearest photos folds the entire
+        // library into the scope and the refine AND stops constraining
+        // ("winter" then "window" returned summer windows). Bound the image side
+        // to the same depth a single-query search of this stage would have used,
+        // so refining narrows within what the user just saw.
+        const imageDepth = Math.max(
+            ((Number(options.limit) || 50) + (Number(options.offset) || 0)) * 5,
+            100,
+        );
         let scope = base; // RoaringBitmap32 | null (null = all docs)
         for (let i = 0; i < texts.length; i++) {
             if (scope && scope.isEmpty) { return scope; }
             const scopeIds = scope ? scope.toArray() : [];
-            const matchedIds = await this.#queryMatchSet(texts[i], scopeIds, FOLD_LIMIT, { relativeImageFloor: i > 0 });
+            const matchedIds = await this.#queryMatchSet(texts[i], scopeIds, FOLD_LIMIT, { relativeImageFloor: i > 0, imageDepth });
             const matched = new RoaringBitmap32(matchedIds);
             scope = scope ? RoaringBitmap32.and(scope, matched) : matched;
         }
@@ -3641,7 +3655,7 @@ class SynapsD extends EventEmitter {
                 const bitmap = base ?? await this.#buildAllDocumentsBitmap();
                 return { bitmap, rankedIds: [], error: null };
             }
-            const scope = await this.#foldQueryScope(texts.slice(0, -1), base);
+            const scope = await this.#foldQueryScope(texts.slice(0, -1), base, options);
             if (scope && scope.isEmpty) { return { bitmap: scope, rankedIds: [], error: null }; }
 
             const last = texts[texts.length - 1];
@@ -3650,7 +3664,10 @@ class SynapsD extends EventEmitter {
             // Membership (full match set of the last stage) and ranking (its head)
             // in parallel — same stage, two views.
             const [memberIds, ranked] = await Promise.all([
-                this.#queryMatchSet(last, scopeIds, 1_000_000, { relativeImageFloor: relative }),
+                // Same rule as the fold: FTS may return everything it matches, the
+                // kNN side must stay bounded or a line's membership becomes the
+                // whole photo library.
+                this.#queryMatchSet(last, scopeIds, 1_000_000, { relativeImageFloor: relative, imageDepth: FUSE_DEPTH }),
                 this.#rankIds(scopeIds, last, { mode: options.mode, minDistance: options.minDistance, maxDistance: options.maxDistance, limit: FUSE_DEPTH, offset: 0, imageRelativeFloor: relative }),
             ]);
             const bitmap = new RoaringBitmap32(memberIds);
