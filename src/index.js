@@ -549,6 +549,17 @@ class SynapsD extends EventEmitter {
             // vectors.) Live-tunable per workspace (setSearchTuning) and
             // env-overridable (CANVAS_IMAGE_MAX_DISTANCE). null/0 = no floor.
             imageMaxDistance: typeof sem.imageMaxDistance === 'number' ? sem.imageMaxDistance : 0.945,
+            // How the image floor is applied — see #imageVectorSearch.
+            // 'relative' (default): keep hits within imageRelativeMargin of the
+            // query's OWN best hit, capped by imageMaxDistance. Adapts to the
+            // per-query, per-model scale shift that makes a single global cutoff
+            // unusable (CLIP ViT-B/32 ~0.73 vs SigLIP ~0.92 for the same match).
+            // 'absolute': imageMaxDistance alone (pre-2026-08 behaviour).
+            imageFloorMode: sem.imageFloorMode === 'absolute' ? 'absolute' : 'relative',
+            // Width of the relative window, in cosine distance from the best hit.
+            imageRelativeMargin: Number.isFinite(sem.imageRelativeMargin) && sem.imageRelativeMargin > 0
+                ? sem.imageRelativeMargin
+                : 0.035,
             // Hybrid RRF fusion weights. fts > dense: text kNN has no relevance
             // floor, so its rank-0 hit on an irrelevant corpus would otherwise tie
             // a rank-0 EXACT lexical match. image == fts: image kNN IS floored
@@ -629,6 +640,8 @@ class SynapsD extends EventEmitter {
             spaces: Object.keys(this.#semanticConfig.spaces || {}),
             // Tunable search knobs (surfaced so the UI can show/edit current values).
             imageMaxDistance: this.#semanticConfig.imageMaxDistance,
+            imageFloorMode: this.#semanticConfig.imageFloorMode,
+            imageRelativeMargin: this.#semanticConfig.imageRelativeMargin,
             searchWeights: { ...this.#semanticConfig.searchWeights },
             // Back-compat: `vector` stays the text space; `vectorSpaces` breaks it
             // out per space (text, image, …) so image embedding is observable.
@@ -648,6 +661,12 @@ class SynapsD extends EventEmitter {
             const v = tuning.imageMaxDistance;
             this.#semanticConfig.imageMaxDistance = (v === null || Number.isFinite(v)) ? v : this.#semanticConfig.imageMaxDistance;
         }
+        if (tuning.imageFloorMode === 'absolute' || tuning.imageFloorMode === 'relative') {
+            this.#semanticConfig.imageFloorMode = tuning.imageFloorMode;
+        }
+        if (Number.isFinite(tuning.imageRelativeMargin) && tuning.imageRelativeMargin > 0) {
+            this.#semanticConfig.imageRelativeMargin = tuning.imageRelativeMargin;
+        }
         if (tuning.searchWeights && typeof tuning.searchWeights === 'object') {
             const w = this.#semanticConfig.searchWeights;
             for (const k of ['fts', 'dense', 'image']) {
@@ -657,6 +676,8 @@ class SynapsD extends EventEmitter {
         }
         return {
             imageMaxDistance: this.#semanticConfig.imageMaxDistance,
+            imageFloorMode: this.#semanticConfig.imageFloorMode,
+            imageRelativeMargin: this.#semanticConfig.imageRelativeMargin,
             searchWeights: { ...this.#semanticConfig.searchWeights },
         };
     }
@@ -1572,14 +1593,26 @@ class SynapsD extends EventEmitter {
      * Returns [] (and loads no model) unless photos are actually embedded, so
      * text-only searches never pay for the image model.
      *
-     * Two floor modes:
-     * - absolute (default): drop hits beyond imageMaxDistance. Right for global
-     *   queries, where the floor separates "is a match at all" from noise.
-     * - relative (`opts.relativeFloor`, refinement stages): the scope already
-     *   established relevance (e.g. 40 car photos), so an absolute floor is wrong —
-     *   "red" over car photos peaks around 0.95+, above the global floor, yet the
-     *   reddest cars ARE the answer. Keep everything within REFINE_MARGIN of the
-     *   scope's best hit instead: adaptive, narrows to the closest cluster.
+     * Floor modes (imageFloorMode, or forced per call by `opts.relativeFloor`):
+     *
+     * - relative (default): keep everything within `imageRelativeMargin` of the
+     *   BEST hit for this query, then apply imageMaxDistance as a ceiling.
+     *   Text→image distances are not comparable across queries — the modality
+     *   gap shifts and compresses the whole distribution per query and per model
+     *   (CLIP ViT-B/32 lands ~0.73 where SigLIP lands ~0.92), so one global
+     *   cutoff either keeps everything or nothing. Anchoring on the query's own
+     *   best hit adapts to that scale automatically, and re-embedding with a new
+     *   model no longer invalidates the setting.
+     * - absolute: drop hits beyond imageMaxDistance and nothing else. The
+     *   pre-2026-08 behaviour; correct when a corpus IS calibrated and you want
+     *   "no match" to mean no results.
+     *
+     * The ceiling is what keeps a relative floor honest: on its own it always
+     * returns the nearest photo, so a camera pointed at a blank wall would still
+     * surface something. imageMaxDistance caps that — set it loose (or off) and
+     * the relative window governs; set it tight and an irrelevant query can
+     * still come back empty. Refinement stages always force relative: the scope
+     * already established relevance, so a global ceiling would empty them out.
      * @returns {Promise<number[]>} candidate docIds, best-first
      */
     async #imageVectorSearch(queryString, scopedIds, depth, opts = {}) {
@@ -1592,27 +1625,46 @@ class SynapsD extends EventEmitter {
         if (!vi || !vi.isReady) { return []; }
         const qv = await embedQuery(queryString, 'image');
         if (!qv) { return []; }
-        if (opts.relativeFloor) {
-            const envMargin = Number(process.env.CANVAS_IMAGE_REFINE_MARGIN);
-            const margin = Number.isFinite(envMargin) && envMargin > 0 ? envMargin : 0.035;
-            const res = await vi.vectorSearch(qv, scopedIds, { limit: depth, offset: 0, minDistance: 0, maxDistance: 2, withDistances: true });
-            const ids = res.pageIds || [];
-            if (ids.length === 0) { return []; }
-            const dist = res.distances || {};
-            const best = dist[ids[0]];
-            if (!Number.isFinite(best)) { return ids; }
-            return ids.filter((id) => Number.isFinite(dist[id]) && dist[id] <= best + margin);
-        }
-        // Relevance floor (cosine distance cap, 0 = identical; smaller = stricter):
-        // image kNN otherwise returns its top-K for ANY query, so every search folds
-        // in unrelated photos. Precedence: env override → workspace setting →
-        // fp32-calibrated default. A non-positive value disables the floor
-        // (legacy top-K behaviour).
+        // Absolute ceiling (cosine distance cap, 0 = identical; smaller =
+        // stricter). Precedence: env override → workspace setting → default.
+        // A non-positive value disables it (pure top-K / pure relative window).
         const envMax = process.env.CANVAS_IMAGE_MAX_DISTANCE;
         const cfgMax = (envMax != null && envMax !== '') ? Number(envMax) : this.#semanticConfig.imageMaxDistance;
-        const maxDistance = Number.isFinite(cfgMax) && cfgMax > 0 ? cfgMax : undefined;
-        const res = await vi.vectorSearch(qv, scopedIds, { limit: depth, offset: 0, maxDistance });
-        return res.pageIds || [];
+        const ceiling = Number.isFinite(cfgMax) && cfgMax > 0 ? cfgMax : undefined;
+
+        // A refinement stage always uses the relative window (its scope already
+        // established relevance); otherwise the configured mode decides.
+        const relative = opts.relativeFloor || this.#semanticConfig.imageFloorMode !== 'absolute';
+
+        if (!relative) {
+            const res = await vi.vectorSearch(qv, scopedIds, { limit: depth, offset: 0, maxDistance: ceiling });
+            return res.pageIds || [];
+        }
+
+        // Refinement keeps its own margin knob for backwards compatibility; a
+        // stage-one query uses the general one.
+        const envMargin = Number(opts.relativeFloor
+            ? (process.env.CANVAS_IMAGE_REFINE_MARGIN ?? process.env.CANVAS_IMAGE_RELATIVE_MARGIN)
+            : (process.env.CANVAS_IMAGE_RELATIVE_MARGIN ?? process.env.CANVAS_IMAGE_REFINE_MARGIN));
+        const margin = Number.isFinite(envMargin) && envMargin > 0
+            ? envMargin
+            : this.#semanticConfig.imageRelativeMargin;
+
+        // Fetch unfloored: the window is measured from THIS query's best hit, so
+        // the ceiling must not prune before the anchor is known.
+        const res = await vi.vectorSearch(qv, scopedIds, { limit: depth, offset: 0, minDistance: 0, maxDistance: 2, withDistances: true });
+        const ids = res.pageIds || [];
+        if (ids.length === 0) { return []; }
+        const dist = res.distances || {};
+        const best = dist[ids[0]];
+        if (!Number.isFinite(best)) { return ids; }
+        // Ceiling applies to a stage-one query only. On a refinement it would
+        // undo the whole point — "red" over car photos legitimately peaks above
+        // any global cutoff.
+        const cap = (!opts.relativeFloor && ceiling !== undefined)
+            ? Math.min(best + margin, ceiling)
+            : best + margin;
+        return ids.filter((id) => Number.isFinite(dist[id]) && dist[id] <= cap);
     }
 
     /**
@@ -3149,7 +3201,12 @@ class SynapsD extends EventEmitter {
         // image kNN distances for this query so a caller can pick imageMaxDistance
         // from real numbers. Best-effort; never fails the search.
         if (options.debug && queryString) {
-            try { result.debug = { imageDistances: await this.#imageDistances(queryString, scopedIds, 25) }; }
+            // Depth matters for calibration: the top-25 neighbours of ANY query
+            // are all near by construction, so a short window shows a tight
+            // cluster with no boundary in it. The match/noise transition is
+            // usually further down — ask for more when you are picking a floor.
+            const debugLimit = Math.min(Math.max(Number(options.debugLimit) || 25, 1), 500);
+            try { result.debug = { imageDistances: await this.#imageDistances(queryString, scopedIds, debugLimit) }; }
             catch (e) { result.debug = { imageDistances: [], error: e.message }; }
         }
         return result;
