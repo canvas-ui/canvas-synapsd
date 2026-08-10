@@ -802,6 +802,26 @@ await db.storeDocumentEmbeddings(docId, schema, updatedAt, [
 ], { space: 'text' });
 ```
 
+Query-side vectors use the same candidate resolver and never pass bytes or
+models into SynapsD:
+
+```js
+const hits = await db.searchByVector(queryVector, {
+    paths: ['ctx:/work/project-a'],
+    features: ['data/schema/file'],
+}, {
+    space: 'image',
+    limit: 50,
+    idsOnly: true,
+});
+
+const vector = await db.getDocumentVector(documentId, 'image');
+```
+
+`searchByVector()` supports structural scope, `excludeIds`, distance bounds,
+`withDistances`, and `idsOnly`. `getDocumentVector()` enables "more like this"
+without moving a stored vector through an HTTP API.
+
 ## Timelines and intervals
 
 SynapsD supports source/domain timelines (`wikipedia`, `britannica`, `crud:updated`, `content`, `tasks`, `events`) backed by internal scale tiers. The developer-facing name stays simple; internally each timeline owns lazy per-scale tiers for `Gyr`, `Myr`, `Kyr`, `year`, `month`, `day`, `second`, `ms`, and `ns`.
@@ -1133,6 +1153,8 @@ Legacy method names like `findDocuments`, `ftsQuery`, and `insertDocument` are n
 | `search(spec)` | Wrapper: `query(spec.query ?? spec.search ?? spec.q, spec)` |
 | `searchRefined(queries[], baseSpec?, opts?)` | Stateless multi-query refinement; `opts = { limit, offset, mode }` |
 | `searchCompound(lines[], opts?)` | Fuses per-line rankings instead of chaining them |
+| `searchByVector(vector, spec?, opts?)` | Rank a structurally scoped candidate set with a caller-supplied vector |
+| `getDocumentVector(id, space?)` | Read one stored document vector for similarity queries |
 | `openSession(specs?, opts?)` | Long-running refinable/live query session |
 | `getByChecksumString(checksum, options?)` | `options = { parse, schema }` |
 | `has(id, spec?)` / `hasByChecksumString(checksum, spec?)` | Membership probe, no document fetch |
