@@ -625,7 +625,59 @@ MDB_DUPFIXED packing; token-string sugar for the `rel` bucket; any back-compat s
 
 ## Session support
 
-The "Why"
+**CONTAINER LANDED (pre-2026-08):** `src/session/QuerySession.js` via `db.openSession(specs, opts)`
+implements everything the checklist below asked for, plus more: modes `frozen|live`, emit
+`delta|ids|page`, `add/remove/patch/clear`, **`set(label, spec)` replace-mode upsert** (for
+streaming producers — patch() concats arrays by design), the **`ids` spec bucket** (literal
+id-set operand: no collection keys, never coarse, zero invalidation cost), `count/ids/
+materialize`, precise `membership.changed` key-touch invalidation with coarse re-resolve for
+temporal/geo/rel operands, debounced recompute, `serialize()/rehydrate()`. Tests:
+`tests/query-session.test.js`. The checklist below is retained for the record.
+
+### NEXT: session transport + delta-driven UI (planned 2026-08-10, separate session)
+
+**The problem observed:** Lens live-mode (camera feed / shared content) in the webui refetches
+and re-renders the whole document list per tick — the UI "blinks". Root cause: sessions are
+IN-PROCESS ONLY. The web toolbox writes filter state → the page re-runs a stateless
+`GET /documents` → full list swap. Nothing surfaces QuerySession's `{added, removed, count}`
+deltas to a client, so every consumer above synapsd is stuck in snapshot-refetch mode.
+
+**Division of labor (synapsd is nearly done here — this is mostly canvas-server + webui):**
+
+1. **canvas-server: session RPC over the existing socket.io transport** (channels today are
+   event fan-out only; no search RPC exists).
+   - `session.open { workspace, specs[], opts {mode, emit, debounceMs} } -> { sessionId, ids }`
+   - `session.set / session.patch / session.remove { sessionId, label, spec }` — thin passthrough
+     to the QuerySession methods (set() is the streaming verb: lens ids, sliding windows).
+   - `session.close { sessionId }`; server ALSO closes on socket disconnect after a grace TTL —
+     `serialize()` makes park/rehydrate cheap if reconnect-with-state is wanted later (PWA).
+   - Server → client: `session.delta { sessionId, added[], removed[], count }` (emit:'delta').
+   - Auth/scoping: session bound to (user, workspace) at open; reuse socket auth. A registry
+     (sessionId → QuerySession) lives in canvas-server (synapsd stays a library); enforce a
+     per-connection session cap.
+   - Materialization stays PULL: deltas carry ids only; the client hydrates added ids via the
+     existing `GET /documents?ids=…` (the Slice B½ ids param) — only NEW docs are ever fetched.
+2. **webui: a `useQuerySession` hook + incremental list.**
+   - Hook: open on mount / close on unmount, maintain `Map<id, doc>` + ordered id list; on delta
+     fetch ONLY `added` ids, drop `removed`; stable keys → React reconciles instead of remounting;
+     no loading-state flash (keep-previous-while-updating).
+   - Lens live mode becomes: frame → `search/image (idsOnly)` (unchanged) → `session.set('lens',
+     { ids })` over WS → delta → incremental render. The toolbox `filters.lens.ids` refetch path
+     stays as the fallback when no socket is available.
+   - Later (sensord): the frame loop moves server-side and patches the SAME session — the client
+     contract (deltas in, cue ops out) does not change. This transport IS the sensord consumer
+     surface, so design the message shapes with that in mind.
+3. **Independent quick mitigation (webui-only, can ship immediately):** even without sessions,
+   the Lens refetch path should keep previous results while fetching + render with stable keys +
+   only replace state when the id set actually changed (set-equality check) — kills the blink,
+   not the redundant fetch.
+4. **synapsd (small, optional):**
+   - [ ] session-wide `andNot(internal/gc/deleted)` in `#combine()` (parked from Slice B½: an
+         id-set cue has no keys, so deletes never dirty it).
+   - [ ] `materialize()` already exists for emit:'page' consumers; nothing else blocking.
+
+**Non-goals for round 1:** multi-workspace sessions, session sharing between users,
+server-side lens frame processing (that's sensord), soft/weighted combinators.
 
 **Conversational drill-down (REPL / the expansion UI you sketched).**  
 In a user-session query:  
