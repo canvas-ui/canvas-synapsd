@@ -7,6 +7,7 @@
   "dependencies": {
     "@lancedb/lancedb": "^0.22.3",
     "apache-arrow": "^18.1.0",
+    "canvas-synapsd": "github:canvas-ui/canvas-synapsd#main",
     "date-fns": "^4.1.0",
     "debug": "^4.4.3",
     "eventemitter2": "^6.4.9",
