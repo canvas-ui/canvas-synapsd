@@ -194,6 +194,33 @@ The webui landed in the monorepo (`~/Code/canvas/canvas/apps/web`); the camera a
 - [ ] Optional server nicety: accept a small batch of frames in one search call (amortize
       HTTP + let the server average vectors).
 
+## Slice B″ — Lens as a standard FILTER (SHIPPED 2026-08-10)
+
+Lens joined Features / Timeline / Map as a fourth toolbox filter tab (webui
+`panels/LensTab.tsx`; `ToolboxFilters.lens` state, deliberately EPHEMERAL — stripped from
+isDirty/session/canvas persistence, a saved view must not replay yesterday's position or a
+long-gone frame). Three refine sources:
+
+- [x] **Refine with GPS**: `watchPosition` → 4dp-rounded fix + radius knob (25 m–10 km) →
+      `geo:near:<lat>,<lon>,<r>m` token folded into tbScopeFilters. Jitter-safe (rounding
+      + re-commit only on movement).
+- [x] **Refine with camera** and **Refine with desktop recording**: same frame loop
+      (`useWebcam` grew `startScreen()` via getDisplayMedia + onEnded teardown when the
+      user stops sharing from browser UI) → search-by-image `idsOnly` at 1 FPS →
+      majority-vote smoothing → smoothed survivors committed as `filters.lens.ids`.
+- [x] Transport: `ids` exposed on GET /documents (repeatable param) + POST /search body →
+      spec.ids (Slice B½ operand); web services (`getWorkspaceDocuments` / canvas / layer
+      variants) gained `ids` option; workspace page folds lens into tbScopeFilters,
+      tbFiltersKey, all three fetch paths incl. live canvas preview.
+- [ ] Context pages: the contexts documents route has no `ids` param yet — GPS refine
+      works there (filters), camera/desktop refine is workspace-pages-only for now.
+
+### Inferd multi-feed direction (user note 2026-08-10, deep dive pending)
+Lens-style refinement will want MULTIPLE feed types from inferd, not just vectors:
+generated summaries (gemma4) fed into the database as QUERY ANCHORS — i.e. the summary
+text itself becomes a query-side leg/anchor, not only an indexed field. Ties into the
+anchor codebook (Slice C/D) and the describe capability; park until the captioner lands.
+
 ## Slice C — anchor layer in synapsd (representation intentionally open)
 
 Two candidate representations, both fed by the same codebook output; benchmark before
