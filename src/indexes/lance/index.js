@@ -226,8 +226,14 @@ class LanceIndex {
         // unscoped branch previously fetched only limit+offset rows, which capped
         // totalCount at the page size and broke deep pagination on whole-workspace
         // search (every query looked like the same fixed candidate set).
-        const overfetch = (limit + offset) * 10 + 1000;
-        const fetchLimit = candidateSet ? Math.min(candidateSet.size, overfetch) : overfetch;
+        // The candidate set does NOT bound this. Filtering happens AFTER the BM25
+        // search (Lance ranks the whole table, we keep the survivors), so fetching
+        // only candidateSet.size rows asked for the globally top-N and then kept
+        // whichever of those happened to be candidates — with a narrow scope
+        // (`?ids=…`, one tree path, a camera frame's kNN survivors) the answer was
+        // usually EMPTY, and the tighter you scoped the more likely it vanished.
+        // Exactly backwards: narrowing must sharpen a search, not silence it.
+        const fetchLimit = (limit + offset) * 10 + 1000;
 
         let rows;
         try {
