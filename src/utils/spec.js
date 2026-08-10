@@ -241,6 +241,10 @@ export function parseSpec(rawSpec = {}) {
             maxDistance: pick('maxDistance'),
             // Calibration: attach raw (unfloored) image kNN distances to the result.
             debug: pick('debug'),
+            // How many of them (default 25, capped at 500). The top-25 neighbours
+            // of any query cluster tightly — locating where relevance actually
+            // ends needs a deeper window.
+            debugLimit: pick('debugLimit'),
         },
     };
 }

@@ -122,10 +122,14 @@ describe('refinement over an image-backed corpus', () => {
         expect(strays).toEqual([]);
     }, 120_000);
 
-    test('with the relevance floor on, the refine narrows to the true intersection', async () => {
+    test('with an absolute floor, the refine narrows to the true intersection', async () => {
         // The floor is the mechanism that is SUPPOSED to do this work; the depth
         // bound above is the backstop for when it is off or badly calibrated.
-        await db.setSearchTuning?.({ imageMaxDistance: 0.5 });
+        // Pinned to 'absolute' deliberately: under the default relative window a
+        // multi-concept photo sits outside a narrow margin (it is necessarily
+        // further from "winter" than a pure snow photo is) — see
+        // image-floor-mode.test.js, which pins that trade-off.
+        await db.setSearchTuning?.({ imageFloorMode: 'absolute', imageMaxDistance: 0.5 });
 
         const winterWindow = await addPhoto('winter window', BOTH);
         const snowOnly = await addPhoto('snow field', WINTER);
