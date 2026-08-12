@@ -6,7 +6,10 @@ Only open engine work belongs here. The current API and landed design live in
 ## Semantic anchors
 
 Inferd produces model output and codebook assignments. SynapsD only stores and
-combines model/version-namespaced anchor membership.
+combines model/version-namespaced anchor membership. Settled: the wire format
+decouples from storage — producers emit normalized 64-bit S2-shaped IDs (or
+anchor paths) and whether SynapsD resolves them via a BSI range or an internal
+context-tree layer stays an implementation detail behind the filter token.
 
 - [ ] Benchmark the producer before choosing storage.
 - [ ] Decide the cardinality contract first. A point BSI stores one value per
@@ -15,9 +18,18 @@ combines model/version-namespaced anchor membership.
       multi-position timeline problem.
 - [ ] Compare:
   - model-keyed anchor bitmaps or quantizer bands;
-  - occurrence indirection plus a sortable 64-bit code;
-  - engine-owned semantic dimension trees with ancestor widening.
-- [ ] Add an `anchor:` filter family. `geo:` remains physical GPS.
+  - occurrence indirection plus a sortable 64-bit code (continuous widening via
+    range queries, but high-D → 2-D locality is provably lossy (JL bound) —
+    adjacency at a fixed level is partly fake; the codebook does the real work,
+    not the curve);
+  - engine-owned semantic dimension trees with ancestor widening (graded recall
+    via ancestor ticking, backoff = parent-path cue swap, atomic v1→v2 tree
+    rebuild; discrete taxonomy, no continuous neighborhoods).
+- [ ] Treat S2/Hilbert as a storage encoding candidate, not evidence that a
+      high-dimensional semantic manifold became two-dimensional without loss.
+- [ ] Add an `anchor:` filter family. `geo:` remains physical GPS. Cell IDs are
+      64-bit unsigned — parse as BigInt/hex in filter tokens, no float precision
+      loss.
 - [ ] Add model-keyed presence/seen ledgers and APIs to store, clear, inspect,
       and query anchors.
 - [ ] Preserve the L3 invariant: anchor indexes are disposable and reproducible
