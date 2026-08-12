@@ -57,7 +57,7 @@ Email **lic@augmentd.eu** with roughly:
 
 - what you are building, and how Canvas fits into it
 - whether you are distributing it, hosting it, or both
-- which components you use (server, SynapsD, StoreD, NeuralD, the web UI)
+- which components you use (server, SynapsD, StoreD, InferD, AgentD)
 - rough scale, in seats, instances or end customers
 
 Terms are negotiated per case and there is no public price list yet. Licences
