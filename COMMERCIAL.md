@@ -19,12 +19,13 @@ no feature held back for paying customers. The AGPL version is the whole product
 
 A commercial licence covers the dual-licensed Canvas components: the server
 runtime (`canvas-server`, including the embedding, messaging, voice and agent
-services), `canvas-synapsd`, `canvas-stored`, `canvas-inferd` and
-`canvas-agentd` (which consolidates the former `canvas-neurald`).
+services), `canvas-synapsd`, `canvas-stored`, `canvas-inferd`,
+`canvas-agentd` (which consolidates the former `canvas-neurald`) and the
+shared `packages/*` libraries in the Canvas monorepo (protocol, schemas,
+api-client).
 
-It does not cover the Canvas clients, the web UI or the shared packages: the
-CLI, the web UI, the shell client, the FUSE client, the desktop app, the
-browser extensions and the `packages/*` libraries in the Canvas monorepo.
+It does not cover the Canvas client applications: the CLI, the web UI, the
+shell client, the FUSE client, the desktop app and the browser extensions.
 Those are AGPL-only for everyone, commercial licensees included.
 
 ## When you need option 2

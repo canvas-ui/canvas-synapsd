@@ -1,6 +1,6 @@
 # Canvas Contributor License Agreement
 
-Version 1.1
+Version 1.2
 
 Thank you for contributing to Canvas. This agreement sets out the terms you
 contribute under, so that the project can go on being offered both under the GNU
@@ -11,19 +11,20 @@ assignment. You stay free to use, publish and relicense your own work however
 you like, including in other projects.
 
 By signing, you accept the following terms for your past and future
-contributions to the dual-licensed Canvas repositories: `canvas-server`,
-`canvas-synapsd`, `canvas-stored`, `canvas-inferd` and `canvas-agentd`
-(including its predecessor `canvas-neurald`). "You"
+contributions to the dual-licensed Canvas components: the repositories
+`canvas-server`, `canvas-synapsd`, `canvas-stored`, `canvas-inferd` and
+`canvas-agentd` (including its predecessor `canvas-neurald`), and the shared
+`packages/*` libraries in the Canvas monorepo (`canvas-ui/canvas`). "You"
 means the person or legal entity signing. "The Owner" means Jozef Melich, the
 copyright holder of the Canvas codebase, and Augmentd s.r.o. acting under
 licence from him.
 
-**This agreement does not reach the AGPL-only clients and packages.**
-Contributions to the Canvas monorepo (`canvas-ui/canvas`: the CLI, web UI,
-browser extensions, desktop app, shell client and shared packages) and to
-`canvas-fuse` are governed by the AGPL and a DCO sign-off alone. No CLA is
-asked for there, and signing this one does not imply any. Nothing here grants
-the Owner any right to relicense your work in those repositories.
+**This agreement does not reach the AGPL-only clients.** Contributions to
+the client applications in the Canvas monorepo (`apps/*`: the CLI, web UI,
+browser extensions, desktop app and shell client) and to `canvas-fuse` are
+governed by the AGPL and a DCO sign-off alone. No CLA is asked for there, and
+signing this one does not imply any. Nothing here grants the Owner any right
+to relicense your work in those directories and repositories.
 
 ## 1. Definitions
 
