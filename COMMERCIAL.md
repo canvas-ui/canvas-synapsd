@@ -18,7 +18,7 @@ no feature held back for paying customers. The AGPL version is the whole product
 ## Scope
 
 A commercial licence covers the dual-licensed Canvas components: the server
-runtime (`canvas-server`, including the embedding, messaging, voice and agent
+runtime (`canvas-server`, including the messaging, voice and agent
 services), `canvas-synapsd`, `canvas-stored`, `canvas-inferd`,
 `canvas-agentd` (which consolidates the former `canvas-neurald`) and the
 shared `packages/*` libraries in the Canvas monorepo (protocol, schemas,
