@@ -49,11 +49,82 @@ context-tree layer stays an implementation detail behind the filter token.
 
 ## Timelines
 
-- [ ] Support several positions or ranges per document on one timeline.
-- [ ] Keep the current BSI as the canonical sortable value plane.
-- [ ] Choose a separate multi-position membership plane. Compare coarse
-      coverings with row refinement against occurrence-ID indirection.
-- [ ] Decide boundary precision before implementation.
+Goal: several positions or ranges per document on one timeline. Settled — the
+doc model: `timelineEntrySchema` allows multiple entries per timeline name
+(today a second insert for the same `(timeline, id)` overwrites and the README
+documents the throw), each entry optionally carrying an opaque `ref` anchor:
+
+```js
+timelines: [
+  { timeline: 'wikipedia', start: '1769-08-15', ref: 'd1' },
+  { timeline: 'wikipedia', start: '1799-11-09', end: '1804-05-18', ref: 'consulate' },
+]
+```
+
+The document stays the source of truth and every timeline index stays
+L3-derived. SynapsD never parses content to extract dates or resolve refs —
+distillation (markup → entries) and the anchor convention are the app's
+responsibility; the engine only stores and returns `ref` verbatim. `ref` also
+points toward the semantic layer (an anchor is a position in content the same
+way a cell is a position in a space), so keep it an opaque string, not a
+timeline-specific format. The current dual-BSI stays the canonical sortable
+value plane holding ONE primary interval per doc (first entry or explicit
+`primary`), which keeps `sortBy` semantics unambiguous.
+
+Settled — the membership plane is **tiled coverings, Pilosa time-quantum
+shaped** (Pilosa/FeatureBase independently arrived at the same split: BSI for
+single sortable values, per-granularity membership views for plural events):
+
+- Per-cell doc-id bitmaps `internal/tsm/<timeline>/<scale>/<cellId>`, quantum
+  depth configured per timeline (a YMDH analog: `wikipedia` ~year, deep-time
+  axes ~Myr, `events` ~day). Intervals write a hierarchical covering (coarse
+  cells mid-span, finer at boundaries) at ingest; range queries union the
+  minimal cell covering of the query range.
+- Precision = finest configured quantum, **no row refinement in v1** (Pilosa
+  precedent: quantum queries don't refine). An `exact` opt-in flag can land
+  later without a format change.
+- Cell bitmaps hold doc ids, so they AND natively with context/feature/geo
+  filters and spend cheap key space, not 32-bit id space.
+- Rejected — occurrence-ID indirection. Packed `occId = (docId << k) |
+  ordinal` is beautiful arithmetic but throws on legitimate fan-out (a
+  meta-analysis citing 50 studies) and spends doc-id bits, the scarce
+  currency; the BSI-translation-table variant resurrects allocation/GC
+  bookkeeping. The per-occurrence chronological listing it uniquely enabled
+  has no product surface; if one appears it can be added alongside tiling
+  later, derived from the same `timelines[]`.
+- Rejected — bitmasking multiple values into one BSI word: destroys the
+  slice-comparison algebra that makes range queries work.
+- App boundary: engine multi-position covers *positions of this document*
+  (distilled dates in a note). Entity-worthy occurrences (a cited study, a
+  referenced event) are promoted by the app to their own documents with
+  edges to the source; fan-out beyond a dozen-ish entries is a modeling
+  smell, not an engine limit.
+- L4/L5 note: the agent recall structure (now-relative anchors, exponential
+  falloff — itself a log-scale tiling anchored at the present) sits above
+  this layer, consumes `(anchor, time-tag, pointer)` tuples, and unfolds
+  into exact timelines on demand. It is representation-independent and
+  constrains nothing here.
+
+We are not building a generic DB (standalone-usable, yes); our zeitgeist
+multi-timeline shape (`mode: 'grouped'` across named axes) stays as-is —
+FeatureBase's frames-per-attribute layout is not an improvement on it. From
+their code (archived clone in `_SCRATCH_/featurebase`) we ingest exactly two
+things:
+
+- [ ] Port the covering decomposition from `viewsByTimeRange` (`time.go:158`):
+      walk up fine→coarse until boundary-aligned, then down coarse→fine —
+      reused over our scale tiers (deep-time included, where their calendar
+      walk can't follow) and on BOTH sides: query-time range decomposition and
+      ingest-time interval coverings (their code only does query-time, for
+      instants). Import their calendar edge cases (`addMonth`, Jan 31 + 1mo)
+      as test cases.
+- [ ] Decide fixed vs adaptive quantum depth: FeatureBase fixes depth per
+      field at creation — evaluate whether that beats our adaptive schema
+      before implementation, and pick depth defaults per timeline class.
+      Benchmark the write-amplification vs precision dial on a
+      Wikipedia-scale ingestion batch before freezing.
+- [ ] Multi-position landing also unblocks recurring Event series expansion
+      (see the cardinality note in `src/schemas/core/Event.js`).
 - [ ] Batch timeline rebuilds before Wikipedia-scale ingestion.
 
 ## Schemas
@@ -66,7 +137,6 @@ context-tree layer stays an implementation detail behind the filter token.
 
 ## Trees and membership
 
-- [ ] Repair legacy duplicate tree names created before uniqueness enforcement.
 - [ ] Design context/directory subtree mountpoints:
   - same tree type only;
   - origin-path resolution;
