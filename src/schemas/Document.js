@@ -148,12 +148,20 @@ const locationSchema = z.object({
     metadata: z.record(z.any()).optional(),
 });
 
+// Multiple entries per timeline name are supported (multi-position): the
+// primary entry — first, or the one flagged `primary: true` — is the document's
+// canonical sortable interval; the rest land in the tiled membership plane.
+// `ref` is an OPAQUE anchor into the document's content ('d1', 'consulate', a
+// future semantic anchor) — the engine stores and returns it verbatim, never
+// parses it; distillation and the anchor convention are the app's job.
 const timelineEntrySchema = z.object({
     name: z.string().optional(),
     timeline: z.string().optional(),
     scale: z.string().optional(),
     start: z.any(),
     end: z.any().optional(),
+    primary: z.boolean().optional(),
+    ref: z.string().optional(),
 }).passthrough().refine(entry => entry.name || entry.timeline, {
     message: 'Timeline entry requires name or timeline',
 });

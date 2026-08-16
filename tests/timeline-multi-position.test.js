@@ -11,12 +11,12 @@ const note = (title, timelines) => ({
     ...(timelines ? { timelines } : {}),
 });
 
-// A document occupies ONE position per timeline — the index is a BSI keyed
-// id -> a single value, so a second insert for the same (timeline, id)
-// overwrites the first. Multi-position is WANTED (a note referencing N eras on a
-// 'wikipedia' timeline) but not yet supported; until it is, the engine must
-// refuse rather than silently keep only the last entry.
-describe('one position per timeline', () => {
+// Multi-position timelines: several positions or ranges per document on one
+// timeline. The primary entry (first, or flagged `primary: true`) lives in the
+// sortable dual-BSI; every additional entry lands in the tiled membership plane
+// (internal/tsm/*, Pilosa time-quantum shaped coverings). The document stays the
+// source of truth — every plane is L3-derived from timelines[].
+describe('multi-position timelines', () => {
     let rootPath;
     let db;
 
@@ -31,55 +31,127 @@ describe('one position per timeline', () => {
         if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
     });
 
-    test('duplicate entries on ONE timeline are refused, not silently truncated', async () => {
-        await expect(db.put(note('Rome notes', [
-            { timeline: 'wikipedia', start: '-0509', end: '-0027' },
-            { timeline: 'wikipedia', start: '-0027', end: '0476' },
-        ]))).rejects.toThrow(/multiple entries for timeline "wikipedia"/);
-    });
-
-    test('nothing is indexed when the write is refused — no half-applied state', async () => {
-        await db.put(note('Rome notes', [
-            { timeline: 'wikipedia', start: '-0509', end: '-0027' },
-            { timeline: 'wikipedia', start: '-0027', end: '0476' },
-        ])).catch(() => {});
-
-        // The pre-guard behaviour indexed the LAST entry and answered this query.
-        const hit = await db.list({ filters: ['t:wikipedia:-0027..0476'], limit: 0 });
-        expect(hit.map((d) => d.id)).toEqual([]);
-    });
-
-    test('distinct timeline names are the supported way to carry several axes', async () => {
+    test('several entries on ONE timeline are indexed, and each position is found', async () => {
         const id = await db.put(note('Rome notes', [
-            { timeline: 'wikipedia', start: '-0509', end: '0476' },
-            { timeline: 'content', start: '2026-08-03T10:00:00.000Z' },
+            { timeline: 'wikipedia', start: '-0509', end: '-0027', ref: 'republic' },
+            { timeline: 'wikipedia', start: '-0027', end: '0476', ref: 'empire' },
+            { timeline: 'wikipedia', start: '1453', ref: 'fall-of-constantinople' },
         ]));
 
-        const byEra = await db.list({ filters: ['t:wikipedia:-0100..0100'], limit: 0 });
-        expect(byEra.map((d) => d.id)).toEqual([id]);
+        // Every declared position answers a range query...
+        for (const filter of ['t:wikipedia:-0400..-0300', 't:wikipedia:0100..0200', 't:wikipedia:1453']) {
+            const hits = await db.list({ filters: [filter], limit: 0 });
+            expect(hits.map((d) => d.id)).toEqual([id]);
+        }
 
-        const byContent = await db.list({ filters: ['t:content:2026-08-01..2026-08-31'], limit: 0 });
-        expect(byContent.map((d) => d.id)).toEqual([id]);
+        // ...and a gap between positions does not.
+        const gap = await db.list({ filters: ['t:wikipedia:0800..1200'], limit: 0 });
+        expect(gap.map((d) => d.id)).toEqual([]);
+
+        // The row keeps every entry verbatim, ref included (opaque to the engine).
+        const doc = await db.get(id);
+        expect(doc.timelines.map((t) => t.ref)).toEqual(['republic', 'empire', 'fall-of-constantinople']);
     });
 
-    test('one document per position is the supported workaround, and each is found', async () => {
-        const republic = await db.put(note('Roman Republic', [{ timeline: 'wikipedia', start: '-0509', end: '-0027' }]));
-        const empire = await db.put(note('Roman Empire', [{ timeline: 'wikipedia', start: '-0027', end: '0476' }]));
+    test('the primary entry is the sortable position; primary:true overrides first-wins', async () => {
+        const first = await db.put(note('A', [
+            { timeline: 'wikipedia', start: '1969', ref: 'moon' },
+            { timeline: 'wikipedia', start: '1903', ref: 'kitty-hawk' },
+        ]));
+        const second = await db.put(note('B', [
+            { timeline: 'wikipedia', start: '1927', ref: 'atlantic' },
+            { timeline: 'wikipedia', start: '1912', ref: 'titanic', primary: true },
+        ]));
 
-        const early = await db.list({ filters: ['t:wikipedia:-0400..-0300'], limit: 0 });
-        expect(early.map((d) => d.id)).toEqual([republic]);
+        // sortBy uses the primary interval only: A sorts at 1969 (first entry),
+        // B at 1912 (flagged primary), so B precedes A.
+        const sorted = await db.list({ filters: ['t:wikipedia:1900..1980'], sortBy: 'wikipedia', limit: 0 });
+        expect(sorted.map((d) => d.id)).toEqual([second, first]);
 
-        const later = await db.list({ filters: ['t:wikipedia:0100..0200'], limit: 0 });
-        expect(later.map((d) => d.id)).toEqual([empire]);
+        // Non-primary positions still answer membership queries.
+        const kittyHawk = await db.list({ filters: ['t:wikipedia:1903'], limit: 0 });
+        expect(kittyHawk.map((d) => d.id)).toEqual([first]);
+        const atlantic = await db.list({ filters: ['t:wikipedia:1927'], limit: 0 });
+        expect(atlantic.map((d) => d.id)).toEqual([second]);
     });
 
-    test('a legacy row carrying duplicates can still be deleted', async () => {
+    test('an update re-derives the plane — dropped positions stop matching', async () => {
+        const id = await db.put(note('Draft', [
+            { timeline: 'wikipedia', start: '1769-08-15', ref: 'd1' },
+            { timeline: 'wikipedia', start: '1799-11-09', end: '1804-05-18', ref: 'consulate' },
+        ]));
+
+        await db.put({
+            id,
+            schema: 'data/schema/note',
+            data: { title: 'Draft', content: 'Draft' },
+            timelines: [{ timeline: 'wikipedia', start: '1769-08-15', ref: 'd1' }],
+        });
+
+        const kept = await db.list({ filters: ['t:wikipedia:1769'], limit: 0 });
+        expect(kept.map((d) => d.id)).toEqual([id]);
+        const dropped = await db.list({ filters: ['t:wikipedia:1799-11..1804-05'], limit: 0 });
+        expect(dropped.map((d) => d.id)).toEqual([]);
+    });
+
+    test('delete removes every position, not just the primary', async () => {
+        const id = await db.put(note('Gone', [
+            { timeline: 'wikipedia', start: '1815' },
+            { timeline: 'wikipedia', start: '1821-05-05' },
+        ]));
+        await db.delete(id);
+
+        for (const filter of ['t:wikipedia:1815', 't:wikipedia:1821']) {
+            const hits = await db.list({ filters: [filter], limit: 0 });
+            expect(hits.map((d) => d.id)).toEqual([]);
+        }
+    });
+
+    test('an open-ended interval must be the primary entry', async () => {
+        await expect(db.put(note('Bad', [
+            { timeline: 'life', start: '1912-06-23', end: '1954-06-07' },
+            { timeline: 'life', start: '2000', end: null },
+        ]))).rejects.toThrow(/open-ended non-primary/i);
+
+        // Flagged primary, the open interval is fine — the BSI sentinels hold it.
+        const id = await db.put(note('Ok', [
+            { timeline: 'life', start: '1912-06-23', end: '1954-06-07' },
+            { timeline: 'life', start: '2000', end: null, primary: true },
+        ]));
+        const ongoing = await db.list({ filters: ['t:life:2030'], limit: 0 });
+        expect(ongoing.map((d) => d.id)).toEqual([id]);
+        const bounded = await db.list({ filters: ['t:life:1930'], limit: 0 });
+        expect(bounded.map((d) => d.id)).toEqual([id]);
+    });
+
+    test('positions AND natively with feature filters (cells hold doc ids)', async () => {
+        const noteId = await db.put({
+            ...note('Napoleon note', [
+                { timeline: 'wikipedia', start: '1769-08-15' },
+                { timeline: 'wikipedia', start: '1799-11-09', end: '1804-05-18' },
+            ]),
+            features: ['custom/napoleon'],
+        });
+        await db.put(note('Unrelated', [{ timeline: 'wikipedia', start: '1802' }]));
+
+        // The range only overlaps the SECOND (non-primary) position, and the
+        // feature filter narrows the two matching docs down to the tagged one —
+        // membership cells hold doc ids, so the AND happens on bitmaps.
+        const narrowed = await db.list({
+            filters: ['t:wikipedia:1800..1803'],
+            features: ['custom/napoleon'],
+            limit: 0,
+        });
+        expect(narrowed.map((d) => d.id)).toEqual([noteId]);
+    });
+
+    test('a legacy row carrying odd entries can still be deleted', async () => {
         const id = await db.put(note('Ok', [{ timeline: 'wikipedia', start: '-0509', end: '0476' }]));
 
-        // Simulate a row written before the guard: mutate the stored document so
-        // it carries duplicate entries, then make sure cleanup does not throw.
+        // Simulate a row written by an older version: mutate the stored document
+        // so it carries a malformed entry, then make sure cleanup does not throw.
         const stored = await db.get(id);
-        stored.timelines.push({ timeline: 'wikipedia', start: '0476', end: '1453' });
+        stored.timelines.push({ timeline: 'wikipedia' }); // no start
         await db.documents.put(id, stored);
 
         await expect(db.delete(id)).resolves.not.toThrow();

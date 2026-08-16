@@ -49,10 +49,10 @@ context-tree layer stays an implementation detail behind the filter token.
 
 ## Timelines
 
-Goal: several positions or ranges per document on one timeline. Settled — the
-doc model: `timelineEntrySchema` allows multiple entries per timeline name
-(today a second insert for the same `(timeline, id)` overwrites and the README
-documents the throw), each entry optionally carrying an opaque `ref` anchor:
+Goal: several positions or ranges per document on one timeline. LANDED
+2026-08-16 (see checked items below; design record kept for the rationale).
+The doc model: `timelineEntrySchema` allows multiple entries per timeline name,
+each entry optionally carrying an opaque `ref` anchor:
 
 ```js
 timelines: [
@@ -111,21 +111,34 @@ FeatureBase's frames-per-attribute layout is not an improvement on it. From
 their code (archived clone in `_SCRATCH_/featurebase`) we ingest exactly two
 things:
 
-- [ ] Port the covering decomposition from `viewsByTimeRange` (`time.go:158`):
-      walk up fine→coarse until boundary-aligned, then down coarse→fine —
-      reused over our scale tiers (deep-time included, where their calendar
-      walk can't follow) and on BOTH sides: query-time range decomposition and
-      ingest-time interval coverings (their code only does query-time, for
-      instants). Import their calendar edge cases (`addMonth`, Jan 31 + 1mo)
-      as test cases.
-- [ ] Decide fixed vs adaptive quantum depth: FeatureBase fixes depth per
-      field at creation — evaluate whether that beats our adaptive schema
-      before implementation, and pick depth defaults per timeline class.
-      Benchmark the write-amplification vs precision dial on a
-      Wikipedia-scale ingestion batch before freezing.
-- [ ] Multi-position landing also unblocks recurring Event series expansion
-      (see the cardinality note in `src/schemas/core/Event.js`).
+- [x] LANDED 2026-08-16 — covering decomposition ported from `viewsByTimeRange`
+      (`time.go:158`) as one greedy loop (emit the coarsest cell that starts
+      here and fits; equivalent to their up-then-down walk), generalized over
+      our scale tiers (deep-time included) and used on BOTH sides: ingest-time
+      interval coverings and query-time range decomposition. Their calendar
+      edge cases live in `tests/timeline-quantum-covering.test.js`; porting
+      them surfaced and fixed a latent December month→day boundary bug
+      (`daysFromCivil(year, 13, 1)` threw, silently swallowed on query).
+      Two planes (`internal/tsm/<tl>/<scale>/{c,a}/<cell>`): cover cells plus
+      ancestor ticks — ancestor ticks are what let a coarse query cell match a
+      fine-stored doc without either side enumerating the other's granularity;
+      ancestors of query cells are probed in the cover plane only (an ancestor
+      tick means "presence somewhere inside", which does not imply overlap).
+- [x] DECIDED 2026-08-16 — FIXED quantum per timeline (FeatureBase precedent),
+      constructor-deterministic like pointTimelines, nothing persisted.
+      Defaults: 'day', `wikipedia`='year', deep-time axes opt into
+      Gyr/Myr/Kyr via `timelineQuantum`; sub-day rejected until an hour/minute
+      tier exists (day→second fan-out is 86400). Benchmarked
+      (`scripts/bench-timeline-quantum.js`, Wikipedia-shaped mix): day quantum
+      ≈2.3× cells and ≈4× insert time vs year, query throughput flat.
+- [x] LANDED 2026-08-16 — recurring Event series expansion: bounded rules in
+      the supported RRULE subset expand into per-occurrence entries (first
+      occurrence = primary); unbounded/unsupported/over-cap rules keep the
+      envelope (never-miss beats precision). See `src/schemas/core/Event.js`.
 - [ ] Batch timeline rebuilds before Wikipedia-scale ingestion.
+- [ ] Optional later: an `exact` opt-in flag (row refinement below quantum) —
+      possible without a format change; and hour/minute tiers to legalize
+      sub-day quantums for dense calendar corpora.
 
 ## Schemas
 
