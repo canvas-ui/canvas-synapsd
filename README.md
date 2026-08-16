@@ -828,7 +828,27 @@ SynapsD supports source/domain timelines (`wikipedia`, `britannica`, `crud:updat
 
 Each stored interval is normalized to `{ scale, start, end }`. If you omit `scale`, SynapsD infers it from the input and errors when it cannot do that safely. No fake precision. Dinosaurs did not have millisecond timestamps, despite what software would like to believe.
 
-> **One document occupies ONE position per timeline.** The index is a BSI keyed id → a single value, so a second insert for the same `(timeline, id)` overwrites the first. Declaring two entries for the same timeline name on one document therefore **throws** rather than silently discarding all but the last (which the row would keep re-rendering, so only a timeline query would reveal the loss). Use one document per position, or a distinct timeline name per axis, until multi-position indexing lands.
+### Multi-position timelines
+
+A document can declare **several positions or ranges on one timeline** — a note referencing N eras on `wikipedia`, a recurring event's occurrences on `events`:
+
+```js
+timelines: [
+  { timeline: 'wikipedia', start: '1769-08-15', ref: 'd1' },
+  { timeline: 'wikipedia', start: '1799-11-09', end: '1804-05-18', ref: 'consulate' },
+]
+```
+
+Two planes back this (the same split Pilosa/FeatureBase arrived at — BSI for single sortable values, per-granularity membership views for plural events):
+
+- **Primary interval — dual-BSI.** The first entry (or the one flagged `primary: true`) is the document's canonical sortable value: `sortBy` uses it, and only it, so sort semantics stay unambiguous. An **open-ended** interval must be the primary entry — a tiling cannot represent ±∞; declaring an open non-primary entry throws.
+- **Every other entry — tiled membership plane** (`internal/tsm/<timeline>/<scale>/{c,a}/<cellId>`). At ingest the interval is decomposed into its minimal hierarchical covering at the timeline's **quantum** (coarse cells mid-span, fine cells at the boundaries — the FeatureBase `viewsByTimeRange` walk, generalized over our scale tiers and used at ingest as well as query time); covering cells are ticked in the cover plane, their coarser containers in the ancestor plane. Range queries decompose the same way and union the matching cells. Cell bitmaps hold doc ids, so timeline positions AND natively with context/feature/geo filters.
+
+**Quantum.** Each timeline has a fixed finest membership granularity (FeatureBase precedent: quantum per field, fixed at creation): `day` by default, `year` for `wikipedia`, deep-time axes take `Gyr`/`Myr`/`Kyr` (configure via the Db `timelineQuantum` option or `db.timeline.setQuantum(name, scale)`; sub-day quantums are rejected until an hour/minute tier exists). Precision **is** the quantum — queries round outward to whole cells, no row refinement in v1 (Pilosa precedent; an `exact` opt-in can land later without a format change). The write-amplification dial is measurable with `scripts/bench-timeline-quantum.js`: on a Wikipedia-shaped interval mix, `day` quantum costs ~2.3× the cells and ~4× the insert time of `year`, with flat query throughput.
+
+`ref` is an **opaque anchor** into the document's content (`'d1'`, `'consulate'`, a future semantic anchor). The engine stores and returns it verbatim and never parses it — distillation (markup → entries) and the anchor convention are the app's responsibility. The document stays the source of truth; every timeline plane is L3-derived from `timelines[]`.
+
+App boundary: engine multi-position covers *positions of this document* (distilled dates in a note). Entity-worthy occurrences (a cited study, a referenced event) should be promoted to their own documents with edges to the source — fan-out beyond a dozen-ish entries is a modeling smell, not an engine limit.
 
 ### Storage modes: interval vs point-event
 
@@ -903,11 +923,14 @@ const recentDocs = await db.list({
 - **`tasks`**: Todo due dates (point-mode, derived from `data.dueDate` by the Todo schema). `t:tasks:today` means "due today"; `sortBy: 'tasks'` orders by due date.
 - **`events`**: `Event` documents (`calendar` / `alert` / `activity`), derived from `data.start` / `data.end`. One timeline for all three types, with `data.type` discriminating - because the founding query is "show me everything happening under /work/customer-foo", and a calendar app, an alert panel and an activity feed are three lenses on one set.
 
-#### Event recurrence: the envelope model
+#### Event recurrence: expansion, with the envelope as fallback
 
-A recurring series cannot be expanded into N timeline entries on one document (one position per timeline, see above). Instead an `Event` carrying an RFC 5545 `data.recurrence` (`FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T235959Z`) gets a timeline entry spanning an **envelope** - first occurrence to `UNTIL`, or open when the rule never ends - and the client expands the RRULE to render real occurrences, exactly as a CalDAV client already does with `VEVENT`+`RRULE`.
+An `Event` carrying an RFC 5545 `data.recurrence` derives its `events` entries in one of two regimes, chosen deterministically from the document alone:
 
-The envelope is a deliberate superset: a weekly standup answers a query for any day inside its span. That is the same candidate-set-then-refine contract as the rest of the engine, and it never *misses* an occurrence, which is the property that matters for a bitmap pre-filter. `COUNT=n` yields an **open** envelope rather than a computed last occurrence - an open envelope over-matches (the client filters), a short one would lose occurrences outright.
+- **Bounded series in the supported RRULE subset** (`FREQ=DAILY|WEEKLY|MONTHLY|YEARLY`, `INTERVAL`, `COUNT`, `UNTIL`, `BYDAY` for weekly — the shapes calendar sync actually emits) are **expanded into per-occurrence entries**: the first occurrence is the primary sortable interval, the rest are membership positions. A weekly standup answers "what happens this week" only in weeks that actually contain an occurrence, at the timeline's quantum (day). Invalid dates are skipped per RFC 5545 (Jan 31 monthly skips February; Feb 29 yearly skips non-leap years).
+- **Everything else** — an unbounded rule, unsupported RRULE features, or an expansion over the cap (512) — keeps the **envelope**: first occurrence to `UNTIL`, or open when the rule never ends, with the client expanding the RRULE to render real occurrences, exactly as a CalDAV client does with `VEVENT`+`RRULE`. The envelope is a deliberate superset (candidate-set-then-refine): it may over-match, it can never *miss* an occurrence — so whenever full expansion cannot be guaranteed, the envelope wins over precision.
+
+Expansion is bounded by the rule (`COUNT`/`UNTIL`), never by wall-clock "now": time-dependent derivation would make rebuilds drift. Exact occurrence rendering stays the client's job either way.
 
 ### Custom timelines
 

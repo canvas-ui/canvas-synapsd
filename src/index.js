@@ -429,6 +429,7 @@ class SynapsD extends EventEmitter {
     // Inverted Indexes
     #checksumIndex;
     #timelineIndex;
+    #timelineQuantum; // per-timeline membership quantum overrides (constructor option)
     #geoIndex;
     #synapses;
     #edges;
@@ -518,6 +519,9 @@ class SynapsD extends EventEmitter {
 
         this.#checksumIndex = new ChecksumIndex(this.#db.createDataset('checksums'));
         this.#timelineIndex = null;
+        // Optional per-timeline membership quantum overrides, merged over the
+        // engine defaults at start(): { <timeline>: 'Gyr'|'Myr'|'Kyr'|'year'|'month'|'day' }.
+        this.#timelineQuantum = options.timelineQuantum || null;
         this.#geoIndex = null;
         this.#semantic = new SemanticEngine({ db: this });
 
@@ -720,7 +724,15 @@ class SynapsD extends EventEmitter {
             // for its own primitive is cheaper than a schema-declared timeline
             // registration mechanism nothing else needs yet. Revisit only if a
             // second schema wants its own point timeline.
-            this.#timelineIndex = new TimelineIndex(this.bitmapIndex, { pointTimelines: ['tasks'] });
+            this.#timelineIndex = new TimelineIndex(this.bitmapIndex, {
+                pointTimelines: ['tasks'],
+                // Membership quantum (finest tsm cell granularity) per timeline
+                // class; anything unlisted gets the 'day' default. 'events' at
+                // day: a recurring occurrence answers "what happens this week"
+                // at day precision, exact rendering stays the client's job.
+                // Callers can override/extend via options.timelineQuantum.
+                quantum: { events: 'day', wikipedia: 'year', ...(this.#timelineQuantum || {}) },
+            });
             this.#geoIndex = new GeoIndex(this.bitmapIndex);
 
             // Initialize Synapses inverted index
@@ -2269,6 +2281,7 @@ class SynapsD extends EventEmitter {
                     const clearedLayers = await this.#synapses.clearSynapses(id, { syncBitmaps: false });
                     await this.#applyMembership('untick', id, clearedLayers);
                     this.#edges.deleteNode(id);
+                    await this.#removeDocumentTimelines(id, document);
                     await this.#timelineIndex.removeFromAll(id);
                     if (await this.#geoIndex.has(id)) { await this.#geoIndex.remove(id); }
                     await this.#checksumIndex.deleteArray(document.checksumArray);
@@ -4042,6 +4055,9 @@ class SynapsD extends EventEmitter {
                 debug(`delete: Document ${docId} removed from all bitmaps, Synapses index and edge plane`);
 
                 // Remove document from all custom and CRUD timelines before recording deletion.
+                // Doc-derived first: multi-position membership cells can only be
+                // recomputed from the row's entries (removeFromAll covers the BSI planes).
+                await this.#removeDocumentTimelines(docId, document);
                 await this.#timelineIndex.removeFromAll(docId);
                 if (await this.#geoIndex.has(docId)) { await this.#geoIndex.remove(docId); }
                 debug(`delete: Document ${docId} removed from timeline indices`);
@@ -5069,69 +5085,111 @@ class SynapsD extends EventEmitter {
     }
 
     async #indexDocumentTimelines(docId, document) {
-        const entries = this.#normalizeDocumentTimelineEntries(document);
-        for (const entry of entries) {
-            await this.#timelineIndex.insert(entry.name, docId, entry.interval);
+        const grouped = this.#normalizeDocumentTimelineEntries(document);
+        for (const [name, { primary, extras }] of grouped) {
+            // The dual-BSI stays the canonical sortable value plane: ONE primary
+            // interval per (timeline, doc) — first entry, or the one flagged
+            // `primary: true` — which keeps sortBy semantics unambiguous. Every
+            // additional entry lands in the tiled membership plane (tsm).
+            await this.#timelineIndex.insert(name, docId, primary.interval);
+            if (extras.length > 0) {
+                await this.#timelineIndex.insertEntries(name, docId, extras.map((e) => e.interval));
+            }
         }
     }
 
     async #removeDocumentTimelines(docId, ...documents) {
-        // Names only — deliberately NOT via #normalizeDocumentTimelineEntries, so
-        // a row written before the duplicate-name guard (or by a future
-        // multi-position writer) can still be cleaned up rather than throwing on
-        // the way out.
+        // Per-entry and tolerant, NOT all-or-nothing: this runs on the way OUT
+        // (update/delete), where a row written by an older version (or by hand)
+        // must still be cleaned up rather than throwing. BSI removal is by name;
+        // membership cells are recomputed from EVERY entry (primary included —
+        // unticking a cell the doc never occupied is a no-op) so overwrites and
+        // primary-flag changes cannot strand cells.
         const names = new Set();
+        const cellIntervals = new Map(); // name -> raw intervals
         for (const document of documents) {
             const timelines = Array.isArray(document?.timelines) ? document.timelines : [];
             for (const entry of timelines) {
                 const name = entry?.name ?? entry?.timeline;
-                if (name) { names.add(name); }
+                if (!name) { continue; }
+                names.add(name);
+                try {
+                    const interval = this.#documentEntryInterval(entry);
+                    if (!cellIntervals.has(name)) { cellIntervals.set(name, []); }
+                    cellIntervals.get(name).push(interval);
+                } catch { /* malformed legacy entry — name-level BSI removal still applies */ }
             }
         }
 
         for (const name of names) {
             await this.#timelineIndex.remove(name, docId);
+            const intervals = cellIntervals.get(name);
+            if (intervals?.length) {
+                // removeEntries is itself per-interval tolerant (open/malformed
+                // intervals are skipped, unticks of absent cells are no-ops).
+                await this.#timelineIndex.removeEntries(name, docId, intervals);
+            }
         }
     }
 
+    // entry {start, end?, scale?} -> the interval value TimelineIndex accepts.
+    #documentEntryInterval(entry) {
+        if (!('start' in entry)) { throw new Error('Document timeline entry requires start'); }
+        const start = entry.scale ? { scale: entry.scale, value: entry.start } : entry.start;
+        // `undefined` (absent) => instant; explicit `null` => OPEN end, the
+        // Timeline index's "ongoing" sentinel. This must not be `??`: that
+        // collapses null into start, so no document could ever declare an
+        // ongoing interval even though TimelineIndex.insert supports it.
+        const rawEnd = (entry.end === undefined) ? entry.start : entry.end;
+        const end = entry.scale ? { scale: entry.scale, value: rawEnd } : rawEnd;
+        return { start, end };
+    }
+
+    /**
+     * Group a document's timelines[] by timeline name and pick each timeline's
+     * PRIMARY entry: the one flagged `primary: true` (first such wins) or the
+     * first entry. Multiple entries per timeline are supported — the primary
+     * goes to the dual-BSI (sortable value plane), the rest to the tiled
+     * membership plane. An open-ended interval (`end: null` / 'ongoing') is
+     * only representable in the BSI, so a non-primary open entry throws here,
+     * on the way IN, instead of failing half-indexed.
+     *
+     * @returns {Map<string, { primary, extras: Array }>}
+     */
     #normalizeDocumentTimelineEntries(document) {
         const timelines = Array.isArray(document?.timelines) ? document.timelines : [];
-        const seen = new Set();
-        return timelines.map((entry) => {
+        const grouped = new Map();
+        for (const entry of timelines) {
             const name = entry.name ?? entry.timeline;
             if (!name) { throw new Error('Document timeline entry requires name or timeline'); }
-            if (!('start' in entry)) { throw new Error(`Document timeline entry "${name}" requires start`); }
+            const item = {
+                interval: this.#documentEntryInterval(entry),
+                primary: entry.primary === true,
+                // Mirrors the Timeline index's open-end markers so the refusal
+                // happens here, before any tick lands, not mid-insert.
+                open: entry.end === null || entry.end === Infinity
+                    || (typeof entry.end === 'string' && /^(∞|\+∞|\+?inf(inity)?|ongoing|present)$/i.test(entry.end.trim())),
+            };
+            if (!grouped.has(name)) { grouped.set(name, { entries: [] }); }
+            grouped.get(name).entries.push(item);
+        }
 
-            // A document occupies ONE position per timeline: the index is a BSI
-            // keyed id -> a single value, so a second insert for the same
-            // (timeline, id) OVERWRITES the first. Left unguarded this loses data
-            // SILENTLY and invisibly — the row keeps every entry and db.get()
-            // re-renders them all, so only a bitmap/timeline query reveals that
-            // just the last one was indexed.
-            // Multi-position is a wanted capability (a note referencing N eras on
-            // a 'wikipedia'/'content' timeline) — see TODO.md, "multi-position
-            // timelines". Until
-            // the index supports it, refuse rather than silently drop.
-            if (seen.has(name)) {
+        const result = new Map();
+        for (const [name, { entries }] of grouped) {
+            let primaryIndex = entries.findIndex((e) => e.primary);
+            if (primaryIndex === -1) { primaryIndex = 0; }
+            const extras = entries.filter((_, i) => i !== primaryIndex);
+            const openExtra = extras.find((e) => e.open);
+            if (openExtra) {
                 throw new Error(
-                    `Document declares multiple entries for timeline "${name}", which the index cannot ` +
-                    'represent: one document occupies one position per timeline, so all but the last ' +
-                    'would be silently discarded. Use one document per position, or a distinct timeline ' +
-                    'name per axis, until multi-position indexing lands.',
+                    `Document declares an open-ended non-primary entry for timeline "${name}": ` +
+                    'the tiled membership plane cannot represent ±∞. Make the open interval the ' +
+                    'primary entry (first, or flagged primary: true), or bound it.',
                 );
             }
-            seen.add(name);
-
-            const start = entry.scale ? { scale: entry.scale, value: entry.start } : entry.start;
-            // `undefined` (absent) => instant; explicit `null` => OPEN end, the
-            // Timeline index's "ongoing" sentinel. This must not be `??`: that
-            // collapses null into start, so no document could ever declare an
-            // ongoing interval even though TimelineIndex.insert supports it.
-            const rawEnd = (entry.end === undefined) ? entry.start : entry.end;
-            const end = entry.scale ? { scale: entry.scale, value: rawEnd } : rawEnd;
-
-            return { name, interval: { start, end } };
-        });
+            result.set(name, { primary: entries[primaryIndex], extras });
+        }
+        return result;
     }
 
     async #resolveDocumentMembershipKeys(contextSpec, directorySpec, featureBitmaps) {

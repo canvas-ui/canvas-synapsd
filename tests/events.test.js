@@ -111,14 +111,15 @@ describe('event schema + events timeline', () => {
         expect(tomorrow.map((d) => d.id)).toEqual([ongoing]);
     });
 
-    // A document occupies exactly ONE position per timeline (the index is a BSI
-    // keyed id -> a single value, so a second insert overwrites the first), so a
-    // series cannot be expanded into N entries. The entry spans an envelope and
-    // the client expands the RRULE — the CalDAV contract.
-    describe('recurrence envelope', () => {
+    // Recurring series: a BOUNDED rule in the supported subset is expanded into
+    // per-occurrence entries (multi-position timelines — first occurrence is the
+    // primary sortable interval, the rest live in the membership plane); anything
+    // else keeps the envelope superset and the client expands the RRULE — the
+    // CalDAV contract.
+    describe('recurrence', () => {
         const RULE_UNTIL = 'FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T235959Z';
 
-        test('a bounded rule spans first occurrence → UNTIL', async () => {
+        test('a bounded rule expands into per-occurrence entries', async () => {
             const id = await db.put({
                 schema: EVENT_SCHEMA,
                 data: {
@@ -129,13 +130,21 @@ describe('event schema + events timeline', () => {
             });
 
             const doc = await db.get(id);
-            const entry = doc.timelines.find((t) => t.timeline === 'events');
-            expect(entry.start).toBe('2026-01-06T09:00:00.000Z');
-            // NOT data.end — that is one occurrence's duration, not the envelope.
-            expect(entry.end).toBe('2026-12-31T23:59:59.000Z');
+            const entries = doc.timelines.filter((t) => t.timeline === 'events');
+            // Jan 6 2026 is a Tuesday; weekly Tuesdays through Dec 31 = 52.
+            expect(entries.length).toBe(52);
+            expect(entries[0].start).toBe('2026-01-06T09:00:00.000Z');
+            // Each occurrence carries ONE occurrence's duration.
+            expect(entries[0].end).toBe('2026-01-06T09:15:00.000Z');
+            expect(entries[entries.length - 1].start).toBe('2026-12-29T09:00:00.000Z');
 
             const inside = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2026-08-01..2026-08-31'], limit: 0 });
             expect(inside.map((d) => d.id)).toEqual([id]);
+
+            // Occurrence precision: a window BETWEEN two Tuesdays (Wed–Mon) no
+            // longer matches — the envelope model matched every day of the span.
+            const between = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2026-08-05..2026-08-10'], limit: 0 });
+            expect(between.map((d) => d.id)).toEqual([]);
 
             const after = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2027-06-01..2027-06-30'], limit: 0 });
             expect(after.map((d) => d.id)).toEqual([]);
@@ -154,20 +163,28 @@ describe('event schema + events timeline', () => {
             expect(farFuture.map((d) => d.id)).toEqual([id]);
         });
 
-        test('COUNT yields an OPEN envelope — over-matching is recoverable, under-matching is not', async () => {
+        test('COUNT expands into exactly COUNT occurrences', async () => {
             const id = await db.put({
                 schema: EVENT_SCHEMA,
                 data: { title: 'Onboarding', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=WEEKLY;COUNT=4' },
             });
 
             const doc = await db.get(id);
-            expect(doc.timelines.find((t) => t.timeline === 'events').end).toBeNull();
+            const entries = doc.timelines.filter((t) => t.timeline === 'events');
+            expect(entries.map((t) => t.start)).toEqual([
+                '2026-01-06T09:00:00.000Z',
+                '2026-01-13T09:00:00.000Z',
+                '2026-01-20T09:00:00.000Z',
+                '2026-01-27T09:00:00.000Z',
+            ]);
 
-            // Resolving COUNT needs rule expansion; a guessed end could stop
-            // matching before the real final occurrence, which nothing downstream
-            // could recover. The client's expansion drops the surplus instead.
+            // The series is fully resolved — nothing bleeds past the last
+            // occurrence (the old envelope model had to stay open here).
             const later = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2027-01-01..2027-12-31'], limit: 0 });
-            expect(later.map((d) => d.id)).toEqual([id]);
+            expect(later.map((d) => d.id)).toEqual([]);
+
+            const secondWeek = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2026-01-13'], limit: 0 });
+            expect(secondWeek.map((d) => d.id)).toEqual([id]);
         });
 
         test('a non-recurring event is unaffected — data.end stays the interval end', async () => {

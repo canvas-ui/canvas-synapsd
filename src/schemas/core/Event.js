@@ -39,10 +39,12 @@ const documentDataSchema = Document.extendDataSchema(
         location: z.string().optional(),
 
         // RFC 5545 RRULE value (the part after "RRULE:"), e.g.
-        // 'FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T235959Z'. Stored verbatim and NOT
-        // expanded server-side — see the envelope note on #deriveTimelines.
-        // Deliberately not in checksumFields: editing the rule edits the series,
-        // it does not create a new event (CalDAV keeps the same UID).
+        // 'FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T235959Z'. Stored verbatim; a
+        // BOUNDED series in the supported subset is expanded into per-occurrence
+        // timeline entries, everything else keeps the envelope — see
+        // #deriveTimelines. Deliberately not in checksumFields: editing the rule
+        // edits the series, it does not create a new event (CalDAV keeps the
+        // same UID).
         recurrence: z.string().regex(/FREQ=/i, 'recurrence must be an RFC 5545 RRULE value containing FREQ=').optional(),
     }).passthrough(),
 );
@@ -69,24 +71,32 @@ export default class Event extends Document {
         super(options);
     }
 
-    // start/end → 'events' timeline entry, derived (doc declares, index derives).
-    // Caller-provided non-events entries are preserved; the events entry is always
-    // regenerated from the data so it can never drift from the document.
+    // start/end → 'events' timeline entries, derived (doc declares, index derives).
+    // Caller-provided non-events entries are preserved; the events entries are
+    // always regenerated from the data so they can never drift from the document.
     //
-    // RECURRENCE — the envelope model (decided 2026-08-03). A document occupies
-    // exactly ONE position per timeline: the index is a BSI keyed id -> a single
-    // value, so a second insert for the same (timeline, id) OVERWRITES the first.
-    // Recurring series therefore cannot be expanded into N timeline entries on one
-    // document. Instead the entry spans an ENVELOPE — first occurrence to UNTIL,
-    // or open when the rule never ends — and the client expands the RRULE to
-    // render real occurrences, exactly as a CalDAV client already does with
-    // VEVENT+RRULE.
+    // RECURRENCE. Multi-position timelines landed (2026-08-16): one document can
+    // occupy N positions on one timeline (primary interval in the sortable BSI,
+    // the rest in the tiled membership plane), which unblocked the expansion the
+    // envelope model (2026-08-03) deferred. Two regimes, chosen deterministically
+    // from the document alone:
     //
-    // The envelope is a deliberate SUPERSET: a weekly standup answers a query for
-    // any day inside its span until the rule is expanded. That is the same
-    // candidate-set-then-refine contract the rest of the engine uses; it never
-    // misses an occurrence, which is the property that matters for a bitmap
-    // pre-filter.
+    // - BOUNDED series in the supported RRULE subset (see #expandRecurrence):
+    //   expanded into per-occurrence entries — first occurrence is the primary
+    //   (the series' sortable position), the rest are membership positions. A
+    //   weekly standup now answers "what happens this week" only in weeks that
+    //   actually contain an occurrence, at the timeline's quantum (day).
+    //
+    // - Everything else (unbounded rule, unsupported RRULE features, expansion
+    //   over the cap): the ENVELOPE — first occurrence to UNTIL, or open when
+    //   the rule never ends — and the client expands the RRULE to render real
+    //   occurrences, exactly as a CalDAV client does with VEVENT+RRULE. The
+    //   envelope is a deliberate SUPERSET (candidate-set-then-refine): it may
+    //   over-match, it can never miss an occurrence.
+    //
+    // Expansion is bounded by the rule (COUNT/UNTIL), never by "now": deriving
+    // from wall-clock time would make index content time-dependent and rebuilds
+    // drift. Exact occurrence rendering stays the client's job either way.
     static #deriveTimelines(options) {
         const prior = (Array.isArray(options.timelines) ? options.timelines : [])
             .filter((t) => (t?.timeline || t?.name) !== EVENTS_TIMELINE);
@@ -94,24 +104,162 @@ export default class Event extends Document {
         const data = options.data ?? {};
         const start = data.start;
         if (typeof start === 'string' && start.length > 0) {
-            const entry = { timeline: EVENTS_TIMELINE, start };
             const recurrence = data.recurrence;
 
             if (typeof recurrence === 'string' && recurrence.length > 0) {
-                // `data.end` still describes ONE occurrence's duration, so it must
-                // not become the envelope end — the envelope comes from the rule.
-                entry.end = Event.#recurrenceEnvelopeEnd(recurrence);
-            } else if ('end' in data) {
-                // Distinguish "no end" (instant) from an explicit null (ongoing):
-                // omitting the key entirely is what the Timeline index reads as an
-                // instant, so we must not write `end: undefined`.
-                entry.end = data.end;
+                const occurrences = Event.#expandRecurrence(recurrence, data);
+                if (occurrences) {
+                    prior.push(...occurrences);
+                } else {
+                    // Envelope fallback. `data.end` still describes ONE
+                    // occurrence's duration, so it must not become the envelope
+                    // end — the envelope comes from the rule.
+                    prior.push({ timeline: EVENTS_TIMELINE, start, end: Event.#recurrenceEnvelopeEnd(recurrence) });
+                }
+            } else {
+                const entry = { timeline: EVENTS_TIMELINE, start };
+                if ('end' in data) {
+                    // Distinguish "no end" (instant) from an explicit null
+                    // (ongoing): omitting the key entirely is what the Timeline
+                    // index reads as an instant, so we must not write
+                    // `end: undefined`.
+                    entry.end = data.end;
+                }
+                prior.push(entry);
             }
-
-            prior.push(entry);
         }
 
         return prior;
+    }
+
+    // Occurrence cap. Not a horizon: rules bounded by COUNT/UNTIL beyond this
+    // fall back to the envelope (over-match, never miss) instead of truncating.
+    static MAX_RECURRENCE_EXPANSION = 512;
+
+    // UTC weekday index (getUTCDay) per RFC 5545 BYDAY code.
+    static #BYDAY = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
+
+    /**
+     * Deterministic expansion of a BOUNDED RRULE into 'events' timeline entries,
+     * or null when the rule must keep the envelope. Supported subset — the
+     * shapes Google/Teams/CalDAV sync actually emits:
+     *   FREQ=DAILY|WEEKLY|MONTHLY|YEARLY, INTERVAL, COUNT, UNTIL,
+     *   BYDAY (WEEKLY only; with INTERVAL>1 only when BYDAY is a single day,
+     *   since multi-day biweekly grouping depends on WKST week numbering).
+     * Any other RRULE part → null. MONTHLY on day 29-31 SKIPS months lacking
+     * the day and YEARLY on Feb 29 skips non-leap years (RFC 5545 invalid-date
+     * behavior — the Jan-31-plus-a-month family FeatureBase's addMonth guards).
+     *
+     * @returns {Array<{timeline, start, end?}>|null} entries, first = primary
+     */
+    static #expandRecurrence(recurrence, data) {
+        const parts = {};
+        for (const kv of recurrence.split(';')) {
+            const trimmed = kv.trim();
+            if (!trimmed) { continue; }
+            const eq = trimmed.indexOf('=');
+            if (eq < 1) { return null; }
+            parts[trimmed.slice(0, eq).toUpperCase()] = trimmed.slice(eq + 1).toUpperCase();
+        }
+
+        const SUPPORTED = new Set(['FREQ', 'INTERVAL', 'COUNT', 'UNTIL', 'BYDAY', 'WKST']);
+        if (Object.keys(parts).some((k) => !SUPPORTED.has(k))) { return null; }
+
+        const freq = parts.FREQ;
+        if (!['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'].includes(freq)) { return null; }
+        const interval = parts.INTERVAL ? parseInt(parts.INTERVAL, 10) : 1;
+        if (!Number.isInteger(interval) || interval < 1) { return null; }
+
+        let byday = null;
+        if (parts.BYDAY !== undefined) {
+            if (freq !== 'WEEKLY') { return null; }
+            byday = parts.BYDAY.split(',').map((d) => Event.#BYDAY[d.trim()]);
+            if (byday.some((d) => d === undefined)) { return null; }
+            if (interval > 1 && byday.length > 1) { return null; }
+        }
+
+        const count = parts.COUNT ? parseInt(parts.COUNT, 10) : null;
+        if (parts.COUNT && (!Number.isInteger(count) || count < 1)) { return null; }
+        let untilMs = null;
+        if (parts.UNTIL) {
+            const iso = Event.#recurrenceEnvelopeEnd(`UNTIL=${parts.UNTIL}`);
+            untilMs = iso ? Date.parse(iso) : NaN;
+            if (Number.isNaN(untilMs)) { return null; }
+        }
+        if (count === null && untilMs === null) { return null; } // unbounded → envelope
+
+        const startMs = Date.parse(data.start);
+        if (Number.isNaN(startMs)) { return null; }
+        if (data.end === null) { return null; } // ongoing single occurrence + a rule — keep the envelope
+        const durationMs = (typeof data.end === 'string' && data.end.length > 0)
+            ? Date.parse(data.end) - startMs
+            : null;
+        if (durationMs !== null && Number.isNaN(durationMs)) { return null; }
+
+        const DAY = 86400000;
+        const starts = [];
+        const push = (ms) => {
+            if (untilMs !== null && ms > untilMs) { return false; }
+            if (starts.length >= Event.MAX_RECURRENCE_EXPANSION) { return false; }
+            starts.push(ms);
+            return count === null || starts.length < count;
+        };
+
+        // Plain weekly stepping only covers a single BYDAY that DTSTART already
+        // sits on; multiple days, or an off-pattern DTSTART, need the day-scan
+        // (both are INTERVAL=1 by the guards above — a biweekly off-pattern
+        // start would need WKST week numbering, which is out of subset).
+        let weeklyScan = false;
+        if (freq === 'WEEKLY' && byday) {
+            const startDay = new Date(startMs).getUTCDay();
+            weeklyScan = byday.length > 1 || startDay !== byday[0];
+            if (weeklyScan && interval > 1) { return null; }
+        }
+
+        if (weeklyScan) {
+            // DTSTART is always the first occurrence per RFC 5545, even
+            // off-pattern.
+            let ms = startMs;
+            if (!push(ms)) { /* fall through to bounds check */ }
+            else {
+                const daySet = new Set(byday);
+                for (let guard = 0; guard < Event.MAX_RECURRENCE_EXPANSION * 8; guard++) {
+                    ms += DAY;
+                    if (untilMs !== null && ms > untilMs) { break; }
+                    if (!daySet.has(new Date(ms).getUTCDay())) { continue; }
+                    if (!push(ms)) { break; }
+                }
+            }
+        } else if (freq === 'DAILY' || freq === 'WEEKLY') {
+            const step = interval * DAY * (freq === 'WEEKLY' ? 7 : 1);
+            for (let ms = startMs; push(ms); ms += step) { /* push() drives */ }
+        } else {
+            // MONTHLY / YEARLY: calendar stepping on UTC fields, skipping
+            // invalid dates (Jan 31 + 1mo, Feb 29 + 1yr) instead of rolling over.
+            const d = new Date(startMs);
+            const y0 = d.getUTCFullYear(), mo0 = d.getUTCMonth(), day0 = d.getUTCDate();
+            const timeOfDay = startMs - Date.UTC(y0, mo0, day0);
+            const monthStep = freq === 'MONTHLY' ? interval : interval * 12;
+            let going = true;
+            for (let i = 0; going && i < Event.MAX_RECURRENCE_EXPANSION * 8; i++) {
+                const monthIndex = mo0 + (i * monthStep);
+                const ms = Date.UTC(y0, monthIndex, day0) + timeOfDay;
+                if (new Date(ms).getUTCDate() !== day0) { continue; } // rolled over → invalid date, skip
+                going = push(ms);
+                if (untilMs !== null && ms > untilMs) { break; }
+            }
+        }
+
+        // Refuse truncation: if the rule wants more occurrences than we emitted,
+        // the envelope's never-miss property wins over precision.
+        if (count !== null && starts.length < count) { return null; }
+        if (starts.length === 0 || starts.length >= Event.MAX_RECURRENCE_EXPANSION) { return null; }
+
+        return starts.map((ms) => {
+            const entry = { timeline: EVENTS_TIMELINE, start: new Date(ms).toISOString() };
+            if (durationMs !== null) { entry.end = new Date(ms + durationMs).toISOString(); }
+            return entry;
+        });
     }
 
     /**
@@ -131,7 +279,10 @@ export default class Event extends Document {
         const match = RRULE_UNTIL_RE.exec(recurrence);
         if (!match) { return null; }
 
-        const [, y, mo, d, h = '00', mi = '00', s = '00'] = match;
+        // A date-only UNTIL (RFC-sloppy but common) is inclusive of that day:
+        // defaulting to 00:00 would drop same-day occurrences — a real miss,
+        // which the timeline planes are contractually not allowed to have.
+        const [, y, mo, d, h = '23', mi = '59', s = '59'] = match;
         return `${y}-${mo}-${d}T${h}:${mi}:${s}.000Z`;
     }
 
