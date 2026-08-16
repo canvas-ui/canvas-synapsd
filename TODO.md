@@ -140,6 +140,58 @@ things:
       possible without a format change; and hour/minute tiers to legalize
       sub-day quantums for dense calendar corpora.
 
+### Open-interval sidecar (settled 2026-08-16, ship BEFORE the 7M-doc wiki run)
+
+Lifts the last multi-position restriction: today an open-ended entry must be
+the PRIMARY, so one document cannot carry two ongoing facts on one timeline
+("still in the Cenozoic" + "person still alive", both distilled into
+`wikipedia`). Wiki-scale distillation will hit this — parsed dates all land on
+one timeline, and forcing the distiller to pick which ongoing fact gets the
+primary slot (or to bound the other at snapshot date) is exactly the kind of
+plane-routing knowledge the API must not leak. The entry grammar stays the
+only surface; where an entry lives is the engine's business.
+
+Design — a per-timeline BSI *sidecar inside the tsm plane*, NOT ∞ tiles:
+
+- Rejected — literal ±∞ cells. Tiles match by key identity; overlap with
+  `[s, +∞)` is the one-sided test `s <= query.end`, which no identity match
+  can encode. A single `+∞` cell over-matches unboundedly (every open doc
+  matches every query — not quantum rounding, wrong answers), and tiling the
+  tail needs either infinitely many cells or a wall-clock write horizon
+  (rebuild drift, already rejected). One-sided comparisons are what BSI slice
+  algebra does; openness belongs to a BSI. (The primary plane's sentinels ARE
+  the ±∞ "tiles" of the BSI world — this sidecar is the same move, scoped to
+  the membership plane.)
+- Storage: `internal/tsm/<tl>/open/start` — BSI holding, per doc, the start
+  of its open-END entries; `internal/tsm/<tl>/open/end` — symmetric, the end
+  of its open-START entries. Lazy like every tier; absent until first use, no
+  format change, no migration.
+- Collapse rule (what makes ONE value per doc lossless): for membership
+  semantics `[s1,+∞) ∪ [s2,+∞) = [min(s1,s2), +∞)`, so any number of
+  open-end entries per (doc, timeline) stores as min(start); open-start
+  symmetrically as max(end). `(-∞,+∞)` = both sentinels, degenerate and
+  fine. The ROW keeps every entry + ref verbatim — only the index collapses,
+  and the index answers membership only.
+- Scale: sidecar values are stored at ONE fixed scale per timeline — the
+  quantum scale (convert on write like cell coverings do). Avoids per-scale
+  sidecar fan-out; quantum-grade precision is the plane's contract anyway.
+- Query: in `#queryMultiBitmap`, OR in `open/start <= enc(query.end)` and
+  `open/end >= enc(query.start)` (skip the respective probe when the query
+  side is itself open — it then matches all sidecar docs, which is correct:
+  `[qs,+∞)` overlaps every `[s,+∞)`). Gated behind the sidecar's own ebm
+  existence, so timelines without open entries pay nothing. histogram /
+  grouped / layers / zeitgeist inherit it for free.
+- Write path: `#normalizeDocumentTimelineEntries` drops the open-must-be-
+  primary throw; non-primary open entries route to the sidecar (min/max
+  merge on insert). Removal recomputes from the row like cell coverings —
+  same tolerant on-the-way-out contract. `insertEntries`/`removeEntries`
+  accept open intervals instead of throwing.
+- Unchanged: primary stays the ONE sortable interval (`sortBy` untouched);
+  an open primary keeps living in the main dual-BSI exactly as today.
+- Tests to port the edge case: Cenozoic + living-person on one timeline in
+  one doc; open + bounded mix; query windows before/inside the open span;
+  removal restores empty; rebuild-from-rows reproduces the sidecar.
+
 ## Schemas
 
 - [ ] Point web consumers at the published JSON Schema endpoint and delete
