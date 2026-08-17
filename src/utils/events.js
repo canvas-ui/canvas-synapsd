@@ -17,20 +17,37 @@ const EVENTS = Object.freeze({
     SHUTDOWN:         'shutdown',
 
     // Document CRUD
+    //
+    // ── `reason`: what changed ──────────────────────────────────────────────
+    // EVERY document.* event carries a `reason` from this closed set, so a
+    // consumer can branch on ONE field instead of inferring meaning from the
+    // payload's shape (which is how a membership-only update used to look like
+    // a content update with a mysteriously absent document):
+    //
+    //   'created'     the document came into existence      (inserted)
+    //   'content'     the document itself changed           (updated)
+    //   'membership'  only its tree placement changed       (updated/linked/
+    //                                                        removed/unlinked)
+    //   'deleted'     it was removed from the index         (deleted)
+    //
+    // Two things follow from this that consumers get wrong otherwise:
+    //
+    //  - `document.updated` fires for BOTH 'content' and 'membership'. Only the
+    //    'content' form carries `document`; the 'membership' form carries
+    //    `memberships` and no document. The membership form is always
+    //    accompanied by the first-class document.linked / document.unlinked,
+    //    which DO carry the document — prefer those for automation.
+    //  - membership payloads (`memberships`, `contextArray`, `directoryArray`)
+    //    are the CHANGED paths, never the document's full placement. "Is this
+    //    filed under /x" is state: read it, do not infer it from an event.
+    //
+    // `batch` is an orthogonal axis: it describes payload SHAPE (ids vs a
+    // document), not what changed. Both axes are independent.
+    //
+    // Adding an emit site? Stamp `reason`. tests/event-payload-contract.test.js
+    // fails on any document.* event that omits it or uses a value outside the
+    // set above.
     DOCUMENT_INSERTED: 'document.inserted',
-    // `document.updated` is emitted for two different kinds of change, which
-    // the payload's `reason` discriminates — consumers MUST branch on it
-    // rather than infer from payload shape:
-    //   reason:'content'    the document itself changed; payload carries
-    //                       `document` (or `ids` + `batch:true` for the bulk
-    //                       compat emission, where the docs are not loaded).
-    //   reason:'membership' only tree placement changed; payload carries
-    //                       `memberships` (the CHANGED paths — never the
-    //                       document's full placement) and NO document.
-    // A membership-only update is always accompanied by the first-class
-    // document.linked / document.unlinked carrying the full document; prefer
-    // those for automation. `batch` is an orthogonal axis: it describes the
-    // payload's shape (ids vs document), not what changed.
     DOCUMENT_UPDATED:  'document.updated',
     DOCUMENT_REMOVED:  'document.removed',
     DOCUMENT_DELETED:  'document.deleted',
@@ -144,4 +161,8 @@ function createTreeEvent(event, tree, detail = {}) {
     }, 'tree');
 }
 
-export { EVENTS, SynapsDEvent, createEvent, createTreeEvent };
+// The closed `reason` vocabulary, exported so consumers (and the contract
+// test) validate against the same list the emitter uses.
+const DOCUMENT_EVENT_REASONS = Object.freeze(['created', 'content', 'membership', 'deleted']);
+
+export { EVENTS, SynapsDEvent, createEvent, createTreeEvent, DOCUMENT_EVENT_REASONS };

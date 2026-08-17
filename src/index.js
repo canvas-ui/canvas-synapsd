@@ -1410,6 +1410,7 @@ class SynapsD extends EventEmitter {
                 batch: true,
                 context: contextSpec,
                 directory: directorySpec,
+                reason: 'created',
                 ...(normSpec.provenance || {}),
             }));
             this.emit(EVENTS.DOCUMENT_INSERTED_BATCH, createEvent(EVENTS.DOCUMENT_INSERTED_BATCH, {
@@ -1417,6 +1418,7 @@ class SynapsD extends EventEmitter {
                 count: insertedIds.length,
                 context: contextSpec,
                 directory: directorySpec,
+                reason: 'created',
                 ...(normSpec.provenance || {}),
             }));
         }
@@ -1944,6 +1946,7 @@ class SynapsD extends EventEmitter {
                 count: storedIds.length,
                 batch: true,
                 directory: { tree: prepared[0]?.directorySpecs[0]?.tree, paths: directoryPaths },
+                reason: 'created',
             }));
         }
 
@@ -2169,6 +2172,7 @@ class SynapsD extends EventEmitter {
                 directoryArray: removedDirectoryPaths,
                 featureArray: featureKeys,
                 recursive,
+                reason: 'membership',
                 ...(normSpec.provenance || {}),
             };
             if (ids.length === 1) {
@@ -2351,9 +2355,9 @@ class SynapsD extends EventEmitter {
             const ids = result.successful.map((e) => e.id);
             const provenance = this.#normalizeProvenance(options.provenance) || {};
             if (ids.length === 1) {
-                this.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: ids[0], ...provenance }));
+                this.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: ids[0], reason: 'deleted', ...provenance }));
             } else {
-                this.emit(EVENTS.DOCUMENT_DELETED_BATCH, createEvent(EVENTS.DOCUMENT_DELETED_BATCH, { ids, ...provenance }));
+                this.emit(EVENTS.DOCUMENT_DELETED_BATCH, createEvent(EVENTS.DOCUMENT_DELETED_BATCH, { ids, reason: 'deleted', ...provenance }));
             }
         }
 
@@ -2523,6 +2527,7 @@ class SynapsD extends EventEmitter {
                 document: parsedDocument,
                 context: contextSpec,
                 directory: directorySpec,
+                reason: 'created',
                 ...(provenance || {}),
             }));
         }
@@ -2588,6 +2593,7 @@ class SynapsD extends EventEmitter {
                 id: numericId,
                 document: storedDocument,
                 memberships: { context: contextSpec, directory: directorySpec, features: featureBitmaps },
+                reason: 'membership',
                 ...(provenance || {}),
             }));
         }
@@ -3995,6 +4001,7 @@ class SynapsD extends EventEmitter {
                 directoryArray: removedDirectoryPaths,
                 featureArray: featureKeys,
                 recursive: options.recursive,
+                reason: 'membership',
                 ...(provenance || {}),
             }));
             // First-class membership event carrying the full document (still in
@@ -4010,6 +4017,7 @@ class SynapsD extends EventEmitter {
                         directoryArray: removedDirectoryPaths,
                         featureArray: featureKeys,
                         recursive: options.recursive,
+                        reason: 'membership',
                         ...(provenance || {}),
                     }));
                 }
@@ -4127,7 +4135,7 @@ class SynapsD extends EventEmitter {
             }
 
             if (emitEvent) {
-                this.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: docId, ...(provenance || {}) }));
+                this.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: docId, reason: 'deleted', ...(provenance || {}) }));
             }
             debug(`delete: Successfully deleted document ID: ${docId}`);
             return true;
