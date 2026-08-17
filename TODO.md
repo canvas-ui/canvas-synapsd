@@ -3,6 +3,60 @@
 Only open engine work belongs here. The current API and landed design live in
 `README.md`.
 
+## Event payload contract (next up — 2026-08-18)
+
+`reason` LANDED: 3.5.0 discriminated `document.updated`, 3.6.0 extended the axis
+to every document event (`created` | `content` | `membership` | `deleted`,
+exported as `DOCUMENT_EVENT_REASONS`) and pinned the whole contract in
+`tests/event-payload-contract.test.js`. `batch` stays an orthogonal axis
+(payload SHAPE, not what changed).
+
+Anchor case, so the motivation does not get lost: a workspace hook rule matching
+on `schema`/`mime` fired on insert and silently NEVER on a re-link, because the
+membership-only `document.updated` carries no document and nothing said so. The
+payload shape WAS the contract, undocumented and unasserted.
+
+Settled principle — **events carry deltas, conditions ask about state**.
+`memberships` / `contextArray` are the CHANGED placement, never the document's
+full placement, so "is this filed under /x" can only be answered by reading the
+bitmaps. Rejected: fattening events with full placement or loading documents at
+emit sites that do not have them in hand (a 10k bulk link would become 10k reads
+to serve consumers that may not care, and every socket subscriber pays the
+serialization). Consumer-side hydration lives in canvas-server's hook dispatcher
+and is the correct home for it.
+
+- [ ] **Retire the membership-only `document.updated` alias.** It exists only
+      for consumers predating `document.linked` / `document.unlinked`, which
+      carry the full document and are strictly better. With `reason` shipped the
+      migration is mechanical but needs a CONSUMER SURVEY first (canvas-server,
+      apps/web, browser extension, agentd): emit both for one release with a log
+      line whenever anything binds the alias, then drop it. Collapses four
+      `document.updated` emit sites to two meanings and removes the trap at the
+      source instead of documenting around it. The biggest of these three by
+      blast radius, not by engine complexity.
+- [ ] **Fix the membership payload vocabulary** (pairs with the above — one
+      breaking pass, aliases kept for a release):
+  - `memberships` reads as "the document's memberships" but means "the ones that
+    changed" — rename to `changed` (or `membershipDelta`).
+  - `contextArray` / `directoryArray` on removal events hold unticked LAYER
+    NAMES (`'filed'`), not paths (`'/filed'`) — despite the field name and the
+    `removedContextPaths` variable behind it both saying paths. Found
+    2026-08-18 while writing the contract test; pinned there with a comment so
+    the behaviour is at least asserted. A consumer reading it as paths matches
+    nothing, silently.
+- [ ] **Assert reserved keys in `createEvent`.** It spreads `...detail`, so an
+      emit site can shadow envelope keys (`event`, `source`, `timestamp`,
+      `eventId`) with no warning. Dev-mode throw, costs nothing, prevents the
+      inverse of the bug the `reason` work just fixed. Independent of the two
+      above; smallest of the three.
+
+Note for consumers of this contract: payload reconstruction must be
+inherit-by-default (spread, then subtract what does not apply), never a
+hand-maintained allow-list. canvas-server's batch fan-out was an allow-list and
+silently dropped `reason` for every batch write until it was inverted
+(2026-08-18); `buildReplayEnvelope` there and `createEvent`/`createTreeEvent`
+here already do it the right way.
+
 ## Semantic anchors
 
 Inferd produces model output and codebook assignments. SynapsD only stores and
