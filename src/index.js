@@ -1425,6 +1425,7 @@ class SynapsD extends EventEmitter {
                 ids: updatedIds,
                 count: updatedIds.length,
                 batch: true,
+                reason: 'content',
                 ...(normSpec.provenance || {}),
             }));
             this.emit(EVENTS.DOCUMENT_UPDATED_BATCH, createEvent(EVENTS.DOCUMENT_UPDATED_BATCH, {
@@ -1432,6 +1433,7 @@ class SynapsD extends EventEmitter {
                 count: updatedIds.length,
                 context: contextSpec,
                 directory: directorySpec,
+                reason: 'content',
                 ...(normSpec.provenance || {}),
             }));
         }
@@ -2030,12 +2032,14 @@ class SynapsD extends EventEmitter {
                 this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
                     id: ids[0],
                     memberships: { context: contextSpec, directory: directorySpec },
+                    reason: 'membership',
                     ...(normSpec.provenance || {}),
                 }));
             } else if (ids.length > 1) {
                 this.emit(EVENTS.DOCUMENT_UPDATED_BATCH, createEvent(EVENTS.DOCUMENT_UPDATED_BATCH, {
                     ids,
                     memberships: { context: contextSpec, directory: directorySpec },
+                    reason: 'membership',
                     ...(normSpec.provenance || {}),
                 }));
             }
@@ -2574,6 +2578,7 @@ class SynapsD extends EventEmitter {
             this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
                 id: numericId,
                 memberships: { context: contextSpec, directory: directorySpec, features: featureBitmaps },
+                reason: 'membership',
                 ...(provenance || {}),
             }));
             // First-class membership event carrying the full document so
@@ -3895,7 +3900,7 @@ class SynapsD extends EventEmitter {
             });
 
             if (emitEvent) {
-                this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument, ...(provenance || {}) }));
+                this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument, reason: 'content', ...(provenance || {}) }));
             }
 
             // Best-effort Lance upsert

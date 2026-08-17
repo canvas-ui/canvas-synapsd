@@ -18,6 +18,19 @@ const EVENTS = Object.freeze({
 
     // Document CRUD
     DOCUMENT_INSERTED: 'document.inserted',
+    // `document.updated` is emitted for two different kinds of change, which
+    // the payload's `reason` discriminates — consumers MUST branch on it
+    // rather than infer from payload shape:
+    //   reason:'content'    the document itself changed; payload carries
+    //                       `document` (or `ids` + `batch:true` for the bulk
+    //                       compat emission, where the docs are not loaded).
+    //   reason:'membership' only tree placement changed; payload carries
+    //                       `memberships` (the CHANGED paths — never the
+    //                       document's full placement) and NO document.
+    // A membership-only update is always accompanied by the first-class
+    // document.linked / document.unlinked carrying the full document; prefer
+    // those for automation. `batch` is an orthogonal axis: it describes the
+    // payload's shape (ids vs document), not what changed.
     DOCUMENT_UPDATED:  'document.updated',
     DOCUMENT_REMOVED:  'document.removed',
     DOCUMENT_DELETED:  'document.deleted',
