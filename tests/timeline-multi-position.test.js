@@ -107,13 +107,43 @@ describe('multi-position timelines', () => {
         }
     });
 
-    test('an open-ended interval must be the primary entry', async () => {
-        await expect(db.put(note('Bad', [
-            { timeline: 'life', start: '1912-06-23', end: '1954-06-07' },
-            { timeline: 'life', start: '2000', end: null },
-        ]))).rejects.toThrow(/open-ended non-primary/i);
+    test('open-ended NON-primary entries land in the sidecar (several ongoing facts per doc)', async () => {
+        // The wiki-distillation shape the sidecar exists for: one doc, one
+        // timeline, a bounded primary plus TWO ongoing facts at different
+        // scales — no primary-slot picking, no snapshot-date bounding.
+        const id = await db.put(note('Cenozoic person', [
+            { timeline: 'wikipedia', start: '1912-06-23', end: '1954-06-07' },   // primary (bounded)
+            { timeline: 'wikipedia', start: '66 MYA', end: null, ref: 'cenozoic' },
+            { timeline: 'wikipedia', start: '2000', end: null, ref: 'career' },
+        ]));
 
-        // Flagged primary, the open interval is fine — the BSI sentinels hold it.
+        // Inside the bounded primary.
+        expect((await db.list({ filters: ['t:wikipedia:1930'], limit: 0 })).map((d) => d.id)).toEqual([id]);
+        // After the primary ended, inside BOTH ongoing facts.
+        expect((await db.list({ filters: ['t:wikipedia:2030'], limit: 0 })).map((d) => d.id)).toEqual([id]);
+        // Deep past: inside the Cenozoic but before everything else.
+        expect((await db.list({ filters: ['t:wikipedia:30mya'], limit: 0 })).map((d) => d.id)).toEqual([id]);
+        // Before all entries: no match.
+        expect((await db.list({ filters: ['t:wikipedia:70mya'], limit: 0 })).map((d) => d.id)).toEqual([]);
+
+        // The row keeps every entry + ref verbatim — only the index collapses.
+        const stored = await db.get(id);
+        expect(stored.timelines.map((t) => t.ref).filter(Boolean)).toEqual(['cenozoic', 'career']);
+
+        // Update: dropping one ongoing fact re-derives the sidecar from the row.
+        const update = (timelines) => db.put({
+            id, schema: 'data/schema/note',
+            data: { title: 'Cenozoic person', content: 'Cenozoic person' },
+            timelines,
+        });
+        await update(stored.timelines.filter((t) => t.ref !== 'career'));
+        expect((await db.list({ filters: ['t:wikipedia:2030'], limit: 0 })).map((d) => d.id)).toEqual([id]); // cenozoic still ongoing
+        await update(stored.timelines.filter((t) => !t.ref));
+        expect((await db.list({ filters: ['t:wikipedia:2030'], limit: 0 })).map((d) => d.id)).toEqual([]);
+        expect((await db.list({ filters: ['t:wikipedia:1930'], limit: 0 })).map((d) => d.id)).toEqual([id]); // primary intact
+    });
+
+    test('an open primary keeps living in the main dual-BSI exactly as before', async () => {
         const id = await db.put(note('Ok', [
             { timeline: 'life', start: '1912-06-23', end: '1954-06-07' },
             { timeline: 'life', start: '2000', end: null, primary: true },

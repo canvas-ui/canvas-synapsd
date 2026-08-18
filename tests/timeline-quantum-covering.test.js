@@ -27,7 +27,6 @@ describe('quantum covering decomposition', () => {
         db = new Db({
             path: rootPath, backupOnOpen: false, backupOnClose: false,
             semantic: { enabled: false },
-            timelineQuantum: { geology: 'Myr' },
         });
         await db.start();
     });
@@ -40,7 +39,7 @@ describe('quantum covering decomposition', () => {
     const cells = (name, start, end) => db.timeline.decomposeRange(name, start, end).cells
         .map((c) => `${c.scale}:${c.cell}`);
 
-    test('an instant is a single quantum cell', () => {
+    test('an instant is a single floor cell', () => {
         expect(cells('content', '2026-08-16')).toEqual([`day:${day(2026, 8, 16)}`]);
     });
 
@@ -91,7 +90,7 @@ describe('quantum covering decomposition', () => {
         expect(got.filter((c) => c.startsWith('day:')).length).toBe(16 + 10);
     });
 
-    test('deep time follows the same walk where a calendar cursor cannot (Myr quantum)', () => {
+    test('deep time follows the same walk where a calendar cursor cannot (Myr notation)', () => {
         const got = cells('geology', '541 MYA', '252 MYA');
         // [-541, -252] Myr: 290 Myr cells (no Gyr cell fits inside the span).
         expect(got.length).toBe(290);
@@ -118,14 +117,18 @@ describe('quantum covering decomposition', () => {
         expect(gap.map((d) => d.id)).toEqual([]);
     });
 
-    test('quantum is fixed per timeline and sub-day quantums are refused', () => {
-        expect(db.timeline.getQuantum('geology')).toBe('Myr');
-        expect(db.timeline.getQuantum('content')).toBe('day');
-        expect(db.timeline.getQuantum('wikipedia')).toBe('year');
-        expect(() => db.timeline.setQuantum('x', 'second')).toThrow(/quantum/i);
+    test('the floor is ADAPTIVE: each range tiles at its own notation-derived scale', () => {
+        // Same timeline, three notations, three floors — no config anywhere.
+        expect(db.timeline.decomposeRange('wikipedia', '541 MYA', '252 MYA').floor).toBe('Myr');
+        expect(db.timeline.decomposeRange('wikipedia', '1769').floor).toBe('year');
+        expect(db.timeline.decomposeRange('wikipedia', '1769-08-15').floor).toBe('day');
+        // Sub-day notation clamps to 'day' (no hour/minute tier yet).
+        const stamped = db.timeline.decomposeRange('wikipedia', '2026-08-16T14:30:00Z');
+        expect(stamped.floor).toBe('day');
+        expect(stamped.cells).toEqual([{ scale: 'day', cell: day(2026, 8, 16) }]);
     });
 
-    test('year-quantum timeline rounds outward to whole years (no row refinement, Pilosa precedent)', async () => {
+    test('precision follows the notation on both sides (you get out what you put in)', async () => {
         const id = await db.put({
             schema: 'data/schema/note',
             data: { title: 'Two eras', content: 'Two eras' },
@@ -135,10 +138,20 @@ describe('quantum covering decomposition', () => {
             ],
         });
 
-        // The membership plane stores year cells, so a sub-year query inside
-        // 1799 matches even before November — quantum precision, by contract.
+        // Day-precise entries tile at day cells, so a month query inside 1799
+        // BEFORE November no longer over-matches (fixed 'year' quantum did).
         const early1799 = await db.list({ filters: ['t:wikipedia:1799-02'], limit: 0 });
-        expect(early1799.map((d) => d.id)).toEqual([id]);
+        expect(early1799.map((d) => d.id)).toEqual([]);
+        const dec1799 = await db.list({ filters: ['t:wikipedia:1799-12'], limit: 0 });
+        expect(dec1799.map((d) => d.id)).toEqual([id]);
+        // Coarse queries still glue to fine-stored entries via ancestor ticks…
+        const year1769 = await db.list({ filters: ['t:wikipedia:1769'], limit: 0 });
+        expect(year1769.map((d) => d.id)).toEqual([id]);
+        // …and exact-day queries hit the exact day.
+        const exact = await db.list({ filters: ['t:wikipedia:1769-08-15'], limit: 0 });
+        expect(exact.map((d) => d.id)).toEqual([id]);
+        const dayOff = await db.list({ filters: ['t:wikipedia:1769-08-16'], limit: 0 });
+        expect(dayOff.map((d) => d.id)).toEqual([]);
         const before = await db.list({ filters: ['t:wikipedia:1768'], limit: 0 });
         expect(before.map((d) => d.id)).toEqual([]);
     });

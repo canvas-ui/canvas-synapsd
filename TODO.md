@@ -185,6 +185,7 @@ things:
       tier exists (day→second fan-out is 86400). Benchmarked
       (`scripts/bench-timeline-quantum.js`, Wikipedia-shaped mix): day quantum
       ≈2.3× cells and ≈4× insert time vs year, query throughput flat.
+      **SUPERSEDED 2026-08-18 — see "Adaptive quantum" below.**
 - [x] LANDED 2026-08-16 — recurring Event series expansion: bounded rules in
       the supported RRULE subset expand into per-occurrence entries (first
       occurrence = primary); unbounded/unsupported/over-cap rules keep the
@@ -194,7 +195,81 @@ things:
       possible without a format change; and hour/minute tiers to legalize
       sub-day quantums for dense calendar corpora.
 
-### Open-interval sidecar (settled 2026-08-16, ship BEFORE the 7M-doc wiki run)
+### Adaptive quantum (settled 2026-08-18, supersedes FIXED-per-timeline)
+
+One timeline must carry geological eras (Myr), lifespans (year) and single
+events (day) at once — Wikipedia distillation lands all three on `wikipedia` —
+so ANY per-timeline floor is the wrong knob regardless of who sets it ('year'
+discards event precision, 'day' explodes eras). The floor moves to the ENTRY:
+
+- Covering floor derived from the entry's own notation: `'1769'` → year,
+  `'1769-08'` → month, `'1769-08-15'` → day; explicit `scale` stays the
+  override (deep time declares Myr/Gyr as today). Precision contract: you get
+  out the precision you put in — quantum rounding at the entry's own
+  precision, no configuration anywhere. Sub-day notation clamps to day until
+  hour/minute tiers exist (unchanged). Query floor likewise from the query's
+  notation (`1996..1999` decomposes at year).
+- NO structural change: scales already nest into one hierarchy, tsm tiers are
+  already lazy, the greedy covering already emits multi-scale cells, and the
+  `{c,a}` two-plane rule already glues arbitrary scale gaps (query cells in
+  c+a find same/finer-stored docs; ancestors of query cells in c find
+  coarser-stored docs). FIXED quantum was a config bound, not a structural
+  need; removing it costs ancestor ticks up the full 9-scale ladder per cover
+  cell, nothing else.
+- Pareto vs both fixed choices (per the existing bench): day cost is paid
+  only by day-precise entries, era entries stay coarse, no precision lost.
+- Restores full L3 purity: rebuilds derive everything from rows alone —
+  `timelineQuantum` via constructor made rebuild output config-dependent.
+- Deprecate: `timelineQuantum` constructor option, `PUT
+  /timelines/:name/quantum`, `workspace.json` `timelines.quantum`
+  persistence, web quantum select. CRUD timelines stay internal point-BSI
+  (system-badged/hidden in UI); the user-facing default timeline type is the
+  tiled multi-position ("S2") timeline — creation needs a name, nothing else.
+
+- [x] LANDED 2026-08-18 (synapsd 3.7.0) — per-entry floors via `#tileFloor`
+      (notation scale, day-clamped) on both `#tsmKeysForInterval` and
+      `#queryMultiBitmap`; full-ladder ancestor ticks were already the
+      existing `#ancestorCells` behavior, so no format change and no
+      migration was needed for the {c,a} planes themselves. Quantum config
+      deleted end-to-end: `timelineQuantum` option + get/setQuantum (engine),
+      `PUT /timelines/:name/quantum` + workspace.json persistence (server
+      2.5.45, verbose listing now returns observed `scales` via the new
+      `getScales()`), quantum selects (web 2.7.36 — create row is name-only,
+      per-timeline badge shows observed tiers). `decomposeRange` returns
+      `{floor, cells}`. Tests updated; 414/414 synapsd, 382/382 server.
+- [x] Bench re-run 2026-08-18 (`scripts/bench-timeline-quantum.js`, now
+      notation-mix corpora): all-year 11.6 cells/entry, all-day 27.1, MIXED
+      (Wikipedia-shaped) 14.85 with the best insert throughput (1739/s vs
+      1301/814) — day cost only where data is day-precise, as designed.
+- [ ] Migration: tsm coverings written under the fixed-quantum era re-derive
+      at entry precision via rebuild — fold into the batch-rebuild work; land
+      together with the open-interval sidecar BEFORE the 7M-doc wiki run.
+- [ ] Web follow-up: crud:* are already surfaced as dedicated toggles, not in
+      the deletable list; decide whether they need an explicit "system" badge.
+
+### Open-interval sidecar (settled 2026-08-16, LANDED 2026-08-18, synapsd 3.8.0)
+
+LANDED with ONE amendment for the adaptive-quantum era: "stored at the quantum
+scale" had lost its referent, so sidecar values live in per-scale lazy tiers
+(`internal/tsm/<tl>/open/<scale>/{start,end}`) at each entry's notation-derived
+scale — structurally the primary plane's tiering, minus sortBy. Min/max
+collapse is per (doc, scale, side); tiers union at query time, which preserves
+losslessness (per-tier min + OR = global min semantics). Everything else
+shipped as designed: ±∞ tiles stayed rejected, open-must-be-primary throw
+removed in `#normalizeDocumentTimelineEntries`, `insertEntries`/`removeEntries`
+partition open entries to the sidecar (removal clears the collapsed side —
+exact for the row write path, tolerant for manual partial removals), queries/
+histogram/grouped/layers inherit via `#querySidecar` in `#queryMultiBitmap`,
+gated on tier ebm existence. Server 2.5.46 (comment-level only — the entry
+grammar was already the whole surface). Tests: engine sidecar suite in
+`tests/timeline-open-intervals.test.js` (collapse across inserts, mixed-scale
+fan, open query sides, degenerate (-∞,+∞)), the Cenozoic+living-person doc
+case + row-re-derivation in `tests/timeline-multi-position.test.js`, server
+`tests/core/workspace/timelines.test.js`. 421/421 synapsd, 389/389 server.
+The 7M-doc wiki run is now UNBLOCKED (batch rebuilds remain a perf item, not
+a correctness gate; dev-env data will be wiped and rebuilt anyway).
+
+Original design record (kept for rationale):
 
 Lifts the last multi-position restriction: today an open-ended entry must be
 the PRIMARY, so one document cannot carry two ongoing facts on one timeline

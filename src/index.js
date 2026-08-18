@@ -429,7 +429,6 @@ class SynapsD extends EventEmitter {
     // Inverted Indexes
     #checksumIndex;
     #timelineIndex;
-    #timelineQuantum; // per-timeline membership quantum overrides (constructor option)
     #geoIndex;
     #synapses;
     #edges;
@@ -519,9 +518,6 @@ class SynapsD extends EventEmitter {
 
         this.#checksumIndex = new ChecksumIndex(this.#db.createDataset('checksums'));
         this.#timelineIndex = null;
-        // Optional per-timeline membership quantum overrides, merged over the
-        // engine defaults at start(): { <timeline>: 'Gyr'|'Myr'|'Kyr'|'year'|'month'|'day' }.
-        this.#timelineQuantum = options.timelineQuantum || null;
         this.#geoIndex = null;
         this.#semantic = new SemanticEngine({ db: this });
 
@@ -724,14 +720,10 @@ class SynapsD extends EventEmitter {
             // for its own primitive is cheaper than a schema-declared timeline
             // registration mechanism nothing else needs yet. Revisit only if a
             // second schema wants its own point timeline.
+            // Membership tiling is ADAPTIVE (per-entry notation-derived floor,
+            // day-clamped) — no per-timeline quantum config exists anymore.
             this.#timelineIndex = new TimelineIndex(this.bitmapIndex, {
                 pointTimelines: ['tasks'],
-                // Membership quantum (finest tsm cell granularity) per timeline
-                // class; anything unlisted gets the 'day' default. 'events' at
-                // day: a recurring occurrence answers "what happens this week"
-                // at day precision, exact rendering stays the client's job.
-                // Callers can override/extend via options.timelineQuantum.
-                quantum: { events: 'day', wikipedia: 'year', ...(this.#timelineQuantum || {}) },
             });
             this.#geoIndex = new GeoIndex(this.bitmapIndex);
 
@@ -5138,8 +5130,9 @@ class SynapsD extends EventEmitter {
             await this.#timelineIndex.remove(name, docId);
             const intervals = cellIntervals.get(name);
             if (intervals?.length) {
-                // removeEntries is itself per-interval tolerant (open/malformed
-                // intervals are skipped, unticks of absent cells are no-ops).
+                // removeEntries is itself per-interval tolerant (malformed
+                // intervals are skipped, unticks of absent cells are no-ops,
+                // open intervals clear their sidecar side).
                 await this.#timelineIndex.removeEntries(name, docId, intervals);
             }
         }
@@ -5163,9 +5156,10 @@ class SynapsD extends EventEmitter {
      * PRIMARY entry: the one flagged `primary: true` (first such wins) or the
      * first entry. Multiple entries per timeline are supported — the primary
      * goes to the dual-BSI (sortable value plane), the rest to the tiled
-     * membership plane. An open-ended interval (`end: null` / 'ongoing') is
-     * only representable in the BSI, so a non-primary open entry throws here,
-     * on the way IN, instead of failing half-indexed.
+     * membership plane, where open-ended intervals land in its open-interval
+     * sidecar (so a document can carry several ongoing facts on one timeline;
+     * the entry grammar is the only surface, plane routing is the engine's
+     * business).
      *
      * @returns {Map<string, { primary, extras: Array }>}
      */
@@ -5178,10 +5172,6 @@ class SynapsD extends EventEmitter {
             const item = {
                 interval: this.#documentEntryInterval(entry),
                 primary: entry.primary === true,
-                // Mirrors the Timeline index's open-end markers so the refusal
-                // happens here, before any tick lands, not mid-insert.
-                open: entry.end === null || entry.end === Infinity
-                    || (typeof entry.end === 'string' && /^(∞|\+∞|\+?inf(inity)?|ongoing|present)$/i.test(entry.end.trim())),
             };
             if (!grouped.has(name)) { grouped.set(name, { entries: [] }); }
             grouped.get(name).entries.push(item);
@@ -5192,14 +5182,6 @@ class SynapsD extends EventEmitter {
             let primaryIndex = entries.findIndex((e) => e.primary);
             if (primaryIndex === -1) { primaryIndex = 0; }
             const extras = entries.filter((_, i) => i !== primaryIndex);
-            const openExtra = extras.find((e) => e.open);
-            if (openExtra) {
-                throw new Error(
-                    `Document declares an open-ended non-primary entry for timeline "${name}": ` +
-                    'the tiled membership plane cannot represent ±∞. Make the open interval the ' +
-                    'primary entry (first, or flagged primary: true), or bound it.',
-                );
-            }
             result.set(name, { primary: entries[primaryIndex], extras });
         }
         return result;

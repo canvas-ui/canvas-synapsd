@@ -2,17 +2,20 @@
 'use strict';
 
 /**
- * bench-timeline-quantum.js — the write-amplification vs precision dial for the
- * multi-position membership plane (TODO.md, Timelines): how many cell writes an
- * interval costs at quantum 'year' | 'month' | 'day', on a Wikipedia-shaped
- * interval mix, plus insert/query throughput per quantum.
+ * bench-timeline-quantum.js — write amplification and throughput of the
+ * multi-position membership plane under the ADAPTIVE floor (per-entry
+ * notation-derived scale; supersedes the fixed-per-timeline quantum this
+ * script originally dialed). Three corpora on separate timelines:
  *
- * Usage:
+ *   year-notation  every entry written as 'YYYY' (floor: year)
+ *   day-notation   every entry written as 'YYYY-MM-DD' (floor: day)
+ *   mixed          Wikipedia-shaped: dates day-precise, spans year-precise
+ *
+ * The first two reproduce the old fixed-'year' / fixed-'day' extremes; the
+ * mixed corpus is what adaptive actually buys — day cost only where the data
+ * is day-precise. Usage:
+ *
  *   node scripts/bench-timeline-quantum.js [docCount] [entriesPerDoc]
- *
- * Default: 2000 docs × 3 extra entries. Interval mix (per entry, uniform):
- *   40% instants (a date), 30% short spans (days–weeks), 20% medium (months–
- *   years), 10% long (decades–centuries) — years drawn from 1500–2030.
  */
 
 import { resolve } from 'path';
@@ -33,34 +36,50 @@ const rand = () => {
 const pad = (n, w = 2) => String(n).padStart(w, '0');
 const iso = (y, m, d) => `${pad(y, 4)}-${pad(m)}-${pad(d)}`;
 
-function randomInterval() {
+// Wikipedia-shaped interval mix (per entry, uniform): 40% instants (a date),
+// 30% short spans (days–weeks), 20% medium (months–years), 10% long
+// (decades–centuries) — years drawn from 1500–2030. `notation` controls the
+// precision the entry is WRITTEN with, which under the adaptive floor is
+// also the precision it tiles at:
+//   'day'   → everything as ISO days
+//   'year'  → everything rounded to bare years
+//   'mixed' → instants/short spans as days, medium/long spans as years
+function randomInterval(notation) {
     const y = 1500 + Math.floor(rand() * 530);
     const m = 1 + Math.floor(rand() * 12);
     const d = 1 + Math.floor(rand() * 28);
     const r = rand();
-    if (r < 0.4) { return { start: iso(y, m, d) }; }                       // instant
+    const asYear = (from, to) => (to === undefined ? { start: String(from) } : { start: String(from), end: String(to) });
+    if (r < 0.4) {                                                        // instant
+        if (notation === 'year') { return asYear(y); }
+        return { start: iso(y, m, d) };
+    }
     if (r < 0.7) {                                                        // days–weeks
         const days = 1 + Math.floor(rand() * 21);
         const end = new Date(Date.UTC(y, m - 1, d) + days * 86400000);
+        if (notation === 'year') { return asYear(y, end.getUTCFullYear()); }
         return { start: iso(y, m, d), end: iso(end.getUTCFullYear(), end.getUTCMonth() + 1, end.getUTCDate()) };
     }
     if (r < 0.9) {                                                        // months–years
         const months = 1 + Math.floor(rand() * 36);
         const end = new Date(Date.UTC(y, m - 1 + months, d));
-        return { start: iso(y, m, d), end: iso(end.getUTCFullYear(), end.getUTCMonth() + 1, end.getUTCDate()) };
+        if (notation === 'day') {
+            return { start: iso(y, m, d), end: iso(end.getUTCFullYear(), end.getUTCMonth() + 1, end.getUTCDate()) };
+        }
+        return asYear(y, end.getUTCFullYear());
     }
     const years = 10 + Math.floor(rand() * 200);                          // decades–centuries
-    return { start: iso(y, m, d), end: iso(Math.min(y + years, 2030), m, d) };
+    if (notation === 'day') { return { start: iso(y, m, d), end: iso(Math.min(y + years, 2030), m, d) }; }
+    return asYear(y, Math.min(y + years, 2030));
 }
 
-async function benchQuantum(db, quantum) {
-    const timeline = `bench-${quantum}`;
-    db.timeline.setQuantum(timeline, quantum);
+async function benchNotation(db, notation) {
+    const timeline = `bench-${notation}`;
 
     seed = 42;
     const batches = [];
     for (let id = 1; id <= docCount; id++) {
-        batches.push({ id, intervals: Array.from({ length: perDoc }, randomInterval) });
+        batches.push({ id, intervals: Array.from({ length: perDoc }, () => randomInterval(notation)) });
     }
 
     let coverCells = 0;
@@ -83,7 +102,8 @@ async function benchQuantum(db, quantum) {
         if (plane in stored) { stored[plane]++; }
     }
 
-    // Query throughput: 500 mixed ranges (a day, a month, a year, a decade).
+    // Query throughput: 500 mixed ranges (a day, a month, a year, a decade) —
+    // each query's own notation sets its floor, same as ingest.
     seed = 7;
     const t1 = performance.now();
     let hits = 0;
@@ -92,8 +112,8 @@ async function benchQuantum(db, quantum) {
         const kinds = [
             [iso(y, 6, 15), iso(y, 6, 15)],
             [iso(y, 6, 1), iso(y, 6, 30)],
-            [iso(y, 1, 1), iso(y, 12, 31)],
-            [iso(y, 1, 1), iso(Math.min(y + 10, 2030), 12, 31)],
+            [String(y), String(y)],
+            [String(y), String(Math.min(y + 10, 2030))],
         ];
         const [qs, qe] = kinds[i % 4];
         const ids = await db.timeline.queryInterval(timeline, qs, qe);
@@ -103,7 +123,7 @@ async function benchQuantum(db, quantum) {
 
     const entries = docCount * perDoc;
     console.log(
-        `${quantum.padEnd(6)} | cells/entry ${(coverCells / entries).toFixed(2).padStart(7)} | ` +
+        `${notation.padEnd(6)} | cells/entry ${(coverCells / entries).toFixed(2).padStart(7)} | ` +
         `distinct bitmaps c=${stored.c} a=${stored.a} | ` +
         `insert ${(entries / (insertMs / 1000)).toFixed(0).padStart(6)} entries/s | ` +
         `query ${(500 / (queryMs / 1000)).toFixed(0).padStart(5)} q/s (${hits} hits)`,
@@ -115,9 +135,9 @@ async function benchQuantum(db, quantum) {
     const db = new SynapsD({ path: dbPath, backupOnOpen: false, backupOnClose: false, semantic: { enabled: false } });
     await db.start();
 
-    console.log(`quantum dial — ${docCount} docs × ${perDoc} entries (Wikipedia-shaped mix)\n`);
-    for (const quantum of ['year', 'month', 'day']) {
-        await benchQuantum(db, quantum);
+    console.log(`adaptive floor — ${docCount} docs × ${perDoc} entries (Wikipedia-shaped mix)\n`);
+    for (const notation of ['year', 'day', 'mixed']) {
+        await benchNotation(db, notation);
     }
 
     await db.shutdown();
