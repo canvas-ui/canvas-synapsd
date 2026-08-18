@@ -1136,10 +1136,45 @@ Event names live in the frozen `EVENTS` map. Rename a constant there to rename t
 
 **Batch variants** - one event per bulk op, so a 1000-doc insert does not fan out into 1000 socket emits: `document.inserted.batch` (`{ ids, count, context, directory }`), `document.updated.batch`, `document.removed.batch`, `document.deleted.batch`. Back-compat: insert/update batches *also* emit the singular event once with `{ ids, batch: true }`. Batch-aware consumers should match on the `.batch` names.
 
-**Membership**:
+### `reason`: what changed
 
-- `document.linked` / `document.unlinked`: first-class membership events carrying the **full document** plus what changed. The full document is the point: automation can match on *content*, which the membership-only `document.updated`/`document.removed` payloads cannot support. Back-compat: `link`/`unlink` also emit the older membership-only forms.
+Every `document.*` event carries a `reason` from a closed set (exported as `DOCUMENT_EVENT_REASONS`), so a consumer branches on **one field** instead of inferring meaning from the payload's shape:
+
+| `reason` | fires on | carries `document` |
+|---|---|---|
+| `created` | `document.inserted[.batch]` | yes (singular) |
+| `content` | `document.updated[.batch]` — the document itself changed | yes (singular) |
+| `membership` | `document.linked`/`unlinked`, and the deprecated membership forms | first-class events only |
+| `deleted` | `document.deleted[.batch]` | no |
+
+`document.updated` fires for **both** `content` and `membership`, and only the content form carries the document. That is not a quirk to work around, it is the reason `reason` exists: a rule matching on `schema` used to fire on insert and silently never on a re-link, because the payload it needed was simply absent and nothing said so.
+
+`batch` is an **orthogonal** axis — it describes payload *shape* (`ids` vs a document), not what changed. A batch event still carries a normal `reason`; `'batch'` is never a reason.
+
+Adding an emit site? Stamp `reason`. `tests/event-payload-contract.test.js` fails on any `document.*` event that omits it or invents a value.
+
+### Membership events
+
+- `document.linked` / `document.unlinked` (+ `.batch`): the first-class membership events. The singular forms carry the **full document**, so automation can match on *content*; the batch forms carry `{ ids, count }` (loading 1000 documents to serve consumers that may not want them is the cost this family exists to avoid — hydrate per document on fan-out instead).
+- Both sides carry the delta in **`changed`**, normalized to path arrays so one consumer branch handles link and unlink alike:
+
+  ```js
+  changed: { context: ['/inbox'], directory: [], features: ['tag/urgent'] }
+  ```
+
+  It is a **delta** — the placements this operation added or removed, never the document's full placement. "Is this filed under /x" is *state*: read the bitmaps, do not infer it from an event. (Making events answer it would mean loading placement for every document in a 10k bulk link, and every socket subscriber paying the serialization.) A recursive unlink reports every prefix it dropped: `['/a', '/a/b', '/a/b/c']`.
 - `membership.changed`: emitted post-commit with the exact collection bitmap keys ticked or unticked - `{ changes: [{ docId, op: 'tick'|'untick', keys }] }`. Drives precise live invalidation in `QuerySession`. Fires before the corresponding `document.*` event, so a session re-resolves against already-committed bitmaps.
+
+> **Deprecated**, removal scheduled for the next major: `link`/`unlink` also emit **membership-only `document.updated` / `document.removed`** for consumers predating `document.linked`/`unlinked`. Those forms carry no document, which is exactly the trap above. The payload aliases `memberships` (raw selectors) and `contextArray` / `directoryArray` / `featureArray` go with them — prefer `changed`. `contextArray` used to hold unticked *layer names* (`'filed'`) despite its name and now aliases `changed.context` (`'/filed'`).
+
+### The envelope's reserved keys
+
+`createEvent` spreads `...detail` over a fixed set of top-level keys. That inherit-by-default direction is deliberate — foreign schemas keep their fields for free, and a hand-maintained allow-list silently drops whatever it forgets. The cost is that a detail key colliding with the envelope disappears, so in dev (`NODE_ENV !== 'production'`) the constructor throws on:
+
+- `detail.event` — owned by the envelope and silently ignored; pass it as the first argument.
+- a malformed envelope *input* (`depth`, `origin`, `causedBy`) — these fall back to their defaults otherwise, and a cascade guard reading `depth` 0 forever is a loop that never terminates.
+
+Envelope inputs a caller *may* legitimately set are exported as `ENVELOPE_INPUT_KEYS`. Assertions are off in production: an emit site sits on the write path, and a payload typo must not fail a committed write.
 
 **Tree management**: `tree.created`, `tree.deleted`, `tree.renamed`
 **Tree path**: `tree.path.inserted|moved|copied|removed|locked|unlocked`

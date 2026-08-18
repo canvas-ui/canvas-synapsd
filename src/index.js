@@ -15,7 +15,7 @@ const { RoaringBitmap32 } = require('roaring');
 import { ArgumentError } from './utils/errors.js';
 
 // Events
-import { EVENTS, createEvent } from './utils/events.js';
+import { EVENTS, createEvent, membershipDelta } from './utils/events.js';
 import { parseLocationUrl } from './utils/path-helpers.js';
 
 // DB Backend
@@ -1101,7 +1101,11 @@ class SynapsD extends EventEmitter {
             return await this.unlinkMany(idOrIds, spec);
         }
         if (!idOrIds) { throw new Error('Document id required'); }
-        return await this.#unlinkOne(idOrIds, this.#normalizeDocumentOperationSpec(spec), spec);
+        // `spec` is the OPTIONS argument (4th), not the feature array (3rd) —
+        // features are unwrapped from the normalized spec inside. Passing it
+        // third silently dropped `recursive`, so unlink(id, { recursive:true })
+        // unticked only the leaf layer while unlinkMany([id], …) honoured it.
+        return await this.#unlinkOne(idOrIds, this.#normalizeDocumentOperationSpec(spec), [], spec);
     }
 
     async delete(id, options = {}) {
@@ -2023,19 +2027,37 @@ class SynapsD extends EventEmitter {
         // otherwise emitted ~2600 socket messages and froze the browser.
         try {
             const ids = toProcess.map((e) => e.id);
+            const delta = membershipDelta(
+                { context: contextSpec, directory: directorySpec },
+                { memberships: { context: contextSpec, directory: directorySpec } },
+            );
+            const shared = { ...delta, reason: 'membership', ...(normSpec.provenance || {}) };
+
+            // DEPRECATED membership-only alias (see #linkOne).
             if (ids.length === 1) {
-                this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
-                    id: ids[0],
-                    memberships: { context: contextSpec, directory: directorySpec },
-                    reason: 'membership',
-                    ...(normSpec.provenance || {}),
-                }));
+                this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: ids[0], ...shared }));
             } else if (ids.length > 1) {
-                this.emit(EVENTS.DOCUMENT_UPDATED_BATCH, createEvent(EVENTS.DOCUMENT_UPDATED_BATCH, {
-                    ids,
-                    memberships: { context: contextSpec, directory: directorySpec },
-                    reason: 'membership',
-                    ...(normSpec.provenance || {}),
+                this.emit(EVENTS.DOCUMENT_UPDATED_BATCH, createEvent(EVENTS.DOCUMENT_UPDATED_BATCH, { ids, ...shared }));
+            }
+
+            // First-class membership events. A lone document gets the singular
+            // form WITH its document — same contract as #linkOne, one read —
+            // so a rule matching on content behaves identically whether the
+            // caller went through link() or linkMany([one]). Bulk links stay
+            // id-only: loading 1000 documents to serve consumers that may not
+            // want them is the cost this whole event family avoids, and the
+            // consumer that does want them hydrates per document on fan-out.
+            if (ids.length === 1) {
+                const linkedData = await this.documents.get(ids[0]);
+                const linkedDocument = linkedData ? parseDocumentData(linkedData) : null;
+                if (linkedDocument) {
+                    this.emit(EVENTS.DOCUMENT_LINKED, createEvent(EVENTS.DOCUMENT_LINKED, {
+                        id: ids[0], document: linkedDocument, ...shared,
+                    }));
+                }
+            } else if (ids.length > 1) {
+                this.emit(EVENTS.DOCUMENT_LINKED_BATCH, createEvent(EVENTS.DOCUMENT_LINKED_BATCH, {
+                    ids, count: ids.length, ...shared,
                 }));
             }
 
@@ -2103,7 +2125,7 @@ class SynapsD extends EventEmitter {
                         : [filteredLayers[filteredLayers.length - 1]];
                     const layerIds = contextTree.resolveLayerIds(targetLayers);
                     layersToRemove.push(...layerIds.map((layerId) => contextCollection.makeKey(layerId)));
-                    removedContextPaths.push(...targetLayers);
+                    removedContextPaths.push(...SynapsD.#unlinkedContextPaths(filteredLayers, recursive));
                 }
             } catch (error) {
                 for (const { index, id } of validEntries) {
@@ -2160,17 +2182,40 @@ class SynapsD extends EventEmitter {
         try {
             const ids = validEntries.map((e) => e.id);
             const shared = {
-                contextArray: removedContextPaths,
-                directoryArray: removedDirectoryPaths,
-                featureArray: featureKeys,
+                ...membershipDelta(
+                    { context: removedContextPaths, directory: removedDirectoryPaths, features: featureKeys },
+                    {
+                        contextArray: removedContextPaths,
+                        directoryArray: removedDirectoryPaths,
+                        featureArray: featureKeys,
+                    },
+                ),
                 recursive,
                 reason: 'membership',
                 ...(normSpec.provenance || {}),
             };
+
+            // DEPRECATED membership-only alias (see #unlinkOne).
             if (ids.length === 1) {
                 this.emit(EVENTS.DOCUMENT_REMOVED, createEvent(EVENTS.DOCUMENT_REMOVED, { id: ids[0], ...shared }));
             } else if (ids.length > 1) {
                 this.emit(EVENTS.DOCUMENT_REMOVED_BATCH, createEvent(EVENTS.DOCUMENT_REMOVED_BATCH, { ids, ...shared }));
+            }
+
+            // First-class membership events, mirroring linkMany: singular WITH
+            // the document for a lone id, id-only batch beyond that.
+            if (ids.length === 1) {
+                const unlinkedData = await this.documents.get(ids[0]);
+                const unlinkedDocument = unlinkedData ? parseDocumentData(unlinkedData) : null;
+                if (unlinkedDocument) {
+                    this.emit(EVENTS.DOCUMENT_UNLINKED, createEvent(EVENTS.DOCUMENT_UNLINKED, {
+                        id: ids[0], document: unlinkedDocument, ...shared,
+                    }));
+                }
+            } else if (ids.length > 1) {
+                this.emit(EVENTS.DOCUMENT_UNLINKED_BATCH, createEvent(EVENTS.DOCUMENT_UNLINKED_BATCH, {
+                    ids, count: ids.length, ...shared,
+                }));
             }
 
             // Tree-scoped events drive cross-client auto-close (browser extension)
@@ -2552,6 +2597,11 @@ class SynapsD extends EventEmitter {
         }
 
         const featureBitmaps = parseBitmapArray(featureBitmapArray).filter(Boolean);
+        // What the CALLER asked to tick, before the schema keys the engine
+        // re-ticks on every link are folded in. Those keys are not a delta —
+        // the document already had them — so they belong in the write path,
+        // not in an event that says "here is what changed".
+        const requestedFeatures = [...featureBitmaps];
         for (const key of schemaBitmapKeys(storedDocument)) {
             if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
         }
@@ -2572,19 +2622,24 @@ class SynapsD extends EventEmitter {
                     source: 'tree',
                 }));
             }
+            const delta = membershipDelta(
+                { context: contextSpec, directory: directorySpec, features: requestedFeatures },
+                { memberships: { context: contextSpec, directory: directorySpec, features: featureBitmaps } },
+            );
+            // DEPRECATED membership-only alias — no document, so automation
+            // cannot match on content. Superseded by document.linked below.
             this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
                 id: numericId,
-                memberships: { context: contextSpec, directory: directorySpec, features: featureBitmaps },
+                ...delta,
                 reason: 'membership',
                 ...(provenance || {}),
             }));
             // First-class membership event carrying the full document so
-            // automation (hooks/rules) can match on content, which the
-            // membership-only document.updated above cannot support.
+            // automation (hooks/rules) can match on content.
             this.emit(EVENTS.DOCUMENT_LINKED, createEvent(EVENTS.DOCUMENT_LINKED, {
                 id: numericId,
                 document: storedDocument,
-                memberships: { context: contextSpec, directory: directorySpec, features: featureBitmaps },
+                ...delta,
                 reason: 'membership',
                 ...(provenance || {}),
             }));
@@ -3960,7 +4015,7 @@ class SynapsD extends EventEmitter {
                     : [filteredLayers[filteredLayers.length - 1]];
                 const layerIds = contextTree.resolveLayerIds(targetLayers);
                 layersToRemove.push(...layerIds.map((layerId) => contextCollection.makeKey(layerId)));
-                removedContextPaths.push(...targetLayers);
+                removedContextPaths.push(...SynapsD.#unlinkedContextPaths(filteredLayers, options.recursive));
             }
         }
 
@@ -3987,11 +4042,19 @@ class SynapsD extends EventEmitter {
                 debug(`unlink: Removed doc ${docId} from ${layersToRemove.length} layers via Synapses`);
             }
 
+            const delta = membershipDelta(
+                { context: removedContextPaths, directory: removedDirectoryPaths, features: featureKeys },
+                {
+                    contextArray: removedContextPaths,
+                    directoryArray: removedDirectoryPaths,
+                    featureArray: featureKeys,
+                },
+            );
+            // DEPRECATED membership-only alias — superseded by
+            // document.unlinked below, which carries the document.
             this.emit(EVENTS.DOCUMENT_REMOVED, createEvent(EVENTS.DOCUMENT_REMOVED, {
                 id: docId,
-                contextArray: removedContextPaths,
-                directoryArray: removedDirectoryPaths,
-                featureArray: featureKeys,
+                ...delta,
                 recursive: options.recursive,
                 reason: 'membership',
                 ...(provenance || {}),
@@ -4005,9 +4068,7 @@ class SynapsD extends EventEmitter {
                     this.emit(EVENTS.DOCUMENT_UNLINKED, createEvent(EVENTS.DOCUMENT_UNLINKED, {
                         id: docId,
                         document: parseDocumentData(unlinkedData),
-                        contextArray: removedContextPaths,
-                        directoryArray: removedDirectoryPaths,
-                        featureArray: featureKeys,
+                        ...delta,
                         recursive: options.recursive,
                         reason: 'membership',
                         ...(provenance || {}),
@@ -4733,6 +4794,26 @@ class SynapsD extends EventEmitter {
     // Caller-supplied provenance rides on emitted events so automation layers
     // (workspace hooks/rules) can detect and bound their own cascades. Only the
     // three known keys pass through; anything else is dropped.
+    /**
+     * The context PATHS an unlink dropped, for the event's membership delta.
+     *
+     * Unlinking `/a/b/c` unticks the leaf layer `c`, or every layer along the
+     * path when recursive — but a consumer reasoning about "what changed"
+     * thinks in paths, not in the layer names a path decomposes into. Layer
+     * names were what the payload used to carry under a field called
+     * `contextArray`, which silently matched nothing for anyone who read the
+     * name literally.
+     *
+     * @param {string[]} filteredLayers layer names of the path, root removed
+     * @param {boolean} recursive
+     * @returns {string[]} '/a/b/c', or every prefix of it when recursive
+     */
+    static #unlinkedContextPaths(filteredLayers, recursive) {
+        if (filteredLayers.length === 0) { return []; }
+        if (!recursive) { return [`/${filteredLayers.join('/')}`]; }
+        return filteredLayers.map((_, i) => `/${filteredLayers.slice(0, i + 1).join('/')}`);
+    }
+
     #normalizeProvenance(provenance) {
         if (!provenance || typeof provenance !== 'object' || Array.isArray(provenance)) { return null; }
         const out = {};
