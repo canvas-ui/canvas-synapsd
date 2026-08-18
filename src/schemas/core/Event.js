@@ -40,9 +40,9 @@ const documentDataSchema = Document.extendDataSchema(
 
         // RFC 5545 RRULE value (the part after "RRULE:"), e.g.
         // 'FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T235959Z'. Stored verbatim; a
-        // BOUNDED series in the supported subset is expanded into per-occurrence
-        // timeline entries, everything else keeps the envelope — see
-        // #deriveTimelines. Deliberately not in checksumFields: editing the rule
+        // supported-subset series expands into per-occurrence timeline entries
+        // (unbounded/over-cap rules add a never-miss tail entry), everything
+        // else keeps the envelope — see #deriveTimelines. Deliberately not in checksumFields: editing the rule
         // edits the series, it does not create a new event (CalDAV keeps the
         // same UID).
         recurrence: z.string().regex(/FREQ=/i, 'recurrence must be an RFC 5545 RRULE value containing FREQ=').optional(),
@@ -88,14 +88,23 @@ export default class Event extends Document {
     //   actually contain an occurrence, at day tiles (occurrence timestamps
     //   are sub-day notation, so their adaptive floor clamps to 'day').
     //
-    // - Everything else (unbounded rule, unsupported RRULE features, expansion
-    //   over the cap): the ENVELOPE — first occurrence to UNTIL, or open when
-    //   the rule never ends — and the client expands the RRULE to render real
-    //   occurrences, exactly as a CalDAV client does with VEVENT+RRULE. The
-    //   envelope is a deliberate SUPERSET (candidate-set-then-refine): it may
-    //   over-match, it can never miss an occurrence.
+    // - UNBOUNDED or over-cap series in the supported subset (the standing
+    //   weekly with no end date — the most common calendar-sync shape): HYBRID
+    //   (unlocked by the open-interval sidecar, 2026-08-18, which lets an open
+    //   entry be non-primary). The first MAX_RECURRENCE_EXPANSION occurrences
+    //   expand exactly; the un-expanded remainder becomes one TAIL entry from
+    //   the next occurrence's start — open (→ sidecar) when the rule never
+    //   ends, bounded to UNTIL otherwise. Inside the horizon queries are
+    //   per-occurrence exact; beyond it the tail keeps the never-miss
+    //   envelope property.
     //
-    // Expansion is bounded by the rule (COUNT/UNTIL), never by "now": deriving
+    // - Everything else (unsupported RRULE features, unparseable rules,
+    //   degenerate expansions): the ENVELOPE — first occurrence to UNTIL, or
+    //   open when the rule never ends — and the client expands the RRULE to
+    //   render real occurrences, exactly as a CalDAV client does with
+    //   VEVENT+RRULE. A deliberate SUPERSET: may over-match, never misses.
+    //
+    // Expansion is bounded by the rule and the cap, never by "now": deriving
     // from wall-clock time would make index content time-dependent and rebuilds
     // drift. Exact occurrence rendering stays the client's job either way.
     static #deriveTimelines(options) {
@@ -133,17 +142,21 @@ export default class Event extends Document {
         return prior;
     }
 
-    // Occurrence cap. Not a horizon: rules bounded by COUNT/UNTIL beyond this
-    // fall back to the envelope (over-match, never miss) instead of truncating.
+    // Exactness horizon: occurrences up to this many expand exactly; a rule
+    // wanting more keeps the remainder in a never-miss tail entry (see the
+    // regime note above), so nothing is ever truncated away.
     static MAX_RECURRENCE_EXPANSION = 512;
 
     // UTC weekday index (getUTCDay) per RFC 5545 BYDAY code.
     static #BYDAY = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
 
     /**
-     * Deterministic expansion of a BOUNDED RRULE into 'events' timeline entries,
-     * or null when the rule must keep the envelope. Supported subset — the
-     * shapes Google/Teams/CalDAV sync actually emits:
+     * Deterministic expansion of a supported-subset RRULE into 'events'
+     * timeline entries, or null when the rule must keep the envelope. Bounded
+     * rules within the cap expand fully; unbounded/over-cap rules expand up to
+     * the cap and append a TAIL entry (next occurrence start → UNTIL, or open)
+     * that preserves the never-miss property. Supported subset — the shapes
+     * Google/Teams/CalDAV sync actually emits:
      *   FREQ=DAILY|WEEKLY|MONTHLY|YEARLY, INTERVAL, COUNT, UNTIL,
      *   BYDAY (WEEKLY only; with INTERVAL>1 only when BYDAY is a single day,
      *   since multi-day biweekly grouping depends on WKST week numbering).
@@ -187,7 +200,6 @@ export default class Event extends Document {
             untilMs = iso ? Date.parse(iso) : NaN;
             if (Number.isNaN(untilMs)) { return null; }
         }
-        if (count === null && untilMs === null) { return null; } // unbounded → envelope
 
         const startMs = Date.parse(data.start);
         if (Number.isNaN(startMs)) { return null; }
@@ -199,9 +211,13 @@ export default class Event extends Document {
 
         const DAY = 86400000;
         const starts = [];
+        let tailStartMs = null; // first occurrence past the cap → tail entry start
         const push = (ms) => {
             if (untilMs !== null && ms > untilMs) { return false; }
-            if (starts.length >= Event.MAX_RECURRENCE_EXPANSION) { return false; }
+            if (starts.length >= Event.MAX_RECURRENCE_EXPANSION) {
+                if (tailStartMs === null) { tailStartMs = ms; }
+                return false;
+            }
             starts.push(ms);
             return count === null || starts.length < count;
         };
@@ -251,16 +267,30 @@ export default class Event extends Document {
             }
         }
 
-        // Refuse truncation: if the rule wants more occurrences than we emitted,
-        // the envelope's never-miss property wins over precision.
-        if (count !== null && starts.length < count) { return null; }
-        if (starts.length === 0 || starts.length >= Event.MAX_RECURRENCE_EXPANSION) { return null; }
+        // Refuse silent truncation: a COUNT the loops could not satisfy AND
+        // the cap did not explain (guard exhaustion, COUNT+UNTIL both set —
+        // RFC-invalid) keeps the envelope; never-miss wins over precision.
+        if (count !== null && starts.length < count && tailStartMs === null) { return null; }
+        if (starts.length === 0) { return null; }
 
-        return starts.map((ms) => {
+        const entries = starts.map((ms) => {
             const entry = { timeline: EVENTS_TIMELINE, start: new Date(ms).toISOString() };
             if (durationMs !== null) { entry.end = new Date(ms + durationMs).toISOString(); }
             return entry;
         });
+        if (tailStartMs !== null) {
+            // The un-expanded remainder, envelope-style: open when the rule
+            // never ends (→ the membership plane's open-interval sidecar,
+            // non-primary open entries are legal since 2026-08-18), bounded to
+            // UNTIL otherwise. Starts AT the first un-expanded occurrence, so
+            // horizon queries stay exact and later ones never miss.
+            entries.push({
+                timeline: EVENTS_TIMELINE,
+                start: new Date(tailStartMs).toISOString(),
+                end: untilMs !== null ? Event.#recurrenceEnvelopeEnd(recurrence) : null,
+            });
+        }
+        return entries;
     }
 
     /**

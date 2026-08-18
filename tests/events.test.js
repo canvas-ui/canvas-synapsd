@@ -150,17 +150,48 @@ describe('event schema + events timeline', () => {
             expect(after.map((d) => d.id)).toEqual([]);
         });
 
-        test('an unbounded rule is an open envelope', async () => {
+        test('an unbounded rule is HYBRID: exact horizon + open never-miss tail', async () => {
             const id = await db.put({
                 schema: EVENT_SCHEMA,
-                data: { title: 'Daily sync', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=DAILY' },
+                data: { title: 'Weekly sync', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=WEEKLY' },
             });
 
             const doc = await db.get(id);
-            expect(doc.timelines.find((t) => t.timeline === 'events').end).toBeNull();
+            const entries = doc.timelines.filter((t) => t.timeline === 'events');
+            // 512 exact Tuesday occurrences + one open tail from occurrence 513.
+            expect(entries.length).toBe(513);
+            expect(entries[0].start).toBe('2026-01-06T09:00:00.000Z');
+            const tail = entries[entries.length - 1];
+            expect(tail.end).toBeNull();
+            expect(tail.start).toBe(new Date(Date.parse('2026-01-06T09:00:00.000Z') + 512 * 7 * 86400000).toISOString());
 
-            const farFuture = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2030-01-01..2030-12-31'], limit: 0 });
+            // Inside the horizon: per-occurrence exact — the envelope model
+            // matched every day of the span, the hybrid only matches Tuesdays.
+            const tuesday = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2026-01-13'], limit: 0 });
+            expect(tuesday.map((d) => d.id)).toEqual([id]);
+            const wednesday = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2026-01-14'], limit: 0 });
+            expect(wednesday.map((d) => d.id)).toEqual([]);
+
+            // Beyond the horizon (year 2045 >> 512 weeks): the open tail keeps
+            // the never-miss superset property via the sidecar.
+            const farFuture = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2045-01-01..2045-12-31'], limit: 0 });
             expect(farFuture.map((d) => d.id)).toEqual([id]);
+        });
+
+        test('an over-cap COUNT rule is HYBRID too (bounded rules never truncate)', async () => {
+            const id = await db.put({
+                schema: EVENT_SCHEMA,
+                data: { title: 'Long onboarding', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=DAILY;COUNT=600' },
+            });
+            const doc = await db.get(id);
+            const entries = doc.timelines.filter((t) => t.timeline === 'events');
+            expect(entries.length).toBe(513);
+            // COUNT tails stay OPEN (computing the real last occurrence would
+            // risk a miss; over-match is the documented COUNT-envelope rule).
+            expect(entries[entries.length - 1].end).toBeNull();
+
+            const inHorizon = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2026-03-01'], limit: 0 });
+            expect(inHorizon.map((d) => d.id)).toEqual([id]);
         });
 
         test('COUNT expands into exactly COUNT occurrences', async () => {

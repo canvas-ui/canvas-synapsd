@@ -190,6 +190,14 @@ things:
       the supported RRULE subset expand into per-occurrence entries (first
       occurrence = primary); unbounded/unsupported/over-cap rules keep the
       envelope (never-miss beats precision). See `src/schemas/core/Event.js`.
+- [x] LANDED 2026-08-18 (3.9.0) — HYBRID expansion for unbounded/over-cap
+      supported-subset rules, unlocked by the open-interval sidecar: first 512
+      occurrences exact + one never-miss tail entry from the next occurrence
+      (open → sidecar for endless rules, bounded to UNTIL otherwise). The
+      standing no-end-date weekly — the most common calendar-sync shape — is
+      now per-occurrence exact inside the horizon (~10 years for weekly)
+      instead of matching every week forever. Pure-envelope fallback remains
+      only for unsupported RRULE features. 422/422.
 - [ ] Batch timeline rebuilds before Wikipedia-scale ingestion.
 - [ ] Optional later: an `exact` opt-in flag (row refinement below quantum) —
       possible without a format change; and hour/minute tiers to legalize
