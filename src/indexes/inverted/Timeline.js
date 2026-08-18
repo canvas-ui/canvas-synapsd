@@ -53,16 +53,19 @@ const SCALE_ALIASES = {
 const SCALES = ['Gyr', 'Myr', 'Kyr', 'year', 'month', 'day', 'second', 'ms', 'ns'];
 const SCALE_ORDER = new Map(SCALES.map((scale, index) => [scale, index]));
 
-// Membership plane (tsm) — tiled coverings, Pilosa time-quantum shaped.
-// A timeline's QUANTUM is its finest membership granularity (the YMDH analog:
-// FeatureBase fixes quantum per field at creation; we fix it per timeline).
-// All coarser tiers are implicitly available — coarse cells only materialize
-// when a covering actually uses them, so "quantum" is one scale, not a list.
-// Sub-day quantums are rejected in v1: the next tier below 'day' is 'second'
-// (no hour/minute tier yet), and a day→second fan-out of 86400 would turn a
+// Membership plane (tsm) — tiled coverings, Pilosa time-quantum shaped, with
+// an ADAPTIVE floor (settled 2026-08-18, supersedes fixed-per-timeline): the
+// finest cell scale of a covering comes from each ENTRY's own notation
+// ('1769' → year, '1769-08-15' → day, '541 MYA' → Myr), not from timeline
+// config. One timeline carries geological eras, lifespans and single events
+// at once, each tiled at its own precision — and rebuilds derive everything
+// from rows alone, nothing config-dependent. Queries likewise decompose at
+// the QUERY's notation-derived floor; the {c,a} two-plane probe is
+// floor-agnostic (see the plane note below), so mixed floors stay sound.
+// Sub-day floors clamp to 'day': the next tier below is 'second' (no
+// hour/minute tier yet), and a day→second fan-out of 86400 would turn a
 // single misaligned boundary into tens of thousands of cell writes.
-const TSM_QUANTUM_SCALES = new Set(['Gyr', 'Myr', 'Kyr', 'year', 'month', 'day']);
-const DEFAULT_QUANTUM = 'day';
+const TSM_TILE_SCALES = new Set(['Gyr', 'Myr', 'Kyr', 'year', 'month', 'day']);
 // union   → one flat id array across all timelines + scales
 // layers  → { name: { scale: [ids] } } (per timeline, per scale)
 // grouped → { name: [ids] } (per timeline, scales pre-unioned) — e.g. "zeitgeist
@@ -87,23 +90,10 @@ export default class TimelineIndex {
         // the bitmaps and slice-writes. crud:* lifecycle stamps are point by
         // convention; extra names can be registered via options.pointTimelines.
         this.#pointTimelines = new Set(options.pointTimelines || []);
-        // Per-timeline membership quantum (finest tsm cell granularity).
-        // Deterministic config, not persisted state — same philosophy as
-        // pointTimelines: the mode is stable across restarts because it comes
-        // from the constructor, so there is nothing to migrate or drift.
-        this.#quantums = new Map();
-        for (const [name, scale] of Object.entries(options.quantum || {})) {
-            this.setQuantum(name, scale);
-        }
-        this.#defaultQuantum = options.defaultQuantum
-            ? this.#assertQuantumScale(options.defaultQuantum)
-            : DEFAULT_QUANTUM;
         debug(`TimelineIndex initialized with tiered Dual-BSI (${BIT_DEPTH}-bit per tier)`);
     }
 
     #pointTimelines;
-    #quantums;
-    #defaultQuantum;
 
     // A timeline is point-mode (single-BSI instants) when its name is a crud:*
     // lifecycle stamp or explicitly registered. Deterministic by name so the mode
@@ -185,6 +175,13 @@ export default class TimelineIndex {
             const keys = await this.bitmapIndex.listBitmaps(`internal/tsm/${this.#timelineKey(timelineName)}`);
             const coverKeys = keys.filter((key) => this.#parseTsmKey(key)?.plane === 'c');
             union.orInPlace(await this.bitmapIndex.OR(coverKeys));
+            for (const scale of this.#openScales(timelineName)) {
+                const tier = this.#openTier(timelineName, scale);
+                for (const bsi of [tier.start, tier.end]) {
+                    const ebm = await this.bitmapIndex.getBitmap(bsi.ebmKey, false);
+                    if (ebm) { union.orInPlace(ebm); }
+                }
+            }
         }
 
         return union.size;
@@ -279,13 +276,13 @@ export default class TimelineIndex {
     //   internal/tsm/<timeline>/<scale>/a/<cellId>   "ancestor" plane
     //
     // Ingest decomposes an interval into its minimal hierarchical covering at
-    // the timeline's quantum (coarse cells mid-span, quantum cells at the
-    // boundaries — the FeatureBase viewsByTimeRange walk, generalized over our
-    // scale tiers and used at ingest too, not just query time). Each covering
-    // cell is ticked in the cover plane; its ancestors up to Gyr are ticked in
-    // the ancestor plane ("this document has presence somewhere inside this
-    // coarse cell" — the generalization of Pilosa writing an instant into every
-    // YMDH view).
+    // the ENTRY's own floor — its notation-derived scale, clamped to 'day'
+    // (coarse cells mid-span, floor cells at the boundaries — the FeatureBase
+    // viewsByTimeRange walk, generalized over our scale tiers and used at
+    // ingest too, not just query time). Each covering cell is ticked in the
+    // cover plane; its ancestors up to Gyr are ticked in the ancestor plane
+    // ("this document has presence somewhere inside this coarse cell" — the
+    // generalization of Pilosa writing an instant into every YMDH view).
     //
     // Query decomposes the range the same way and probes, for each query cell q
     // (q ⊆ range by construction):
@@ -296,27 +293,27 @@ export default class TimelineIndex {
     // cell only says "presence somewhere inside", which does not imply overlap
     // with q — so ancestors of query cells are probed in the cover plane only.
     //
-    // Precision is the quantum (no row refinement in v1, Pilosa precedent):
-    // a query is answered as if rounded outward to whole quantum cells.
+    // Precision follows the notation on BOTH sides (no row refinement in v1,
+    // Pilosa precedent): an entry is stored as if rounded outward to whole
+    // cells at its own floor, a query is answered as if rounded outward to
+    // whole cells at its own floor — you get out the precision you put in.
     // Cell bitmaps hold doc ids, so results AND natively with context/feature/
     // geo filters. Everything here is L3: disposable, re-derived from rows.
 
-    getQuantum(name) {
-        this.#assertTimelineName(name);
-        return this.#quantums.get(name) || this.#defaultQuantum;
-    }
-
-    setQuantum(name, scale) {
-        this.#assertTimelineName(name);
-        this.#quantums.set(name, this.#assertQuantumScale(scale));
-        return this.#quantums.get(name);
+    // Adaptive covering floor: the notation-derived scale itself when it is a
+    // legal tile scale, else clamped to 'day' (sub-day notations: ISO
+    // datetimes, Dates, epoch numbers).
+    #tileFloor(scale) {
+        const normalized = this.#normalizeScale(scale);
+        return TSM_TILE_SCALES.has(normalized) ? normalized : 'day';
     }
 
     /**
      * Insert additional (non-primary) interval positions for a document into a
-     * timeline's membership plane. Open-ended intervals are rejected — a tiling
-     * cannot represent ±∞; an open interval is only supported as the primary
-     * entry, where the dual-BSI sentinels handle it.
+     * timeline's membership plane. Bounded intervals tile into {c,a} coverings;
+     * open-ended intervals route to the open-interval sidecar (per-scale
+     * dual-BSI, min/max collapse per doc — see the sidecar note below), so a
+     * document can carry any number of ongoing facts on one timeline.
      *
      * @param {string} timelineName
      * @param {number} id document id
@@ -330,16 +327,24 @@ export default class TimelineIndex {
         if (list.length === 0) { return true; }
 
         const keys = new Set();
+        // side ('start'|'end') -> scale -> batch-collapsed sidecar value.
+        const open = { start: new Map(), end: new Map() };
         for (const raw of list) {
-            for (const key of this.#tsmKeysForInterval(timelineName, raw)) { keys.add(key); }
+            const interval = this.#normalizeEntryInterval(raw);
+            if (interval.start === OPEN_START_VALUE || interval.end === OPEN_END_VALUE) {
+                this.#collapseOpen(open, interval);
+                continue;
+            }
+            for (const key of this.#tsmKeysForNormalized(interval, timelineName)) { keys.add(key); }
         }
-        if (keys.size === 0) { return true; }
+        if (keys.size === 0 && open.start.size === 0 && open.end.size === 0) { return true; }
 
         await this.createTimeline(timelineName);
         // Presence marker: lets every query short-circuit the tsm probe for the
         // (overwhelmingly common) timelines that have no multi-position data.
         await this.bitmapIndex.createBitmap(this.#tsmMetaKey(timelineName));
-        await this.bitmapIndex.tickMany([...keys], id);
+        if (keys.size > 0) { await this.bitmapIndex.tickMany([...keys], id); }
+        await this.#writeOpenSidecar(timelineName, id, open);
         debug(`tsm: set ID ${id} in '${timelineName}' across ${keys.size} cells (${list.length} intervals)`);
         return true;
     }
@@ -349,6 +354,12 @@ export default class TimelineIndex {
      * Tolerant by design: unticking a cell the document never occupied is a
      * no-op, and a malformed interval is skipped rather than thrown — this runs
      * on the way OUT (update/delete), where refusing would strand the row.
+     *
+     * Open intervals clear the doc's collapsed sidecar value for their
+     * (side, scale): exact for the document write path (which removes ALL of
+     * the row's entries and re-inserts the new set, re-deriving the collapse),
+     * tolerant for a manual partial removal (re-insert the remaining open
+     * entries to restore the marker).
      */
     async removeEntries(timelineName, id, intervals) {
         this.#assertTimelineName(timelineName);
@@ -356,31 +367,46 @@ export default class TimelineIndex {
         if (!this.bitmapIndex.hasBitmap(this.#tsmMetaKey(timelineName))) { return true; }
 
         const keys = new Set();
+        const openRemovals = [];
         for (const raw of (Array.isArray(intervals) ? intervals : [intervals])) {
             try {
-                for (const key of this.#tsmKeysForInterval(timelineName, raw)) { keys.add(key); }
+                const interval = this.#normalizeEntryInterval(raw);
+                if (interval.start === OPEN_START_VALUE || interval.end === OPEN_END_VALUE) {
+                    openRemovals.push({
+                        side: interval.end === OPEN_END_VALUE ? 'start' : 'end',
+                        scale: interval.scale,
+                    });
+                    continue;
+                }
+                for (const key of this.#tsmKeysForNormalized(interval, timelineName)) { keys.add(key); }
             } catch (error) {
                 debug(`tsm: skipping unremovable interval on '${timelineName}': ${error.message}`);
             }
         }
         if (keys.size > 0) { await this.bitmapIndex.untickMany([...keys], id); }
+        for (const { side, scale } of openRemovals) {
+            await this.#openTier(timelineName, scale)[side].removeValue(id);
+        }
         return true;
     }
 
     /**
-     * Decompose an interval/range into its minimal covering at the timeline's
-     * quantum. Public for tests, debugging and UIs that want to see the tiling.
+     * Decompose an interval/range into its minimal covering at the range's own
+     * notation-derived floor. Public for tests, debugging and UIs that want to
+     * see the tiling. (`timelineName` kept for signature stability; the floor
+     * is adaptive, nothing timeline-specific remains.)
      *
-     * @returns {{quantum: string, cells: Array<{scale: string, cell: string}>}}
+     * @returns {{floor: string, cells: Array<{scale: string, cell: string}>}}
      */
     decomposeRange(timelineName, startOrInterval, endVal = undefined) {
-        const quantum = this.getQuantum(timelineName);
+        this.#assertTimelineName(timelineName);
         const range = (endVal === undefined)
             ? this.#normalizeEntryInterval(startOrInterval)
             : this.#normalizeInterval(startOrInterval, endVal);
         this.#assertBoundedInterval(range);
-        const cells = this.#coverCells(range, quantum);
-        return { quantum, cells: cells.map((c) => ({ scale: c.scale, cell: c.value.toString() })) };
+        const floor = this.#tileFloor(range.scale);
+        const cells = this.#coverCells(range, floor);
+        return { floor, cells: cells.map((c) => ({ scale: c.scale, cell: c.value.toString() })) };
     }
 
     // A raw entry value with no positional end: a bare value ('1769', a Date)
@@ -396,13 +422,13 @@ export default class TimelineIndex {
             : this.#normalizeInterval({ start: raw, end: raw });
     }
 
-    // Cover + ancestor keys for one raw interval, at the timeline's quantum.
-    #tsmKeysForInterval(timelineName, raw) {
-        const interval = this.#normalizeEntryInterval(raw);
-        this.#assertBoundedInterval(interval);
-        const quantum = this.getQuantum(timelineName);
+    // Cover + ancestor keys for one normalized BOUNDED interval, at the
+    // interval's own floor. Open intervals never reach here — insertEntries/
+    // removeEntries partition them into the sidecar first.
+    #tsmKeysForNormalized(interval, timelineName) {
+        const floor = this.#tileFloor(interval.scale);
         const keys = [];
-        for (const cell of this.#coverCells(interval, quantum)) {
+        for (const cell of this.#coverCells(interval, floor)) {
             keys.push(this.#tsmKey(timelineName, 'c', cell));
             for (const anc of this.#ancestorCells(cell)) {
                 keys.push(this.#tsmKey(timelineName, 'a', anc));
@@ -414,10 +440,119 @@ export default class TimelineIndex {
     #assertBoundedInterval(interval) {
         if (interval.start === OPEN_START_VALUE || interval.end === OPEN_END_VALUE) {
             throw new Error(
-                'Open-ended intervals cannot be tiled into the membership plane; ' +
-                'declare the open interval as the primary timeline entry instead',
+                'Open-ended intervals cannot be tiled; they live in the ' +
+                'membership plane\'s open-interval sidecar, which decomposeRange ' +
+                'does not cover',
             );
         }
+    }
+
+    // ── Open-interval sidecar ────────────────────────────────────────────
+    //
+    // Open-ended entries cannot be tiled (±∞ has no finite covering, and cell
+    // identity matching cannot encode a one-sided comparison — that is what
+    // BSI slice algebra does), so non-primary open intervals live in
+    // per-scale dual-BSI sidecar tiers INSIDE the tsm plane:
+    //
+    //   internal/tsm/<tl>/open/<scale>/start   per doc: the start of its
+    //                                          ongoing ([s,+∞)) entries
+    //   internal/tsm/<tl>/open/<scale>/end     per doc: the end of its
+    //                                          since-forever ((-∞,e]) entries
+    //
+    // ONE value per (doc, scale, side) is lossless for membership because
+    // open intervals absorb: [s1,+∞) ∪ [s2,+∞) = [min(s1,s2),+∞) — so insert
+    // min-collapses starts (max for ends) and the ROW keeps every entry + ref
+    // verbatim; only the index collapses, and the index answers membership
+    // only. Tiers are lazy and per-scale like everywhere else (adaptive: an
+    // entry's tier is its notation-derived scale); a doc with ongoing facts
+    // at several scales occupies several tiers and queries fan across them.
+    // (-∞,+∞) stores as an ongoing entry whose start is the -∞ sentinel.
+
+    #openTier(timelineName, scale) {
+        const timeline = this.getTimeline(timelineName);
+        const normalizedScale = this.#normalizeScale(scale);
+        const cacheKey = `open/${normalizedScale}`;
+        if (!timeline.has(cacheKey)) {
+            const key = this.#timelineKey(timelineName);
+            timeline.set(cacheKey, {
+                start: new BitSlicedIndex(`internal/tsm/${key}/open/${normalizedScale}/start`, this.bitmapIndex, BIT_DEPTH),
+                end: new BitSlicedIndex(`internal/tsm/${key}/open/${normalizedScale}/end`, this.bitmapIndex, BIT_DEPTH),
+            });
+        }
+        return timeline.get(cacheKey);
+    }
+
+    // Scales with materialized sidecar tiers (either side).
+    #openScales(name) {
+        const key = this.#timelineKey(name);
+        return SCALES.filter((scale) =>
+            this.bitmapIndex.hasBitmap(`internal/tsm/${key}/open/${scale}/start/ebm`)
+            || this.bitmapIndex.hasBitmap(`internal/tsm/${key}/open/${scale}/end/ebm`));
+    }
+
+    // Fold one normalized open interval into the batch collapse accumulator.
+    #collapseOpen(open, interval) {
+        const side = interval.end === OPEN_END_VALUE ? 'start' : 'end';
+        const value = side === 'start' ? interval.start : interval.end;
+        const perScale = open[side];
+        const prior = perScale.get(interval.scale);
+        if (prior === undefined) { perScale.set(interval.scale, value); return; }
+        perScale.set(interval.scale, side === 'start'
+            ? (value < prior ? value : prior)
+            : (value > prior ? value : prior));
+    }
+
+    // Merge the batch collapse into the stored per-doc sidecar values.
+    // setValue overwrites, so re-read the prior value and keep the absorbing
+    // bound (min start / max end) — repeated inserts stay lossless.
+    async #writeOpenSidecar(timelineName, id, open) {
+        for (const side of ['start', 'end']) {
+            for (const [scale, value] of open[side]) {
+                const bsi = this.#openTier(timelineName, scale)[side];
+                const one = new RoaringBitmap32([Number(id)]);
+                const existing = await bsi.getValues(one);
+                let merged = value;
+                if (existing.has(Number(id))) {
+                    const prior = existing.get(Number(id)) - SIGNED_OFFSET;
+                    merged = side === 'start'
+                        ? (prior < merged ? prior : merged)
+                        : (prior > merged ? prior : merged);
+                }
+                await bsi.setValue(id, this.#encodeSigned(merged));
+                debug(`tsm sidecar: doc ${id} '${timelineName}' open/${scale}/${side} = ${merged}`);
+            }
+        }
+    }
+
+    // Sidecar probe: ongoing docs ([s,+∞)) overlap the query iff s <= q.end;
+    // since-forever docs ((-∞,e]) iff e >= q.start. An open query side drops
+    // its bound — every doc in that BSI matches ([qs,+∞) overlaps every
+    // [s,+∞)). Range endpoints convert outward to each tier's scale; a value
+    // outside a tier's 64-bit window cannot match that tier and is skipped.
+    async #querySidecar(name, range) {
+        const union = new RoaringBitmap32();
+        for (const scale of this.#openScales(name)) {
+            const tier = this.#openTier(name, scale);
+            if (range.end === OPEN_END_VALUE) {
+                const ebm = await this.bitmapIndex.getBitmap(tier.start.ebmKey, false);
+                if (ebm) { union.orInPlace(ebm); }
+            } else {
+                try {
+                    const r = this.#convertRangeToScale({ scale: range.scale, start: range.end, end: range.end }, scale);
+                    union.orInPlace(await tier.start.query('<=', this.#encodeSigned(r.end)));
+                } catch { /* out of tier window */ }
+            }
+            if (range.start === OPEN_START_VALUE) {
+                const ebm = await this.bitmapIndex.getBitmap(tier.end.ebmKey, false);
+                if (ebm) { union.orInPlace(ebm); }
+            } else {
+                try {
+                    const r = this.#convertRangeToScale({ scale: range.scale, start: range.start, end: range.start }, scale);
+                    union.orInPlace(await tier.end.query('>=', this.#encodeSigned(r.start)));
+                } catch { /* out of tier window */ }
+            }
+        }
+        return union;
     }
 
     /**
@@ -432,31 +567,32 @@ export default class TimelineIndex {
      * conversion helpers, not from date arithmetic on a walking cursor.
      *
      * @param {{scale, start, end}} range normalized interval
-     * @param {string} quantum finest cell scale for this timeline
+     * @param {string} floor finest cell scale for this covering (the range's
+     *        notation-derived floor, day-clamped)
      * @returns {Array<{scale: string, value: BigInt}>}
      */
-    #coverCells(range, quantum) {
-        const quantumIndex = SCALE_ORDER.get(quantum);
-        // Convert to quantum scale: floors when the interval is finer than the
-        // quantum (outward rounding — the documented precision), expands to full
+    #coverCells(range, floor) {
+        const floorIndex = SCALE_ORDER.get(floor);
+        // Convert to floor scale: floors when the interval is finer than the
+        // floor (outward rounding — the documented precision), expands to full
         // periods when coarser (a 'year' entry covers all its days).
-        const r = this.#convertRangeToScale(range, quantum);
+        const r = this.#convertRangeToScale(range, floor);
 
         const cells = [];
         let t = r.start;
         while (t <= r.end) {
-            let chosen = { scale: quantum, value: t, endAtQuantum: t };
-            for (let k = 0; k < quantumIndex; k++) {
+            let chosen = { scale: floor, value: t, endAtFloor: t };
+            for (let k = 0; k < floorIndex; k++) {
                 const scale = SCALES[k];
-                const coarseValue = this.#convertValue({ scale: quantum, value: t }, scale);
-                const bounds = this.#convertRangeToScale({ scale, start: coarseValue, end: coarseValue }, quantum);
+                const coarseValue = this.#convertValue({ scale: floor, value: t }, scale);
+                const bounds = this.#convertRangeToScale({ scale, start: coarseValue, end: coarseValue }, floor);
                 if (bounds.start === t && bounds.end <= r.end) {
-                    chosen = { scale, value: coarseValue, endAtQuantum: bounds.end };
+                    chosen = { scale, value: coarseValue, endAtFloor: bounds.end };
                     break; // scales iterate coarse→fine; first fit is the coarsest
                 }
             }
             cells.push({ scale: chosen.scale, value: chosen.value });
-            t = chosen.endAtQuantum + 1n;
+            t = chosen.endAtFloor + 1n;
         }
         return cells;
     }
@@ -478,23 +614,30 @@ export default class TimelineIndex {
     async #queryMultiBitmap(name, range) {
         if (!this.bitmapIndex.hasBitmap(this.#tsmMetaKey(name))) { return new RoaringBitmap32(); }
 
-        const quantum = this.getQuantum(name);
+        // Query floor = the QUERY's notation-derived scale (day-clamped) —
+        // symmetric with ingest. Mixed floors are sound because cells nest:
+        // finer-stored docs surface via a(q), coarser-stored ones via cover
+        // ticks on q's ancestors.
+        const floor = this.#tileFloor(range.scale);
         const openStart = range.start === OPEN_START_VALUE;
         const openEnd = range.end === OPEN_END_VALUE;
+        const sidecar = await this.#querySidecar(name, range);
 
         if (openStart || openEnd) {
             // A half-open query range has no finite covering — enumerate the
             // timeline's cover-plane cells (its cell inventory, not its docs)
             // and union those overlapping the bounded side. Cover cells alone
             // are complete: every stored point lies inside some cover cell.
-            return await this.#queryMultiOpen(name, range, quantum, openStart, openEnd);
+            const result = await this.#queryMultiOpen(name, range, floor, openStart, openEnd);
+            result.orInPlace(sidecar);
+            return result;
         }
 
         let cells;
         try {
-            cells = this.#coverCells(range, quantum);
+            cells = this.#coverCells(range, floor);
         } catch {
-            return new RoaringBitmap32();
+            return sidecar;
         }
 
         const keys = new Set();
@@ -505,19 +648,21 @@ export default class TimelineIndex {
                 keys.add(this.#tsmKey(name, 'c', anc)); // cover plane ONLY — see plane note above
             }
         }
-        return await this.bitmapIndex.OR([...keys]);
+        const result = await this.bitmapIndex.OR([...keys]);
+        result.orInPlace(sidecar);
+        return result;
     }
 
-    async #queryMultiOpen(name, range, quantum, openStart, openEnd) {
+    async #queryMultiOpen(name, range, floor, openStart, openEnd) {
         const prefix = `internal/tsm/${this.#timelineKey(name)}`;
         const allKeys = await this.bitmapIndex.listBitmaps(prefix);
 
-        let boundedAtQuantum = null;
+        let boundedAtFloor = null;
         if (!(openStart && openEnd)) {
             const boundedValue = openStart ? range.end : range.start;
             try {
-                boundedAtQuantum = this.#convertRangeToScale(
-                    { scale: range.scale, start: boundedValue, end: boundedValue }, quantum);
+                boundedAtFloor = this.#convertRangeToScale(
+                    { scale: range.scale, start: boundedValue, end: boundedValue }, floor);
             } catch {
                 return new RoaringBitmap32();
             }
@@ -527,15 +672,15 @@ export default class TimelineIndex {
         for (const key of allKeys) {
             const parsed = this.#parseTsmKey(key);
             if (!parsed || parsed.plane !== 'c') { continue; }
-            if (boundedAtQuantum === null) { selected.push(key); continue; } // (-∞, +∞)
+            if (boundedAtFloor === null) { selected.push(key); continue; } // (-∞, +∞)
             let bounds;
             try {
                 bounds = this.#convertRangeToScale(
-                    { scale: parsed.scale, start: parsed.value, end: parsed.value }, quantum);
+                    { scale: parsed.scale, start: parsed.value, end: parsed.value }, floor);
             } catch { continue; }
             const overlaps = openEnd
-                ? bounds.end >= boundedAtQuantum.start   // [start, +∞)
-                : bounds.start <= boundedAtQuantum.end;  // (-∞, end]
+                ? bounds.end >= boundedAtFloor.start   // [start, +∞)
+                : bounds.start <= boundedAtFloor.end;  // (-∞, end]
             if (overlaps) { selected.push(key); }
         }
         return await this.bitmapIndex.OR(selected);
@@ -557,17 +702,6 @@ export default class TimelineIndex {
         const plane = parts[4];
         if (!scale || (plane !== 'c' && plane !== 'a')) { return null; }
         try { return { scale, plane, value: BigInt(parts[5]) }; } catch { return null; }
-    }
-
-    #assertQuantumScale(scale) {
-        const normalized = this.#normalizeScale(scale);
-        if (!TSM_QUANTUM_SCALES.has(normalized)) {
-            throw new Error(
-                `Unsupported timeline quantum '${scale}': quantum must be one of ` +
-                `${[...TSM_QUANTUM_SCALES].join(', ')} (sub-day tiers need an hour/minute scale first)`,
-            );
-        }
-        return normalized;
     }
 
     // ========================================
@@ -668,6 +802,24 @@ export default class TimelineIndex {
         return SCALES.filter((scale) =>
             this.bitmapIndex.hasBitmap(`internal/ts/${key}/${scale}/start/ebm`)
             || this.bitmapIndex.hasBitmap(`internal/ts/${key}/${scale}/ts/ebm`));
+    }
+
+    /**
+     * Observed scale tiers across BOTH planes (BSI value tiers + tsm cover
+     * cells), coarse→fine. Informational — floors are adaptive, so this is
+     * "what this timeline's data has materialized", not configuration.
+     */
+    async getScales(name) {
+        const observed = new Set(this.#existingScales(name));
+        if (this.bitmapIndex.hasBitmap(this.#tsmMetaKey(name))) {
+            const keys = await this.bitmapIndex.listBitmaps(`internal/tsm/${this.#timelineKey(name)}`);
+            for (const key of keys) {
+                const parsed = this.#parseTsmKey(key);
+                if (parsed?.plane === 'c') { observed.add(parsed.scale); }
+            }
+            for (const scale of this.#openScales(name)) { observed.add(scale); }
+        }
+        return SCALES.filter((scale) => observed.has(scale));
     }
 
     /**

@@ -85,4 +85,62 @@ describe('TimelineIndex open intervals', () => {
         await t.insert('life', 3, { start: '1800-01-01', end: '1850-01-01' }); // died long ago
         expect((await t.queryInterval('life', { start: '2026', end: '2026' })).sort((a, b) => a - b)).toEqual([1, 2]);
     });
+
+    // ── Open-interval sidecar (non-primary open entries) ─────────────────
+
+    test('sidecar: ongoing membership entries match any later window, none before', async () => {
+        const t = newTimeline();
+        await t.insertEntries('wiki', 1, [
+            { start: '1980', end: '1985' },              // bounded → tiles
+            { start: '2000', end: Infinity },            // ongoing → sidecar
+        ]);
+        expect(await t.queryInterval('wiki', '1982', '1982')).toEqual([1]); // bounded tile
+        expect(await t.queryInterval('wiki', '2030', '2030')).toEqual([1]); // ongoing
+        expect(await t.queryInterval('wiki', '1990', '1990')).toEqual([]);  // gap
+    });
+
+    test('sidecar: min-collapse keeps the earliest ongoing start across separate inserts', async () => {
+        const t = newTimeline();
+        await t.insertEntries('wiki', 1, [{ start: '1950', end: Infinity }]);
+        await t.insertEntries('wiki', 1, [{ start: '2000', end: Infinity }]); // later start must NOT clobber
+        expect(await t.queryInterval('wiki', '1960', '1960')).toEqual([1]);
+    });
+
+    test('sidecar: since-forever entries and the degenerate (-∞,+∞)', async () => {
+        const t = newTimeline();
+        await t.insertEntries('wiki', 1, [{ start: -Infinity, end: '1900' }]); // since forever
+        await t.insertEntries('wiki', 2, [{ start: -Infinity, end: Infinity }]); // always
+        expect((await t.queryInterval('wiki', '1850', '1850')).sort((a, b) => a - b)).toEqual([1, 2]);
+        expect(await t.queryInterval('wiki', '1950', '1950')).toEqual([2]);
+    });
+
+    test('sidecar: open QUERY sides match all sidecar docs on that side', async () => {
+        const t = newTimeline();
+        await t.insertEntries('wiki', 1, [{ start: '2000', end: Infinity }]);
+        await t.insertEntries('wiki', 2, [{ start: -Infinity, end: '1900' }]);
+        // [1990, +∞) overlaps every ongoing doc; the since-forever doc ended 1900 < 1990.
+        expect(await t.queryInterval('wiki', '1990')).toEqual([1]);
+        // (-∞, 1950] overlaps the since-forever doc; ongoing starts 2000 > 1950.
+        expect(await t.queryInterval('wiki', null, '1950')).toEqual([2]);
+    });
+
+    test('sidecar: mixed scales fan across tiers (deep-time ongoing + modern ongoing)', async () => {
+        const t = newTimeline();
+        await t.insertEntries('wiki', 1, [{ start: '66 MYA', end: Infinity }]); // Myr tier
+        await t.insertEntries('wiki', 1, [{ start: '2000', end: Infinity }]);   // year tier
+        expect(await t.queryInterval('wiki', '30mya', '30mya')).toEqual([1]);
+        expect(await t.queryInterval('wiki', '2030', '2030')).toEqual([1]);
+        expect(await t.queryInterval('wiki', '70mya', '70mya')).toEqual([]);
+    });
+
+    test('sidecar: removal clears the collapsed side, bounded tiles untouched', async () => {
+        const t = newTimeline();
+        await t.insertEntries('wiki', 1, [
+            { start: '1980', end: '1985' },
+            { start: '2000', end: Infinity },
+        ]);
+        await t.removeEntries('wiki', 1, [{ start: '2000', end: Infinity }]);
+        expect(await t.queryInterval('wiki', '2030', '2030')).toEqual([]);
+        expect(await t.queryInterval('wiki', '1982', '1982')).toEqual([1]);
+    });
 });

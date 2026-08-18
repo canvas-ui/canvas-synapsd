@@ -85,7 +85,8 @@ export default class Event extends Document {
     //   expanded into per-occurrence entries — first occurrence is the primary
     //   (the series' sortable position), the rest are membership positions. A
     //   weekly standup now answers "what happens this week" only in weeks that
-    //   actually contain an occurrence, at the timeline's quantum (day).
+    //   actually contain an occurrence, at day tiles (occurrence timestamps
+    //   are sub-day notation, so their adaptive floor clamps to 'day').
     //
     // - Everything else (unbounded rule, unsupported RRULE features, expansion
     //   over the cap): the ENVELOPE — first occurrence to UNTIL, or open when
