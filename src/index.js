@@ -813,6 +813,20 @@ class SynapsD extends EventEmitter {
                 }
             }
 
+            // One-time heal (not a schema migration — rows are untouched): the
+            // pre-write-through REST path (server ≤2.5.51) linked asserted edges
+            // directly into the edge plane, leaving them out of their subject
+            // rows' data.relations — invisible to rebuildL3 and unretractable
+            // by the row-owned delete path. Fold them back in once, then stamp.
+            const RELATIONS_BACKFILL_KEY = 'backfill/asserted-relations/v1';
+            if (!this.#internalStore.get(RELATIONS_BACKFILL_KEY)) {
+                const healed = await this.backfillAssertedRelations();
+                if (healed.patched || healed.orphaned) {
+                    debug(`start: asserted-relations backfill patched ${healed.patched}, orphaned ${healed.orphaned}`);
+                }
+                await this.#internalStore.put(RELATIONS_BACKFILL_KEY, new Date().toISOString());
+            }
+
             // Set status
             this.#status = 'running';
 
@@ -1066,7 +1080,12 @@ class SynapsD extends EventEmitter {
     }
 
     /**
-     * Create a typed edge between two documents.
+     * Create a DERIVED typed edge between two documents (extractor/agent
+     * output). `meta.src` is REQUIRED: the only writer of asserted edges is
+     * `#syncDocumentRelations`, deriving them from a row's `data.relations` —
+     * so the L3 rebuild invariant (replay rows + re-run extractors == complete
+     * edge plane) holds by construction. Asserted relations go through
+     * `assertRelation()` instead.
      *
      * This is the DOCUMENT-AWARE facade over `this.edges` (EdgeIndex), which is
      * deliberately document-unaware. Membership inheritance is exactly the kind
@@ -1076,12 +1095,16 @@ class SynapsD extends EventEmitter {
      * @param {number} fromId
      * @param {string} predicate see indexes/edges/predicates.js
      * @param {number} toId
-     * @param {{inheritMemberships?: boolean, meta?: {src:string, conf?:number}}} [options]
-     *        meta: OMIT for asserted edges (derived from a doc's data.relations);
-     *        pass {src:'extractor:<name>'} for derived ones.
+     * @param {{inheritMemberships?: boolean, meta: {src:string, conf?:number}}} options
      */
     async relate(fromId, predicate, toId, options = {}) {
-        this.#edges.link(fromId, predicate, toId, options.meta ?? null);
+        if (!options.meta?.src) {
+            throw new Error(
+                'relate() writes DERIVED edges and requires meta.src (e.g. "extractor:foo"); ' +
+                'asserted relations are document-owned — use assertRelation()',
+            );
+        }
+        this.#edges.link(fromId, predicate, toId, options.meta);
 
         if (options.inheritMemberships) {
             await this.#synapses.createSynapsesFromDocs(Number(toId), [Number(fromId)]);
@@ -1090,10 +1113,125 @@ class SynapsD extends EventEmitter {
     }
 
     /**
-     * Remove a typed edge between two documents (both mirrors + meta).
+     * Remove a DERIVED typed edge (both mirrors + meta). Refuses asserted
+     * edges: those are owned by the subject row's `data.relations`, and
+     * removing the edge alone would leave the row claiming a relationship the
+     * graph no longer has — drift that only a rebuild would surface.
      */
     async unrelate(fromId, predicate, toId) {
+        const existing = this.#edges.edge(fromId, predicate, toId);
+        if (existing && existing.meta?.src === 'doc') {
+            throw new Error(
+                `Edge ${fromId} --${predicate}--> ${toId} is asserted (owned by the document's ` +
+                'data.relations) — use retractRelation() instead of unrelate()',
+            );
+        }
         return this.#edges.unlink(fromId, predicate, toId);
+    }
+
+    /**
+     * Assert a relation by writing it through the SUBJECT document's own
+     * `data.relations`, then deriving the edge — the row stays the source of
+     * truth and `rebuildL3()` can always reconstruct the edge plane. This is
+     * the write path for user/API-drawn relations (the REST relations
+     * endpoint).
+     *
+     * The target may not exist yet (dangling `to` ids are allowed by design —
+     * query-time candidate intersection filters them); callers that want a
+     * hard existence guarantee check before calling.
+     *
+     * @param {number} docId subject document (edge source)
+     * @param {string} predicate see indexes/edges/predicates.js
+     * @param {number} toId edge target
+     * @returns {boolean} true if the relation was added, false if it was
+     *          already present (no-op, nothing written)
+     */
+    async assertRelation(docId, predicate, toId) {
+        return await this.#writeAssertedRelation(docId, predicate, toId, 'assert');
+    }
+
+    /**
+     * Retract an asserted relation: remove it from the subject document's
+     * `data.relations` and drop the derived edge. Derived (extractor/agent)
+     * edges between the same pair are untouched — they are not the row's to
+     * delete.
+     *
+     * @returns {boolean} true if the relation was removed, false if the
+     *          document does not declare it (or the document no longer exists —
+     *          its edges died with it in deleteNode)
+     */
+    async retractRelation(docId, predicate, toId) {
+        return await this.#writeAssertedRelation(docId, predicate, toId, 'retract');
+    }
+
+    async #writeAssertedRelation(docIdentifier, predicate, toIdentifier, op) {
+        const docId = Number(docIdentifier);
+        if (!Number.isInteger(docId) || docId <= 0) { throw new Error(`Invalid document id: ${docIdentifier}`); }
+        const to = Number(toIdentifier);
+        if (!Number.isInteger(to) || to <= 0) { throw new Error(`Invalid relation target id: ${toIdentifier}`); }
+        predicateId(predicate); // throws on unknown and inverse-style names
+
+        const storedDocument = await this.#getById(docId);
+        if (!storedDocument) {
+            if (op === 'retract') { return false; } // doc gone → its edges died in deleteNode
+            throw new Error(`Document with ID "${docId}" not found`);
+        }
+
+        const previous = documentRelations(storedDocument);
+        const key = relationKey({ p: predicate, to });
+        const present = previous.some((r) => relationKey(r) === key);
+        if (op === 'assert' ? present : !present) { return false; }
+
+        const current = op === 'assert'
+            ? [...previous, { p: predicate, to }]
+            : previous.filter((r) => relationKey(r) !== key);
+
+        // Relations are structural, not content (NON_CONTENT_DATA_KEYS): the
+        // checksum/FTS/embedding projections all strip them via contentData(),
+        // so this write needs none of #updateOne's identity churn — just the
+        // row, the crud:updated timeline, and the edge diff.
+        storedDocument.data = { ...storedDocument.data };
+        if (current.length > 0) { storedDocument.data.relations = current; }
+        else { delete storedDocument.data.relations; }
+        storedDocument.updatedAt = new Date().toISOString();
+
+        await this.documents.put(docId, storedDocument);
+        await this.#timelineIndex.insert('crud:updated', docId, storedDocument.updatedAt);
+        this.#syncDocumentRelations(docId, previous, current);
+
+        this.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
+            id: docId, document: storedDocument, reason: 'relations',
+        }));
+        return true;
+    }
+
+    /**
+     * One-off repair: fold asserted edges that exist ONLY in the edge plane
+     * back into their subject documents' `data.relations`. Heals data written
+     * by the pre-write-through REST path (which linked edges directly, leaving
+     * them invisible to the L3 rebuild). Idempotent — a healthy store is a
+     * full scan and zero writes.
+     *
+     * @returns {Promise<{scanned:number, patched:number, orphaned:number}>}
+     *          orphaned = asserted edges whose source document no longer exists
+     */
+    async backfillAssertedRelations() {
+        // Materialize first: allEdges() pins a read txn, and assertRelation writes.
+        const asserted = [];
+        for (const edge of this.#edges.allEdges()) {
+            if (edge.meta?.src === 'doc') { asserted.push(edge); }
+        }
+
+        let patched = 0;
+        let orphaned = 0;
+        for (const { from, p, to } of asserted) {
+            const doc = await this.#getById(from);
+            if (!doc) { orphaned++; continue; }
+            if (await this.assertRelation(from, p, to)) { patched++; }
+        }
+
+        debug(`backfillAssertedRelations: scanned ${asserted.length} asserted edges, patched ${patched}, orphaned ${orphaned}`);
+        return { scanned: asserted.length, patched, orphaned };
     }
 
     async unlink(idOrIds, spec = {}) {
@@ -3115,14 +3253,21 @@ class SynapsD extends EventEmitter {
 
     // One rel entry -> the sorted adjacency list for (of, p) in the requested
     // direction, lifted into an ephemeral bitmap. `new RoaringBitmap32(array)` is
-    // fine here: the dupsort iteration is already sorted.
+    // fine here: the dupsort iteration is already sorted. A multi-id `of` unions
+    // its adjacency lists into ONE operand (see parseRel) before the sigil
+    // algebra runs.
     async #combineRelFilters(relFilters) {
         return await this.#combineSigilFilters(relFilters, (f) => {
-            const iterator = f.dir === 'in'
-                ? this.#edges.incoming(f.of, f.p)
-                : this.#edges.outgoing(f.of, f.p);
-            // Drain promptly — a live iterator pins an LMDB read txn.
-            return new RoaringBitmap32([...iterator]);
+            const anchors = Array.isArray(f.of) ? f.of : [f.of];
+            const bitmap = new RoaringBitmap32();
+            for (const anchor of anchors) {
+                const iterator = f.dir === 'in'
+                    ? this.#edges.incoming(anchor, f.p)
+                    : this.#edges.outgoing(anchor, f.p);
+                // Drain promptly — a live iterator pins an LMDB read txn.
+                bitmap.orInPlace(new RoaringBitmap32([...iterator]));
+            }
+            return bitmap;
         });
     }
 

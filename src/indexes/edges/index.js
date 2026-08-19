@@ -267,6 +267,21 @@ export default class EdgeIndex {
     }
 
     /**
+     * Lazily iterate EVERY edge in the index, with provenance. Maintenance-path
+     * only (backfill/audit) — this is a full scan of edges_fwd plus one meta
+     * lookup per edge. Same iterator caveat as everything else here: drain it
+     * fully before writing anything.
+     * @yields {{from:number, p:string, to:number, meta:object}}
+     */
+    *allEdges() {
+        for (const { key, value } of this.#fwd.getRange()) {
+            const [from, pid] = key;
+            const meta = this.#meta.get([from, pid, value]) ?? { src: 'doc' };
+            yield { from, p: predicateName(pid), to: value, meta };
+        }
+    }
+
+    /**
      * Lifecycle
      */
 

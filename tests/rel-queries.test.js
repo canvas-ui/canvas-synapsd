@@ -153,6 +153,35 @@ describe('rel query bucket', () => {
         await expect(db.list({ rel: { of: 1 } })).rejects.toThrow(/requires a predicate/);
         await expect(db.list({ rel: { p: 'mentions', of: 1, dir: 'sideways' } })).rejects.toThrow(/'out' or 'in'/);
         await expect(db.list({ rel: { p: 'mentioned-by', of: 1 } })).rejects.toThrow(/Direction is an axis/);
+        // [] would be an always-empty operand silently blanking the result set.
+        await expect(db.list({ rel: { p: 'mentions', of: [] } })).rejects.toThrow(/empty "of" array/);
+    });
+
+    test('a multi-id "of" unions its adjacency lists into one operand', async () => {
+        // Two identities that both look like "Jane" to a name resolver: the
+        // filter must mean "authored by EITHER", AND-composable with the rest.
+        const jane1 = await db.put(note('jane-doe'));
+        const jane2 = await db.put(note('jane-d'));
+        const a = await db.put(note('a', [{ p: 'authored-by', to: jane1 }]));
+        const b = await db.put(note('b', [{ p: 'authored-by', to: jane2 }]));
+        await db.put(note('unattributed'));
+
+        expect(ids(await db.list({ rel: { op: 'allOf', p: 'authored-by', of: [jane1, jane2], dir: 'in' }, limit: 0 })))
+            .toEqual([a, b].sort());
+
+        // Still one operand under the sigil algebra: AND-ing a second allOf
+        // entry intersects, it does not pool into the union.
+        const both = await db.put(note('both', [
+            { p: 'authored-by', to: jane1 },
+            { p: 'mentions', to: jane2 },
+        ]));
+        expect(ids(await db.list({
+            rel: [
+                { op: 'allOf', p: 'authored-by', of: [jane1, jane2], dir: 'in' },
+                { op: 'allOf', p: 'mentions', of: jane2, dir: 'in' },
+            ],
+            limit: 0,
+        }))).toEqual([both]);
     });
 });
 
