@@ -36,8 +36,8 @@ describe('SynapsD relations (dupsort edge plane)', () => {
         const a = await db.put(note('attachment-a'));
         const b = await db.put(note('attachment-b'));
 
-        await db.relate(email, 'includes', a);
-        await db.relate(email, 'includes', b);
+        await db.relate(email, 'includes', a, { meta: { src: 'extractor:test' } });
+        await db.relate(email, 'includes', b, { meta: { src: 'extractor:test' } });
 
         expect([...db.edges.outgoing(email, 'includes')].sort()).toEqual([a, b].sort());
         // reverse: which docs include `a` — direction is an axis, not a predicate name
@@ -50,8 +50,8 @@ describe('SynapsD relations (dupsort edge plane)', () => {
         const e2 = await db.put(note('email-2'));
         const pdf = await db.put(note('shared.pdf'));
 
-        await db.relate(e1, 'includes', pdf);
-        await db.relate(e2, 'includes', pdf);
+        await db.relate(e1, 'includes', pdf, { meta: { src: 'extractor:test' } });
+        await db.relate(e2, 'includes', pdf, { meta: { src: 'extractor:test' } });
 
         expect([...db.edges.incoming(pdf, 'includes')].sort()).toEqual([e1, e2].sort());
     });
@@ -59,7 +59,7 @@ describe('SynapsD relations (dupsort edge plane)', () => {
     test('unrelate removes both directions', async () => {
         const x = await db.put(note('x'));
         const y = await db.put(note('y'));
-        await db.relate(x, 'references', y);
+        await db.relate(x, 'references', y, { meta: { src: 'extractor:test' } });
         await db.unrelate(x, 'references', y);
 
         expect([...db.edges.outgoing(x, 'references')]).toEqual([]);
@@ -70,8 +70,8 @@ describe('SynapsD relations (dupsort edge plane)', () => {
         const email = await db.put(note('email'));
         const a = await db.put(note('a'));
         const b = await db.put(note('b'));
-        await db.relate(email, 'includes', a);
-        await db.relate(email, 'includes', b);
+        await db.relate(email, 'includes', a, { meta: { src: 'extractor:test' } });
+        await db.relate(email, 'includes', b, { meta: { src: 'extractor:test' } });
 
         await db.delete(a);
 
@@ -83,7 +83,7 @@ describe('SynapsD relations (dupsort edge plane)', () => {
         const offline = await db.put(note('offline.html'));
 
         const beforeLayers = await db.synapses.listSynapses(offline);
-        await db.relate(tab, 'includes', offline, { inheritMemberships: true });
+        await db.relate(tab, 'includes', offline, { inheritMemberships: true, meta: { src: 'extractor:test' } });
         const afterLayers = await db.synapses.listSynapses(offline);
 
         const tabLayers = await db.synapses.listSynapses(tab);
@@ -95,7 +95,7 @@ describe('SynapsD relations (dupsort edge plane)', () => {
     test('unknown predicate is rejected', async () => {
         const x = await db.put(note('x'));
         const y = await db.put(note('y'));
-        await expect(db.relate(x, 'attachment-of', y)).rejects.toThrow(/Unknown predicate/);
+        await expect(db.relate(x, 'attachment-of', y, { meta: { src: 'extractor:test' } })).rejects.toThrow(/Unknown predicate/);
     });
 
     test('the rel/ bitmap namespace is gone — stragglers throw', async () => {

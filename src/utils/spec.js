@@ -167,11 +167,22 @@ export function parseRel(rawSpec = {}) {
         // errors and yields an empty bitmap, so an unknown or inverse-style
         // predicate would SILENTLY widen the result set instead of failing.
         predicateId(entry.p);
-        const of = typeof entry.of === 'string' && /^\d+$/.test(entry.of.trim())
-            ? parseInt(entry.of, 10)
-            : entry.of;
-        if (!Number.isInteger(of) || of <= 0) {
-            throw new Error(`rel entry for predicate "${entry.p}" requires a positive integer document id as "of"`);
+        // `of` may be one id or an array of ids ("any of these anchors"): the
+        // combiner unions the adjacency lists BEFORE the sigil algebra, so an
+        // allOf entry with three ids means "related to at least one of the
+        // three" AND-ed with the other constraints — the shape a name resolving
+        // to several identity documents needs. [] would be an always-empty
+        // operand that silently blanks the result set, so it is rejected.
+        const normalizeOf = (value) => {
+            const n = typeof value === 'string' && /^\d+$/.test(value.trim()) ? parseInt(value, 10) : value;
+            if (!Number.isInteger(n) || n <= 0) {
+                throw new Error(`rel entry for predicate "${entry.p}" requires a positive integer document id as "of"`);
+            }
+            return n;
+        };
+        const of = Array.isArray(entry.of) ? entry.of.map(normalizeOf) : normalizeOf(entry.of);
+        if (Array.isArray(of) && of.length === 0) {
+            throw new Error(`rel entry for predicate "${entry.p}" has an empty "of" array`);
         }
         const dir = String(entry.dir || 'out').toLowerCase();
         if (dir !== 'out' && dir !== 'in') {
