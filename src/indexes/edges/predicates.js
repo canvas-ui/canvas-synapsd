@@ -34,6 +34,14 @@
  *   hand-written mention would be byte-identical in the index with nothing to tell
  *   them apart. Conflating is a lossy one-way door; appending an id is one line.
  *
+ * `member-of` (added 2026-08-19) is affiliation between two identities: a person
+ * to an organization. It is deliberately NOT `references`, for the same reason
+ * `depicts` is not `mentions` — a soft link and an employment are answers to
+ * different questions, and collapsing them makes "everyone at Acme"
+ * indistinguishable from "everything that links to Acme" with no way back
+ * short of a migration. The subject is the MEMBER, per the document-as-subject
+ * convention; "who works here" is the incoming axis.
+ *
  * Recipients (email To/Cc -> identity) are deferred, not rejected: the role is
  * distinct from authorship and cannot live in edge meta without colliding with the
  * asserted-edge convention above. `data.to`/`data.cc` stay ordinary fields until
@@ -49,6 +57,7 @@ export const PREDICATES = {
     'replies-to': { id: 5 },    // threading: message -> message
     'depicts': { id: 6 },       // media subject: image -> identity (face tags)
     'authored-by': { id: 7 },   // authorship: message/document -> identity (sender, author)
+    'member-of': { id: 8 },     // affiliation: identity -> identity (person -> organization)
 };
 
 // id -> name, built once. Used to decode ids read back out of keys.
