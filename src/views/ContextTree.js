@@ -378,6 +378,99 @@ class ContextTree extends EventEmitter {
         }
     }
 
+    /**
+     * Resolve a path into { leaf, ancestors } layer ids for the path-scoped
+     * bitmap ops. Root and canvas leaves carry no path bitmap (see
+     * resolveLayerIds), so they are never a source nor a target.
+     */
+    #pathBitmapLayers(path) {
+        const normalizedPath = this.#normalizePath(path);
+        const nodes = this.#getNodesForPath(normalizedPath).slice(1); // drop root
+        if (nodes.length === 0) { throw new Error('Cannot operate on the root path'); }
+        const leaf = nodes[nodes.length - 1].payload;
+        if (leaf.type === 'canvas') { throw new Error(`"${leaf.name}" is a canvas (a saved view), it has no path bitmap`); }
+        const ancestors = nodes.slice(0, -1)
+            .map((node) => node.payload)
+            .filter((layer) => layer.type !== 'canvas');
+        return { normalizedPath, leaf, ancestors };
+    }
+
+    /**
+     * "Merge down": OR the leaf layer's bitmap into EVERY ancestor layer on
+     * `path`, so that reading the path (AND of all segments) yields the leaf's
+     * documents. Use after moving a node under ancestors that have not yet
+     * "seen" its documents (/home/music/rock → /music/playlists/genre/rock).
+     *
+     * Source/targets are derived from the path, so — unlike mergeLayer() —
+     * the caller cannot accidentally swap them and pour an ancestor into its
+     * descendants.
+     *
+     * @returns {{ data: { path, source, targets, affected }, count, error }}
+     */
+    async mergeDown(path) {
+        if (!this.#bitmapCollection) { throw new Error('Bitmap collection not passed to ContextTree, functionality not available'); }
+        try {
+            const { normalizedPath, leaf, ancestors } = this.#pathBitmapLayers(path);
+            const targetIds = ancestors.map((layer) => layer.id);
+            const affected = targetIds.length
+                ? await this.#bitmapCollection.mergeBitmap(leaf.id, targetIds)
+                : [];
+            if (targetIds.length) {
+                this.#emitTreeEvent(EVENTS.TREE_LAYER_MERGED, {
+                    source: leaf.name,
+                    sourceId: leaf.id,
+                    targets: targetIds,
+                    affected,
+                    path: normalizedPath,
+                    direction: 'down',
+                });
+            }
+            return {
+                data: { path: normalizedPath, source: leaf.id, targets: targetIds, affected },
+                count: affected.length,
+                error: null,
+            };
+        } catch (error) {
+            debug(`Error merging down path "${path}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
+    }
+
+    /**
+     * Inverse of mergeDown(): AND-NOT the leaf layer's bitmap out of every
+     * ancestor layer on `path`. Documents that live in an ancestor for other
+     * reasons are removed too (bitmaps carry no provenance) — this is the
+     * "undo" of a merge down, not a surgical unlink.
+     */
+    async subtractDown(path) {
+        if (!this.#bitmapCollection) { throw new Error('Bitmap collection not passed to ContextTree, functionality not available'); }
+        try {
+            const { normalizedPath, leaf, ancestors } = this.#pathBitmapLayers(path);
+            const targetIds = ancestors.map((layer) => layer.id);
+            const affected = targetIds.length
+                ? await this.#bitmapCollection.subtractBitmap(leaf.id, targetIds)
+                : [];
+            if (targetIds.length) {
+                this.#emitTreeEvent(EVENTS.TREE_LAYER_SUBTRACTED, {
+                    source: leaf.name,
+                    sourceId: leaf.id,
+                    targets: targetIds,
+                    affected,
+                    path: normalizedPath,
+                    direction: 'down',
+                });
+            }
+            return {
+                data: { path: normalizedPath, source: leaf.id, targets: targetIds, affected },
+                count: affected.length,
+                error: null,
+            };
+        } catch (error) {
+            debug(`Error subtracting down path "${path}": ${error.message}`);
+            return { data: null, count: 0, error: error.message };
+        }
+    }
+
     async convertLayer(layerId, targetType) {
         try {
             const converted = await this.#layerIndex.convertLayer(layerId, targetType);
@@ -542,10 +635,18 @@ class ContextTree extends EventEmitter {
         }
     }
 
-    async movePath(pathFrom, pathTo, recursive = false) {
+    /**
+     * Move a node under `pathTo`. Bitmaps are untouched by design (a layer IS
+     * its bitmap; tree position is only a filter) — pass `{ mergeDown: true }`
+     * to also OR the moved layer into its new ancestors so the new path reads
+     * its documents immediately (see mergeDown()).
+     */
+    async movePath(pathFrom, pathTo, recursive = false, options = {}) {
+        if (recursive && typeof recursive === 'object') { options = recursive; recursive = Boolean(options.recursive); }
+        const mergeDown = Boolean(options?.mergeDown);
         const normalizedPathFrom = this.#normalizePath(pathFrom);
         const normalizedPathTo = this.#normalizePath(pathTo);
-        debug(`Moving normalized path "${normalizedPathFrom}" under "${normalizedPathTo}"${recursive ? ' recursively' : ''}`);
+        debug(`Moving normalized path "${normalizedPathFrom}" under "${normalizedPathTo}"${recursive ? ' recursively' : ''}${mergeDown ? ' + mergeDown' : ''}`);
 
         try {
             let sourceNodes, destNodes, nodeToMove, sourceParentNode, destNode;
@@ -632,10 +733,18 @@ class ContextTree extends EventEmitter {
                 pathFrom: normalizedPathFrom,
                 pathTo: normalizedPathTo,
                 recursive,
+                mergeDown,
                 layerId: layer.id,
                 layerName: layer.name,
                 layerType: layer.type,
             });
+
+            let merged = null;
+            if (mergeDown && layer.type !== 'canvas' && this.#bitmapCollection) {
+                const movedPath = normalizedPathTo === '/' ? `/${layer.name}` : `${normalizedPathTo}/${layer.name}`;
+                merged = await this.mergeDown(movedPath);
+                if (merged.error) { debug(`mergeDown after move failed: ${merged.error}`); }
+            }
 
             debug(`Path "${normalizedPathFrom}" successfully moved under "${normalizedPathTo}".`);
             return {
@@ -644,6 +753,7 @@ class ContextTree extends EventEmitter {
                     pathTo: normalizedPathTo,
                     layerId: layer.id,
                     layerName: layer.name,
+                    ...(merged ? { mergeDown: merged.data, mergeDownError: merged.error } : {}),
                 },
                 count: 1,
                 error: null,
