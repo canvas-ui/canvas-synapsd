@@ -41,7 +41,12 @@ export default class File extends Document {
         // plus the document's own name so a renamed file is findable by the name
         // the user gave it. Additive: documents without metadata.filename index
         // exactly as before, so no reindex is required for existing rows.
-        ftsSearchFields: ['locationUrls', 'metadata.filename'],
+        // `metadata.text.content` is the searchable head of a text blob, put
+        // there by the ingest extractor. Without it a File is findable only by
+        // its NAME — so a note-shaped thing that arrived as a file (a markdown
+        // file, a config, a source file) matched nothing you could remember
+        // about what it SAYS. Additive: files without it index as before.
+        ftsSearchFields: ['locationUrls', 'metadata.filename', 'metadata.text.content'],
         vectorEmbeddingFields: ['locationUrls'],
         // File relies on external checksumArray, so we don't modify checksumFields here
     };

@@ -1287,6 +1287,7 @@ class SynapsD extends EventEmitter {
                 let prevLocations = null;
                 let prevComment = null;
                 let prevSummary = null;
+                let prevText = null;
                 let prevTimelineState = null;
                 let prevFacetKeys = null;
                 let prevFeatureKeys = null;
@@ -1315,6 +1316,7 @@ class SynapsD extends EventEmitter {
                         prevLocations = Array.isArray(existing.locations) ? [...existing.locations] : [];
                         prevComment = typeof existing.comment === 'string' ? existing.comment : '';
                         prevSummary = typeof existing.metadata?.summary === 'string' ? existing.metadata.summary : '';
+                        prevText = typeof existing.metadata?.text?.content === 'string' ? existing.metadata.text.content : '';
                         prevTimelineState = {
                             timelines: Array.isArray(existing.timelines)
                                 ? existing.timelines.map(entry => ({ ...entry }))
@@ -1351,6 +1353,7 @@ class SynapsD extends EventEmitter {
                         prevLocations = Array.isArray(existing.locations) ? [...existing.locations] : [];
                         prevComment = typeof existing.comment === 'string' ? existing.comment : '';
                         prevSummary = typeof existing.metadata?.summary === 'string' ? existing.metadata.summary : '';
+                        prevText = typeof existing.metadata?.text?.content === 'string' ? existing.metadata.text.content : '';
                         prevTimelineState = {
                             timelines: Array.isArray(existing.timelines)
                                 ? existing.timelines.map(entry => ({ ...entry }))
@@ -1389,7 +1392,7 @@ class SynapsD extends EventEmitter {
 
                 validateDocumentRelations(parsed);
 
-                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevSummary, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures };
+                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevSummary, prevText, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures };
                 prepared.push(entry);
                 if (!isUpdate) {
                     const primaryChecksum = parsed.getPrimaryChecksum();
@@ -1491,6 +1494,10 @@ class SynapsD extends EventEmitter {
             // Same for the generated summary: a metadata.summary patch (captioner
             // writing back) changes FTS text without touching checksums.
             if ((p.prevSummary ?? '') !== (typeof p.parsed.metadata?.summary === 'string' ? p.parsed.metadata.summary : '')) { return true; }
+            // And for extracted blob text: a File's checksum is of its BYTES, so
+            // text arriving late (backfill on an already-stored blob) would
+            // otherwise never reach the index.
+            if ((p.prevText ?? '') !== (typeof p.parsed.metadata?.text?.content === 'string' ? p.parsed.metadata.text.content : '')) { return true; }
             const prev = p.prevChecksums;
             if (!Array.isArray(prev)) { return true; }
             const cur = p.parsed.checksumArray || [];
