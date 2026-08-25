@@ -4,7 +4,7 @@
 
 # SynapsD
 
-A small KV database on `LMDB`, with `roaring-bitmap` and `LanceDB` indexes. Store a JSON document once, then place it in as many views as you need: a project tree, a tag, a timeline, a map, a dataset. Each appearance costs bitmap bits, not copies. Every filter below narrows the same candidate set, so they combine freely in one query.
+A small KV database built on top of `LMDB`, with `roaring-bitmap` and `LanceDB` indexes in-the-mix, purpose-built to index the inflow of unstructured data in an almost ordinary Universe. Synapsd exports virtual bitmap-powered FS-like trees on top of your data - store a JSON document once, then place it in as many views as you need: a project tree, a tag, a timeline, a map, a dataset. Each appearance costs bitmap bits, not copies. Every filter below narrows the same candidate set, so they combine freely in one query.
 
 SynapsD indexes metadata and structure. It does not store blob bytes, and it does not run an embedding model. Point `locations[]` at wherever the bytes live. Push vectors in from your own embedder, or skip that stack and everything falls back to full-text.
 
