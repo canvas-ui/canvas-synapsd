@@ -12,7 +12,7 @@ SynapsD indexes metadata and structure. It does not store blob bytes, and it doe
 
 - **[Context trees](#trees)** - virtual, filesystem-like trees over your data. A path is a logical AND of the layers along it: `ctx:/work/customer-foo/project-bar/task-baz` is "everything linked to all four", and shortening the path *widens* the result. One document can live in many trees; placement is cheap and reversible.
 - **[Bitmap-powered search](#the-query-spec)** - membership, tags, facets, mime types, device presence and schema identity are roaring bitmaps, so "files in `/work/customer-foo`, tagged `finance`, not in staging" is a set intersection. Counts, existence checks and live standing views come off the bitmaps without loading a single document.
-- **[Multi-timeline support](#timelines-and-intervals)** - any number of named time axes per document, from nanoseconds to gigayears on one grammar: "updated today", "due this week", "Roman Empire, 27 BCE–476 CE", open-ended "still alive" intervals, and [zeitgeist queries](#the-zeitgeist-of-a-birthday) that answer "what does this date mean across wikipedia AND my life" in one call.
+- **[Multi-timeline support](#timelines-and-intervals)** - any number of named time axes per document, from nanoseconds to gigayears on one grammar: "updated today", "due this week", "Roman Empire, 27 BCE–476 CE", open-ended "still alive" intervals, and [zeitgeist queries](#the-zeitgeist-of-a-birthday) (`grouped` by source, `layers` by scale) that answer "what does this date mean across wikipedia AND my life" in one call.
 - **[Vector search](#semantic-search-vectors)** - BM25 full-text and dense-vector kNN fused with RRF, running only on documents that already survived the structural filter. SynapsD stores and namespaces vectors but owns no model: a three-call contract fills the spaces, and without an embedder everything degrades to FTS.
 - **[Datasets](#datasets)** - named ingest partitions (`data/dataset/wikipedia`, `data/dataset/personal`) you toggle in and out of *every* query like lenses, and drop wholesale without touching your own documents.
 - **[Typed edges](#relations-and-edges)** - a directed document graph (`mentions`, `replies-to`, `authored-by`, …) that composes into the same pipeline: "everything mentioning Alice, in this context, tagged important" is a one-hop scan ANDed into the candidate bitmap.
@@ -105,12 +105,19 @@ const pending = await db.list({
 
 ### The zeitgeist of a birthday
 
-Grandma was born 12 April 1938. What else was happening: two historians, Wikipedia, and your own life, in one call.
+Grandma was born 12 April 1938. What else was happening: two historians, Wikipedia, and your own life, in one call. Two retrieval modes on the same query: `grouped` is per-source, `layers` keeps the scale (year vs day vs Myr) so a UI can stack them.
 
 ```js
 await db.timeline.createTimeline('wikipedia');
 await db.timeline.createTimeline('britannica');
 await db.timeline.createTimeline('personal');
+
+await db.put({
+    schema: 'data/schema/document',
+    data: { title: '1938', text: 'The year 1938.' },
+    timelines: [{ name: 'wikipedia', start: '1938', end: '1938' }],
+    features: ['data/dataset/wikipedia'],
+});
 
 await db.put({
     schema: 'data/schema/document',
@@ -132,18 +139,30 @@ await db.put({
     timelines: [{ name: 'personal', start: '1938-04-12' }],
 }, { paths: ['ctx:/family/grandma'] });
 
-const zeitgeist = await db.timeline.queryInterval(
+const grouped = await db.timeline.queryInterval(
     ['wikipedia', 'britannica', 'personal'],
     { start: '1938-04-12', end: '1938-04-12' },
     { mode: 'grouped' },
 );
 // {
-//   wikipedia:  [/* Anschluss still covers April 12? no; empty */],
-//   britannica: [],
+//   wikipedia:  [year1938Id],          // year-scale 1938 covers the day
+//   britannica: [],                    // Munich is September; still present as []
 //   personal:   [grandmaNoteId],
 // }
 
-// Widen the window to the year, keep the corpora as lenses.
+const layers = await db.timeline.queryInterval(
+    ['wikipedia', 'britannica', 'personal'],
+    { start: '1938-04-12', end: '1938-04-12' },
+    { mode: 'layers' },
+);
+// {
+//   wikipedia:  { year: [year1938Id] },
+//   britannica: {},
+//   personal:   { day: [grandmaNoteId] },
+// }
+
+// Widen the window to the year. Grouped for a source list; layers if the UI
+// wants year-scale encyclopaedia next to day-scale family notes.
 const thatYear = await db.timeline.queryInterval(
     ['wikipedia', 'britannica', 'personal'],
     { start: '1938-01-01', end: '1938-12-31' },
@@ -164,7 +183,7 @@ const mixed = await db.list({
 });
 ```
 
-`mode: 'grouped'` returns every requested timeline, empty as `[]`. A year-scale Wikipedia article and a day-precise personal note both match `1938-04-12` when their intervals cover it. Open-ended lives (`end: Infinity`) match any later query automatically.
+`grouped` returns every requested timeline, empty as `[]`. `layers` is `{ name: { scale: [ids] } }`: only scales that hit are present (plus `multi` for non-primary positions). A year-scale Wikipedia article and a day-precise personal note both match `1938-04-12` when their intervals cover it. Open-ended lives (`end: Infinity`) match any later query automatically. Default `mode` is `union`: one flat id array.
 
 ### Agentic search that refines as it thinks
 
@@ -270,9 +289,9 @@ const inView = await db.list({
 
 ### Around me, and what the camera sees
 
-You are standing somewhere. Two questions, same geo filter: what did I already file here, and what in my archive looks like what I am looking at right now.
+You are standing somewhere. Two questions, same geo filter: what did I already file here, and what in my archive looks like this camera frame.
 
-The first is GPS. The second is a vision producer (Inferd, once it streams live captions and image embeddings from a camera frame). SynapsD never sees the bytes. It ranks documents that already survived the structural filter.
+The first is GPS. The second is already live: Inferd embeds each frame into the same joint image space the archive uses (`embedImageQuery`; the vector is ephemeral, never indexed). SynapsD never sees the bytes. It ranks documents that already survived the structural filter.
 
 ```js
 const { lat, lon } = gps.here();
@@ -299,27 +318,25 @@ async function onGps({ lat, lon }) {
     await walk.set('here', { filters: [`geo:near:${lat},${lon},300m`] });
 }
 
-// Live camera frame. Inferd (or any vision stack) describes and embeds it;
-// synapsd matches that against documents, including ones whose visual
-// description landed later as metadata.summary + an image-space vector.
+// Each camera frame. Inferd embeds it; synapsd does kNN in the image space,
+// still scoped to "here".
 async function onFrame(frameBytes) {
-    const caption  = await inferd.describeImage(frameBytes);   // "red brick facade, scaffolding,…"
-    const imageVec = await inferd.embedImage(frameBytes);      // same joint space as stored photos
-
-    const byCaption = await walk.materialize(caption, { limit: 12, mode: 'hybrid' });
+    const imageVec = await inferd.embedImageQuery(wsId, frameBytes, 'image/jpeg');
 
     const byLook = await db.searchByVector(imageVec, {
         filters: [`geo:near:${lat},${lon},300m`],
         features: ['data/mime/image', 'data/schema/note', 'data/schema/file'],
     }, { space: 'image', limit: 12 });
 
-    return { byCaption, byLook };
+    // Optional: caption the frame and rank text (notes, mail, metadata.summary).
+    const caption = await inferd.describeImage(wsId, frameBytes);
+    const byCaption = await walk.materialize(caption, { limit: 12, mode: 'hybrid' });
+
+    return { byLook, byCaption };
 }
 ```
 
-`byCaption` is lexical + dense text: notes, emails, and files whose `metadata.summary` (a generated caption) or body mention what the camera described. `byLook` is cross-modal image kNN: photos (and any other doc with an image-space vector) that *look* like the frame, still scoped to "here". Tighten the radius, add a path, or drop geo entirely if the match should be global.
-
-Until Inferd streams live frames, the same two calls work on a still: pass a photo's bytes in, or skip `embedImage` and `query(caption)` a handwritten description against the archive.
+`byLook` is the live-video path: cross-modal image kNN against stored photos (and any other doc with an image-space vector). Drop the geo filter if the match should be global; add a path or mime gate to tighten it. `describeImage` is optional (`summarize.image.enabled`) and feeds the lexical/hybrid leg: notes and files whose body or `metadata.summary` mention what the camera described.
 
 ---
 
@@ -1072,11 +1089,31 @@ await db.timeline.queryInterval('life', null, '2000');   // (-inf, 2000]
 await db.timeline.queryInterval('life', '2008', '2008'); // bounded point
 ```
 
-### Multi-timeline retrieval: `mode: 'grouped'` (zeitgeist)
+### Multi-timeline retrieval: `grouped` and `layers` (zeitgeist)
 
-`queryInterval` takes one or more timeline names and a query `mode`: `union` (default, one flat id array), `layers` (`{ name: { scale: [ids] } }`), or `grouped` (`{ name: [ids] }`, scales pre-unioned). See **[The zeitgeist of a birthday](#the-zeitgeist-of-a-birthday)** for the working example.
+`queryInterval` takes one or more timeline names and a query `mode`. See **[The zeitgeist of a birthday](#the-zeitgeist-of-a-birthday)** for the working example.
 
-Every requested timeline is present in the result (empty as `[]`). Because queries span all scale tiers, a single instant matches a king's reign stored at `year` *and* the geological era stored at `Myr` in the same call.
+| `mode` | Shape | Use when |
+|--------|-------|----------|
+| `union` (default) | `[id, …]` | One flat set |
+| `grouped` | `{ name: [ids] }` | Per-source zeitgeist. Scales pre-unioned; every requested timeline is present, empty as `[]` |
+| `layers` | `{ name: { scale: [ids] } }` | Same query, keep precision. Only scales that hit are present; non-primary positions land under `multi` |
+
+```js
+await db.timeline.queryInterval(
+    ['wikipedia', 'britannica', 'personal'],
+    { start: '1938-04-12', end: '1938-04-12' },
+    { mode: 'grouped' },
+);
+
+await db.timeline.queryInterval(
+    ['wikipedia', 'britannica', 'personal'],
+    { start: '1938-04-12', end: '1938-04-12' },
+    { mode: 'layers' },
+);
+```
+
+Because queries span all scale tiers, a single instant matches a king's reign stored at `year` *and* the geological era stored at `Myr` in the same call.
 
 Canonical calendar and time semantics:
 
