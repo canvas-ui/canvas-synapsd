@@ -3,11 +3,14 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import Db from '../src/index.js';
+import Db, { derivedBitmapPrefixes } from '../src/index.js';
 
 const NOTE = 'data/schema/note';
 const TAB = 'data/schema/tab';
 const FILE = 'data/schema/file';
+const TASK = 'data/schema/task';
+const DEVICE = 'data/schema/device';
+const COMMENT = 'feature/has-comment';
 
 // The derived-plane invariant, executable: drop every derived structure and
 // recompute it from documents + extractors, and the index must come back
@@ -37,6 +40,9 @@ describe('rebuildL3', () => {
         }),
     });
 
+    const hasCommentIds = async () =>
+        (await db.list({ features: [COMMENT], limit: 0 })).map((d) => d.id).sort((a, b) => a - b);
+
     const snapshot = async () => ({
         mime: (await db.list({ features: ['data/mime/image/png'], limit: 0 })).map((d) => d.id),
         backend: (await db.list({ features: ['data/backend/stored/homenas'], limit: 0 })).map((d) => d.id),
@@ -65,6 +71,97 @@ describe('rebuildL3', () => {
         expect(stats.documents).toBe(3);
 
         expect(await snapshot()).toEqual(before);
+    });
+
+    // A user-authored comment cannot be regenerated from anything (a photo's
+    // "two minutes before the wine disaster" is not recoverable from a captioner),
+    // so the bitmap that makes it findable has to come back from the row rather
+    // than relying on no write path ever having missed an untick.
+    test('reproduces feature/has-comment, and drops a stale tick', async () => {
+        const ids = await seed();
+        await db.put({ id: ids.note, comment: 'two minutes before the wine disaster' });
+        // A doc whose comment is gone but whose bitmap is not: only the drop can
+        // fix this, since the replay only ticks.
+        await db.bitmapIndex.tick(COMMENT, ids.tab);
+        expect(await hasCommentIds()).toEqual([ids.note, ids.tab].sort((a, b) => a - b));
+
+        await db.rebuildL3();
+
+        expect(await hasCommentIds()).toEqual([ids.note]);
+        expect((await db.get(ids.note)).comment).toBe('two minutes before the wine disaster');
+    });
+
+    // One document per derived namespace, so the sweep below is not asserting over
+    // an empty plane. Device first: device/os|type resolve through the Device row,
+    // and a file written before it lands only gets device/id.
+    const seedEveryDerivedNamespace = async () => {
+        await db.put({
+            schema: DEVICE,
+            data: { deviceId: 'laptop1', name: 'Laptop', platform: 'linux', type: 'laptop' },
+        });
+        const orphan = await db.put({
+            schema: FILE,
+            data: {},
+            checksumArray: ['sha256/orphan'],
+            locations: [{ url: 'stored://homenas/gone' }],
+        });
+        await db.put({ id: orphan, locations: [], orphanedAt: new Date().toISOString() });
+
+        const ids = await seed();
+        await db.put({ id: ids.note, comment: 'keep me' });
+        return {
+            ...ids,
+            orphan,
+            // device/id + device/os + device/type
+            onDevice: await db.put({
+                schema: FILE,
+                data: {},
+                checksumArray: ['sha256/local'],
+                locations: [{ url: 'file://laptop1/home/idnc/notes.md' }],
+                metadata: { contentType: 'text/markdown' },
+            }),
+            // data/status/* — a per-schema facet namespace, which the drop list has
+            // to compute from the registry rather than hardcode.
+            task: await db.put({ schema: TASK, data: { title: 'ship it', status: 'pending' } }),
+        };
+    };
+
+    // The whole derived plane, keyed by bitmap, membership sorted.
+    const derivedPlane = async () => {
+        const out = {};
+        for (const prefix of derivedBitmapPrefixes()) {
+            for (const key of await db.bitmapIndex.listBitmaps(prefix)) {
+                const bitmap = await db.bitmapIndex.getBitmap(key, false);
+                out[key] = (bitmap?.toArray() ?? []).sort((a, b) => a - b);
+            }
+        }
+        return out;
+    };
+
+    // The generalization of the has-comment case above, and the reason rebuildL3
+    // drops before it replays. The replay only ticks, so a derived namespace the
+    // drop list misses comes out of a rebuild as `stale ∪ derived(rows)` — the
+    // rebuild silently preserves exactly the drift it was run to repair. Asserting
+    // it per-key would mean remembering to extend this test whenever a deriver is
+    // added, so it sweeps every key the fixture produced instead.
+    test('every derived bitmap sheds a tick no row justifies', async () => {
+        await seedEveryDerivedNamespace();
+        const before = await derivedPlane();
+
+        // Guards the sweep against a fixture that quietly stops covering a
+        // namespace, which would let the assertion pass over nothing.
+        for (const prefix of derivedBitmapPrefixes()) {
+            expect({ prefix, keys: Object.keys(before).filter((k) => k.startsWith(`${prefix}/`)) })
+                .not.toEqual({ prefix, keys: [] });
+        }
+
+        // An id with no row behind it: the replay walks documents, so nothing can
+        // put this back and only the drop can take it away.
+        for (const key of Object.keys(before)) { await db.bitmapIndex.tick(key, 999_999); }
+
+        await db.rebuildL3();
+
+        expect(await derivedPlane()).toEqual(before);
     });
 
     test('drops the retired data/kind/* axis instead of re-deriving it', async () => {

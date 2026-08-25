@@ -25,6 +25,7 @@ import LmdbBackend from './backends/lmdb/index.js';
 import schemaRegistry from './schemas/SchemaRegistry.js';
 import { predicateId } from './indexes/edges/predicates.js';
 import { isDocumentData, isDocumentInstance } from './schemas/SchemaRegistry.js';
+import { DERIVED_FEATURE_PREFIXES } from './schemas/Document.js';
 
 // Indexes
 import BitmapIndex from './indexes/bitmaps/index.js';
@@ -67,6 +68,12 @@ const SCHEMA_VERSION_KEY = 'internal/schemaVersion';
 // Presence bitmap for docs carrying a non-empty user-authored comment. A `feature/`
 // key so it is non-internal (listed + user-filterable in the toolbox). Ticked/unticked
 // from doc state on every write, so it is derived and can never drift.
+//
+// Also dropped + replayed by rebuildL3, like every other derived key. That is not
+// redundant with the write-path untick: a comment is the one text class nothing can
+// regenerate (a photo's "two minutes before the wine disaster" is not recoverable
+// from any captioner), so the bitmap that makes it findable must be reconstructable
+// from the row rather than trusting that no write path ever missed an untick.
 const COMMENT_BITMAP_KEY = 'feature/has-comment';
 
 // Per-MIME-type presence bitmaps, derived from a doc's metadata.contentType. Two
@@ -121,16 +128,22 @@ const ENGINE_OWNED_FACET_NAMESPACES = new Set([
 // Device documents are the source of truth for the derived device/os|type facets.
 const DEVICE_SCHEMA_NAME = 'data/schema/device';
 
-// Empty locations[] on a schema that owns backends. Notes/tasks never tick this,
-// so GC listing the key cannot sweep documents that were never expected to have
-// a copy. Same prefix family as data/backend/<scheme>, so strip + rebuildL3
-// already cover it.
-const NO_LOCATION_FEATURE = 'data/backend/no-location';
-const LOCATION_SCHEMAS = ['data/schema/file', 'data/schema/application', 'data/schema/dotfile'];
-function schemaOwnsLocations(schema) {
-    if (typeof schema !== 'string') { return false; }
-    return LOCATION_SCHEMAS.some((id) => schema === id || schema.startsWith(`${id}/`));
-}
+// The orphan bitmap: a document that HAD a resolvable copy and lost it. Derived
+// from `orphanedAt` (+ empty locations, which is what unticks it on re-bind).
+// A `feature/` key for the same reason as feature/has-comment: an engine-observed
+// boolean read off one row field, user-filterable in the toolbox.
+//
+// Deliberately NOT derived from the schema. A per-schema "owns locations" flag
+// cannot answer this for Task: one typed into Canvas is complete without a copy,
+// one mirrored from a deleted GitHub issue is not. Same schema, opposite answers,
+// because the discriminator is per-row provenance.
+//
+// Named for the state it indexes, not for the field it reads. "Has no locations"
+// is a different (much larger, much less useful) set that nothing materializes:
+// every note and local task is in it. A File with no bytes and no orphan stamp is
+// a broken row rather than an orphan, and would want its own key.
+const ORPHANED_FEATURE = 'feature/orphaned';
+
 function facetFieldKeys(doc) {
     const fields = doc?.constructor?.facetFields;
     if (!Array.isArray(fields) || fields.length === 0) { return []; }
@@ -150,6 +163,51 @@ function facetFieldKeys(doc) {
 
     return normalizeBitmapKeys(keys);
 }
+
+// Every `data/<facet>/` namespace any registered schema can emit, computed the
+// same way facetFieldKeys computes it so the two cannot disagree about which
+// namespace a facet field lands in.
+function facetNamespacePrefixes() {
+    const prefixes = new Set();
+    for (const schemaId of schemaRegistry.listSchemas()) {
+        const fields = schemaRegistry.getSchema(schemaId)?.facetFields;
+        for (const field of Array.isArray(fields) ? fields : []) {
+            const namespace = String(field).split('.').pop();
+            if (!namespace || ENGINE_OWNED_FACET_NAMESPACES.has(namespace)) { continue; }
+            prefixes.add(`data/${namespace}`);
+        }
+    }
+    return [...prefixes];
+}
+
+// What rebuildL3 drops before replaying, and it is deliberately the same list
+// Document strips on write: a namespace the engine derives is a namespace no row
+// can assert, so rows are its only source and the rebuild must rebuild ALL of it.
+// Skip a derived namespace here and the rebuild computes `stale ∪ derived(rows)`
+// instead of `derived(rows)` — the replay only ticks — so the drift it was run to
+// repair survives it. The converse is the sharper edge: everything dropped here
+// MUST be reproducible by #replayDerivedPlane, or a rebuild destroys it.
+//
+// Asserted namespaces (tag/, custom/, client/, data/dataset/) are absent on
+// purpose. link() ticks those without touching the row, so the rows are not their
+// only source and dropping them would delete membership nothing can put back.
+export function derivedBitmapPrefixes() {
+    return [
+        ...DERIVED_FEATURE_PREFIXES.map((prefix) => prefix.replace(/\/+$/, '')),
+        ...facetNamespacePrefixes(),
+    ];
+}
+
+// Retired axes: dropped one-way, because nothing derives them any more and a
+// database migrated from an older version still carries the residue. A rebuild is
+// how it sheds them. `data/kind` (2026-08-04) and `data/abstraction` (2026-08-05)
+// lost to `data/schema`; the `no-location` spellings lost to `feature/orphaned`
+// when the orphan axis moved off "empty locations" onto `orphanedAt`.
+const RETIRED_BITMAP_PREFIXES = ['data/kind', 'data/abstraction'];
+// listBitmaps(prefix) scans a `prefix/…` range, so it never returns a leaf key
+// that IS the prefix. `data/backend/no-location` needs no entry here — it sits
+// under the live `data/backend` prefix and gets dropped with it.
+const RETIRED_BITMAP_KEYS = ['data/no-location'];
 
 // A document's root `features` array is DECLARATIVE and authoritative: the
 // document JSON says what it is, and bitmaps follow it 1:1. Every write path
@@ -1291,7 +1349,7 @@ class SynapsD extends EventEmitter {
                 let isUpdate = false;
                 let prevChecksums = null;
                 let prevLocations = null;
-                let prevSchema = null;
+                let prevOrphanedAt = null;
                 let prevComment = null;
                 let prevSummary = null;
                 let prevText = null;
@@ -1321,7 +1379,7 @@ class SynapsD extends EventEmitter {
                         // so stale checksums/timelines/device tags can be cleaned.
                         prevChecksums = Array.isArray(existing.checksumArray) ? [...existing.checksumArray] : [];
                         prevLocations = Array.isArray(existing.locations) ? [...existing.locations] : [];
-                        prevSchema = existing.schema;
+                        prevOrphanedAt = existing.orphanedAt || null;
                         prevComment = typeof existing.comment === 'string' ? existing.comment : '';
                         prevSummary = typeof existing.metadata?.summary === 'string' ? existing.metadata.summary : '';
                         prevText = typeof existing.metadata?.text?.content === 'string' ? existing.metadata.text.content : '';
@@ -1358,7 +1416,7 @@ class SynapsD extends EventEmitter {
                         if (existing.updatedAt) { parsed.updatedAt = existing.updatedAt; }
                         prevChecksums = Array.isArray(existing.checksumArray) ? [...existing.checksumArray] : [];
                         prevLocations = Array.isArray(existing.locations) ? [...existing.locations] : [];
-                        prevSchema = existing.schema;
+                        prevOrphanedAt = existing.orphanedAt || null;
                         prevComment = typeof existing.comment === 'string' ? existing.comment : '';
                         prevSummary = typeof existing.metadata?.summary === 'string' ? existing.metadata.summary : '';
                         prevText = typeof existing.metadata?.text?.content === 'string' ? existing.metadata.text.content : '';
@@ -1400,7 +1458,7 @@ class SynapsD extends EventEmitter {
 
                 validateDocumentRelations(parsed);
 
-                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevSchema, prevComment, prevSummary, prevText, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures };
+                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevOrphanedAt, prevComment, prevSummary, prevText, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures };
                 prepared.push(entry);
                 if (!isUpdate) {
                     const primaryChecksum = parsed.getPrimaryChecksum();
@@ -1441,7 +1499,7 @@ class SynapsD extends EventEmitter {
         try {
             await this.#withDeferredMembership(async () => {
                 await this.bitmapIndex.tick(this.allDocumentsBitmap.key, prepared.map((p) => p.parsed.id));
-                for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevSchema, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures } of prepared) {
+                for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevOrphanedAt, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures } of prepared) {
                     await this.documents.put(parsed.id, parsed);
 
                     // Features this write dropped from the document — untick, or a
@@ -1469,7 +1527,7 @@ class SynapsD extends EventEmitter {
                     this.#syncDocumentRelations(parsed.id, prevRelations, documentRelations(parsed));
                     await this.#indexDocument(parsed.id, contextSpec, directorySpec, docFeatures);
                     if (existing) {
-                        await this.#removeStaleLocationMembership(parsed.id, { schema: prevSchema, locations: prevLocations }, parsed, docFeatures);
+                        await this.#removeStaleLocationMembership(parsed.id, { locations: prevLocations, orphanedAt: prevOrphanedAt }, parsed, docFeatures);
                     }
                     await this.#applyMembership(parsed.hasComment ? 'tick' : 'untick', parsed.id, [COMMENT_BITMAP_KEY]);
                     // Facet bitmaps (mime + status): tick current, untick whatever
@@ -4060,7 +4118,7 @@ class SynapsD extends EventEmitter {
         // Capture locations before update() mutates storedDocument in place, so we can
         // untick device tags for any copy this write dropped.
         const previousLocations = Array.isArray(storedDocument.locations) ? [...storedDocument.locations] : [];
-        const previousSchema = storedDocument.schema;
+        const previousOrphanedAt = storedDocument.orphanedAt || null;
         // Facet keys (mime + status) before update(), so a contentType/status
         // change unticks stale ones.
         const previousFacetKeys = facetBitmapKeys(storedDocument);
@@ -4104,7 +4162,7 @@ class SynapsD extends EventEmitter {
                 if (staleFeatureKeys.length) { await this.#applyMembership('untick', updatedDocument.id, staleFeatureKeys); }
                 // Index across all views using shared helper
                 await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
-                await this.#removeStaleLocationMembership(updatedDocument.id, { schema: previousSchema, locations: previousLocations }, updatedDocument, featureBitmaps);
+                await this.#removeStaleLocationMembership(updatedDocument.id, { locations: previousLocations, orphanedAt: previousOrphanedAt }, updatedDocument, featureBitmaps);
                 // Presence bitmap tracks comment state; untick when cleared on this edit.
                 await this.#applyMembership(updatedDocument.hasComment ? 'tick' : 'untick', updatedDocument.id, [COMMENT_BITMAP_KEY]);
                 // Facet bitmaps (mime + status): tick current keys, untick any the
@@ -5072,11 +5130,19 @@ class SynapsD extends EventEmitter {
      *   device/os/<os>         — the OS of each device it is present on
      *   device/type/<type>     — the type (laptop/desktop/server/…) of each
      *
-     * os/type are resolved through the device's own `data/schema/device`
-     * document (the single source of truth) via #deviceFacets, so
-     * "all applications available on Windows" is a plain bitmap AND rather than
-     * a join. An unregistered device contributes only its id — the facets appear
-     * once its Device document lands and #syncDeviceFacets reconciles.
+     * This is the MACHINE axis, not the addressing one — `data/backend/file/<id>`
+     * says the bytes are reached as a local path, `device/id/<id>` says which box
+     * they are on, and for file:// the two coincide. `device/id` earns its keep as
+     * the union over file:// AND device:// and as the join anchor below.
+     *
+     * Everything past `device/id` is OPTIONAL ENRICHMENT, present only if the app
+     * registered a Device document: os/type resolve through that document (the
+     * single source of truth) via #deviceFacets, so "all applications available on
+     * Windows" is a plain bitmap AND rather than a join. An unregistered device
+     * contributes only its id — the facets appear once its Device document lands
+     * and #syncDeviceFacets reconciles. Further facets (a `device/network/<cidr>`,
+     * say) slot in the same way: add them to deviceFacetsFromData and they inherit
+     * the reconcile.
      *
      * @param {Array<{url:string}>} locations
      * @returns {string[]}
@@ -5209,10 +5275,21 @@ class SynapsD extends EventEmitter {
      * listing of its own namespace; list `data/backend/` instead. Safe here
      * because the parent is ALWAYS ticked.
      *
-     * `file://` and `device://` are skipped: device/* already answers "where do
-     * these bytes live" for device-local copies, and a backend key there would be
-     * a redundant second answer to a solved question. Device-anchored mounts are
-     * still attributed, via `location.metadata.backend` below.
+     * NO scheme is exempt, including `file://` and `device://`. They were skipped
+     * until 2026-08-25 on the grounds that `device/id/*` already answered "where
+     * do these bytes live" for device-local copies, which conflated two axes:
+     * `data/backend/*` is the ADDRESSING mode (how the bytes are reached),
+     * `device/*` is the MACHINE (which box, and what that box is). A local
+     * filesystem is an addressing mode like any other, so `file://laptop1/x`
+     * ticks `data/backend/file` + `data/backend/file/laptop1`.
+     *
+     * The exemption also cost a query nothing else could answer: `data/backend/file`
+     * AND NOT `data/backend/stored` is "exists only as a loose local file",
+     * i.e. backup coverage. Under the skip that needed every device enumerated.
+     *
+     * `device/id/*` stays, and is not made redundant by this: it is the UNION of
+     * the file:// and device:// keys for one authority, so "on laptop1" remains a
+     * single key, and it is the anchor #syncDeviceFacets joins os/type onto.
      *
      * `data/source/*` is GONE, folded into this axis (decided 2026-08-03): once
      * both derive from locations[] they are two projections of the same fact, and
@@ -5222,12 +5299,16 @@ class SynapsD extends EventEmitter {
         const tags = new Set();
 
         for (const loc of Array.isArray(locations) ? locations : []) {
-            // An explicitly declared backend wins. Device-anchored mounts address
-            // their bytes as file://<deviceId>/… so the URL cannot carry the
-            // backend — it lives in location metadata instead. Reading it here is
-            // still generic (a location-metadata key, not a `stored` concept) and
-            // is the "supplied by the client" escape hatch for anything the URL
-            // cannot express.
+            // An explicitly declared backend REPLACES the URL's answer rather than
+            // adding to it, because the case it exists for is the URL lying: a NAS
+            // mounted at /mnt/nas is addressed `file://<deviceId>/mnt/nas/…` but
+            // the bytes are not on that device. Reading it here is still generic
+            // (a location-metadata key, not a `stored` concept).
+            //
+            // Wart: a declared name is flat (`homenas`), so it lands at the level
+            // where every other entry is a scheme. Harmless while the two
+            // vocabularies do not collide, and not worth a `declared/` prefix that
+            // every consumer would have to learn.
             const declared = typeof loc?.metadata?.backend === 'string' ? loc.metadata.backend.trim() : '';
             if (declared) {
                 tags.add(`data/backend/${declared}`);
@@ -5235,7 +5316,7 @@ class SynapsD extends EventEmitter {
             }
 
             const parsed = parseLocationUrl(loc?.url);
-            if (!parsed || parsed.scheme === 'file' || parsed.scheme === 'device') { continue; }
+            if (!parsed) { continue; }
 
             tags.add(`data/backend/${parsed.scheme}`);
             const authority = parsed.backend;
@@ -5298,7 +5379,9 @@ class SynapsD extends EventEmitter {
     #locationDerivedFeatures(doc) {
         const list = Array.isArray(doc?.locations) ? doc.locations : [];
         if (list.length === 0) {
-            return schemaOwnsLocations(doc?.schema) ? [NO_LOCATION_FEATURE] : [];
+            // The empty-locations guard is what unticks on re-bind; orphanedAt alone
+            // would leave the key set on a document that regained a copy.
+            return doc?.orphanedAt ? [ORPHANED_FEATURE] : [];
         }
         return [
             ...this.#deviceFeaturesFromLocations(list),
@@ -5854,6 +5937,10 @@ class SynapsD extends EventEmitter {
                 ...documentFeatureKeys(doc),
                 ...schemaBitmapKeys(doc),
             ];
+            // The user-authored comment is the one text class nothing can
+            // regenerate, so its presence bitmap has to come back from the row like
+            // every other derived key. rebuildL3 drops the bitmap; this re-ticks it.
+            if (doc.hasComment) { derived.push(COMMENT_BITMAP_KEY); }
             await this.#applyMembership('tick', id, normalizeBitmapKeys(derived));
 
             const relations = documentRelations(doc);
@@ -5917,21 +6004,24 @@ class SynapsD extends EventEmitter {
         }
 
         if (bitmaps) {
-            // `data/kind` and `data/abstraction` are dropped but NOT re-derived:
-            // both axes are retired (2026-08-04 / 2026-08-05), so a rebuild is
-            // also how a migrated database sheds their residue. `data/schema` and
-            // `feature/email` are dropped AND re-derived by the replay below.
-            for (const prefix of ['data/kind', 'data/abstraction', 'data/schema', 'data/backend', 'data/mime', 'feature/email']) {
+            // device/os|type resolve through the #deviceFacets cache rather than off
+            // the document being replayed, so the cache has to be row-fresh BEFORE
+            // the drop. Otherwise those two keys are dropped and only partially put
+            // back, which is the one way this rebuild could lose derived state.
+            await this.#loadDeviceFacets();
+
+            for (const prefix of [...derivedBitmapPrefixes(), ...RETIRED_BITMAP_PREFIXES]) {
                 for (const key of await this.bitmapIndex.listBitmaps(prefix)) {
                     await this.bitmapIndex.deleteBitmap(key);
                     stats.bitmapsDropped++;
                 }
             }
-            // Retired exact key (was a sibling of data/backend/*, now data/backend/no-location).
-            try {
-                await this.bitmapIndex.deleteBitmap('data/no-location');
-                stats.bitmapsDropped++;
-            } catch { /* absent */ }
+            for (const key of RETIRED_BITMAP_KEYS) {
+                try {
+                    await this.bitmapIndex.deleteBitmap(key);
+                    stats.bitmapsDropped++;
+                } catch { /* absent */ }
+            }
         }
 
         if (edges || bitmaps) {

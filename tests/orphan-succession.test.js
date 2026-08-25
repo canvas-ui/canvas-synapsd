@@ -7,7 +7,7 @@ import Db from '../src/index.js';
 
 const NOTE_SCHEMA = 'data/schema/note';
 const FILE_SCHEMA = 'data/schema/file';
-const NO_LOCATION = 'data/backend/no-location';
+const ORPHANED = 'feature/orphaned';
 
 function note(title, content = title) {
     return { schema: NOTE_SCHEMA, data: { title, content } };
@@ -26,7 +26,7 @@ function ids(results) {
     return results.map((doc) => doc.id).sort((a, b) => a - b);
 }
 
-// Orphan lifecycle (orphanedAt + data/backend/no-location) and edit-succession
+// Orphan lifecycle (orphanedAt + feature/orphaned) and edit-succession
 // placement migration (migrateDocumentMemberships) — the synapsd primitives
 // behind the workspace's orphan-not-delete reconciliation.
 describe('SynapsD orphan lifecycle + placement migration', () => {
@@ -44,20 +44,20 @@ describe('SynapsD orphan lifecycle + placement migration', () => {
         if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
     });
 
-    test('empty locations[] ticks data/backend/no-location on a file; re-bind unticks it', async () => {
+    test('orphanedAt + empty locations ticks feature/orphaned; re-bind unticks it', async () => {
         const id = await db.put({
             ...file('orphan', [{ url: 'stored://workspace:home/x' }]),
         }, { context: { path: '/Projects/Alpha' } });
 
-        expect(await db.list({ features: { allOf: [NO_LOCATION] } })).toHaveLength(0);
+        expect(await db.list({ features: { allOf: [ORPHANED] } })).toHaveLength(0);
 
         const stamp = new Date().toISOString();
         await db.put({ id, locations: [], orphanedAt: stamp }, { context: null });
 
-        expect(ids(await db.list({ features: { allOf: [NO_LOCATION] } }))).toEqual([id]);
+        expect(ids(await db.list({ features: { allOf: [ORPHANED] } }))).toEqual([id]);
         const orphan = await db.get(id);
         expect(orphan.orphanedAt).toBe(stamp);
-        expect(orphan.features || []).not.toContain(NO_LOCATION);
+        expect(orphan.features || []).not.toContain(ORPHANED);
         expect(ids(await db.list({ paths: ['ctx:/Projects/Alpha'] }))).toEqual([id]);
 
         await db.put({
@@ -66,25 +66,77 @@ describe('SynapsD orphan lifecycle + placement migration', () => {
             orphanedAt: null,
         }, { context: null });
 
-        expect(await db.list({ features: { allOf: [NO_LOCATION] } })).toHaveLength(0);
+        expect(await db.list({ features: { allOf: [ORPHANED] } })).toHaveLength(0);
         expect((await db.get(id)).orphanedAt).toBeNull();
         expect(ids(await db.list({ paths: ['ctx:/Projects/Alpha'] }))).toEqual([id]);
     });
 
-    test('a note with empty locations does not tick data/backend/no-location', async () => {
-        const id = await db.put(note('just-a-note'));
-        expect((await db.get(id)).locations || []).toEqual([]);
-        expect(await db.list({ features: { allOf: [NO_LOCATION] } })).toHaveLength(0);
-        expect(ids(await db.list({}))).toContain(id);
+    // The key is the ORPHAN axis, not "has no locations". A schema allowlist was
+    // tried and could not express Task: one typed into Canvas is complete without
+    // a copy, one mirrored from a deleted GitHub issue is not. Same schema,
+    // opposite answers, so the discriminator has to be per-row (orphanedAt).
+    test('documents that never had a copy stay out, whatever the schema', async () => {
+        const noteId = await db.put(note('just-a-note'));
+        const taskId = await db.put({ schema: 'data/schema/task', data: { title: 'inbox' } });
+        // A file with no bytes is a BROKEN row, not an orphan — a different alert.
+        const fileId = await db.put(file('never-stored', []));
+
+        expect((await db.get(noteId)).locations || []).toEqual([]);
+        expect(await db.list({ features: { allOf: [ORPHANED] } })).toHaveLength(0);
+        expect(ids(await db.list({}))).toEqual(expect.arrayContaining([noteId, taskId, fileId]));
     });
 
-    test('asserting data/backend/no-location is stripped — the derivation owns the key', async () => {
+    test('a pruned GitHub task orphans onto the same axis as a vanished file', async () => {
+        const local = await db.put({ schema: 'data/schema/task', data: { title: 'inbox' } });
+
+        const id = await db.put({
+            schema: 'data/schema/task',
+            data: { title: 'issue' },
+            locations: [
+                { url: 'gh://acme/api/issues/7', metadata: { provenance: true } },
+                { url: 'https://github.com/acme/api/issues/7' },
+            ],
+        });
+        expect(await db.list({ features: { allOf: [ORPHANED] } })).toHaveLength(0);
+
+        const stamp = new Date().toISOString();
+        await db.put({ id, locations: [], orphanedAt: stamp }, { context: null });
+        expect(ids(await db.list({ features: { allOf: [ORPHANED] } }))).toEqual([id]);
+        expect(ids(await db.list({ features: { allOf: [ORPHANED] } }))).not.toContain(local);
+
+        await db.put({
+            id,
+            locations: [{ url: 'gh://acme/api/issues/7', metadata: { provenance: true } }],
+            orphanedAt: null,
+        }, { context: null });
+        expect(await db.list({ features: { allOf: [ORPHANED] } })).toHaveLength(0);
+    });
+
+    test('asserting feature/orphaned is stripped — the derivation owns the key', async () => {
         const id = await db.put({
             ...file('sneaky', [{ url: 'stored://workspace:home/x' }]),
-            features: [NO_LOCATION, 'tag/keepme'],
+            features: [ORPHANED, 'tag/keepme'],
         });
         expect((await db.get(id)).features).toEqual(['tag/keepme']);
-        expect(await db.list({ features: { allOf: [NO_LOCATION] } })).toHaveLength(0);
+        expect(await db.list({ features: { allOf: [ORPHANED] } })).toHaveLength(0);
+    });
+
+    // The key is a leaf, and listBitmaps() is a `prefix/…` range that never
+    // returns one — so rebuildL3 has to drop it by exact key or the replay's
+    // re-tick would sit on top of a stale bitmap.
+    test('rebuildL3 reproduces feature/orphaned from rows alone', async () => {
+        const orphanId = await db.put({
+            ...file('rebuild-orphan', []),
+            orphanedAt: new Date().toISOString(),
+        });
+        const liveId = await db.put(file('rebuild-live', [{ url: 'stored://homenas/k' }]));
+
+        expect(ids(await db.list({ features: { allOf: [ORPHANED] } }))).toEqual([orphanId]);
+
+        await db.rebuildL3();
+
+        expect(ids(await db.list({ features: { allOf: [ORPHANED] } }))).toEqual([orphanId]);
+        expect(ids(await db.list({ features: { allOf: ['data/backend/stored'] } }))).toEqual([liveId]);
     });
 
     test('migrateDocumentMemberships copies placements to the successor, honoring excludeTrees', async () => {

@@ -199,8 +199,8 @@ const documentSchema = z.object({
     updatedAt: z.string().datetime(),
     // Orphan lifecycle: set when the document lost its last resolvable location.
     // null = not orphaned. Cleared on re-bind, read by the retention GC.
-    // Distinct from the derived `data/backend/no-location` bitmap (empty locations[]
-    // on file/application/dotfile).
+    // Source of the derived `feature/orphaned` bitmap (this + empty
+    // locations[]), so an orphan is queryable without a scan.
     orphanedAt: z.string().datetime().nullable().optional(),
 
     // Document data/payload
