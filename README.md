@@ -402,18 +402,19 @@ Three things worth knowing before you write anything:
 
 - **`features[]` is top-level and asserted-only.** `metadata` holds *extracted facts written by derivers*; `features[]` holds *membership a human or client asserted*. Derived prefixes (`data/schema/`, `data/mime/`, `data/backend/`, `feature/`, `device/`, plus each schema's own facet namespaces) are **stripped on the way in**. `data/dataset/*` is *preserved* across an update that omits it, so a client re-putting its own tag array cannot drop ingest provenance.
 - **`indexOptions` is schema-level** (`static indexOptions` on the schema class). There is no per-document index override. Legacy rows carrying it are ignored on read.
-- **There is no `kind` field.** Subtype lives in the schema id.
 
 Reading a document back gives you a schema instance (`parse: false` for the raw stored object).
 
 ### Subtypes (the schema-id hierarchy)
 
-The schema id is hierarchical. Every segment below `data/schema/` is ticked on write, parent and child alike, so the parent key is always a roll-up.
+The schema id is hierarchical. Every segment below `data/schema/` is ticked on write, parent and child alike, so querying the parent is a roll-up.
 
-- **Registered** child ids (`data/schema/message/email`) have their own class, validation and checksum identity, and appear in the registry.
-- **Derived** subtype segments come from a registration's `subtypeField: 'data.type'` (`data/schema/application/flatpak`): real, queryable bitmap keys that are **not** registry entries and never a `doc.schema` value. `getSchema()` throws on one (naming the real schema); `resolveSchemaId(key)` walks a bitmap key up to the nearest registered id.
+A child segment is a registered id. Some children have their own class; closed-enum leaves share the parent class:
 
-Enumerate schemas from `listSchemas()`, never from bitmap keys: a bitmap listing of `data/schema` contains derived subtype keys that are not schemas.
+- `data/schema/message/email` is an Email, and also a Message. It has its own class; `doc.schema` is the full id.
+- `data/schema/application/flatpak` is an Application. The leaf *is* the schema id; querying `data/schema/application` rolls the children up. Same pattern for Event, Identity, Dotfile.
+
+Both keys work the same in `features`. `listSchemas()` lists schemas; `resolveSchemaId(key)` walks a bitmap key up to the schema that owns it.
 
 ### Trees
 
@@ -433,23 +434,30 @@ Beyond FS-like tree methods, layers support `merge layer` (merge a layer's bitma
 
 ### Features
 
-Features are flat bitmap keys ticked on a document. They carry a `who says so?` convention in the prefix. Allowed prefixes are validated in `src/indexes/bitmaps/lib/keys.js`:
+Features are flat bitmap keys ticked on a document. They carry a `who says so?` convention in the prefix. Allowed prefixes are validated in `src/indexes/bitmaps/lib/keys.js`.
 
-| Prefix | Who says so | Stored on the document? |
-|--------|-------------|-------------------------|
-| `tag/*` | The user: free-form flat labels | yes, in `features[]` |
-| `custom/<axis>/<value>` | The user: structured | yes, in `features[]` |
-| `client/*` | The writing client | yes, in `features[]` |
-| `data/dataset/*` | Ingest provenance (see **Datasets**) | yes, preserved across updates |
-| `data/no-location` | The app: orphan marker | yes, in `features[]` |
-| `data/schema/*` | Derived from `schema` | no: derived every write |
-| `data/mime/*` | Derived from `metadata.contentType` (type + full type) | no |
-| `data/backend/*` | Derived from `locations[]` (scheme + scheme/authority) | no |
-| `data/<facet>/*` | Derived from a schema's `static facetFields` (e.g. `data/status/*` from Task's `data.status`) | no |
-| `device/id\|os\|type/*` | Derived from `locations[]` + the device's own Device document | no |
-| `feature/*` | The engine observed it (`feature/has-comment`) | no |
-| `context/*`, `vfs/*` | Tree membership: bitmap-only, not on the row | no |
-| `internal/*` | Engine-managed, hidden from default listings | no |
+**User-managed** — a client or the application asserted these. They live on the row in `features[]`.
+
+| Prefix | Who says so | Notes |
+|--------|-------------|-------|
+| `tag/*` | The user: free-form flat labels | |
+| `client/*` | The writing client | |
+| `custom/<axis>/<value>` | The user: structured | |
+| `data/dataset/*` | Ingest provenance (see **Datasets**) | preserved across updates that omit it |
+| `data/no-location` | The app: orphan marker | |
+
+**System** — the engine ticks these from document state or tree membership. They are not stored on the row. Asserting a copy is stripped on write.
+
+| Prefix | Source |
+|--------|--------|
+| `data/schema/*` | `schema` (every id-path segment) |
+| `data/mime/*` | `metadata.contentType` (type + full type) |
+| `data/backend/*` | `locations[]` (scheme + scheme/authority) |
+| `data/<facet>/*` | a schema's `static facetFields` (e.g. `data/status/*` from Task's `data.status`) |
+| `device/id\|os\|type/*` | `locations[]` + the device's own Device document |
+| `feature/*` | the engine observed it (`feature/has-comment`) |
+| `context/*`, `vfs/*` | tree membership: bitmap-only, not on the row |
+| `internal/*` | engine-managed, hidden from default listings |
 
 Derived facet bitmaps are re-ticked and stale-unticked on every write from document state, so they cannot drift. Completing a task moves it from `data/status/pending` to `data/status/completed` atomically with the document write, so an agent's "any pending tasks here?" is a zero-fetch bitmap probe.
 
@@ -751,6 +759,7 @@ const msg = await db.put({
 
 - Relations are validated at ingest: an unknown predicate, an inverse-style name, or a non-integer `to` throws.
 - Dangling `to` ids are **allowed** (logged at debug). Edges to documents that do not exist yet are filtered by candidate-set intersection at query time, and forbidding them would make ingest order significant.
+- Deleting a document drops every edge touching it (both directions) and retracts incoming asserted claims from surviving subjects, so a rebuild cannot resurrect them. Outgoing claims die with the row.
 - `data.relations` is **structural, not content**: `Document.contentData()` strips it from every whole-`data` projection (checksum, FTS, embedding). Asserting an edge therefore does not fork the document's identity, pollute its search text, or trigger a re-embed.
 
 ### Provenance: asserted vs derived
@@ -838,9 +847,7 @@ class Widget extends Document {
     static get dataSchema() { /* zod */ }
 }
 
-schemaRegistry.registerSchema('data/schema/widget', Widget, {
-    subtypeField: 'data.type',
-});
+schemaRegistry.registerSchema('data/schema/widget', Widget);
 ```
 
 A subclass of a core schema keeps its parent's validation with `mergeDataSchema()`:
@@ -870,7 +877,7 @@ Rules the registry enforces:
 
 Internal layer types are not documents and have no `dataSchema`; `getJsonSchema()` returns `null` for them rather than throwing, so iterating `listSchemas()` is safe.
 
-Introspection: `db.listSchemas(prefix?)`, `db.getSchema(id)`, `db.hasSchema(id)`, `db.getDataSchema(id)`, `db.getJsonSchema(id)`. On the registry itself: `getSchemaEntry(id)`, `resolveSubtype(id, doc)`, `unregisterSchema(id)`.
+Introspection: `db.listSchemas(prefix?)`, `db.getSchema(id)`, `db.hasSchema(id)`, `db.getDataSchema(id)`, `db.getJsonSchema(id)`. On the registry itself: `getSchemaEntry(id)`, `resolveSchemaId(key)`, `unregisterSchema(id)`.
 
 ## Querying
 
@@ -1141,7 +1148,7 @@ const recentDocs = await db.list({
 
 - **`content`**: when the content itself came into existence (EXIF capture date for photos).
 - **`tasks`**: due dates (point-mode, derived from `data.dueDate` by the Task schema). `t:tasks:today` means "due today"; `sortBy: 'tasks'` orders by due date.
-- **`events`**: `Event` documents (`calendar` / `alert` / `activity`), derived from `data.start` / `data.end`. One timeline for all three types, with `data.type` discriminating, because the founding query is "show me everything happening under /work/customer-foo".
+- **`events`**: `Event` documents (`calendar` / `alert` / `activity`), derived from `data.start` / `data.end`. One timeline for all three leaves; the schema id discriminates (`data/schema/event/calendar`), because the founding query is "show me everything happening under /work/customer-foo".
 
 #### Event recurrence: expansion, with the envelope as fallback
 
@@ -1302,24 +1309,24 @@ await db.deleteDataset('scan-2026-08', { dropDocuments: true });
 
 **There is no migration code in this engine.** One-time migrations were living on the startup path, gated behind a persisted version, running an `O(all-docs)` check on every open for work that happens once in a database's life. They are operator actions; write a one-off script against a backup instead.
 
-What stayed is the **refusal**. `SCHEMA_VERSION` (currently **3**) is the row format this build writes; a *non-empty* database below it throws at `start()`:
+What stayed is the **refusal**. `SCHEMA_VERSION` (currently **4**) is the row format this build writes; a *non-empty* database below it throws at `start()`:
 
 ```
-synapsd: database is at schema v2, this build needs v3. Migration code was removed
+synapsd: database is at schema v3, this build needs v4. Migration code was removed
 from the engine; migrate the database with a one-off script against a backup, then
-stamp internal/schemaVersion to 3.
+stamp internal/schemaVersion to 4.
 ```
 
 A brand-new or empty database is stamped and skips the refusal. Bump `SCHEMA_VERSION` when a change makes rows written by this build unreadable by the previous one.
 
-The one-off script for the current version is **`scripts/migrate-schema-v3.js`**:
+The one-off script for the current version is **`scripts/migrate-schema-v4.js`** (run **`scripts/migrate-schema-v3.js`** first if the database is still below v3):
 
 ```bash
-node scripts/migrate-schema-v3.js -d <workspace>/db [--hooks <workspace>/hooks] [--dry-run]
-node scripts/migrate-schema-v3.js --users-root <server>/server/users   # every workspace at once
+node scripts/migrate-schema-v4.js -d <workspace>/db [--dry-run]
+node scripts/migrate-schema-v4.js --users-root <server>/server/users   # every workspace at once
 ```
 
-It rewrites `doc.schema` through the exported `SCHEMA_ID_RENAMES`, migrates the id-bearing config that would otherwise fail *silently*, handles pre-v2 databases too (features promotion + bitmap-only tag recovery), stamps the version **last**, then reopens and runs `rebuildL3()` + the FTS rebuild.
+It folds `data.type` into the schema id for Event / Identity / Application / Dotfile, stamps the version **last**, then reopens and runs `rebuildL3()`.
 
 ### `rebuildL3()`
 
@@ -1438,7 +1445,7 @@ Legacy method names like `findDocuments`, `ftsQuery`, and `insertDocument` are n
 
 `createTree(name, type?, options?)`, `listTrees(type?)`, `getTree(nameOrId)`, `deleteTree(nameOrId)`, `renameTree(nameOrId, newName)`, `getTreePaths(nameOrId)`, `getTreeJson(nameOrId)`, `getDefaultContextTree()`, `getDefaultDirectoryTree()`, `listDocumentTreePaths(id, tree)`, `listDocumentTreeMemberships(id, tree)`, `hasDocumentTreeMembership(id, tree)`, `migrateDocumentMemberships(fromId, toId, opts?)`
 
-`listSchemas(prefix?)`, `getSchema(id)`, `hasSchema(id)`, `getDataSchema(id)`, `getJsonSchema(id)`. Registration itself goes through the `schemaRegistry` singleton (`registerSchema` / `unregisterSchema` / `getSchemaEntry` / `resolveSubtype`).
+`listSchemas(prefix?)`, `getSchema(id)`, `hasSchema(id)`, `getDataSchema(id)`, `getJsonSchema(id)`. Registration itself goes through the `schemaRegistry` singleton (`registerSchema` / `unregisterSchema` / `getSchemaEntry` / `resolveSchemaId`).
 
 ### Maintenance and introspection
 

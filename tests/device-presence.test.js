@@ -14,7 +14,7 @@ const DEV_B = 'device-bbb';
 
 function dotfile(entry, links, type = 'file') {
     // v3: identity is a normalized URI; a bare path resolves to the workspace repo.
-    return { schema: DOTFILE_SCHEMA, data: { url: entry, type, links } };
+    return { schema: `${DOTFILE_SCHEMA}/${type}`, data: { url: entry, links } };
 }
 
 // Application.superRefine requires a type-appropriate `source` for
@@ -27,9 +27,9 @@ const SOURCE_FOR = {
 };
 
 function app(appId, installs, type = 'system') {
-    const data = { appId, type, installs };
+    const data = { appId, installs };
     if (SOURCE_FOR[type]) { data.source = SOURCE_FOR[type]; }
-    return { schema: APP_SCHEMA, data };
+    return { schema: `${APP_SCHEMA}/${type}`, data };
 }
 
 async function featuresOf(db, id) {
@@ -95,10 +95,9 @@ describe('device presence bitmaps', () => {
 
     test('a source URL alone is not device presence', async () => {
         const id = await db.put({
-            schema: APP_SCHEMA,
+            schema: `${APP_SCHEMA}/appimage`,
             data: {
                 appId: 'com.example.Remote',
-                type: 'appimage',
                 installs: {},
                 source: { url: 'https://example.com/app.AppImage' },
             },
@@ -135,7 +134,7 @@ describe('device presence bitmaps', () => {
 
         await db.put({
             id,
-            data: { url: 'shell/bashrc', type: 'file', links: { [DEV_A]: '$HOME/.bashrc' } },
+            data: { url: 'shell/bashrc', links: { [DEV_A]: '$HOME/.bashrc' } },
         });
 
         expect(await featuresOf(db, id)).toEqual([`device/id/${DEV_A}`]);
@@ -149,8 +148,8 @@ describe('device presence bitmaps', () => {
 
         await db.put({
             id,
-            schema: DOTFILE_SCHEMA,
-            data: { url: 'shell/bashrc', type: 'file', links: { [DEV_A]: '$HOME/.bashrc' } },
+            schema: `${DOTFILE_SCHEMA}/file`,
+            data: { url: 'shell/bashrc', links: { [DEV_A]: '$HOME/.bashrc' } },
         });
 
         expect(await featuresOf(db, id)).toEqual([`device/id/${DEV_A}`]);
@@ -168,7 +167,6 @@ describe('device presence bitmaps', () => {
             id,
             data: {
                 appId: 'com.spotify.Client',
-                type: 'flatpak',
                 source: { ref: 'app/com.example.App/x86_64/stable' },
                 installs: { [DEV_B]: { status: 'available' } },
             },
@@ -182,10 +180,9 @@ describe('device presence bitmaps', () => {
 
         await db.put({
             id,
-            schema: DOTFILE_SCHEMA,
+            schema: `${DOTFILE_SCHEMA}/file`,
             data: {
                 url: 'shell/bashrc',
-                type: 'file',
                 links: { [DEV_A]: '$HOME/.bashrc', [DEV_B]: '$HOME/.bashrc' },
             },
         });
@@ -267,7 +264,6 @@ describe('install status gates presence', () => {
             id,
             data: {
                 appId: 'com.example.Vanish',
-                type: 'system',
                 installs: { [DEV_A]: { status: 'available' }, [DEV_B]: { status: 'missing' } },
             },
         });

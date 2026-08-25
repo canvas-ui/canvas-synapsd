@@ -18,8 +18,8 @@ const at = (h, dayOffset = 0) => {
 
 // Event exists to serve the founding query: "show me everything happening under
 // /work/customer-foo". Calendar entries, alerts and activity logs are three
-// lenses on ONE time-bound set, so they are one entity with a subtype and one
-// 'events' timeline — not three corpora a client has to union by hand.
+// lenses on ONE time-bound set — one family under data/schema/event, leaf in
+// the id, one 'events' timeline. Not three corpora a client has to union.
 describe('event schema + events timeline', () => {
     let rootPath;
     let db;
@@ -35,33 +35,33 @@ describe('event schema + events timeline', () => {
         if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
     });
 
-    test('is registered as a core schema with a data.type subtype axis', () => {
+    test('leaf schemas are registered under the event parent', () => {
         expect(schemaRegistry.getSchemaEntry(EVENT_SCHEMA).tier).toBe('core');
-        // Unprefixed: the subtype is scoped by the schema id it hangs under, so
-        // 'calendar' cannot collide with another schema's 'calendar'.
-        expect(schemaRegistry.resolveSubtype(EVENT_SCHEMA, { data: { type: 'calendar' } })).toBe('calendar');
-        expect(schemaRegistry.resolveSubtype(EVENT_SCHEMA, { data: { type: 'alert' } })).toBe('alert');
-        expect(schemaRegistry.resolveSubtype(EVENT_SCHEMA, { data: { type: 'activity' } })).toBe('activity');
+        for (const leaf of ['calendar', 'alert', 'activity']) {
+            expect(schemaRegistry.hasSchema(`${EVENT_SCHEMA}/${leaf}`)).toBe(true);
+            expect(schemaRegistry.getSchema(`${EVENT_SCHEMA}/${leaf}`))
+                .toBe(schemaRegistry.getSchema(EVENT_SCHEMA));
+        }
     });
 
-    test('type is required — a silent default would mis-file the subtype', async () => {
+    test('the parent id is not a writable event schema', async () => {
         await expect(db.put({
             schema: EVENT_SCHEMA,
             data: { title: 'Untyped', start: at(9) },
-        })).rejects.toThrow();
+        })).rejects.toThrow(/event\/\{calendar\|alert\|activity\}/);
     });
 
     test('start is required — an event with no position on the timeline is not an event', async () => {
         await expect(db.put({
-            schema: EVENT_SCHEMA,
-            data: { title: 'Nowhen', type: 'calendar' },
+            schema: `${EVENT_SCHEMA}/calendar`,
+            data: { title: 'Nowhen' },
         })).rejects.toThrow();
     });
 
     test('a calendar entry with an end is stored as an interval, and found by a range covering it', async () => {
         const id = await db.put({
-            schema: EVENT_SCHEMA,
-            data: { title: 'Standup', type: 'calendar', start: at(9), end: at(10) },
+            schema: `${EVENT_SCHEMA}/calendar`,
+            data: { title: 'Standup', start: at(9), end: at(10) },
         });
 
         const found = await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:today'], limit: 0 });
@@ -70,8 +70,8 @@ describe('event schema + events timeline', () => {
 
     test('an alert with no end is an instant on the same timeline', async () => {
         const id = await db.put({
-            schema: EVENT_SCHEMA,
-            data: { title: 'Disk almost full', type: 'alert', start: at(11) },
+            schema: `${EVENT_SCHEMA}/alert`,
+            data: { title: 'Disk almost full', start: at(11) },
         });
 
         const doc = await db.get(id);
@@ -88,12 +88,12 @@ describe('event schema + events timeline', () => {
 
     test('end: null is an ongoing interval, distinct from an omitted end', async () => {
         const ongoing = await db.put({
-            schema: EVENT_SCHEMA,
-            data: { title: 'Incident open', type: 'alert', start: at(9), end: null },
+            schema: `${EVENT_SCHEMA}/alert`,
+            data: { title: 'Incident open', start: at(9), end: null },
         });
         const instant = await db.put({
-            schema: EVENT_SCHEMA,
-            data: { title: 'Incident noticed', type: 'alert', start: at(9) },
+            schema: `${EVENT_SCHEMA}/alert`,
+            data: { title: 'Incident noticed', start: at(9) },
         });
 
         const doc = await db.get(ongoing);
@@ -121,9 +121,9 @@ describe('event schema + events timeline', () => {
 
         test('a bounded rule expands into per-occurrence entries', async () => {
             const id = await db.put({
-                schema: EVENT_SCHEMA,
+                schema: `${EVENT_SCHEMA}/calendar`,
                 data: {
-                    title: 'Standup', type: 'calendar',
+                    title: 'Standup',
                     start: '2026-01-06T09:00:00.000Z', end: '2026-01-06T09:15:00.000Z',
                     recurrence: RULE_UNTIL,
                 },
@@ -152,8 +152,8 @@ describe('event schema + events timeline', () => {
 
         test('an unbounded rule is HYBRID: exact horizon + open never-miss tail', async () => {
             const id = await db.put({
-                schema: EVENT_SCHEMA,
-                data: { title: 'Weekly sync', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=WEEKLY' },
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Weekly sync', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=WEEKLY' },
             });
 
             const doc = await db.get(id);
@@ -180,8 +180,8 @@ describe('event schema + events timeline', () => {
 
         test('an over-cap COUNT rule is HYBRID too (bounded rules never truncate)', async () => {
             const id = await db.put({
-                schema: EVENT_SCHEMA,
-                data: { title: 'Long onboarding', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=DAILY;COUNT=600' },
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Long onboarding', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=DAILY;COUNT=600' },
             });
             const doc = await db.get(id);
             const entries = doc.timelines.filter((t) => t.timeline === 'events');
@@ -196,8 +196,8 @@ describe('event schema + events timeline', () => {
 
         test('COUNT expands into exactly COUNT occurrences', async () => {
             const id = await db.put({
-                schema: EVENT_SCHEMA,
-                data: { title: 'Onboarding', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=WEEKLY;COUNT=4' },
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Onboarding', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=WEEKLY;COUNT=4' },
             });
 
             const doc = await db.get(id);
@@ -220,9 +220,9 @@ describe('event schema + events timeline', () => {
 
         test('a non-recurring event is unaffected — data.end stays the interval end', async () => {
             const id = await db.put({
-                schema: EVENT_SCHEMA,
+                schema: `${EVENT_SCHEMA}/calendar`,
                 data: {
-                    title: 'One-off', type: 'calendar',
+                    title: 'One-off',
                     start: '2026-01-06T09:00:00.000Z', end: '2026-01-06T10:00:00.000Z',
                 },
             });
@@ -233,20 +233,20 @@ describe('event schema + events timeline', () => {
 
         test('the rule must be a real RRULE value', async () => {
             await expect(db.put({
-                schema: EVENT_SCHEMA,
-                data: { title: 'Bad', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'every tuesday' },
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Bad', start: '2026-01-06T09:00:00.000Z', recurrence: 'every tuesday' },
             })).rejects.toThrow();
         });
 
         test('editing the rule edits the series, it does not fork a new event', async () => {
             const id = await db.put({
-                schema: EVENT_SCHEMA,
-                data: { title: 'Standup', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: RULE_UNTIL },
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Standup', start: '2026-01-06T09:00:00.000Z', recurrence: RULE_UNTIL },
             });
 
             const again = await db.put({
-                schema: EVENT_SCHEMA,
-                data: { title: 'Standup', type: 'calendar', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=WEEKLY;BYDAY=TH' },
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Standup', start: '2026-01-06T09:00:00.000Z', recurrence: 'FREQ=WEEKLY;BYDAY=TH' },
             });
 
             // recurrence is NOT a checksum field — same title/start/type is the
@@ -258,14 +258,14 @@ describe('event schema + events timeline', () => {
 
     test('the timeline entry is regenerated on update, never drifting from the doc', async () => {
         const id = await db.put({
-            schema: EVENT_SCHEMA,
-            data: { title: 'Review', type: 'calendar', start: at(9), end: at(10) },
+            schema: `${EVENT_SCHEMA}/calendar`,
+            data: { title: 'Review', start: at(9), end: at(10) },
         });
 
         await db.put({
             id,
-            schema: EVENT_SCHEMA,
-            data: { title: 'Review', type: 'calendar', start: at(14), end: at(15) },
+            schema: `${EVENT_SCHEMA}/calendar`,
+            data: { title: 'Review', start: at(14), end: at(15) },
         });
 
         const doc = await db.get(id);
@@ -276,24 +276,24 @@ describe('event schema + events timeline', () => {
 
     test('same title at a different time is a different event, not a dedup collision', async () => {
         const morning = await db.put({
-            schema: EVENT_SCHEMA,
-            data: { title: 'Standup', type: 'calendar', start: at(9) },
+            schema: `${EVENT_SCHEMA}/calendar`,
+            data: { title: 'Standup', start: at(9) },
         });
         const afternoon = await db.put({
-            schema: EVENT_SCHEMA,
-            data: { title: 'Standup', type: 'calendar', start: at(14) },
+            schema: `${EVENT_SCHEMA}/calendar`,
+            data: { title: 'Standup', start: at(14) },
         });
         expect(afternoon).not.toBe(morning);
     });
 
     test('a calendar entry and an alert sharing a title stay distinct', async () => {
         const cal = await db.put({
-            schema: EVENT_SCHEMA,
-            data: { title: 'Deploy', type: 'calendar', start: at(9) },
+            schema: `${EVENT_SCHEMA}/calendar`,
+            data: { title: 'Deploy', start: at(9) },
         });
         const alert = await db.put({
-            schema: EVENT_SCHEMA,
-            data: { title: 'Deploy', type: 'alert', start: at(9) },
+            schema: `${EVENT_SCHEMA}/alert`,
+            data: { title: 'Deploy', start: at(9) },
         });
         expect(alert).not.toBe(cal);
     });
@@ -304,20 +304,20 @@ describe('event schema + events timeline', () => {
     describe('context zoom-out', () => {
         const seed = async () => ({
             taskEvent: await db.put({
-                schema: EVENT_SCHEMA,
-                data: { title: 'Review task-bar', type: 'calendar', start: at(9) },
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Review task-bar', start: at(9) },
             }, { context: { path: '/work/customer-foo/task-bar' } }),
             taskTodo: await db.put({
                 schema: TODO_SCHEMA,
                 data: { title: 'Finish task-bar', dueDate: at(17) },
             }, { context: { path: '/work/customer-foo/task-bar' } }),
             siblingEvent: await db.put({
-                schema: EVENT_SCHEMA,
-                data: { title: 'Customer sync', type: 'calendar', start: at(11) },
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Customer sync', start: at(11) },
             }, { context: { path: '/work/customer-foo/task-baz' } }),
             elsewhere: await db.put({
-                schema: EVENT_SCHEMA,
-                data: { title: 'Dentist', type: 'calendar', start: at(15) },
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Dentist', start: at(15) },
             }, { context: { path: '/personal' } }),
         });
 

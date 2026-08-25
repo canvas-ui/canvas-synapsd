@@ -34,7 +34,7 @@ describe('schema version gate', () => {
 
     test('a fresh database is stamped, and reopening it stays clean', async () => {
         await open();
-        expect(Number(db.internalStore.get('internal/schemaVersion'))).toBe(3);
+        expect(Number(db.internalStore.get('internal/schemaVersion'))).toBe(4);
         await db.shutdown();
 
         await expect(open()).resolves.toBeDefined();
@@ -48,7 +48,7 @@ describe('schema version gate', () => {
         await db.shutdown();
 
         await expect(open()).resolves.toBeDefined();
-        expect(Number(db.internalStore.get('internal/schemaVersion'))).toBe(3);
+        expect(Number(db.internalStore.get('internal/schemaVersion'))).toBe(4);
     });
 
     test('a NON-empty database below the current version refuses to open', async () => {
@@ -58,6 +58,6 @@ describe('schema version gate', () => {
         await db.shutdown();
         db = null;
 
-        await expect(open()).rejects.toThrow(/is at schema v2, this build needs v3/);
+        await expect(open()).rejects.toThrow(/is at schema v2, this build needs v4/);
     });
 });

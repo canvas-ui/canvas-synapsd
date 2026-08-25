@@ -148,4 +148,34 @@ describe('asserted relations write-through', () => {
         await db.start();
         expect((await db.get(from)).data.relations).toEqual([{ p: 'references', to }]);
     });
+
+    test('deleting a document wipes both directions and retracts incoming asserted claims', async () => {
+        const person = await db.put({
+            schema: 'data/schema/identity/person',
+            data: { displayName: 'P' },
+        });
+        const org = await db.put({
+            schema: 'data/schema/identity/organization',
+            data: { displayName: 'O' },
+        });
+        const noteId = await db.put({
+            schema: NOTE,
+            data: { title: 'hi', content: 'hi', relations: [{ p: 'mentions', to: person }] },
+        });
+        await db.assertRelation(person, 'member-of', org);
+        await db.relate(noteId, 'depicts', person, { meta: { src: 'extractor:faces' } });
+
+        await db.delete(person);
+
+        expect([...db.edges.outgoing(person, 'member-of')]).toEqual([]);
+        expect([...db.edges.incoming(person, 'mentions')]).toEqual([]);
+        expect([...db.edges.incoming(person, 'depicts')]).toEqual([]);
+        expect([...db.edges.outgoing(noteId, 'mentions')]).toEqual([]);
+        expect([...db.edges.incoming(org, 'member-of')]).toEqual([]);
+        expect((await db.get(noteId)).data.relations).toBeUndefined();
+
+        await db.rebuildL3({ bitmaps: false, edges: true });
+        expect([...db.edges.outgoing(noteId, 'mentions')]).toEqual([]);
+        expect([...db.edges.outgoing(noteId, 'depicts')]).toEqual([]);
+    });
 });

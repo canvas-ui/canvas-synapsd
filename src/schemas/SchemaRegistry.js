@@ -9,13 +9,13 @@ export { SCHEMA_ID_RENAMES } from './rename-map.js';
 
 // Core schemas — synapsd's own primitives (schemas/core/).
 import Email from './core/Email.js';
-import Event from './core/Event.js';
+import Event, { EVENT_SCHEMA, EVENT_TYPES } from './core/Event.js';
 import File from './core/File.js';
-import Identity from './core/Identity.js';
+import Identity, { IDENTITY_SCHEMA, IDENTITY_TYPES } from './core/Identity.js';
 import Message from './core/Message.js';
 import Task from './core/Task.js';
 import Device from './core/Device.js';
-import Application from './core/Application.js';
+import Application, { APPLICATION_SCHEMA, APPLICATION_TYPES } from './core/Application.js';
 
 // App-level schemas (schemas/app/). These are NOT synapsd primitives — they
 // belong to canvas-server and register through `registerSchema()`. They stay
@@ -25,7 +25,7 @@ import Application from './core/Application.js';
 import Link from './app/Link.js';
 import Note from './app/Note.js';
 import Tab from './app/Tab.js';
-import Dotfile from './app/Dotfile.js';
+import Dotfile, { DOTFILE_SCHEMA, DOTFILE_TYPES } from './app/Dotfile.js';
 
 // Tree Abstractions
 import Canvas from './internal/layers/Canvas.js';
@@ -38,28 +38,29 @@ import Project from './internal/layers/Project.js';
 
 /**
  * The CORE entity set — synapsd's own primitives. Ids are hierarchical
- * `data/schema/*` (Rev B, 2026-08-05): the id IS the axis, and a multi-segment id
- * ticks every ancestor segment (`data/schema/message/email` ticks
- * `data/schema/message` too — see schemaBitmapKeys in index.js).
+ * `data/schema/*`: the id IS the axis, and a multi-segment id ticks every
+ * ancestor (`data/schema/message/email` ticks `data/schema/message` too).
  *
- * `subtypeField` names a per-document discriminator (`data.type`). It is resolved
- * by `resolveSubtype()` and indexed as a DERIVED SEGMENT of the schema id: an
- * Application doc with `data.type: 'flatpak'` also ticks
- * `data/schema/application/flatpak`. Register-vs-derive rule: a subtype that needs
- * its own validation or identity gets registered as its own id with a class
- * (message/email); a mere discriminator on one class stays derived (this field).
- * Consumers query both kinds of key identically.
+ * Closed-enum children share the parent class (`event/calendar`, `identity/person`,
+ * `application/flatpak`). Register a child id when it needs its own class
+ * (message/email). Querying the parent rolls up the children either way.
  */
+function withLeaves(parentId, SchemaClass, leaves) {
+    const out = { [parentId]: { SchemaClass } };
+    for (const leaf of leaves) { out[`${parentId}/${leaf}`] = { SchemaClass }; }
+    return out;
+}
+
 const CORE_SCHEMAS = {
     'data/schema/document': { SchemaClass: Document },
     'data/schema/file': { SchemaClass: File },
     'data/schema/message': { SchemaClass: Message },
     'data/schema/message/email': { SchemaClass: Email },
-    'data/schema/event': { SchemaClass: Event, subtypeField: 'data.type' },
+    ...withLeaves(EVENT_SCHEMA, Event, EVENT_TYPES),
     'data/schema/task': { SchemaClass: Task },
-    'data/schema/identity': { SchemaClass: Identity, subtypeField: 'data.type' },
+    ...withLeaves(IDENTITY_SCHEMA, Identity, IDENTITY_TYPES),
     'data/schema/device': { SchemaClass: Device },
-    'data/schema/application': { SchemaClass: Application, subtypeField: 'data.type' },
+    ...withLeaves(APPLICATION_SCHEMA, Application, APPLICATION_TYPES),
 };
 
 /**
@@ -71,7 +72,7 @@ const APP_SCHEMAS = {
     'data/schema/note': { SchemaClass: Note },
     'data/schema/tab': { SchemaClass: Tab },
     'data/schema/link': { SchemaClass: Link },
-    'data/schema/dotfile': { SchemaClass: Dotfile, subtypeField: 'data.type' },
+    ...withLeaves(DOTFILE_SCHEMA, Dotfile, DOTFILE_TYPES),
 };
 
 const INTERNAL_SCHEMAS = {
@@ -115,7 +116,7 @@ export function isDocumentData(obj) {
 
 class SchemaRegistry {
 
-    // schemaId -> { SchemaClass, tier, subtypeField?, indexOptions? }
+    // schemaId -> { SchemaClass, tier, indexOptions? }
     #entries = new Map();
 
     constructor() {
@@ -133,8 +134,6 @@ class SchemaRegistry {
      * @param {string} schemaId          e.g. 'data/schema/note'
      * @param {Function} SchemaClass     a Document subclass
      * @param {object} [options]
-     * @param {string} [options.subtypeField] dotted path to a per-document subtype
-     *                                        discriminator, e.g. 'data.type'
      * @param {object} [options.indexOptions] fts/vector/checksum field lists
      * @returns {SchemaRegistry} this, for chaining
      */
@@ -151,10 +150,6 @@ class SchemaRegistry {
             throw new Error(`registerSchema: ${schemaId} is a core schema and cannot be re-registered`);
         }
 
-        if (options.subtypeField !== undefined && typeof options.subtypeField !== 'string') {
-            throw new Error(`registerSchema: ${schemaId} subtypeField must be a dotted field path string`);
-        }
-
         // `static indexOptions` on the class is the ONE source of truth — that is
         // what Document resolves from at construction time (it cannot import
         // this registry without a cycle). Registering with indexOptions therefore
@@ -164,11 +159,7 @@ class SchemaRegistry {
             SchemaClass.indexOptions = options.indexOptions;
         }
 
-        this.#entries.set(schemaId, {
-            SchemaClass,
-            tier: 'app',
-            subtypeField: options.subtypeField,
-        });
+        this.#entries.set(schemaId, { SchemaClass, tier: 'app' });
 
         return this;
     }
@@ -196,8 +187,7 @@ class SchemaRegistry {
     }
 
     /**
-     * Get the full registration record — the shape ingest reads `subtypeField`
-     * and `indexOptions` from, so it never reads them off the row.
+     * Get the full registration record.
      * @param {string} schemaId Schema identifier
      * @returns {object} Registration entry
      * @throws {Error} If schema is not found
@@ -205,16 +195,10 @@ class SchemaRegistry {
     getSchemaEntry(schemaId) {
         const entry = this.#entries.get(schemaId);
         if (!entry) {
-            // Exact-match only, deliberately: a derived subtype key
-            // (data/schema/application/flatpak) is a real BITMAP key but not a
-            // schema id — resolving it here to the parent would let an unknown
-            // or mistyped subtype construct and validate as the parent class,
-            // silently. Name the real schema instead of guessing; callers that
-            // legitimately hold a bitmap key use resolveSchemaId().
             const ancestor = this.resolveSchemaId(schemaId);
             if (ancestor && ancestor !== schemaId) {
                 throw new Error(
-                    `${schemaId} is a derived subtype bitmap key, not a schema id — the schema is ${ancestor}`,
+                    `${schemaId} is not a registered schema id — nearest schema is ${ancestor}`,
                 );
             }
             throw new Error(`Schema not found: ${schemaId}`);
@@ -223,32 +207,6 @@ class SchemaRegistry {
         // copy here: it is resolved from the class at construction time, and a
         // second stored copy could drift from what documents actually use.
         return { ...entry, indexOptions: entry.SchemaClass?.indexOptions };
-    }
-
-    /**
-     * Resolve a document's SUBTYPE — the registration's `subtypeField` read off the
-     * document. Returns null when the schema declares no subtype axis, or the field
-     * is absent/empty.
-     *
-     * One raw segment, never a path: it becomes the last segment of the schema id
-     * (`data/schema/application` + `/flatpak`), so scoping is the id's job. That is
-     * why the v3 `kindPrefix` has no successor here. Indexed by schemaBitmapKeys()
-     * in index.js on every write since Rev B (2026-08-05).
-     *
-     * @param {string} schemaId
-     * @param {object} [document] document instance or plain object
-     * @returns {string|null}
-     */
-    resolveSubtype(schemaId, document = null) {
-        const entry = this.#entries.get(schemaId);
-        if (!entry || !entry.subtypeField || !document) { return null; }
-
-        const value = entry.subtypeField
-            .split('.')
-            .reduce((acc, segment) => (acc == null ? acc : acc[segment]), document);
-
-        if (typeof value !== 'string' || value.trim() === '') { return null; }
-        return value.trim();
     }
 
     /**
@@ -283,11 +241,8 @@ class SchemaRegistry {
 
     /**
      * Resolve a bitmap KEY to the nearest registered schema id — identity on a
-     * registered id, ancestor walk on a derived subtype key
-     * (`data/schema/application/flatpak` -> `data/schema/application`), null when
-     * no registered ancestor exists. This is the explicit bridge between the
-     * membership plane (where derived subtype keys are real) and the identity
-     * plane (where only registered ids exist); getSchema() stays exact-match.
+     * registered id, ancestor walk otherwise (`data/schema/application/nope` ->
+     * `data/schema/application`), null when no registered ancestor exists.
      *
      * @param {string} key schema id or schema-derived bitmap key
      * @returns {string|null} registered schema id, or null
@@ -311,7 +266,7 @@ class SchemaRegistry {
      * getSchemaEntry(), so they cannot drift from what documents actually use.
      *
      * @param {string} schemaId Schema identifier
-     * @returns {object} { id, tier, subtypeField, indexOptions, jsonSchema }
+     * @returns {object} { id, tier, indexOptions, jsonSchema }
      * @throws {Error} If schema is not found
      */
     getSchemaDescriptor(schemaId) {
@@ -319,7 +274,6 @@ class SchemaRegistry {
         return {
             id: schemaId,
             tier: entry.tier,
-            subtypeField: entry.subtypeField ?? null,
             indexOptions: entry.indexOptions ?? null,
             jsonSchema: this.getJsonSchema(schemaId),
         };

@@ -24,18 +24,13 @@ const email = (subject, extra = {}) => ({
 });
 
 const app = (appId, type) => ({
-    schema: APP,
-    // source carries both ref (flatpak identity) and name (snap identity) so the
-    // same fixture satisfies Application's per-type refine for either subtype.
-    data: { appId, name: appId, type, source: { ref: appId, name: appId } },
+    schema: `${APP}/${type}`,
+    data: { appId, name: appId, source: { ref: appId, name: appId } },
 });
 
-// Rev B (2026-08-05): the schema id is hierarchical and EVERY segment below
-// `data/schema/` is ticked — registered child ids (message/email) and derived
-// subtype segments (application/flatpak) alike. The parent key is always a
-// roll-up. This is ID-PATH expansion, not the class-chain expansion v3 killed:
-// each ticked segment is written into the id (or its declared subtypeField),
-// never inherited from how the classes happen to extend each other.
+// Rev B: the schema id is hierarchical and EVERY segment below `data/schema/`
+// is ticked. The parent key is always a roll-up. This is ID-PATH expansion,
+// not the class-chain expansion v3 killed.
 describe('schema hierarchy ticking', () => {
     let rootPath;
     let db;
@@ -71,14 +66,14 @@ describe('schema hierarchy ticking', () => {
         expect(await hasBitmap(MESSAGE, id)).toBe(false);
     });
 
-    test('a declared subtype ticks a derived child segment', async () => {
+    test('a child id ticks itself and its parent', async () => {
         const id = await db.put(app('org.gimp.GIMP', 'flatpak'));
 
         expect(await hasBitmap(APP, id)).toBe(true);
         expect(await hasBitmap(`${APP}/flatpak`, id)).toBe(true);
     });
 
-    test('changing the subtype field moves the derived segment', async () => {
+    test('changing the schema leaf moves the child segment', async () => {
         const id = await db.put(app('org.gimp.GIMP', 'flatpak'));
         await db.put({ id, ...app('org.gimp.GIMP', 'snap') });
 

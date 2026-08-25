@@ -3,30 +3,27 @@
 import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { z } from 'zod';
 
-const DOCUMENT_SCHEMA_NAME = 'data/schema/event';
+export const EVENT_SCHEMA = 'data/schema/event';
 const DOCUMENT_SCHEMA_VERSION = '3.0';
 
-// The three things a time-bound entry can be. Deliberately one entity with a
-// subtype rather than three: the founding query is "show me everything happening
-// under /work/customer-foo", and a calendar app, an alert panel and an activity
-// feed are three lenses on that one set — not three unrelated corpora.
-const EVENT_TYPES = ['calendar', 'alert', 'activity'];
+// Three lenses on one time-bound set. The leaf is the schema id
+// (`data/schema/event/calendar`); querying the parent rolls them up.
+export const EVENT_TYPES = ['calendar', 'alert', 'activity'];
 
-// One timeline for all three types; the kind bitmaps discriminate. `events` is
-// NOT registered in `pointTimelines` (index.js, Db constructor) because calendar
-// entries have duration — and a start-only entry on an interval timeline is
-// already stored as an instant, so alerts and activity points cost nothing extra.
-// This is what makes "all time-bound docs in this context" a single timeline
-// scan, with `data/kind/event/calendar` narrowing it when a caller wants only one.
+// One timeline for all three types. `events` is NOT registered in
+// `pointTimelines` because calendar entries have duration — a start-only
+// entry on an interval timeline is already stored as an instant.
 const EVENTS_TIMELINE = 'events';
+
+function eventLeaf(schema) {
+    if (typeof schema !== 'string' || !schema.startsWith(`${EVENT_SCHEMA}/`)) { return null; }
+    const leaf = schema.slice(EVENT_SCHEMA.length + 1);
+    return EVENT_TYPES.includes(leaf) ? leaf : null;
+}
 
 const documentDataSchema = Document.extendDataSchema(
     z.object({
         title: z.string(),
-        // Required, not defaulted. This drives the kind bitmap, so a silent
-        // default would mis-file documents into exactly the query this entity
-        // exists to serve.
-        type: z.enum(EVENT_TYPES),
         description: z.string().optional(),
 
         // start is mandatory — an event with no position on the timeline is not
@@ -59,17 +56,19 @@ export default class Event extends Document {
     static indexOptions = {
         ftsSearchFields: ['data.title', 'data.description', 'data.location'],
         vectorEmbeddingFields: ['data.title', 'data.description'],
-        checksumFields: ['data.title', 'data.start', 'data.type'],
+        checksumFields: ['data.title', 'data.start'],
     };
 
     constructor(options = {}) {
-        options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
+        if (!eventLeaf(options.schema)) {
+            throw new Error(`Event schema must be ${EVENT_SCHEMA}/{${EVENT_TYPES.join('|')}}`);
+        }
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-
         options.timelines = Event.#deriveTimelines(options);
-
         super(options);
     }
+
+    get type() { return eventLeaf(this.schema); }
 
     // start/end → 'events' timeline entries, derived (doc declares, index derives).
     // Caller-provided non-events entries are preserved; the events entries are
@@ -318,7 +317,6 @@ export default class Event extends Document {
     }
 
     static fromData(data) {
-        data.schema = DOCUMENT_SCHEMA_NAME;
         return new Event(data);
     }
 
@@ -331,4 +329,4 @@ export default class Event extends Document {
     static validateData(documentData) { return documentDataSchema.parse(documentData); }
 }
 
-export { EVENT_TYPES, EVENTS_TIMELINE };
+export { EVENTS_TIMELINE };
