@@ -209,6 +209,9 @@ function device(deviceId, name, platform, type) {
     return { schema: DEVICE_SCHEMA, data: { deviceId, name, platform, type } };
 }
 
+// Same thing, keyword-style, for the suites that vary which facets exist.
+const box = (deviceId, data) => ({ schema: DEVICE_SCHEMA, data: { deviceId, name: deviceId, ...data } });
+
 describe('install status gates presence', () => {
     let rootPath;
     let db;
@@ -348,5 +351,188 @@ describe('derived device/os and device/type facets', () => {
         const tags = await featuresOf(db, id);
 
         expect(tags).toEqual(['device/id/never-registered']);
+    });
+});
+
+describe('capability (data/platform) vs presence (device/id)', () => {
+    let rootPath;
+    let db;
+
+    const capable = (appId, platform, installs = {}) => ({
+        schema: `${APP_SCHEMA}/flatpak`,
+        data: { appId, platform, installs, source: SOURCE_FOR.flatpak },
+    });
+
+    const idsOf = async (features) => {
+        const result = await db.list({ features });
+        return (Array.isArray(result) ? result : result.data ?? []).map((d) => d.id);
+    };
+
+    beforeEach(async () => {
+        rootPath = await fs.mkdtemp(path.join(os.tmpdir(), 'synapsd-devcap-'));
+        db = new Db({ path: rootPath, backupOnOpen: false, backupOnClose: false });
+        await db.start();
+    });
+
+    afterEach(async () => {
+        if (db) { await db.shutdown().catch(() => {}); db = null; }
+        if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
+    });
+
+    test('"applicable here" and "already here" are two intersections, no per-app inspection', async () => {
+        // The workspace-of-30-apps case: logging into a new box, most are for
+        // other platforms and most of the rest are not installed yet.
+        await db.put(box(DEV_A, { platform: 'linux', arch: 'x86_64' }));
+
+        const here = await db.put(capable('com.example.Here', ['linux/x86_64'], { [DEV_A]: { status: 'available' } }));
+        const installable = await db.put(capable('com.example.Installable', ['linux/x86_64', 'mac/aarch64']));
+        const wrongOs = await db.put(capable('com.example.Mac', ['mac/aarch64'], { [DEV_A]: { status: 'available' } }));
+
+        const applicable = ['data/schema/application', 'data/platform/linux/x86_64'];
+
+        expect((await idsOf({ allOf: applicable })).sort()).toEqual([here, installable].sort());
+        expect(await idsOf({ allOf: [...applicable, `device/id/${DEV_A}`] })).toEqual([here]);
+        expect(await idsOf({ allOf: applicable, noneOf: [`device/id/${DEV_A}`] })).toEqual([installable]);
+
+        // Present but not applicable is a real state (installed before a migration,
+        // or a mislabelled package) and stays visible rather than being filtered.
+        expect(await idsOf({ allOf: ['data/platform/mac/aarch64', `device/id/${DEV_A}`] })).toEqual([wrongOs]);
+    });
+
+    test('an app with no declared platform is in no capability bitmap', async () => {
+        // Absence is not "runs everywhere": an undeclared app must not silently
+        // pass a capability filter it was never checked against.
+        const id = await db.put(capable('com.example.Unknown', undefined, { [DEV_A]: { status: 'available' } }));
+
+        expect(await idsOf({ allOf: ['data/platform/linux/x86_64'] })).toEqual([]);
+        expect(await idsOf({ allOf: [`device/id/${DEV_A}`] })).toEqual([id]);
+    });
+});
+
+describe('the device/os chain and device/arch', () => {
+    let rootPath;
+    let db;
+
+    beforeEach(async () => {
+        rootPath = await fs.mkdtemp(path.join(os.tmpdir(), 'synapsd-devchain-'));
+        db = new Db({ path: rootPath, backupOnOpen: false, backupOnClose: false });
+        await db.start();
+    });
+
+    afterEach(async () => {
+        if (db) { await db.shutdown().catch(() => {}); db = null; }
+        if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
+    });
+
+    test('every prefix of the os chain is ticked, so any tier is one key', async () => {
+        await db.put(box(DEV_A, {
+            platform: 'linux', osDistro: 'ubuntu', osVersion: '24.04',
+            arch: 'x86_64', type: 'laptop',
+        }));
+        const id = await db.put(app('com.example.App', { [DEV_A]: { status: 'available' } }));
+
+        expect(await featuresOf(db, id)).toEqual([
+            'device/arch/x86_64',
+            `device/id/${DEV_A}`,
+            'device/os/linux',
+            'device/os/linux/ubuntu',
+            'device/os/linux/ubuntu/24.04',
+            'device/type/laptop',
+        ]);
+    });
+
+    test('a family with no distro tier gets a shorter chain, not a missing version', async () => {
+        // "which boxes are still on Windows 10" has to be answerable too, so an
+        // empty tier is skipped rather than truncating everything below it.
+        await db.put(box(DEV_A, { platform: 'darwin', osVersion: '15.2' }));
+        await db.put(box(DEV_B, { platform: 'win32', osVersion: '10' }));
+
+        const onMac = await db.put(app('com.example.Mac', { [DEV_A]: { status: 'available' } }));
+        const onWin = await db.put(app('com.example.Win', { [DEV_B]: { status: 'available' } }));
+
+        expect(await featuresOf(db, onMac)).toEqual([`device/id/${DEV_A}`, 'device/os/mac', 'device/os/mac/15.2']);
+        expect(await featuresOf(db, onWin)).toEqual([`device/id/${DEV_B}`, 'device/os/windows', 'device/os/windows/10']);
+    });
+
+    test('a distro upgrade retires the version key and keeps the tiers above it', async () => {
+        // The fleet case: 22.04 -> 24.04 must not leave a box answering both, or
+        // "what is still on 22.04" over-reports forever.
+        await db.put(box(DEV_A, { platform: 'linux', osDistro: 'ubuntu', osVersion: '22.04' }));
+        const id = await db.put(app('com.example.App', { [DEV_A]: { status: 'available' } }));
+        expect(await featuresOf(db, id)).toContain('device/os/linux/ubuntu/22.04');
+
+        await db.put(box(DEV_A, { platform: 'linux', osDistro: 'ubuntu', osVersion: '24.04' }));
+
+        const tags = await featuresOf(db, id);
+        expect(tags).toContain('device/os/linux/ubuntu/24.04');
+        expect(tags).not.toContain('device/os/linux/ubuntu/22.04');
+        expect(tags).toEqual(expect.arrayContaining(['device/os/linux', 'device/os/linux/ubuntu']));
+    });
+
+    test('a Device document carries its own identity keys', async () => {
+        const deviceDoc = await db.put(box(DEV_A, {
+            platform: 'linux', osDistro: 'ubuntu', osVersion: '24.04', arch: 'aarch64', type: 'server',
+        }));
+
+        const fleet = await db.list({
+            features: { allOf: [DEVICE_SCHEMA, 'device/os/linux/ubuntu/24.04', 'device/arch/aarch64'] },
+        });
+        expect((Array.isArray(fleet) ? fleet : fleet.data ?? []).map((d) => d.id)).toEqual([deviceDoc]);
+    });
+
+    test('rebuildL3 restores the Device self-tags', async () => {
+        // Regression: these were asserted by the caller and therefore bitmap-only,
+        // while rebuildL3 drops the whole device/ namespace and replays it from
+        // locations[] — which a Device row has none of pointing at itself. The
+        // rebuild deleted them with nothing to put them back.
+        const deviceDoc = await db.put(box(DEV_A, { platform: 'linux', osDistro: 'ubuntu', osVersion: '24.04' }));
+        const before = await featuresOf(db, deviceDoc);
+
+        await db.rebuildL3();
+
+        expect(await featuresOf(db, deviceDoc)).toEqual(before);
+        expect(before).toContain('device/os/linux/ubuntu/24.04');
+    });
+
+    test('rebuildL3 restores facets inherited from a device', async () => {
+        await db.put(box(DEV_A, { platform: 'linux', osDistro: 'ubuntu', osVersion: '24.04', arch: 'x86_64' }));
+        const id = await db.put(app('com.example.App', { [DEV_A]: { status: 'available' } }));
+        const before = await featuresOf(db, id);
+
+        await db.rebuildL3();
+
+        expect(await featuresOf(db, id)).toEqual(before);
+    });
+
+    test('a tier cannot smuggle in another tier', async () => {
+        // The one shape rule enforced: the chain's arity. Which OSs have which
+        // tiers is NOT policed (that needs a registry of known systems, wrong the
+        // first time a buildroot image shows up), but a value containing '/' would
+        // silently deepen the chain and is folded instead.
+        await db.put(box(DEV_A, { platform: 'linux', osDistro: 'ubuntu/core', osVersion: '24' }));
+        const id = await db.put(app('com.example.App', { [DEV_A]: { status: 'available' } }));
+
+        const tags = await featuresOf(db, id);
+        expect(tags).toContain('device/os/linux/ubuntu_core');
+        expect(tags).toContain('device/os/linux/ubuntu_core/24');
+        expect(tags).not.toContain('device/os/linux/ubuntu');
+    });
+
+    test('an unpoliced shape still produces a usable key', async () => {
+        // A custom distro lands correctly with no special casing, which is the
+        // argument against a known-OS registry.
+        await db.put(box(DEV_A, { platform: 'linux', osDistro: 'iolinux', osVersion: '1.2' }));
+        const id = await db.put(app('com.example.App', { [DEV_A]: { status: 'available' } }));
+
+        expect(await featuresOf(db, id)).toEqual(expect.arrayContaining([
+            'device/os/linux', 'device/os/linux/iolinux', 'device/os/linux/iolinux/1.2',
+        ]));
+    });
+
+    test('a version with a space is still a legal key', async () => {
+        await db.put(box(DEV_A, { platform: 'linux', osDistro: 'ubuntu', osVersion: '22.04 LTS' }));
+        const id = await db.put(app('com.example.App', { [DEV_A]: { status: 'available' } }));
+
+        expect(await featuresOf(db, id)).toContain('device/os/linux/ubuntu/22.04_lts');
     });
 });

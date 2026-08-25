@@ -452,9 +452,9 @@ Features are flat bitmap keys ticked on a document. They carry a `who says so?` 
 | `data/schema/*` | `schema` (every id-path segment) |
 | `data/mime/*` | `metadata.contentType` (type + full type) |
 | `data/backend/*` | `locations[]` (scheme + scheme/authority, no scheme exempt), or `metadata.backend` |
-| `data/<facet>/*` | a schema's `static facetFields` (e.g. `data/status/*` from Task's `data.status`) |
+| `data/<facet>/*` | a schema's `static facetFields` (e.g. `data/status/*` from Task's `data.status`, `data/platform/*` from Application's `data.platform`); array-valued fields emit one key per entry |
 | `device/id/*` | `locations[]` (`file://` and `device://` authorities) |
-| `device/os\|type/*` | the device's own Device document, joined on `device/id` |
+| `device/os\|arch\|type/*` | the device's own Device document, joined on `device/id` |
 | `feature/*` | the engine observed it (`feature/has-comment`, `feature/orphaned`) |
 | `context/*`, `vfs/*` | tree membership: bitmap-only, not on the row |
 | `internal/*` | engine-managed, hidden from default listings |
@@ -467,7 +467,35 @@ Key charset: lowercased, `a-z 0-9 _ - . / @ : +`. `@` and `:` keep backend addre
 
 A location may declare `metadata.backend` to *override* the URL, for the case the URL lies: a NAS mounted at `/mnt/nas` is addressed `file://<deviceId>/mnt/nas/…` but the bytes are not on that device. The declared name is flat, so it lands where schemes otherwise sit — harmless while the vocabularies do not collide.
 
-**`device/*`** is anchored on `device/id/<deviceId>`, the union of a device's `file://` and `device://` locations, which is why it survives the above rather than being made redundant by it. Everything past the id is optional enrichment that exists only if the app registered a Device document: `device/os/*` and `device/type/*` are joined from it, and further facets (`device/network/<cidr>`, say) slot in the same way.
+**`device/*`** is anchored on `device/id/<deviceId>`, the union of a device's `file://` and `device://` locations, which is why it survives the above rather than being made redundant by it. Everything past the id is optional enrichment that exists only if the app registered a Device document; `device/os/*`, `device/arch/*` and `device/type/*` are joined from it, and a new facet slots in by being added to `deviceFacetKeys`.
+
+The OS is a **chain**, each tier narrowing the one before it, and every prefix is ticked:
+
+```
+device/os/linux
+device/os/linux/ubuntu
+device/os/linux/ubuntu/24.04
+```
+
+so "on Linux", "on Ubuntu" and "still on 22.04" are each one key with no enumeration — the axis a fleet actually differs along, since 22.04 and 24.04 are not interchangeable install targets. An empty tier is skipped rather than reserved, so families with no distro get a shorter chain (`device/os/mac/15.2`, `device/os/windows/10`). `device/arch/*` is `os.machine()` vocabulary (`x86_64`, `aarch64`), not `os.arch()` (`x64`, `arm64`), because that is what flatpak, snap and appimage publish against — a device facet and a package's capability compare without a translation table.
+
+A Device document carries its own keys too (`Device.getFeatureBitmapArray`), which is what makes `data/schema/device AND device/os/linux/ubuntu/24.04` a fleet query rather than a scan. Derived from the row rather than asserted by the caller, for the usual reason and one specific one: `rebuildL3` drops the whole `device/` namespace and replays it from `locations[]`, which a Device row has none of pointing at itself — asserted self-tags would be deleted with nothing to restore them.
+
+Facets change when a box does, and the repair is scoped by the `device/id/<x>` bitmap, which names the affected documents exactly. An in-place distro upgrade retires `device/os/linux/ubuntu/22.04` and keeps the two tiers above it; a document on several devices keeps any facet another of them still implies.
+
+**The chain's shape is not enforced**, and that is a decision rather than an omission. Requiring `linux/<distro>/<version>` needs a registry of which families have which tiers, which is wrong the first time someone turns up with a buildroot image — and useless for that case anyway, since a custom distro reports an ID like any other and already lands correctly as `device/os/linux/iolinux/1.2`. The only shape such a registry would police is a client reporting a version with no distro, which yields `device/os/linux/24.04`: an inert key, because nobody queries a key they cannot construct, produced by a client that is broken. Surfacing that beats rejecting the write or discarding the version it did report. What *is* enforced is arity — a tier cannot contain `/` and so cannot quietly become two. The engine stays dumb about operating systems for the same reason it stays dumb about backends: it parses a shape, and the vocabulary belongs to the caller.
+
+**Capability vs presence.** `device/*` answers where something *is*. What it *could* run on is a separate axis, declared per document — `Application.data.platform` is an array facet, so `['linux/x86_64', 'mac/aarch64']` emits `data/platform/linux/x86_64` and `data/platform/mac/aarch64`. A client logging into an unfamiliar box splits its workspace three ways with intersections against keys derived from its own device facts, inspecting no documents:
+
+```
+applicable here    data/schema/application AND data/platform/linux/x86_64
+already here       … AND device/id/<self>
+installable here   … AND NOT device/id/<self>
+```
+
+`<os>/<arch>` matches the device vocabulary on purpose so the two axes compare without a translation table. There is no distro tier: glibc, not the distro name, is usually what decides, and `linux/ubuntu/24.04/x86_64` explodes combinatorially for a discrimination almost nothing needs. An app declaring no platform lands in no capability bitmap — absence is *unknown*, not *everywhere*, so it fails a filter it was never checked against rather than passing one silently.
+
+Indexing an application is **opt-in, per workspace**: a client enumerating local applications has to let the user pick which ones to index, and has to ask again for each workspace, because the same machine's work and personal apps belong in different ones. Nothing in the engine enforces that and nothing can — a workspace is its own database, so "not indexed here" and "does not exist" are the same observation. The selection has to be right at the point of capture; there is no repair for an over-eager sweep beyond deleting documents the user never asked for.
 
 **`feature/orphaned`** is the orphan axis: `orphanedAt` set and `locations[]` empty. It answers "this document had a resolvable copy and lost it" (stored resync, connector prune, destroy-keep), which is what the UI filter and the retention GC both want. The empty-locations half is what unticks the key on re-bind; `orphanedAt` stays the retention clock, and the bitmap is exactly the GC candidate set.
 
@@ -882,6 +910,8 @@ Rules the registry enforces:
 `indexOptions` fields: `checksumAlgorithms` (default `['sha1','sha256']`), `checksumFields`, `ftsSearchFields`, `vectorEmbeddingFields` (all default to `['data']`), and `embeddingOptions`. Field paths are dotted and resolved against the *document*; the literal `'data'` resolves to `contentData()`, i.e. `data` minus `relations`.
 
 `static facetFields = ['data.status']` gives a schema the derived-facet machinery: the leaf field name becomes the namespace (`data/status/*`). Engine-owned namespaces (`abstraction`, `schema`, `kind`, `mime`, `backend`, `source`, `dataset`, `no-location`) are refused.
+
+A facet field may hold **one value or an array**, in which case it emits one key per entry. That is what a capability axis needs — `data.platform = ['linux/x86_64', 'linux/aarch64']` ticks both — and it stays truthful for free, because every write path diffs the previous key *set* against the current one, so dropping a single entry unticks exactly that key. Name the field for the namespace you want, in the singular even when it holds an array: the leaf name *is* the key namespace, and `data/platform/linux/x86_64` reads as one fact about the document.
 
 ### Publishing a schema to consumers
 

@@ -10,6 +10,7 @@ const TAB = 'data/schema/tab';
 const FILE = 'data/schema/file';
 const TASK = 'data/schema/task';
 const DEVICE = 'data/schema/device';
+const APPLICATION = 'data/schema/application/flatpak';
 const COMMENT = 'feature/has-comment';
 
 // The derived-plane invariant, executable: drop every derived structure and
@@ -123,6 +124,17 @@ describe('rebuildL3', () => {
             // data/status/* — a per-schema facet namespace, which the drop list has
             // to compute from the registry rather than hardcode.
             task: await db.put({ schema: TASK, data: { title: 'ship it', status: 'pending' } }),
+            // data/platform/* — the same, from an ARRAY field, so the sweep covers
+            // a namespace where one row contributes several keys.
+            app: await db.put({
+                schema: APPLICATION,
+                data: {
+                    appId: 'com.example.App',
+                    platform: ['linux/x86_64', 'mac/aarch64'],
+                    source: { ref: 'app/com.example.App/x86_64/stable' },
+                    installs: { laptop1: { status: 'available' } },
+                },
+            }),
         };
     };
 

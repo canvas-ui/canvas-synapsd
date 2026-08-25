@@ -369,16 +369,26 @@ class Document {
      * The schema id is defaulted before validation (the merged
      * `abstractions/Document.js` did this), so `fromData({ data })` works the
      * same way it does on every subclass.
+     *
+     * Constructs `new this(...)`, NOT `new Document(...)`: this is what the
+     * registry calls for every schema id, and hardcoding the base class silently
+     * downgraded any subclass that did not override fromData — it came back as a
+     * plain Document with no facetFields, no deriveLocations and no
+     * getFeatureBitmapArray. Every core schema happens to define its own
+     * fromData, which is why only `registerSchema()`-ed classes ever hit it, i.e.
+     * exactly the third-party path the registry advertises as "the same code
+     * path".
+     *
      * @param {Object} data - Document data
-     * @returns {Document} New Document instance
+     * @returns {Document} New instance of the class this was called on
      */
     static fromData(data) {
         const documentData = { ...data, schema: data?.schema ?? DOCUMENT_SCHEMA_NAME };
-        if (!Document.validateData(documentData)) {
+        if (!this.validateData(documentData)) {
             throw new Error('Invalid document data');
         };
 
-        return new Document(documentData);
+        return new this(documentData);
     }
 
     static get dataSchema() {

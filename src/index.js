@@ -38,7 +38,7 @@ import LanceIndex from './indexes/lance/index.js';
 import VectorIndex from './indexes/lance/VectorIndex.js';
 import * as lancedb from '@lancedb/lancedb';
 import { normalizeBitmapKeys, normalizeBitmapKey, validateBitmapKey } from './indexes/bitmaps/lib/keys.js';
-import { deviceFacetsFromData } from './utils/device-facets.js';
+import { deviceFacetKeys } from './utils/device-facets.js';
 import SemanticEngine from './semantic/index.js';
 
 // Views / Abstractions
@@ -156,9 +156,16 @@ function facetFieldKeys(doc) {
             debug(`Skipping facet field "${field}" on ${doc?.schema} — "${namespace}" is engine-owned`);
             continue;
         }
+        // One value or many. Multi-value is what lets a CAPABILITY facet exist at
+        // all — an application runs on several platforms, a document is in several
+        // states — and it costs nothing extra to keep truthful: every write path
+        // diffs the previous key SET against the current one, so dropping a single
+        // entry from the array unticks exactly that key and nothing else.
         const value = segments.reduce((acc, seg) => (acc == null ? acc : acc[seg]), doc);
-        if (typeof value !== 'string' || value.trim() === '') { continue; }
-        keys.push(`data/${namespace}/${value.trim().toLowerCase()}`);
+        for (const entry of Array.isArray(value) ? value : [value]) {
+            if (typeof entry !== 'string' || entry.trim() === '') { continue; }
+            keys.push(`data/${namespace}/${entry.trim().toLowerCase()}`);
+        }
     }
 
     return normalizeBitmapKeys(keys);
@@ -5127,7 +5134,9 @@ class SynapsD extends EventEmitter {
     /**
      * Derive device feature tags from a document's locations:
      *   device/id/<deviceId>   — presence, one per distinct device-local copy
-     *   device/os/<os>         — the OS of each device it is present on
+     *   device/os/<chain>      — family/distro/version of each device it is on,
+     *                            every prefix ticked (see deviceFacetKeys)
+     *   device/arch/<arch>     — os.machine() vocabulary (x86_64, aarch64)
      *   device/type/<type>     — the type (laptop/desktop/server/…) of each
      *
      * This is the MACHINE axis, not the addressing one — `data/backend/file/<id>`
@@ -5136,13 +5145,13 @@ class SynapsD extends EventEmitter {
      * the union over file:// AND device:// and as the join anchor below.
      *
      * Everything past `device/id` is OPTIONAL ENRICHMENT, present only if the app
-     * registered a Device document: os/type resolve through that document (the
-     * single source of truth) via #deviceFacets, so "all applications available on
+     * registered a Device document: they resolve through that document (the single
+     * source of truth) via #deviceFacets, so "all applications available on
      * Windows" is a plain bitmap AND rather than a join. An unregistered device
      * contributes only its id — the facets appear once its Device document lands
-     * and #syncDeviceFacets reconciles. Further facets (a `device/network/<cidr>`,
-     * say) slot in the same way: add them to deviceFacetsFromData and they inherit
-     * the reconcile.
+     * and #syncDeviceFacets reconciles. A new facet slots in by being added to
+     * deviceFacetKeys; the reconcile is a set difference and needs no per-facet
+     * knowledge.
      *
      * @param {Array<{url:string}>} locations
      * @returns {string[]}
@@ -5165,9 +5174,9 @@ class SynapsD extends EventEmitter {
             const idKey = normalizeBitmapKey(`device/id/${authority}`);
             tags.add(idKey);
 
-            const facets = this.#deviceFacets.get(idKey.slice('device/id/'.length));
-            if (facets?.os) { tags.add(normalizeBitmapKey(`device/os/${facets.os}`)); }
-            if (facets?.type) { tags.add(normalizeBitmapKey(`device/type/${facets.type}`)); }
+            for (const key of this.#deviceFacets.get(idKey.slice('device/id/'.length)) ?? []) {
+                tags.add(key);
+            }
         }
         return [...tags];
     }
@@ -5195,7 +5204,7 @@ class SynapsD extends EventEmitter {
         if (!deviceId) { return null; }
         // Key by the normalized form, matching how it appears in device/id/<x>.
         const key = normalizeBitmapKey(`device/id/${deviceId}`).slice('device/id/'.length);
-        const facets = deviceFacetsFromData(deviceDoc.data);
+        const facets = deviceFacetKeys(deviceDoc.data);
         this.#deviceFacets.set(key, facets);
         return { key, facets };
     }
@@ -5217,23 +5226,26 @@ class SynapsD extends EventEmitter {
         if (!deviceId) { return; }
 
         const key = normalizeBitmapKey(`device/id/${deviceId}`).slice('device/id/'.length);
-        const previous = this.#deviceFacets.get(key) ?? null;
+        const previous = this.#deviceFacets.get(key) ?? [];
         const { facets } = this.#cacheDeviceFacets(deviceDoc) ?? {};
         if (!facets) { return; }
 
-        if (previous && previous.os === facets.os && previous.type === facets.type) { return; }
+        // Both sides come from deviceFacetKeys, so ordering is deterministic and
+        // a join-compare is a whole-set equality test.
+        if (previous.join('\u0000') === facets.join('\u0000')) { return; }
         debug(`Device ${key} facets changed: ${JSON.stringify(previous)} -> ${JSON.stringify(facets)}`);
 
         // Recompute per affected document rather than blanket-swapping keys: a
         // document may sit on several devices, and another of them may still
-        // legitimately imply the old os/type.
+        // legitimately imply the old facets.
         const idKey = `device/id/${key}`;
         const bitmap = await this.bitmapIndex.getBitmap(idKey, false);
         if (!bitmap || bitmap.isEmpty) { return; }
 
-        const staleKeys = [];
-        if (previous?.os && previous.os !== facets.os) { staleKeys.push(normalizeBitmapKey(`device/os/${previous.os}`)); }
-        if (previous?.type && previous.type !== facets.type) { staleKeys.push(normalizeBitmapKey(`device/type/${previous.type}`)); }
+        // Set difference, so this needs no per-facet knowledge: an OS upgrade
+        // retires device/os/linux/ubuntu/22.04 while keeping the two prefixes
+        // above it, and a new facet inherits the reconcile by existing.
+        const staleKeys = previous.filter((k) => !facets.includes(k));
 
         for (const docId of bitmap.toArray()) {
             // NB: documents.get() is SYNCHRONOUS (lmdb-js returns the value, not a
@@ -5243,7 +5255,7 @@ class SynapsD extends EventEmitter {
             const current = new Set(this.#deviceFeaturesFromLocations(stored.locations));
             const drop = staleKeys.filter((k) => !current.has(k));
             if (drop.length) { await this.#applyMembership('untick', docId, drop); }
-            const add = [...current].filter((k) => k.startsWith('device/os/') || k.startsWith('device/type/'));
+            const add = [...current].filter((k) => !k.startsWith('device/id/'));
             if (add.length) { await this.#applyMembership('tick', docId, add); }
         }
     }
