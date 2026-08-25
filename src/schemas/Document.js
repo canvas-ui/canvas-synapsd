@@ -50,8 +50,7 @@ const NON_CONTENT_DATA_KEYS = ['relations'];
 // `location.metadata.backend` case), so the parent no longer asserts it and an
 // asserted copy would be immune to that derivation's stale-diff.
 // Deliberately still ABSENT: `data/source/*` (folded into `data/backend/*` by the
-// v3 migration, nothing emits it) and `data/no-location` (asserted by the parent's
-// orphan lifecycle — it carries intent, not just location count; see TODO.md).
+// v3 migration, nothing emits it).
 const DERIVED_FEATURE_PREFIXES = [
     'data/schema/',         // index.js: schemaBitmapKeys (id path segments)
     'data/mime/',           // index.js: mimeBitmapKeys from metadata.contentType
@@ -59,6 +58,11 @@ const DERIVED_FEATURE_PREFIXES = [
     'feature/',             // index.js: feature/has-comment, feature/email/* flags
     'device/',              // index.js: #deviceFeaturesFromLocations
 ];
+
+// Exact keys the engine derives (not a prefix family). Stripped like the prefixes
+// above so an asserted copy cannot outlive the derivation.
+const NO_LOCATION_FEATURE = 'data/no-location';
+const DERIVED_FEATURE_KEYS = [NO_LOCATION_FEATURE];
 
 // A schema's own facet namespaces (`static facetFields = ['data.status']` ->
 // `data/status/`) are derived too, but they are per-schema rather than global, so
@@ -106,7 +110,8 @@ function normalizeFeatureArray(input, previous = [], facetFields = []) {
     const refusedPrefixes = [
         ...DERIVED_FEATURE_PREFIXES, ...RETIRED_FEATURE_PREFIXES, ...facetPrefixesFor(facetFields),
     ];
-    const isDerived = (key) => refusedPrefixes.some((prefix) => key.startsWith(prefix));
+    const isDerived = (key) =>
+        DERIVED_FEATURE_KEYS.includes(key) || refusedPrefixes.some((prefix) => key.startsWith(prefix));
     const out = [];
     const seen = new Set();
     const add = (key) => {
@@ -198,9 +203,9 @@ const documentSchema = z.object({
     // Timestamps
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
-    // Orphan lifecycle: set when the document lost its last resolvable location
-    // (data/no-location feature). null = not orphaned. Cleared on re-bind, read
-    // by the retention GC. A state marker, not a deletion.
+    // Orphan lifecycle: set when the document lost its last resolvable location.
+    // null = not orphaned. Cleared on re-bind, read by the retention GC.
+    // Distinct from the derived `data/no-location` bitmap (empty locations[]).
     orphanedAt: z.string().datetime().nullable().optional(),
 
     // Document data/payload
@@ -907,4 +912,4 @@ class Document {
 // Export document class and schemas
 export default Document;
 export { documentDataSchema, documentSchema, locationSchema, timelineEntrySchema };
-export { DERIVED_FEATURE_PREFIXES, RETIRED_FEATURE_PREFIXES, PRESERVED_FEATURE_PREFIXES, normalizeFeatureArray };
+export { DERIVED_FEATURE_PREFIXES, RETIRED_FEATURE_PREFIXES, PRESERVED_FEATURE_PREFIXES, NO_LOCATION_FEATURE, normalizeFeatureArray };
