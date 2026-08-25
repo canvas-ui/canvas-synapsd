@@ -42,8 +42,8 @@ describe('kind axis removal', () => {
         // ('application/flatpak'), note a single-segment literal ('note').
         await db.put({ schema: TAB, data: { url: 'https://example.com/a', title: 'a' } });
         await db.put({
-            schema: APP,
-            data: { appId: 'org.gimp.GIMP', name: 'GIMP', type: 'flatpak', source: { ref: 'org.gimp.GIMP' } },
+            schema: `${APP}/flatpak`,
+            data: { appId: 'org.gimp.GIMP', name: 'GIMP', source: { ref: 'org.gimp.GIMP' } },
         });
         await db.put({ schema: NOTE, data: { title: 'n', content: 'c' } });
 

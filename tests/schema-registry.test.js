@@ -16,6 +16,7 @@ const CORE_IDS = [
     'data/schema/file',
     'data/schema/message',
     'data/schema/message/email',
+    'data/schema/event',
     'data/schema/task',
     'data/schema/identity',
     'data/schema/device',
@@ -97,7 +98,7 @@ describe('SchemaRegistry v3', () => {
         test('round-trips an app schema through the public API', () => {
             expect(schemaRegistry.hasSchema('data/schema/widget')).toBe(false);
 
-            schemaRegistry.registerSchema('data/schema/widget', Widget, { subtypeField: 'data.type' });
+            schemaRegistry.registerSchema('data/schema/widget', Widget);
 
             expect(schemaRegistry.getSchema('data/schema/widget')).toBe(Widget);
             expect(schemaRegistry.listSchemas('data/')).toContain('data/schema/widget');
@@ -137,10 +138,15 @@ describe('SchemaRegistry v3', () => {
             expect(() => schemaRegistry.registerSchema('   ', Widget)).toThrow(/non-empty string/);
         });
 
-        test('rejects a non-string subtypeField', () => {
-            expect(() => schemaRegistry.registerSchema('data/schema/widget', Widget, {
-                subtypeField: 42,
-            })).toThrow(/dotted field path string/);
+        test('child ids share the parent class', () => {
+            expect(schemaRegistry.getSchema('data/schema/application/flatpak'))
+                .toBe(schemaRegistry.getSchema('data/schema/application'));
+            expect(schemaRegistry.getSchema('data/schema/event/calendar'))
+                .toBe(schemaRegistry.getSchema('data/schema/event'));
+            expect(schemaRegistry.getSchema('data/schema/identity/person'))
+                .toBe(schemaRegistry.getSchema('data/schema/identity'));
+            expect(schemaRegistry.getSchema('data/schema/dotfile/file'))
+                .toBe(schemaRegistry.getSchema('data/schema/dotfile'));
         });
     });
 
@@ -211,49 +217,36 @@ describe('SchemaRegistry v3', () => {
         });
     });
 
-    // `resolveSubtype` replaces v3's `resolveKind`. It returns ONE RAW SEGMENT:
-    // scoping used to need `kindPrefix` because every kind shared one flat
-    // namespace, whereas a subtype hangs under the schema id that owns it.
-    //
-    // ⚠️ Nothing indexes the result yet — the `data/kind/*` axis was deleted and
-    // the replacement is a segment of the schema id, which lands with the ids in
-    // Rev B. These tests keep the resolver honest in the meantime.
-    describe('resolveSubtype', () => {
-        test('reads the declared field off the document, unprefixed', () => {
-            expect(schemaRegistry.resolveSubtype('data/schema/application', { data: { type: 'flatpak' } }))
-                .toBe('flatpak');
-            expect(schemaRegistry.resolveSubtype('data/schema/identity', { data: { type: 'person' } }))
-                .toBe('person');
-            expect(schemaRegistry.resolveSubtype('data/schema/dotfile', { data: { type: 'folder' } }))
-                .toBe('folder');
-        });
-
-        test('returns null when the schema declares no subtype axis, or the field is absent', () => {
-            expect(schemaRegistry.resolveSubtype('data/schema/file', { data: { type: 'x' } })).toBeNull();
-            expect(schemaRegistry.resolveSubtype('data/schema/application')).toBeNull();
-            expect(schemaRegistry.resolveSubtype('data/schema/application', {})).toBeNull();
-            expect(schemaRegistry.resolveSubtype('data/schema/application', { data: {} })).toBeNull();
-            expect(schemaRegistry.resolveSubtype('data/schema/application', { data: { type: '  ' } })).toBeNull();
-            expect(schemaRegistry.resolveSubtype('data/schema/nonexistent', { data: { type: 'x' } })).toBeNull();
-        });
-
-        test('the v3 kind resolver is gone, not aliased', () => {
+    describe('retired kind/subtypeField axis', () => {
+        test('the v3 kind resolver and subtypeField are gone, not aliased', () => {
             expect(schemaRegistry.resolveKind).toBeUndefined();
+            expect(schemaRegistry.resolveSubtype).toBeUndefined();
             for (const id of schemaRegistry.listSchemas('data/')) {
                 const entry = schemaRegistry.getSchemaEntry(id);
                 expect(entry.kind).toBeUndefined();
                 expect(entry.kindField).toBeUndefined();
                 expect(entry.kindPrefix).toBeUndefined();
+                expect(entry.subtypeField).toBeUndefined();
             }
         });
     });
 
     describe('Identity', () => {
-        test('carries a type discriminator, not a data-level kind that would shadow the row field', () => {
-            const identity = Identity.fromData({ data: { displayName: 'Alice', type: 'person' } });
-            expect(identity.data.type).toBe('person');
-            expect(identity.schema).toBe('data/schema/identity');
+        test('the type lives in the schema id, not a payload discriminator', () => {
+            const identity = Identity.fromData({
+                schema: 'data/schema/identity/person',
+                data: { displayName: 'Alice' },
+            });
+            expect(identity.data.type).toBeUndefined();
+            expect(identity.type).toBe('person');
+            expect(identity.schema).toBe('data/schema/identity/person');
             expect(identity.schemaVersion).toBe('3.0');
+        });
+
+        test('the parent id is still writable (type was always optional)', () => {
+            const identity = Identity.fromData({ data: { displayName: 'Alice' } });
+            expect(identity.type).toBeNull();
+            expect(identity.schema).toBe('data/schema/identity');
         });
 
         test('identifiers are a field on the identity, not the identity itself', () => {
@@ -268,11 +261,11 @@ describe('SchemaRegistry v3', () => {
             expect(identity.data.identifiers).toHaveLength(1);
         });
 
-        test('rejects the retired contact enum values', () => {
-            expect(() => Identity.validateData({
-                schema: 'data/schema/identity',
-                data: { displayName: 'Team', type: 'team' },
-            })).toThrow();
+        test('rejects a leaf that is not in the identity enum', () => {
+            expect(() => Identity.fromData({
+                schema: 'data/schema/identity/team',
+                data: { displayName: 'Team' },
+            })).toThrow(/identity\/\{person\|organization\|service\|bot\}/);
         });
     });
 });
@@ -330,8 +323,7 @@ describe('jsonSchema derivation', () => {
         // Required-vs-optional falls out of `.optional()`, so a form builder can
         // render it without knowing anything about synapsd.
         expect(data.required).toEqual(['title']);
-        expect(Identity.jsonSchema.properties.data.properties.type.enum)
-            .toEqual(['person', 'organization', 'service', 'bot']);
+        expect(Identity.jsonSchema.properties.data.properties.type).toBeUndefined();
     });
 
     test('every registered document schema converts, and layer types return null', () => {

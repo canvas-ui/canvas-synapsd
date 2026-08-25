@@ -19,10 +19,10 @@ describe('SCHEMA_ID_RENAMES', () => {
         }
     });
 
-    test('no registered data/schema id is missing from the map targets', () => {
-        const targets = new Set(Object.values(SCHEMA_ID_RENAMES));
+    test('every registered data/schema id is a map target or a child of one', () => {
+        const targets = [...Object.values(SCHEMA_ID_RENAMES)];
         for (const id of schemaRegistry.listSchemas('data/schema')) {
-            expect(targets.has(id)).toBe(true);
+            expect(targets.some((t) => id === t || id.startsWith(`${t}/`))).toBe(true);
         }
     });
 
@@ -33,15 +33,18 @@ describe('SCHEMA_ID_RENAMES', () => {
     });
 });
 
-// Registered vs derived two-segment ids: `message/email` is a registry entry,
-// `application/flatpak` is a bitmap key only. getSchema() stays exact-match and
-// must not silently resolve a derived key to the parent class (an unknown
-// subtype would construct and validate as the parent). resolveSchemaId() is the
-// explicit bridge for callers holding a bitmap key.
+// Closed-enum children are registered and share the parent class. getSchema()
+// stays exact-match: an unknown extra segment must not silently construct as
+// the parent. resolveSchemaId() is the explicit ancestor walk for bitmap keys.
 describe('derived-key resolution', () => {
-    test('getSchema throws on a derived subtype key, naming the real schema', () => {
-        expect(() => schemaRegistry.getSchema('data/schema/application/flatpak')).toThrow(
-            /derived subtype bitmap key.*data\/schema\/application/,
+    test('getSchema returns the parent class for a registered child', () => {
+        expect(schemaRegistry.getSchema('data/schema/application/flatpak'))
+            .toBe(schemaRegistry.getSchema('data/schema/application'));
+    });
+
+    test('getSchema throws on an unknown extra segment, naming the nearest schema', () => {
+        expect(() => schemaRegistry.getSchema('data/schema/application/not-a-type')).toThrow(
+            /not a registered schema id — nearest schema is data\/schema\/application/,
         );
     });
 
@@ -49,13 +52,14 @@ describe('derived-key resolution', () => {
         expect(() => schemaRegistry.getSchema('data/schema/nonexistent')).toThrow(/Schema not found/);
     });
 
-    test('resolveSchemaId is identity on a registered id', () => {
+    test('resolveSchemaId is identity on a registered id, including children', () => {
         expect(schemaRegistry.resolveSchemaId('data/schema/message/email')).toBe('data/schema/message/email');
+        expect(schemaRegistry.resolveSchemaId('data/schema/application/flatpak')).toBe('data/schema/application/flatpak');
         expect(schemaRegistry.resolveSchemaId('data/schema/note')).toBe('data/schema/note');
     });
 
-    test('resolveSchemaId walks a derived key to the registered ancestor', () => {
-        expect(schemaRegistry.resolveSchemaId('data/schema/application/flatpak')).toBe('data/schema/application');
+    test('resolveSchemaId walks an unregistered extra segment to the registered ancestor', () => {
+        expect(schemaRegistry.resolveSchemaId('data/schema/application/not-a-type')).toBe('data/schema/application');
     });
 
     test('resolveSchemaId returns null when nothing registered is above the key', () => {

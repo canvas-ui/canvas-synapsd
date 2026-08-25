@@ -28,7 +28,9 @@ import { z } from 'zod';
 import { pathPattern, normalizeHomePlaceholder, deviceFileUrl, normalizeDotfileUrl, dotfileEntryPath } from '../../utils/path-helpers.js';
 
 const DOCUMENT_SCHEMA_NAME = 'data/schema/dotfile';
+export const DOTFILE_SCHEMA = DOCUMENT_SCHEMA_NAME;
 const DOCUMENT_SCHEMA_VERSION = '3.0';
+export const DOTFILE_TYPES = ['file', 'folder'];
 
 /*******************
  * Data Schema     *
@@ -44,9 +46,6 @@ const documentDataSchema = z
                 // path (resolved to the workspace-local form) and NORMALIZES both,
                 // so four spellings of one entry cannot become four documents.
                 url: z.string().min(1).transform(normalizeDotfileUrl),
-
-                // Whether this dotfile entry points to a file or folder in the repo.
-                type: z.enum(['file', 'folder']),
 
                 // Per-device mappings: deviceId -> localPath
                 // localPath may contain $HOME or other placeholders resolved at runtime.
@@ -90,7 +89,12 @@ export default class Dotfile extends Document {
     };
 
     constructor(options = {}) {
-        options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
+        const leaf = typeof options.schema === 'string' && options.schema.startsWith(`${DOCUMENT_SCHEMA_NAME}/`)
+            ? options.schema.slice(DOCUMENT_SCHEMA_NAME.length + 1)
+            : null;
+        if (!DOTFILE_TYPES.includes(leaf)) {
+            throw new Error(`Dotfile schema must be ${DOCUMENT_SCHEMA_NAME}/{${DOTFILE_TYPES.join('|')}}`);
+        }
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
 
         super(options);
@@ -110,7 +114,7 @@ export default class Dotfile extends Document {
     get url() { return this.data.url; }
     /** Repo-relative entry path — what a client joins onto its local checkout. */
     get entryPath() { return dotfileEntryPath(this.data.url); }
-    get type() { return this.data.type; }
+    get type() { return this.schema.slice(DOCUMENT_SCHEMA_NAME.length + 1); }
     get links() { return this.data.links; }
     get description() { return this.data.description; }
     get tags() { return this.data.tags; }
@@ -152,11 +156,6 @@ export default class Dotfile extends Document {
      * ------------------*/
 
     static fromData(data) {
-        data.schema = DOCUMENT_SCHEMA_NAME;
-        // validateData throws on invalid input and normalizes `data` (link paths →
-        // $HOME). Construct from the full object so top-level fields (id, locations,
-        // checksumArray, timestamps) survive a reparse — only `data` is replaced with
-        // the normalized version.
         const transformed = this.validateData(data);
         return new Dotfile({ ...data, data: transformed.data });
     }

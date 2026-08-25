@@ -61,7 +61,7 @@ const DEFAULT_LIST_LIMIT = 100;
 // Row-format version of the database. Bump when a change makes rows written by
 // this build unreadable by the previous one; a database below it is REFUSED at
 // open (see start()) rather than migrated — there is no migration code here.
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const SCHEMA_VERSION_KEY = 'internal/schemaVersion';
 
 // Presence bitmap for docs carrying a non-empty user-authored comment. A `feature/`
@@ -276,24 +276,13 @@ function facetBitmapKeys(doc) {
 }
 
 // ── Schema identity keys ─────────────────────────────────────────────────────
-// The hierarchical expansion of a doc's schema id, plus its derived subtype.
-// One rule, no special cases: EVERY segment below `data/schema/` is ticked —
-// `data/schema/message/email` ticks `data/schema/message` AND itself, an
-// Application doc with `data.type: 'flatpak'` additionally ticks
-// `data/schema/application/flatpak`. The parent key is therefore always a
-// roll-up, and consumers cannot tell (and need not care) whether a child
-// segment came from a REGISTERED id (message/email, its own class + identity)
-// or a DERIVED subtype (application/flatpak, a bitmap key only — never a
-// `doc.schema` value, never a registry entry).
-//
-// This is ancestor ticking — the thing v3 deliberately killed — and NOT a
-// reversal: v3 killed the CLASS-chain expansion (`Tab extends Link` making tabs
-// answer to "all links" as a side effect of code reuse). What expands here is
-// the ID PATH, where every segment is a modelling decision written into the id
-// itself. Same mechanism, opposite provenance.
+// Hierarchical expansion of a doc's schema id. One rule: EVERY segment below
+// `data/schema/` is ticked — `data/schema/message/email` ticks
+// `data/schema/message` AND itself. The parent key is always a roll-up.
+// This is ancestor ticking of the ID PATH, not the class-chain expansion v3 killed.
 //
 // Tick and untick paths MUST both use this function (stale diffs are computed
-// against the same expansion), or parent/subtype keys would never untick.
+// against the same expansion), or parent keys would never untick.
 const SCHEMA_BITMAP_PREFIX = 'data/schema/';
 export function schemaBitmapKeysForTest(doc) { return schemaBitmapKeys(doc); }
 
@@ -311,14 +300,6 @@ function schemaBitmapKeys(doc) {
         slash = id.indexOf('/', slash + 1);
     }
     keys.push(id);
-
-    const subtype = schemaRegistry.resolveSubtype(id, doc);
-    if (subtype) {
-        // normalizeBitmapKey downstream lowercases and replaces invalid chars,
-        // but a subtype containing '/' would silently mint fake hierarchy levels
-        // — refuse that here rather than normalize it away.
-        if (!subtype.includes('/')) { keys.push(`${id}/${subtype}`); }
-    }
     return keys;
 }
 
@@ -1164,6 +1145,20 @@ class SynapsD extends EventEmitter {
         return await this.#writeAssertedRelation(docId, predicate, toId, 'retract');
     }
 
+    // Incoming asserted edges are owned by the SURVIVING subject row. deleteNode
+    // drops the index entries, but a later rebuildL3 would replay those rows and
+    // resurrect the edge. Retract first. Derived incoming (extractor/agent) has
+    // no row claim and dies in deleteNode alone.
+    async #retractIncomingAssertedRelations(deletedId, skipIds) {
+        const { incoming } = this.#edges.edgesOf(deletedId);
+        for (const { p, from } of incoming) {
+            if (skipIds?.has(from)) { continue; }
+            const existing = this.#edges.edge(from, p, deletedId);
+            if (!existing || existing.meta?.src !== 'doc') { continue; }
+            await this.retractRelation(from, p, deletedId);
+        }
+    }
+
     async #writeAssertedRelation(docIdentifier, predicate, toIdentifier, op) {
         const docId = Number(docIdentifier);
         if (!Number.isInteger(docId) || docId <= 0) { throw new Error(`Invalid document id: ${docIdentifier}`); }
@@ -1324,8 +1319,7 @@ class SynapsD extends EventEmitter {
                         };
                         prevFacetKeys = facetBitmapKeys(existing);
                         // Schema keys join the snapshot so the stale-diff below can
-                        // untick a subtype segment the update moved away from
-                        // (data.type change -> different derived child key).
+                        // untick a child segment the update moved away from.
                         prevFeatureKeys = [...documentFeatureKeys(existing), ...schemaBitmapKeys(existing)];
                         prevRelations = documentRelations(existing);
                         // Merge input onto existing (preserves locations, metadata,
@@ -2466,7 +2460,9 @@ class SynapsD extends EventEmitter {
         // Single transaction for all deletes
         try {
             await this.#withDeferredMembership(async () => {
+                const doomed = new Set(toDelete.map(({ id }) => id));
                 for (const { id, document } of toDelete) {
+                    await this.#retractIncomingAssertedRelations(id, doomed);
                     await this.documents.delete(id);
                     const clearedLayers = await this.#synapses.clearSynapses(id, { syncBitmaps: false });
                     await this.#applyMembership('untick', id, clearedLayers);
@@ -4055,7 +4051,7 @@ class SynapsD extends EventEmitter {
         const previousFacetKeys = facetBitmapKeys(storedDocument);
         // Same for declarative features: captured before update() mutates the
         // document in place, so an edit that removes a tag can untick it. Schema
-        // keys join the snapshot so a data.type change unticks the old subtype.
+        // keys join the snapshot so a schema-id change unticks the old child.
         const previousFeatureKeys = [...documentFeatureKeys(storedDocument), ...schemaBitmapKeys(storedDocument)];
         // Same again for asserted relations — update() mutates storedDocument in
         // place, so this must be read before it.
@@ -4267,6 +4263,7 @@ class SynapsD extends EventEmitter {
 
                 // Delete document from all bitmaps AND Reverse Index via Synapses
                 // await this.bitmapIndex.untickAll(docId);
+                await this.#retractIncomingAssertedRelations(docId);
                 const clearedLayers = await this.#synapses.clearSynapses(docId, { syncBitmaps: false });
                 await this.#applyMembership('untick', docId, clearedLayers);
                 this.#edges.deleteNode(docId);

@@ -22,9 +22,10 @@ import { z } from 'zod';
 import { pathPattern, normalizeHomePlaceholder, deviceFileUrl, deviceUrl } from '../../utils/path-helpers.js';
 
 const DOCUMENT_SCHEMA_NAME = 'data/schema/application';
+export const APPLICATION_SCHEMA = DOCUMENT_SCHEMA_NAME;
 const DOCUMENT_SCHEMA_VERSION = '3.0';
 
-const applicationTypeSchema = z.enum(['appimage', 'flatpak', 'snap', 'portable', 'system', 'local']);
+export const APPLICATION_TYPES = ['appimage', 'flatpak', 'snap', 'portable', 'system', 'local'];
 const installStatusSchema = z.enum(['available', 'missing', 'installing', 'error', 'unknown']);
 
 // Which install states mean "the app is on this device". Only these produce a
@@ -55,7 +56,6 @@ const applicationPayloadSchema = Document.extendDataSchema(
         // Stable identifier (primary identity)
         appId: z.string().min(1),
         name: z.string().min(1).optional(),
-        type: applicationTypeSchema,
         description: z.string().optional(),
         tags: z.array(z.string()).optional(),
 
@@ -74,6 +74,9 @@ const applicationPayloadSchema = Document.extendDataSchema(
 ).superRefine((doc, ctx) => {
     const data = doc?.data || {};
     const source = data.source || {};
+    const leaf = typeof doc.schema === 'string' && doc.schema.startsWith(`${DOCUMENT_SCHEMA_NAME}/`)
+        ? doc.schema.slice(DOCUMENT_SCHEMA_NAME.length + 1)
+        : null;
 
     const requireSourceKey = (key, message) => {
         if (typeof source?.[key] !== 'string' || !source[key].trim()) {
@@ -81,10 +84,10 @@ const applicationPayloadSchema = Document.extendDataSchema(
         }
     };
 
-    if (data.type === 'appimage') { requireSourceKey('url', 'appimage requires data.source.url'); }
-    if (data.type === 'flatpak')  { requireSourceKey('ref', 'flatpak requires data.source.ref'); }
-    if (data.type === 'snap')     { requireSourceKey('name', 'snap requires data.source.name'); }
-    if (data.type === 'portable') {
+    if (leaf === 'appimage') { requireSourceKey('url', 'appimage requires data.source.url'); }
+    if (leaf === 'flatpak')  { requireSourceKey('ref', 'flatpak requires data.source.ref'); }
+    if (leaf === 'snap')     { requireSourceKey('name', 'snap requires data.source.name'); }
+    if (leaf === 'portable') {
         if (!source?.repoPath && !source?.url && !source?.path) {
             ctx.addIssue({
                 code: z.ZodIssueCode.custom,
@@ -104,13 +107,18 @@ export default class Application extends Document {
     // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = {
-        ftsSearchFields: ['data.appId', 'data.name', 'data.type', 'data.description', 'locationUrls'],
+        ftsSearchFields: ['data.appId', 'data.name', 'data.description', 'locationUrls'],
         vectorEmbeddingFields: ['data.name', 'data.appId', 'locationUrls'],
         checksumFields: ['data.appId'],
     };
 
     constructor(options = {}) {
-        options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
+        const leaf = typeof options.schema === 'string' && options.schema.startsWith(`${DOCUMENT_SCHEMA_NAME}/`)
+            ? options.schema.slice(DOCUMENT_SCHEMA_NAME.length + 1)
+            : null;
+        if (!APPLICATION_TYPES.includes(leaf)) {
+            throw new Error(`Application schema must be ${DOCUMENT_SCHEMA_NAME}/{${APPLICATION_TYPES.join('|')}}`);
+        }
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
 
         super(options);
@@ -129,7 +137,7 @@ export default class Application extends Document {
 
     get appId() { return this.data.appId; }
     get name() { return this.data.name; }
-    get type() { return this.data.type; }
+    get type() { return this.schema.slice(DOCUMENT_SCHEMA_NAME.length + 1); }
     get description() { return this.data.description; }
     get tags() { return this.data.tags; }
     get source() { return this.data.source; }
@@ -196,10 +204,6 @@ export default class Application extends Document {
      * ------------------*/
 
     static fromData(data) {
-        data.schema = DOCUMENT_SCHEMA_NAME;
-        // validateData throws on invalid input and normalizes `data` (install paths).
-        // Construct from the full object so top-level fields (id, locations,
-        // checksumArray, timestamps) survive a reparse — only `data` is replaced.
         const transformed = this.validateData(data);
         return new Application({ ...data, data: transformed.data });
     }

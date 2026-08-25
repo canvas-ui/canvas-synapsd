@@ -4,7 +4,9 @@ import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/schema/identity';
+export const IDENTITY_SCHEMA = DOCUMENT_SCHEMA_NAME;
 const DOCUMENT_SCHEMA_VERSION = '3.0';
+export const IDENTITY_TYPES = ['person', 'organization', 'service', 'bot'];
 
 /**
  * One external identifier for this identity (an email address, a Slack user id,
@@ -48,15 +50,6 @@ const organizationSchema = z.object({
 const identityPayloadSchema = Document.extendDataSchema(
     z.object({
         displayName: z.string(),
-        // Subtype axis, named `type` rather than `kind`. The original reason was
-        // avoiding a collision with v3's reserved top-level `kind` row field; that
-        // field is gone (removed 2026-08-04) but the name stays, because `kind`
-        // remains a reserved facet namespace and `data.type` is what the registry's
-        // `subtypeField` points at — the segment that becomes part of the schema id
-        // in Rev B.
-        // 'team' -> organization and 'integration' -> service under the old enum;
-        // there are 0 documents, so this is a pure code change.
-        type: z.enum(['person', 'organization', 'service', 'bot']).optional(),
         primaryEmail: z.string().email().optional(),
         name: z.object({
             given: z.string().optional(),
@@ -94,7 +87,14 @@ export default class Identity extends Document {
     static indexOptions = defaultIndexOptions;
 
     constructor(options = {}) {
-        options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
+        const schema = options.schema || DOCUMENT_SCHEMA_NAME;
+        const leaf = schema === DOCUMENT_SCHEMA_NAME
+            ? null
+            : (schema.startsWith(`${DOCUMENT_SCHEMA_NAME}/`) ? schema.slice(DOCUMENT_SCHEMA_NAME.length + 1) : false);
+        if (leaf === false || (leaf && !IDENTITY_TYPES.includes(leaf))) {
+            throw new Error(`Identity schema must be ${DOCUMENT_SCHEMA_NAME} or ${DOCUMENT_SCHEMA_NAME}/{${IDENTITY_TYPES.join('|')}}`);
+        }
+        options.schema = schema;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
 
         super(options);
@@ -103,6 +103,12 @@ export default class Identity extends Document {
     }
 
     // ----- Getters / Setters -----
+
+    get type() {
+        return this.schema === DOCUMENT_SCHEMA_NAME
+            ? null
+            : this.schema.slice(DOCUMENT_SCHEMA_NAME.length + 1);
+    }
 
     get primaryEmail() {
         if (this.data.primaryEmail) {
@@ -192,7 +198,6 @@ export default class Identity extends Document {
     // ----- Static helpers -----
 
     static fromData(data) {
-        data.schema = DOCUMENT_SCHEMA_NAME;
         return new Identity(data);
     }
 

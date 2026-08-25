@@ -53,7 +53,7 @@ const NON_CONTENT_DATA_KEYS = ['relations'];
 // v3 migration, nothing emits it) and `data/no-location` (asserted by the parent's
 // orphan lifecycle — it carries intent, not just location count; see TODO.md).
 const DERIVED_FEATURE_PREFIXES = [
-    'data/schema/',         // index.js: schemaBitmapKeys (id segments + derived subtype)
+    'data/schema/',         // index.js: schemaBitmapKeys (id path segments)
     'data/mime/',           // index.js: mimeBitmapKeys from metadata.contentType
     'data/backend/',        // index.js: #backendFeaturesFromLocations
     'feature/',             // index.js: feature/has-comment, feature/email/* flags
@@ -436,6 +436,11 @@ class Document {
 
         // Update ID if provided (coerce numeric strings; ids are integers)
         if (data.id !== undefined && data.id !== null) { this.id = normalizeDocumentId(data.id); }
+
+        // The schema id IS the subtype axis. An update that names a new id
+        // (application/flatpak → application/snap) must take, or the bitmap
+        // child never moves.
+        if (typeof data.schema === 'string' && data.schema) { this.schema = data.schema; }
 
         // Update data if provided
         if (data.data) {

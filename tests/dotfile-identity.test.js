@@ -11,8 +11,8 @@ const TAB = 'data/schema/tab';
 const LINK = 'data/schema/link';
 
 const dotfile = (url, links = {}, type = 'file') => ({
-    schema: DOTFILE,
-    data: { url, type, links },
+    schema: `${DOTFILE}/${type}`,
+    data: { url, links },
 });
 
 // A dotfile's identity is WHICH ENTRY IN WHICH REPO — a URI, not a bare path.
@@ -89,7 +89,8 @@ describe('dotfile identity (data.url)', () => {
         const id = await db.put(dotfile('ssh', { 'dev-a': '$HOME/.ssh' }, 'folder'));
         const doc = await db.get(id);
 
-        expect(doc.data.type).toBe('folder');
+        expect(doc.schema).toBe(`${DOTFILE}/folder`);
+        expect(doc.type).toBe('folder');
         expect(doc.data.url).toBe('workspace:dotfiles#ssh');
     });
 
