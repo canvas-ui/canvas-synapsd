@@ -340,7 +340,7 @@ async function onFrame(frameBytes) {
 
 ---
 
-## How it thinks
+## Core concepts
 
 - **Documents are the source of truth; indexes are derived cache.** Timelines, mime facets, backend and device presence, geo cells, asserted edges: all re-derived from document state on every write, so they cannot drift. `rebuildL3()` reconstructs them from rows alone.
 - **Membership is cheap and plural.** A document is stored once; appearing in ten trees, five tags, and three timelines costs bitmap bits, not copies.
