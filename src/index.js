@@ -120,6 +120,17 @@ const ENGINE_OWNED_FACET_NAMESPACES = new Set([
 
 // Device documents are the source of truth for the derived device/os|type facets.
 const DEVICE_SCHEMA_NAME = 'data/schema/device';
+
+// Empty locations[] on a schema that owns backends. Notes/tasks never tick this,
+// so GC listing the key cannot sweep documents that were never expected to have
+// a copy. Same prefix family as data/backend/<scheme>, so strip + rebuildL3
+// already cover it.
+const NO_LOCATION_FEATURE = 'data/backend/no-location';
+const LOCATION_SCHEMAS = ['data/schema/file', 'data/schema/application', 'data/schema/dotfile'];
+function schemaOwnsLocations(schema) {
+    if (typeof schema !== 'string') { return false; }
+    return LOCATION_SCHEMAS.some((id) => schema === id || schema.startsWith(`${id}/`));
+}
 function facetFieldKeys(doc) {
     const fields = doc?.constructor?.facetFields;
     if (!Array.isArray(fields) || fields.length === 0) { return []; }
@@ -1280,6 +1291,7 @@ class SynapsD extends EventEmitter {
                 let isUpdate = false;
                 let prevChecksums = null;
                 let prevLocations = null;
+                let prevSchema = null;
                 let prevComment = null;
                 let prevSummary = null;
                 let prevText = null;
@@ -1309,6 +1321,7 @@ class SynapsD extends EventEmitter {
                         // so stale checksums/timelines/device tags can be cleaned.
                         prevChecksums = Array.isArray(existing.checksumArray) ? [...existing.checksumArray] : [];
                         prevLocations = Array.isArray(existing.locations) ? [...existing.locations] : [];
+                        prevSchema = existing.schema;
                         prevComment = typeof existing.comment === 'string' ? existing.comment : '';
                         prevSummary = typeof existing.metadata?.summary === 'string' ? existing.metadata.summary : '';
                         prevText = typeof existing.metadata?.text?.content === 'string' ? existing.metadata.text.content : '';
@@ -1345,6 +1358,7 @@ class SynapsD extends EventEmitter {
                         if (existing.updatedAt) { parsed.updatedAt = existing.updatedAt; }
                         prevChecksums = Array.isArray(existing.checksumArray) ? [...existing.checksumArray] : [];
                         prevLocations = Array.isArray(existing.locations) ? [...existing.locations] : [];
+                        prevSchema = existing.schema;
                         prevComment = typeof existing.comment === 'string' ? existing.comment : '';
                         prevSummary = typeof existing.metadata?.summary === 'string' ? existing.metadata.summary : '';
                         prevText = typeof existing.metadata?.text?.content === 'string' ? existing.metadata.text.content : '';
@@ -1386,7 +1400,7 @@ class SynapsD extends EventEmitter {
 
                 validateDocumentRelations(parsed);
 
-                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevComment, prevSummary, prevText, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures };
+                const entry = { parsed, existing: !!existing, isUpdate, prevChecksums, prevLocations, prevSchema, prevComment, prevSummary, prevText, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures };
                 prepared.push(entry);
                 if (!isUpdate) {
                     const primaryChecksum = parsed.getPrimaryChecksum();
@@ -1427,7 +1441,7 @@ class SynapsD extends EventEmitter {
         try {
             await this.#withDeferredMembership(async () => {
                 await this.bitmapIndex.tick(this.allDocumentsBitmap.key, prepared.map((p) => p.parsed.id));
-                for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures } of prepared) {
+                for (const { parsed, existing, isUpdate, prevChecksums, prevLocations, prevSchema, prevTimelineState, prevFacetKeys, prevFeatureKeys, prevRelations, docFeatures } of prepared) {
                     await this.documents.put(parsed.id, parsed);
 
                     // Features this write dropped from the document — untick, or a
@@ -1455,7 +1469,7 @@ class SynapsD extends EventEmitter {
                     this.#syncDocumentRelations(parsed.id, prevRelations, documentRelations(parsed));
                     await this.#indexDocument(parsed.id, contextSpec, directorySpec, docFeatures);
                     if (existing) {
-                        await this.#removeStaleLocationMembership(parsed.id, prevLocations || [], parsed.locations, docFeatures);
+                        await this.#removeStaleLocationMembership(parsed.id, { schema: prevSchema, locations: prevLocations }, parsed, docFeatures);
                     }
                     await this.#applyMembership(parsed.hasComment ? 'tick' : 'untick', parsed.id, [COMMENT_BITMAP_KEY]);
                     // Facet bitmaps (mime + status): tick current, untick whatever
@@ -2673,7 +2687,7 @@ class SynapsD extends EventEmitter {
                 );
                 await this.#indexDocument(parsedDocument.id, contextSpec, directorySpec, featureBitmaps);
                 if (storedDocument) {
-                    await this.#removeStaleLocationMembership(parsedDocument.id, storedDocument.locations, parsedDocument.locations, featureBitmaps);
+                    await this.#removeStaleLocationMembership(parsedDocument.id, storedDocument, parsedDocument, featureBitmaps);
                 }
                 await this.#applyMembership(parsedDocument.hasComment ? 'tick' : 'untick', parsedDocument.id, [COMMENT_BITMAP_KEY]);
                 // Facet bitmaps (mime + status): tick current, untick stale from
@@ -4046,6 +4060,7 @@ class SynapsD extends EventEmitter {
         // Capture locations before update() mutates storedDocument in place, so we can
         // untick device tags for any copy this write dropped.
         const previousLocations = Array.isArray(storedDocument.locations) ? [...storedDocument.locations] : [];
+        const previousSchema = storedDocument.schema;
         // Facet keys (mime + status) before update(), so a contentType/status
         // change unticks stale ones.
         const previousFacetKeys = facetBitmapKeys(storedDocument);
@@ -4089,7 +4104,7 @@ class SynapsD extends EventEmitter {
                 if (staleFeatureKeys.length) { await this.#applyMembership('untick', updatedDocument.id, staleFeatureKeys); }
                 // Index across all views using shared helper
                 await this.#indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
-                await this.#removeStaleLocationMembership(updatedDocument.id, previousLocations, updatedDocument.locations, featureBitmaps);
+                await this.#removeStaleLocationMembership(updatedDocument.id, { schema: previousSchema, locations: previousLocations }, updatedDocument, featureBitmaps);
                 // Presence bitmap tracks comment state; untick when cleared on this edit.
                 await this.#applyMembership(updatedDocument.hasComment ? 'tick' : 'untick', updatedDocument.id, [COMMENT_BITMAP_KEY]);
                 // Facet bitmaps (mime + status): tick current keys, untick any the
@@ -5036,7 +5051,7 @@ class SynapsD extends EventEmitter {
             // A Device document defines the os/type facets other documents derive.
             // Runs before the derivation below so a device's own write sees itself.
             if (stored?.schema === DEVICE_SCHEMA_NAME) { await this.#syncDeviceFacets(stored); }
-            for (const tag of this.#locationDerivedFeatures(stored?.locations)) {
+            for (const tag of this.#locationDerivedFeatures(stored)) {
                 if (!features.includes(tag)) { features.push(tag); }
             }
         } catch (error) {
@@ -5280,19 +5295,21 @@ class SynapsD extends EventEmitter {
 
     // Every feature derived from locations[], in one place — so the stale-diff
     // below can never cover one axis and silently miss another.
-    #locationDerivedFeatures(locations) {
-        const list = Array.isArray(locations) ? locations : [];
-        if (list.length === 0) { return ['data/no-location']; }
+    #locationDerivedFeatures(doc) {
+        const list = Array.isArray(doc?.locations) ? doc.locations : [];
+        if (list.length === 0) {
+            return schemaOwnsLocations(doc?.schema) ? [NO_LOCATION_FEATURE] : [];
+        }
         return [
             ...this.#deviceFeaturesFromLocations(list),
             ...this.#backendFeaturesFromLocations(list),
         ];
     }
 
-    async #removeStaleLocationMembership(docId, previousLocations, currentLocations, assertedFeatures = []) {
-        const previous = this.#locationDerivedFeatures(previousLocations);
+    async #removeStaleLocationMembership(docId, previousDoc, currentDoc, assertedFeatures = []) {
+        const previous = this.#locationDerivedFeatures(previousDoc);
         if (previous.length === 0) { return; }
-        const current = new Set(this.#locationDerivedFeatures(currentLocations));
+        const current = new Set(this.#locationDerivedFeatures(currentDoc));
         const asserted = new Set((Array.isArray(assertedFeatures) ? assertedFeatures : []).map(normalizeBitmapKey));
         const stale = previous.filter((tag) => !current.has(tag) && !asserted.has(tag));
         if (stale.length > 0) { await this.#removeDocumentMembership(docId, stale); }
@@ -5833,7 +5850,7 @@ class SynapsD extends EventEmitter {
 
             const derived = [
                 ...facetBitmapKeys(doc),
-                ...this.#locationDerivedFeatures(doc.locations),
+                ...this.#locationDerivedFeatures(doc),
                 ...documentFeatureKeys(doc),
                 ...schemaBitmapKeys(doc),
             ];
@@ -5910,7 +5927,7 @@ class SynapsD extends EventEmitter {
                     stats.bitmapsDropped++;
                 }
             }
-            // Exact key — listBitmaps is a prefix range and would miss it.
+            // Retired exact key (was a sibling of data/backend/*, now data/backend/no-location).
             try {
                 await this.bitmapIndex.deleteBitmap('data/no-location');
                 stats.bitmapsDropped++;

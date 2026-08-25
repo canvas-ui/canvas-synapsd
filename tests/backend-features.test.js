@@ -140,11 +140,11 @@ describe('data/backend/* derived from locations', () => {
         expect(await backendKeys(id)).not.toContain('data/backend/madeup');
     });
 
-    test('losing every location unticks the whole axis', async () => {
+    test('losing every location ticks data/backend/no-location', async () => {
         const id = await db.put(blob('jjj', [{ url: 'stored://homenas/k1' }]));
         await db.put({ id, locations: [] });
 
-        expect(await backendKeys(id)).toEqual([]);
+        expect(await backendKeys(id)).toEqual(['data/backend/no-location']);
     });
 
     test('data/source/* is gone — folded into the backend axis', async () => {
