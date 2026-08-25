@@ -451,10 +451,11 @@ Features are flat bitmap keys ticked on a document. They carry a `who says so?` 
 |--------|--------|
 | `data/schema/*` | `schema` (every id-path segment) |
 | `data/mime/*` | `metadata.contentType` (type + full type) |
-| `data/backend/*` | `locations[]` (scheme + scheme/authority); empty locations on file/application/dotfile → `data/backend/no-location` |
+| `data/backend/*` | `locations[]` (scheme + scheme/authority, no scheme exempt), or `metadata.backend` |
 | `data/<facet>/*` | a schema's `static facetFields` (e.g. `data/status/*` from Task's `data.status`) |
-| `device/id\|os\|type/*` | `locations[]` + the device's own Device document |
-| `feature/*` | the engine observed it (`feature/has-comment`) |
+| `device/id/*` | `locations[]` (`file://` and `device://` authorities) |
+| `device/os\|type/*` | the device's own Device document, joined on `device/id` |
+| `feature/*` | the engine observed it (`feature/has-comment`, `feature/orphaned`) |
 | `context/*`, `vfs/*` | tree membership: bitmap-only, not on the row |
 | `internal/*` | engine-managed, hidden from default listings |
 
@@ -462,7 +463,21 @@ Derived facet bitmaps are re-ticked and stale-unticked on every write from docum
 
 Key charset: lowercased, `a-z 0-9 _ - . / @ : +`. `@` and `:` keep backend addresses readable (`data/backend/imap/user@domain.tld`); `+` keeps MIME subtypes intact (`data/mime/image/svg+xml`) and is only a query sigil in *leading* position.
 
-**`data/backend/*`** is derived from `locations[]`. SynapsD parses each URL into scheme + authority and knows nothing about specific backends. `file://` and `device://` are skipped (that is what `device/*` answers); a location may declare `metadata.backend` explicitly when the URL cannot carry it. File, application, and dotfile documents with no locations at all tick `data/backend/no-location` — notes and tasks do not, so a GC listing that key cannot sweep documents that were never expected to have a copy. Retention GC still keys off `orphanedAt` — the bitmap is the current fact, the timestamp is the lifecycle.
+**`data/backend/*`** is derived from `locations[]`. SynapsD parses each URL into scheme + authority and knows nothing about specific backends. No scheme is exempt: `file://laptop1/x` ticks `data/backend/file` + `data/backend/file/laptop1` like any other, because this axis is the *addressing mode* (how the bytes are reached) while `device/*` is the *machine* (which box, and what it is). That makes "loose local files with no managed copy" a plain intersection — `data/backend/file` AND NOT `data/backend/stored` — which is exactly what a backup sweep wants.
+
+A location may declare `metadata.backend` to *override* the URL, for the case the URL lies: a NAS mounted at `/mnt/nas` is addressed `file://<deviceId>/mnt/nas/…` but the bytes are not on that device. The declared name is flat, so it lands where schemes otherwise sit — harmless while the vocabularies do not collide.
+
+**`device/*`** is anchored on `device/id/<deviceId>`, the union of a device's `file://` and `device://` locations, which is why it survives the above rather than being made redundant by it. Everything past the id is optional enrichment that exists only if the app registered a Device document: `device/os/*` and `device/type/*` are joined from it, and further facets (`device/network/<cidr>`, say) slot in the same way.
+
+**`feature/orphaned`** is the orphan axis: `orphanedAt` set and `locations[]` empty. It answers "this document had a resolvable copy and lost it" (stored resync, connector prune, destroy-keep), which is what the UI filter and the retention GC both want. The empty-locations half is what unticks the key on re-bind; `orphanedAt` stays the retention clock, and the bitmap is exactly the GC candidate set.
+
+Three things it deliberately is not:
+
+- **Not schema-derived.** A per-schema "owns locations" flag cannot answer this for Task: one typed into Canvas is complete without a copy, one mirrored from a deleted GitHub issue is not. Same schema, opposite answers, because the discriminator is per-row provenance.
+- **Not "has no locations".** That set is most of the database (every note, every local task) and nothing materializes it. Bitmaps earn their keep on selective predicates.
+- **Not "has no backend".** Every located document now ticks something under `data/backend/*`, so that set is just "has no locations" again — see above. The orphan key stays out of the `data/backend/` namespace because it is not an addressing fact at all: it is a lifecycle stamp that happens to be readable as one.
+
+A File with no bytes and no orphan stamp is a broken row rather than an orphan. Different alert, and it would want its own key: `data/schema/file` intersected with an empty-locations bitmap, minus this one.
 
 ## The query spec
 
@@ -1338,10 +1353,14 @@ await db.rebuildL3({ timelines: true, search: true });  // + crud timelines, + F
 | Option | Default | Effect |
 |--------|---------|--------|
 | `edges` | `true` | Drop and re-derive edges. With `src`, only that source's derived edges; without it, the whole edge plane is cleared |
-| `bitmaps` | `true` | Drop and re-derive `data/backend/*`, `data/mime/*` (and drop the retired `data/kind/*`) |
+| `bitmaps` | `true` | Drop and re-derive every derived namespace (see below); also drops the retired `data/kind/*` and `data/abstraction/*` one-way |
 | `timelines` | `false` | `reindexCrudTimelines()` |
 | `search` | `false` | `reindexSearchIndex({ rebuild: true })` |
 | `embeddings` | `false` | `reindexEmbeddings()` (expensive) |
+
+The set it drops is the set `Document` strips on write — `data/schema/*`, `data/mime/*`, `data/backend/*`, `device/*`, `feature/*`, plus each schema's own `data/<facet>/*` — for one reason: a namespace the engine derives is a namespace no row can assert, so rows are its only source and the rebuild owns all of it. Miss one and the rebuild returns `stale ∪ derived(rows)` rather than `derived(rows)`, because the replay only ticks; the drift it was run to repair survives it. `tag/*`, `custom/*`, `client/*`, and `data/dataset/*` are left alone, since `link()` ticks those without the row saying so.
+
+`derivedBitmapPrefixes()` is exported for that reason. `tests/rebuild-l3.test.js` seeds one document per derived namespace, ticks a nonexistent id into every resulting bitmap, rebuilds, and expects the plane back byte-identical.
 
 Targeted reindexers remain available: `reindexCrudTimelines()`, `reindexMimeBitmaps()`, `reindexSearchIndex()`, `reindexEmbeddings()`.
 

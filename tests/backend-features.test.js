@@ -80,23 +80,48 @@ describe('data/backend/* derived from locations', () => {
         ]);
     });
 
-    test('file:// ticks no backend key — device/* already owns that axis', async () => {
-        const id = await db.put(blob('fff', [{ url: 'file://laptop-a/home/x.bin' }]));
+    // No scheme is exempt. file:// was skipped until 2026-08-25 because device/*
+    // "already answered it", which conflated the addressing mode with the machine.
+    test('file:// and device:// parse like every other scheme, alongside device/*', async () => {
+        const onPath = await db.put(blob('fff', [{ url: 'file://laptop-a/home/x.bin' }]));
+        const pathless = await db.put(blob('fff2', [{ url: 'device://laptop-a' }]));
 
-        expect(await backendKeys(id)).toEqual([]);
+        expect(await backendKeys(onPath)).toEqual(['data/backend/file', 'data/backend/file/laptop-a']);
+        expect(await backendKeys(pathless)).toEqual(['data/backend/device', 'data/backend/device/laptop-a']);
+
+        // device/id is the union of the two, which is why it is not redundant.
         const byDevice = await db.list({ features: ['device/id/laptop-a'], limit: 0 });
-        expect(byDevice.map((d) => d.id)).toEqual([id]);
+        expect(byDevice.map((d) => d.id).sort()).toEqual([onPath, pathless].sort());
     });
 
-    test('a device-anchored mount is still attributed, via location.metadata.backend', async () => {
-        // Device-anchored fs mounts address their bytes as file://<deviceId>/… so
-        // the URL cannot carry the backend — it lives in location metadata. This is
-        // the "supplied by the client" escape hatch for anything a URL cannot say.
+    // The query the exemption made unanswerable: loose local files with no managed
+    // copy, i.e. what a backup sweep is looking for.
+    test('"local only, not in stored" is one intersection', async () => {
+        const loose = await db.put(blob('lo1', [{ url: 'file://laptop-a/home/x.bin' }]));
+        await db.put(blob('lo2', [
+            { url: 'file://laptop-a/home/y.bin' },
+            { url: 'stored://homenas/y' },
+        ]));
+
+        const result = await db.list({
+            features: { allOf: ['data/backend/file'], noneOf: ['data/backend/stored'] },
+            limit: 0,
+        });
+        expect(result.map((d) => d.id)).toEqual([loose]);
+    });
+
+    test('a declared backend replaces the URL, because a mount URL lies about location', async () => {
+        // A NAS mounted at /mnt/nas is addressed file://<deviceId>/mnt/nas/… but
+        // the bytes are not on that device, so the declaration overrides rather
+        // than adds. device/* is derived separately and still records the mount
+        // point, which is correct: the path IS reachable there.
         const id = await db.put(blob('ggg', [
             { url: 'file://laptop-a/mnt/nas/x.bin', metadata: { backend: 'homenas' } },
         ]));
 
         expect(await backendKeys(id)).toEqual(['data/backend/homenas']);
+        const byDevice = await db.list({ features: ['device/id/laptop-a'], limit: 0 });
+        expect(byDevice.map((d) => d.id)).toEqual([id]);
     });
 
     test('{WORKSPACE_ROOT} placeholders are not addressable stores', async () => {
@@ -140,11 +165,15 @@ describe('data/backend/* derived from locations', () => {
         expect(await backendKeys(id)).not.toContain('data/backend/madeup');
     });
 
-    test('losing every location ticks data/backend/no-location', async () => {
+    test('losing every location unticks the whole axis, and ticks nothing in its place', async () => {
+        // The orphan state lives on its own key (feature/orphaned, see
+        // orphan-succession.test.js) rather than as a member of this axis: "no
+        // backend" and "orphaned" are different questions and a doc can be the
+        // first without being the second.
         const id = await db.put(blob('jjj', [{ url: 'stored://homenas/k1' }]));
         await db.put({ id, locations: [] });
 
-        expect(await backendKeys(id)).toEqual(['data/backend/no-location']);
+        expect(await backendKeys(id)).toEqual([]);
     });
 
     test('data/source/* is gone — folded into the backend axis', async () => {
