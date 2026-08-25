@@ -340,7 +340,7 @@ async function onFrame(frameBytes) {
 
 ---
 
-## Core concepts
+## High-level design overview
 
 - **Documents are the source of truth; indexes are derived cache.** Timelines, mime facets, backend and device presence, geo cells, asserted edges: all re-derived from document state on every write, so they cannot drift. `rebuildL3()` reconstructs them from rows alone.
 - **Membership is cheap and plural.** A document is stored once; appearing in ten trees, five tags, and three timelines costs bitmap bits, not copies.
@@ -349,11 +349,12 @@ async function onFrame(frameBytes) {
 
 | Layer | What it is | Rebuildable from |
 |-------|------------|------------------|
-| **L1** | Document rows: the JSON payload, checksums, timestamps. The source of truth. | nothing (this *is* the truth) |
+| **L0** | Physical bytes addressed by `locations[]` URLs, identified by `checksumArray`. | - |
+| **L1** | Document rows: the JSON payload, `checksumArray`, timestamps. The source of truth. | nothing (this *is* the truth) |
 | **L2** | View membership: context/directory tree bitmaps. Human-authored placement. | nothing (also truth) |
 | **L3** | Everything derived: feature/facet bitmaps, mime, backend/device presence, timelines, geo cells, asserted edges, FTS/vector rows. | L1 + extractors: `rebuildL3()` |
 
-Drop L3, recompute it from L1, and the index must come back identical. If it does not, something is storing state with no source.
+Drop L3, recompute it from L1, and the index must come back identical. If it does not, something is storing state with no source. L0 is out of band: synapsd keeps the pointers and checksums, not the bytes.
 
 Every read is two pure stages, and both are public:
 
