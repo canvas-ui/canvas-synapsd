@@ -463,49 +463,52 @@ Derived facet bitmaps are re-ticked and stale-unticked on every write from docum
 
 Key charset: lowercased, `a-z 0-9 _ - . / @ : +`. `@` and `:` keep backend addresses readable (`data/backend/imap/user@domain.tld`); `+` keeps MIME subtypes intact (`data/mime/image/svg+xml`) and is only a query sigil in *leading* position.
 
-**`data/backend/*`** is derived from `locations[]`. SynapsD parses each URL into scheme + authority and knows nothing about specific backends. No scheme is exempt: `file://laptop1/x` ticks `data/backend/file` + `data/backend/file/laptop1` like any other, because this axis is the *addressing mode* (how the bytes are reached) while `device/*` is the *machine* (which box, and what it is). That makes "loose local files with no managed copy" a plain intersection — `data/backend/file` AND NOT `data/backend/stored` — which is exactly what a backup sweep wants.
+#### Hierarchical keys
 
-A location may declare `metadata.backend` to *override* the URL, for the case the URL lies: a NAS mounted at `/mnt/nas` is addressed `file://<deviceId>/mnt/nas/…` but the bytes are not on that device. The declared name is flat, so it lands where schemes otherwise sit — harmless while the vocabularies do not collide.
+Three axes are paths, not flat labels, and **every prefix is ticked**, so the general and the specific question are both one key with no enumeration:
 
-**`device/*`** is anchored on `device/id/<deviceId>`, the union of a device's `file://` and `device://` locations, which is why it survives the above rather than being made redundant by it. Everything past the id is optional enrichment that exists only if the app registered a Device document; `device/os/*`, `device/arch/*` and `device/type/*` are joined from it, and a new facet slots in by being added to `deviceFacetKeys`.
+| Axis | Ticked keys for one document |
+|------|------------------------------|
+| `data/backend/*` from `stored://homenas/k1` | `data/backend/stored`, `data/backend/stored/homenas` |
+| `device/os/*` for a box on Ubuntu 24.04 | `device/os/linux`, `device/os/linux/ubuntu`, `device/os/linux/ubuntu/24.04` |
+| `data/mime/*` from `image/png` | `data/mime/image`, `data/mime/image/png` |
 
-The OS is a **chain**, each tier narrowing the one before it, and every prefix is ticked:
+The OS chain is family, distro, version. An empty tier is skipped rather than reserved, so a mac gets `device/os/mac` + `device/os/mac/15.2`. Values come from the Device document (`platform`, `osDistro`, `osVersion`); clients read them from `/etc/os-release` on Linux.
 
+`device/arch/*` uses **`os.machine()` spelling** (`x86_64`, `aarch64`), not `os.arch()` (`x64`, `arm64`), matching what flatpak, snap and appimage publish against.
+
+`data/platform/*` is the **capability** axis (`<os>/<arch>`, e.g. `data/platform/linux/x86_64`), declared per document as an array in `Application.data.platform`. `device/*` says where a document *is*; `data/platform/*` says where it *could* run.
+
+#### What the axes buy you
+
+```js
+// Loose local files with no managed copy: a backup sweep's worklist.
+await db.list({ features: { allOf: ['data/backend/file'], noneOf: ['data/backend/stored'] } });
+
+// The fleet still on the old LTS, ahead of a rollout.
+await db.list({ features: { allOf: ['data/schema/device', 'device/os/linux/ubuntu/22.04'] } });
+
+// Everything on this machine, whatever schema, wherever it came from.
+await db.list({ features: [`device/id/${deviceId}`] });
+
+// Of the apps in this workspace: which can run here, and which already do.
+const applicable = ['data/schema/application', 'data/platform/linux/x86_64'];
+await db.list({ features: { allOf: applicable } });
+await db.list({ features: { allOf: [...applicable, `device/id/${deviceId}`] } });   // installed
+await db.list({ features: { allOf: applicable, noneOf: [`device/id/${deviceId}`] } }); // installable
+
+// Documents that had a copy and lost it — the retention GC's candidate set.
+await db.list({ features: ['feature/orphaned'] });
 ```
-device/os/linux
-device/os/linux/ubuntu
-device/os/linux/ubuntu/24.04
-```
 
-so "on Linux", "on Ubuntu" and "still on 22.04" are each one key with no enumeration — the axis a fleet actually differs along, since 22.04 and 24.04 are not interchangeable install targets. An empty tier is skipped rather than reserved, so families with no distro get a shorter chain (`device/os/mac/15.2`, `device/os/windows/10`). `device/arch/*` is `os.machine()` vocabulary (`x86_64`, `aarch64`), not `os.arch()` (`x64`, `arm64`), because that is what flatpak, snap and appimage publish against — a device facet and a package's capability compare without a translation table.
+`feature/orphaned` means `orphanedAt` is set *and* `locations[]` is empty, so re-binding a copy unticks it while `orphanedAt` stays as the retention clock.
 
-A Device document carries its own keys too (`Device.getFeatureBitmapArray`), which is what makes `data/schema/device AND device/os/linux/ubuntu/24.04` a fleet query rather than a scan. Derived from the row rather than asserted by the caller, for the usual reason and one specific one: `rebuildL3` drops the whole `device/` namespace and replays it from `locations[]`, which a Device row has none of pointing at itself — asserted self-tags would be deleted with nothing to restore them.
+Two rules for clients:
 
-Facets change when a box does, and the repair is scoped by the `device/id/<x>` bitmap, which names the affected documents exactly. An in-place distro upgrade retires `device/os/linux/ubuntu/22.04` and keeps the two tiers above it; a document on several devices keeps any facet another of them still implies.
+- **Never assert a derived key.** `device/*`, `data/backend/*`, `data/schema/*`, `data/mime/*` and `feature/*` are engine-owned and stripped on write. Use `client/*` or `custom/*` for your own provenance.
+- **Indexing applications is opt-in, per workspace.** Let the user choose which local apps to index, and ask again for each workspace. A workspace is its own database, so an over-eager sweep has no repair beyond deleting documents the user never wanted.
 
-**The chain's shape is not enforced**, and that is a decision rather than an omission. Requiring `linux/<distro>/<version>` needs a registry of which families have which tiers, which is wrong the first time someone turns up with a buildroot image — and useless for that case anyway, since a custom distro reports an ID like any other and already lands correctly as `device/os/linux/iolinux/1.2`. The only shape such a registry would police is a client reporting a version with no distro, which yields `device/os/linux/24.04`: an inert key, because nobody queries a key they cannot construct, produced by a client that is broken. Surfacing that beats rejecting the write or discarding the version it did report. What *is* enforced is arity — a tier cannot contain `/` and so cannot quietly become two. The engine stays dumb about operating systems for the same reason it stays dumb about backends: it parses a shape, and the vocabulary belongs to the caller.
-
-**Capability vs presence.** `device/*` answers where something *is*. What it *could* run on is a separate axis, declared per document — `Application.data.platform` is an array facet, so `['linux/x86_64', 'mac/aarch64']` emits `data/platform/linux/x86_64` and `data/platform/mac/aarch64`. A client logging into an unfamiliar box splits its workspace three ways with intersections against keys derived from its own device facts, inspecting no documents:
-
-```
-applicable here    data/schema/application AND data/platform/linux/x86_64
-already here       … AND device/id/<self>
-installable here   … AND NOT device/id/<self>
-```
-
-`<os>/<arch>` matches the device vocabulary on purpose so the two axes compare without a translation table. There is no distro tier: glibc, not the distro name, is usually what decides, and `linux/ubuntu/24.04/x86_64` explodes combinatorially for a discrimination almost nothing needs. An app declaring no platform lands in no capability bitmap — absence is *unknown*, not *everywhere*, so it fails a filter it was never checked against rather than passing one silently.
-
-Indexing an application is **opt-in, per workspace**: a client enumerating local applications has to let the user pick which ones to index, and has to ask again for each workspace, because the same machine's work and personal apps belong in different ones. Nothing in the engine enforces that and nothing can — a workspace is its own database, so "not indexed here" and "does not exist" are the same observation. The selection has to be right at the point of capture; there is no repair for an over-eager sweep beyond deleting documents the user never asked for.
-
-**`feature/orphaned`** is the orphan axis: `orphanedAt` set and `locations[]` empty. It answers "this document had a resolvable copy and lost it" (stored resync, connector prune, destroy-keep), which is what the UI filter and the retention GC both want. The empty-locations half is what unticks the key on re-bind; `orphanedAt` stays the retention clock, and the bitmap is exactly the GC candidate set.
-
-Three things it deliberately is not:
-
-- **Not schema-derived.** A per-schema "owns locations" flag cannot answer this for Task: one typed into Canvas is complete without a copy, one mirrored from a deleted GitHub issue is not. Same schema, opposite answers, because the discriminator is per-row provenance.
-- **Not "has no locations".** That set is most of the database (every note, every local task) and nothing materializes it. Bitmaps earn their keep on selective predicates.
-- **Not "has no backend".** Every located document now ticks something under `data/backend/*`, so that set is just "has no locations" again — see above. The orphan key stays out of the `data/backend/` namespace because it is not an addressing fact at all: it is a lifecycle stamp that happens to be readable as one.
-
-A File with no bytes and no orphan stamp is a broken row rather than an orphan. Different alert, and it would want its own key: `data/schema/file` intersected with an empty-locations bitmap, minus this one.
+Design rationale, rejected alternatives and the rules for adding an axis: [`docs/FEATURE_AXES.md`](docs/FEATURE_AXES.md).
 
 ## The query spec
 
