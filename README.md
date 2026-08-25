@@ -400,7 +400,7 @@ The stored row shape (v3):
 
 Three things worth knowing before you write anything:
 
-- **`features[]` is top-level and asserted-only.** `metadata` holds *extracted facts written by derivers*; `features[]` holds *membership a human or client asserted*. Derived prefixes (`data/schema/`, `data/mime/`, `data/backend/`, `feature/`, `device/`, plus each schema's own facet namespaces) are **stripped on the way in**. `data/dataset/*` is *preserved* across an update that omits it, so a client re-putting its own tag array cannot drop ingest provenance.
+- **`features[]` is top-level and asserted-only.** `metadata` holds *extracted facts written by derivers*; `features[]` holds *membership a human or client asserted*. Derived prefixes (`data/schema/`, `data/mime/`, `data/backend/`, `feature/`, `device/`, `data/no-location`, plus each schema's own facet namespaces) are **stripped on the way in**. `data/dataset/*` is *preserved* across an update that omits it, so a client re-putting its own tag array cannot drop ingest provenance.
 - **`indexOptions` is schema-level** (`static indexOptions` on the schema class). There is no per-document index override. Legacy rows carrying it are ignored on read.
 
 Reading a document back gives you a schema instance (`parse: false` for the raw stored object).
@@ -444,7 +444,6 @@ Features are flat bitmap keys ticked on a document. They carry a `who says so?` 
 | `client/*` | The writing client | |
 | `custom/<axis>/<value>` | The user: structured | |
 | `data/dataset/*` | Ingest provenance (see **Datasets**) | preserved across updates that omit it |
-| `data/no-location` | The app: orphan marker | |
 
 **System** — the engine ticks these from document state or tree membership. They are not stored on the row. Asserting a copy is stripped on write.
 
@@ -453,6 +452,7 @@ Features are flat bitmap keys ticked on a document. They carry a `who says so?` 
 | `data/schema/*` | `schema` (every id-path segment) |
 | `data/mime/*` | `metadata.contentType` (type + full type) |
 | `data/backend/*` | `locations[]` (scheme + scheme/authority) |
+| `data/no-location` | empty `locations[]` |
 | `data/<facet>/*` | a schema's `static facetFields` (e.g. `data/status/*` from Task's `data.status`) |
 | `device/id\|os\|type/*` | `locations[]` + the device's own Device document |
 | `feature/*` | the engine observed it (`feature/has-comment`) |
@@ -463,9 +463,7 @@ Derived facet bitmaps are re-ticked and stale-unticked on every write from docum
 
 Key charset: lowercased, `a-z 0-9 _ - . / @ : +`. `@` and `:` keep backend addresses readable (`data/backend/imap/user@domain.tld`); `+` keeps MIME subtypes intact (`data/mime/image/svg+xml`) and is only a query sigil in *leading* position.
 
-**`data/no-location`** marks a document whose last resolvable location vanished: index entry kept, bytes gone. It is asserted by the application, not derived here. It lives under `data/` rather than `tag/` so delete-protection and retention sweeps can find it by prefix.
-
-**`data/backend/*`** is derived from `locations[]`. SynapsD parses a URL into scheme + authority and knows nothing about specific backends. `file://` and `device://` are skipped (that is what `device/*` answers); a location may declare `metadata.backend` explicitly when the URL cannot carry it.
+**`data/backend/*`** and **`data/no-location`** are the same derivation. SynapsD parses each URL into scheme + authority and knows nothing about specific backends. `file://` and `device://` are skipped (that is what `device/*` answers); a location may declare `metadata.backend` explicitly when the URL cannot carry it. No locations at all ticks `data/no-location`. Retention GC still keys off `orphanedAt` — the bitmap is the current fact, the timestamp is the lifecycle.
 
 ## The query spec
 

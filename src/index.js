@@ -5281,9 +5281,11 @@ class SynapsD extends EventEmitter {
     // Every feature derived from locations[], in one place — so the stale-diff
     // below can never cover one axis and silently miss another.
     #locationDerivedFeatures(locations) {
+        const list = Array.isArray(locations) ? locations : [];
+        if (list.length === 0) { return ['data/no-location']; }
         return [
-            ...this.#deviceFeaturesFromLocations(locations),
-            ...this.#backendFeaturesFromLocations(locations),
+            ...this.#deviceFeaturesFromLocations(list),
+            ...this.#backendFeaturesFromLocations(list),
         ];
     }
 
@@ -5908,6 +5910,11 @@ class SynapsD extends EventEmitter {
                     stats.bitmapsDropped++;
                 }
             }
+            // Exact key — listBitmaps is a prefix range and would miss it.
+            try {
+                await this.bitmapIndex.deleteBitmap('data/no-location');
+                stats.bitmapsDropped++;
+            } catch { /* absent */ }
         }
 
         if (edges || bitmaps) {

@@ -33,33 +33,42 @@ describe('SynapsD orphan lifecycle + placement migration', () => {
         if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
     });
 
-    test('orphanedAt persists, data/no-location is bitmap-queryable, and both clear on re-bind', async () => {
-        const id = await db.put(note('orphan-me'), { context: { path: '/Projects/Alpha' } });
+    test('empty locations[] ticks data/no-location; re-bind unticks it', async () => {
+        const id = await db.put({
+            ...note('orphan-me'),
+            locations: [{ url: 'stored://workspace:home/x' }],
+        }, { context: { path: '/Projects/Alpha' } });
 
-        // Mark orphaned: state, not deletion.
+        expect(await db.list({ features: { allOf: ['data/no-location'] } })).toHaveLength(0);
+
         const stamp = new Date().toISOString();
-        await db.put({
-            id,
-            orphanedAt: stamp,
-            metadata: { features: ['data/no-location'] },
-        }, { context: null });
+        await db.put({ id, locations: [], orphanedAt: stamp }, { context: null });
 
         expect(ids(await db.list({ features: { allOf: ['data/no-location'] } }))).toEqual([id]);
         const orphan = await db.get(id);
         expect(orphan.orphanedAt).toBe(stamp);
-        // Curated placement survives orphaning.
+        expect(orphan.features || []).not.toContain('data/no-location');
         expect(ids(await db.list({ paths: ['ctx:/Projects/Alpha'] }))).toEqual([id]);
 
-        // Re-bind: feature drop unticks the bitmap, orphanedAt clears.
         await db.put({
             id,
+            locations: [{ url: 'stored://workspace:home/x' }],
             orphanedAt: null,
-            metadata: { features: [] },
         }, { context: null });
 
         expect(await db.list({ features: { allOf: ['data/no-location'] } })).toHaveLength(0);
         expect((await db.get(id)).orphanedAt).toBeNull();
         expect(ids(await db.list({ paths: ['ctx:/Projects/Alpha'] }))).toEqual([id]);
+    });
+
+    test('asserting data/no-location is stripped — the derivation owns the key', async () => {
+        const id = await db.put({
+            ...note('sneaky'),
+            locations: [{ url: 'stored://workspace:home/x' }],
+            features: ['data/no-location', 'tag/keepme'],
+        });
+        expect((await db.get(id)).features).toEqual(['tag/keepme']);
+        expect(await db.list({ features: { allOf: ['data/no-location'] } })).toHaveLength(0);
     });
 
     test('migrateDocumentMemberships copies placements to the successor, honoring excludeTrees', async () => {
