@@ -398,11 +398,6 @@ The stored row shape (v3):
 }
 ```
 
-Three things worth knowing before you write anything:
-
-- **`features[]` is top-level and asserted-only.** `metadata` holds *extracted facts written by derivers*; `features[]` holds *membership a human or client asserted*. Derived prefixes (`data/schema/`, `data/mime/`, `data/backend/`, `feature/`, `device/`, plus each schema's own facet namespaces) are **stripped on the way in**. `data/dataset/*` is *preserved* across an update that omits it, so a client re-putting its own tag array cannot drop ingest provenance.
-- **`indexOptions` is schema-level** (`static indexOptions` on the schema class). There is no per-document index override. Legacy rows carrying it are ignored on read.
-
 Reading a document back gives you a schema instance (`parse: false` for the raw stored object).
 
 ### Subtypes (the schema-id hierarchy)
