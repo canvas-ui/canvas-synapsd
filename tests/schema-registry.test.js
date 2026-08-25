@@ -138,6 +138,31 @@ describe('SchemaRegistry v3', () => {
             expect(() => schemaRegistry.registerSchema('   ', Widget)).toThrow(/non-empty string/);
         });
 
+        // Document.fromData hardcoded `new Document(...)` until 2026-08-25, so a
+        // registered subclass that did not override it came back as a plain
+        // Document — no facetFields, no deriveLocations, no
+        // getFeatureBitmapArray, and no error to say so. Every core schema
+        // defines its own fromData, so only the third-party path was affected:
+        // the one the registry advertises as "the same code path".
+        test('the registered class survives the registry round-trip through fromData', () => {
+            class FacetedWidget extends Document {
+                static facetFields = ['data.colour'];
+                constructor(options = {}) {
+                    options.schema = options.schema || 'data/schema/widget';
+                    super(options);
+                }
+            }
+            schemaRegistry.registerSchema('data/schema/widget', FacetedWidget);
+
+            const doc = schemaRegistry.getSchema('data/schema/widget')
+                .fromData({ schema: 'data/schema/widget', data: { colour: 'red' } });
+
+            expect(doc).toBeInstanceOf(FacetedWidget);
+            // The consequence that actually bit: a downgraded instance derives no
+            // facet keys, silently and with no error.
+            expect(facetBitmapKeysForTest(doc)).toEqual(['data/colour/red']);
+        });
+
         test('child ids share the parent class', () => {
             expect(schemaRegistry.getSchema('data/schema/application/flatpak'))
                 .toBe(schemaRegistry.getSchema('data/schema/application'));
@@ -303,6 +328,39 @@ describe('facetFields', () => {
             // the rename ships.
             expect(key.startsWith('data/schema/')).toBe(false);
         }
+    });
+
+    // Multi-value is what a CAPABILITY facet needs: "this app runs on x86_64 and
+    // aarch64" is not one value, and modelling it as one string per document
+    // would mean one document per platform.
+    test('a facet field holding an array emits one key per entry', () => {
+        class Portable extends Document {
+            static facetFields = ['data.platforms'];
+            constructor(options = {}) {
+                options.schema = options.schema || 'data/schema/portable';
+                super(options);
+            }
+        }
+
+        const doc = new Portable({ data: { platforms: ['Linux/x86_64', 'linux/aarch64'] } });
+
+        expect(facetBitmapKeysForTest(doc)).toEqual(
+            expect.arrayContaining(['data/platforms/linux/x86_64', 'data/platforms/linux/aarch64']),
+        );
+    });
+
+    test('empty and non-string entries are skipped rather than minting junk keys', () => {
+        class Loose extends Document {
+            static facetFields = ['data.platforms'];
+            constructor(options = {}) {
+                options.schema = options.schema || 'data/schema/loose';
+                super(options);
+            }
+        }
+
+        const doc = new Loose({ data: { platforms: ['linux', '', '   ', null, 42, { os: 'mac' }] } });
+
+        expect(facetBitmapKeysForTest(doc)).toEqual(['data/platforms/linux']);
     });
 });
 

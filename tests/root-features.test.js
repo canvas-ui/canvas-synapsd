@@ -5,6 +5,8 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 import Note from '../src/schemas/app/Note.js';
+import Document from '../src/schemas/Document.js';
+import schemaRegistry from '../src/schemas/SchemaRegistry.js';
 
 const NOTE = 'data/schema/note';
 const note = (title, features) => ({
@@ -242,5 +244,74 @@ describe('schema-declared facet namespaces are derived, not assertable', () => {
         expect(pending.map((d) => d.id)).not.toContain(id);
         const completed = await db.list({ features: ['data/status/completed'], limit: 0 });
         expect(completed.map((d) => d.id)).toContain(id);
+    });
+});
+
+// A CAPABILITY facet ("this app runs on x86_64 AND aarch64") is multi-valued,
+// which only works because every write path diffs the previous key SET against
+// the current one rather than swapping a single value.
+describe('multi-valued facet fields', () => {
+    const PORTABLE = 'data/schema/portable';
+    let rootPath;
+    let db;
+
+    class Portable extends Document {
+        static facetFields = ['data.platforms'];
+        constructor(options = {}) {
+            options.schema = options.schema || PORTABLE;
+            super(options);
+        }
+    }
+
+    const ids = async (key) => (await db.list({ features: [key], limit: 0 })).map((d) => d.id);
+
+    beforeEach(async () => {
+        schemaRegistry.registerSchema(PORTABLE, Portable);
+        rootPath = await fs.mkdtemp(path.join(os.tmpdir(), 'synapsd-multifacet-'));
+        db = new Db({ path: rootPath, backupOnOpen: false, backupOnClose: false, semantic: { enabled: false } });
+        await db.start();
+    });
+
+    afterEach(async () => {
+        if (db) { await db.shutdown().catch(() => {}); db = null; }
+        if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
+        schemaRegistry.unregisterSchema(PORTABLE);
+    });
+
+    test('every entry is queryable, and dropping one unticks only that key', async () => {
+        const id = await db.put({
+            schema: PORTABLE,
+            data: { name: 'ripgrep', platforms: ['linux/x86_64', 'linux/aarch64', 'mac/aarch64'] },
+        });
+
+        expect(await ids('data/platforms/linux/x86_64')).toEqual([id]);
+        expect(await ids('data/platforms/linux/aarch64')).toEqual([id]);
+        expect(await ids('data/platforms/mac/aarch64')).toEqual([id]);
+
+        // Drop one arch, keep the others. The negative half is the point: a
+        // tick-only derivation would leave the dropped key set forever.
+        await db.put({
+            id,
+            schema: PORTABLE,
+            data: { name: 'ripgrep', platforms: ['linux/x86_64', 'mac/aarch64'] },
+        });
+
+        expect(await ids('data/platforms/linux/aarch64')).toEqual([]);
+        expect(await ids('data/platforms/linux/x86_64')).toEqual([id]);
+        expect(await ids('data/platforms/mac/aarch64')).toEqual([id]);
+    });
+
+    test('rebuildL3 reproduces the whole set from the row', async () => {
+        const id = await db.put({
+            schema: PORTABLE,
+            data: { name: 'fd', platforms: ['linux/x86_64', 'windows/x86_64'] },
+        });
+        await db.bitmapIndex.tick('data/platforms/linux/aarch64', id);
+
+        await db.rebuildL3();
+
+        expect(await ids('data/platforms/linux/x86_64')).toEqual([id]);
+        expect(await ids('data/platforms/windows/x86_64')).toEqual([id]);
+        expect(await ids('data/platforms/linux/aarch64')).toEqual([]);
     });
 });

@@ -7,6 +7,19 @@
  *
  * Identity: `data.appId` (stable across devices, e.g. "com.spotify.Client")
  * Presence: `data.installs` — map of deviceId -> install state
+ * Capability: `data.platform` — <os>/<arch> pairs it can run on
+ *
+ * INDEXING IS OPT-IN, PER WORKSPACE. A client that enumerates local applications
+ * MUST let the user choose which of them to index, and MUST ask per workspace —
+ * the same machine's work apps and personal apps belong in different workspaces,
+ * and a user who indexed Steam into `personal` has not asked for it in `work`.
+ * Never sweep a package manager into a workspace on the user's behalf.
+ *
+ * Nothing here enforces that, because nothing here can: a workspace is its own
+ * database, so "not indexed in this workspace" is indistinguishable from "does
+ * not exist" by construction — which is precisely why the selection has to be
+ * made correctly at the point of capture. There is no server-side repair for an
+ * over-eager sweep beyond deleting documents the user never wanted.
  *
  * Types:
  * - appimage  : portable single-file executable, installed via URL (± checksum)
@@ -68,6 +81,13 @@ const applicationPayloadSchema = Document.extendDataSchema(
         //   system / local : optional
         source: z.record(z.any()).optional(),
 
+        // CAPABILITY: where this app *can* run, as <os>/<arch> pairs matching the
+        // device axis vocabulary — 'linux/x86_64', 'mac/aarch64'. Distinct from
+        // `installs`, which is where it *does* run. Singular to match the bitmap
+        // namespace it becomes (data/platform/*); the leaf field name IS the
+        // namespace, and every other one is singular.
+        platform: z.array(z.string()).optional(),
+
         // Per-device install state: deviceId -> installState
         installs: z.record(z.string(), installStateSchema).default({}),
     }).passthrough(),
@@ -103,6 +123,27 @@ const applicationPayloadSchema = Document.extendDataSchema(
  *******************/
 
 export default class Application extends Document {
+
+    /**
+     * CAPABILITY, as `data/platform/<os>/<arch>` — one key per entry.
+     *
+     * The counterpart to the presence axis: `installs` says which boxes have it,
+     * this says which boxes could. A client answers "of my 30 apps, which are
+     * even applicable here, and which are already present" with two intersections
+     * against keys it derives from its own device facts, no per-app inspection:
+     *
+     *   applicable: data/schema/application AND data/platform/linux/x86_64
+     *   present:    … AND device/id/<self>
+     *
+     * `<os>/<arch>` deliberately matches the device vocabulary (`linux`, `mac`,
+     * `windows` × `os.machine()` names) so the two axes compare without a
+     * translation table. No distro tier: glibc, not the distro name, is what
+     * usually decides, and `linux/ubuntu/24.04/x86_64` combinatorially explodes
+     * for a discrimination almost nothing needs. Whether that holds up against
+     * appimages and a trip to macOS is a question only real usage answers —
+     * widening a facet later costs a rebuildL3.
+     */
+    static facetFields = ['data.platform'];
 
     // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
