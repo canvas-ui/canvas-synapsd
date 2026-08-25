@@ -59,11 +59,6 @@ const DERIVED_FEATURE_PREFIXES = [
     'device/',              // index.js: #deviceFeaturesFromLocations
 ];
 
-// Exact keys the engine derives (not a prefix family). Stripped like the prefixes
-// above so an asserted copy cannot outlive the derivation.
-const NO_LOCATION_FEATURE = 'data/no-location';
-const DERIVED_FEATURE_KEYS = [NO_LOCATION_FEATURE];
-
 // A schema's own facet namespaces (`static facetFields = ['data.status']` ->
 // `data/status/`) are derived too, but they are per-schema rather than global, so
 // they are computed rather than listed. Without this the generalization would
@@ -110,8 +105,7 @@ function normalizeFeatureArray(input, previous = [], facetFields = []) {
     const refusedPrefixes = [
         ...DERIVED_FEATURE_PREFIXES, ...RETIRED_FEATURE_PREFIXES, ...facetPrefixesFor(facetFields),
     ];
-    const isDerived = (key) =>
-        DERIVED_FEATURE_KEYS.includes(key) || refusedPrefixes.some((prefix) => key.startsWith(prefix));
+    const isDerived = (key) => refusedPrefixes.some((prefix) => key.startsWith(prefix));
     const out = [];
     const seen = new Set();
     const add = (key) => {
@@ -205,7 +199,8 @@ const documentSchema = z.object({
     updatedAt: z.string().datetime(),
     // Orphan lifecycle: set when the document lost its last resolvable location.
     // null = not orphaned. Cleared on re-bind, read by the retention GC.
-    // Distinct from the derived `data/no-location` bitmap (empty locations[]).
+    // Distinct from the derived `data/backend/no-location` bitmap (empty locations[]
+    // on file/application/dotfile).
     orphanedAt: z.string().datetime().nullable().optional(),
 
     // Document data/payload
@@ -912,4 +907,4 @@ class Document {
 // Export document class and schemas
 export default Document;
 export { documentDataSchema, documentSchema, locationSchema, timelineEntrySchema };
-export { DERIVED_FEATURE_PREFIXES, RETIRED_FEATURE_PREFIXES, PRESERVED_FEATURE_PREFIXES, NO_LOCATION_FEATURE, normalizeFeatureArray };
+export { DERIVED_FEATURE_PREFIXES, RETIRED_FEATURE_PREFIXES, PRESERVED_FEATURE_PREFIXES, normalizeFeatureArray };
