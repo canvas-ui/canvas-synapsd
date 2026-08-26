@@ -182,17 +182,56 @@ async function migrateDatabase(dbDir, dryRun) {
     console.log('done.');
 }
 
+// Where a workspace keeps its SynapsD database, relative to the workspace root.
+// The `full` layout puts it at <ws>/db; the `home` (roaming profile) layout
+// hides it at <ws>/.workspace/db. Probe both, or every roaming workspace is
+// silently skipped and left on the old schema.
+const WORKSPACE_DB_DIRS = ['db', path.join('.workspace', 'db')];
+
+function isDirectory(target) {
+    // statSync, not the dirent: a roaming setup symlinks each user home (and
+    // sometimes a workspace) at a real profile dir, and dirent.isDirectory()
+    // is false for a symlink — which silently skipped every such workspace.
+    try { return fs.statSync(target).isDirectory(); } catch { return false; }
+}
+
+function isDatabaseDir(dir) {
+    return fs.existsSync(path.join(dir, 'data.mdb'));
+}
+
+// lmdb's open() CREATES an environment at whatever path it is handed, so a
+// typo — or the natural mistake of passing the workspace ROOT instead of its
+// db dir — quietly litters an empty, freshly-stamped database there and
+// migrates nothing. Never hand open() an unverified path: require a data.mdb,
+// and resolve a workspace root of either layout to the db dir inside it.
+function resolveDatabaseDir(dir) {
+    if (isDatabaseDir(dir)) { return dir; }
+    for (const rel of WORKSPACE_DB_DIRS) {
+        const candidate = path.join(dir, rel);
+        if (isDatabaseDir(candidate)) {
+            console.log(`${dir} is a workspace root; using its database at ${candidate}`);
+            return candidate;
+        }
+    }
+    throw new Error(
+        `no SynapsD database at ${dir} — expected data.mdb there, or in `
+        + WORKSPACE_DB_DIRS.map((rel) => path.join(dir, rel)).join(' or '),
+    );
+}
+
 function discoverDatabases(usersRoot) {
     const found = [];
-    for (const user of fs.readdirSync(usersRoot, { withFileTypes: true })) {
-        if (!user.isDirectory()) { continue; }
+    for (const user of fs.readdirSync(usersRoot)) {
+        if (!isDirectory(path.join(usersRoot, user))) { continue; }
         for (const bucket of ['workspaces', 'Workspaces', 'agents']) {
-            const bucketPath = path.join(usersRoot, user.name, bucket);
+            const bucketPath = path.join(usersRoot, user, bucket);
             if (!fs.existsSync(bucketPath)) { continue; }
-            for (const ws of fs.readdirSync(bucketPath, { withFileTypes: true })) {
-                if (!ws.isDirectory()) { continue; }
-                const dbDir = path.join(bucketPath, ws.name, 'db');
-                if (fs.existsSync(path.join(dbDir, 'data.mdb'))) { found.push(dbDir); }
+            for (const ws of fs.readdirSync(bucketPath)) {
+                if (!isDirectory(path.join(bucketPath, ws))) { continue; }
+                for (const rel of WORKSPACE_DB_DIRS) {
+                    const dbDir = path.join(bucketPath, ws, rel);
+                    if (isDatabaseDir(dbDir)) { found.push(dbDir); }
+                }
             }
         }
     }
@@ -218,7 +257,7 @@ async function main() {
     }
 
     if (dbDir) {
-        await migrateDatabase(dbDir, dryRun);
+        await migrateDatabase(resolveDatabaseDir(dbDir), dryRun);
         return;
     }
 
