@@ -144,8 +144,10 @@ describe('email mailbox flags (feature/email/*)', () => {
         expect(await hasBitmap('feature/email/flagged', id)).toBe(true);
         expect(await hasBitmap('feature/email/received', id)).toBe(true);
         // Nothing below the email id: a key like data/schema/message/email/flagged
-        // would read as a SUBTYPE of email in the hierarchy.
-        expect(await db.bitmapIndex.listBitmaps(EMAIL)).toEqual([]);
+        // would read as a SUBTYPE of email in the hierarchy. The schema key
+        // itself is of course there — it is the roll-up every email ticks, and
+        // listBitmaps() returns the prefix's own key alongside its children.
+        expect(await db.bitmapIndex.listBitmaps(EMAIL)).toEqual([EMAIL]);
     });
 
     test('a flag change unticks the stale flag key', async () => {

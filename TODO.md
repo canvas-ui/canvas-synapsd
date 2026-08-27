@@ -1,17 +1,5 @@
 # TODO
 
-
-
-* Hierarchical (tick parent AND child), same contract as data/mime/*:
-* "everything from IMAP" is one key with no enumeration of accounts. Note the inherited caveat — listBitmaps(prefix) range-scans
-* `prefix + '/'`, so a bare `data/backend/imap` is invisible to a prefix
-* listing of its own namespace; list `data/backend/` instead. Safe here
-* because the parent is ALWAYS ticked.
-
-
-
-
-
 Only open engine work belongs here. The current API and landed design live in
 `README.md`.
 

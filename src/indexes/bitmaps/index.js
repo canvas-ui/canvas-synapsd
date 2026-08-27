@@ -112,7 +112,23 @@ class BitmapIndex {
         if (prefix) { prefix = prefix.replace(/\/+$/, ''); }
         if (prefix) {
             // If prefix provided, use range query (internal/* reachable this way)
+            //
+            // The range starts at `prefix + '/'`, never at the bare prefix, and
+            // that is load-bearing: keys are only prefix-validated, so segments
+            // may contain '-' and '.', which sort BEFORE '/'. Starting at the
+            // bare prefix would pull `data/backend-legacy` and
+            // `data/backend.old` into a listing of `data/backend`.
+            //
+            // The prefix's OWN key is therefore added separately. A namespace
+            // that is also a key is a roll-up ("everything from IMAP",
+            // `data/mime/image`), and a listing that silently omits it has
+            // already cost us one real bug: `internal/lance/vectors` was the
+            // text presence bitmap AND the parent of the image one, so listing
+            // it returned image and dropped text without a word. It also forced
+            // every caller sweeping a namespace to carry a second, hand-written
+            // list of the bare keys the sweep could not see.
             const keys = [];
+            if (this.hasBitmap(prefix)) { keys.push(prefix); }
             for await (const key of this.dataset.getKeys({
                 start: prefix + '/',
                 end: prefix + '/' + '\uffff',
