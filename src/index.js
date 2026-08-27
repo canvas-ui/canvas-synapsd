@@ -210,11 +210,12 @@ export function derivedBitmapPrefixes() {
 // how it sheds them. `data/kind` (2026-08-04) and `data/abstraction` (2026-08-05)
 // lost to `data/schema`; the `no-location` spellings lost to `feature/orphaned`
 // when the orphan axis moved off "empty locations" onto `orphanedAt`.
-const RETIRED_BITMAP_PREFIXES = ['data/kind', 'data/abstraction'];
-// listBitmaps(prefix) scans a `prefix/…` range, so it never returns a leaf key
-// that IS the prefix. `data/backend/no-location` needs no entry here — it sits
-// under the live `data/backend` prefix and gets dropped with it.
-const RETIRED_BITMAP_KEYS = ['data/no-location'];
+// Entries are namespaces OR bare keys, because listBitmaps() returns the
+// prefix's own key alongside its children — `data/no-location` is a leaf with
+// no children and lists as itself. It used to need a second, separate list for
+// exactly that reason. (`data/backend/no-location` needs no entry: it sits
+// under the live `data/backend` prefix and is dropped with it.)
+const RETIRED_BITMAP_PREFIXES = ['data/kind', 'data/abstraction', 'data/no-location'];
 
 // A document's root `features` array is DECLARATIVE and authoritative: the
 // document JSON says what it is, and bitmaps follow it 1:1. Every write path
@@ -6027,12 +6028,6 @@ class SynapsD extends EventEmitter {
                     await this.bitmapIndex.deleteBitmap(key);
                     stats.bitmapsDropped++;
                 }
-            }
-            for (const key of RETIRED_BITMAP_KEYS) {
-                try {
-                    await this.bitmapIndex.deleteBitmap(key);
-                    stats.bitmapsDropped++;
-                } catch { /* absent */ }
             }
         }
 

@@ -1178,26 +1178,27 @@ class ContextTree extends EventEmitter {
      * ============================================================================
      */
 
+    // The db scopes a query by a `context` SELECTOR ({ tree, path }); `tree` and
+    // `path` at the top level of a spec are read by nobody (see parseSpec). A
+    // path passed that way silently dropped the scope, and every path in the
+    // tree answered with every document in the workspace.
+    #scopedSpec(spec) {
+        const { path: _path, context: _context, tree: _tree, attributes, ...rest } = spec;
+        return {
+            ...rest,
+            context: { tree: this.id, path: this.#normalizePath(spec.path ?? spec.context ?? '/') },
+            features: spec.features ?? attributes ?? null,
+        };
+    }
+
     async search(spec = {}) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        const normalizedContextSpec = this.#normalizePath(spec.path ?? spec.context ?? '/');
-        return await this.#db.search({
-            ...spec,
-            tree: this.id,
-            path: normalizedContextSpec,
-            features: spec.features ?? spec.attributes ?? null,
-        });
+        return await this.#db.search(this.#scopedSpec(spec));
     }
 
     async list(spec = {}) {
         if (!this.#db) { throw new Error('Database instance not passed to ContextTree, functionality not available'); }
-        const normalizedContextSpec = this.#normalizePath(spec.path ?? spec.context ?? '/');
-        return await this.#db.list({
-            ...spec,
-            tree: this.id,
-            path: normalizedContextSpec,
-            features: spec.features ?? spec.attributes ?? null,
-        });
+        return await this.#db.list(this.#scopedSpec(spec));
     }
 
     /**

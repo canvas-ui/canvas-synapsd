@@ -37,13 +37,26 @@ function parsePathToken(token) {
 // paths: string[] sigil tokens | { in, not } | tree-qualified context/directory
 // selectors. The ctx:/dir: string grammar targets default trees; the
 // context/directory selector objects carry an explicit tree id.
+//
+// An ENTRY of paths.in / paths.not may be a selector object ({ type?, path,
+// tree }) instead of a token string — the same shape spec.context takes. The
+// string grammar has nowhere to put a tree id, so `!ctx:/a/b` can only ever
+// exclude /a/b of the DEFAULT context tree: for a caller working in a named
+// tree that silently excludes nothing, or the wrong thing. Whatever can scope a
+// query TO a tree has to be able to scope an exclusion the same way.
 function parsePaths(spec) {
     const inEntries = [];
     const notEntries = [];
 
+    const entryOf = (token) => (
+        token && typeof token === 'object' && !Array.isArray(token)
+            ? treeEntry(token.type === 'directory' ? 'directory' : 'context', token)
+            : parsePathToken(token)
+    );
+
     const pushToken = (token) => {
-        const entry = parsePathToken(token);
-        (entry.exclude ? notEntries : inEntries).push({ type: entry.type, path: entry.path });
+        const { exclude, ...entry } = entryOf(token);
+        (exclude ? notEntries : inEntries).push(entry);
     };
 
     if (Array.isArray(spec.paths)) {
@@ -51,8 +64,8 @@ function parsePaths(spec) {
     } else if (spec.paths && typeof spec.paths === 'object') {
         for (const token of (spec.paths.in ?? []).filter(Boolean)) { pushToken(token); }
         for (const token of (spec.paths.not ?? []).filter(Boolean)) {
-            const entry = parsePathToken(token);
-            notEntries.push({ type: entry.type, path: entry.path });
+            const { exclude: _exclude, ...entry } = entryOf(token);
+            notEntries.push(entry);
         }
     }
 
