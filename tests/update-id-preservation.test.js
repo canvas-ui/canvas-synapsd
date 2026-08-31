@@ -99,11 +99,31 @@ describe('SynapsD putMany id-preserving updates', () => {
         expect(allNotes).toHaveLength(1);
     });
 
-    test('a supplied id that does not exist still inserts as new (no throw)', async () => {
-        // Unknown id falls through to the insert path; a fresh id is minted
-        const result = await db.putMany([{ id: 999999, schema: NOTE_SCHEMA, data: { title: 'X', content: 'y' } }]);
-        expect(result).toHaveLength(1);
-        const doc = await db.getDocument(result[0]);
-        expect(doc.data.content).toBe('y');
+    // A supplied id names the document the caller means to write. Falling
+    // through to insert would mint a DIFFERENT id and report success, so the
+    // caller's "update 999999" silently becomes "created 100001" with nothing
+    // to distinguish the two. Content-addressed dedup stays the path for
+    // ID-LESS writes; naming an id that is not here is an error.
+    test('a supplied id that does not exist throws ENODOCUMENT (putMany)', async () => {
+        await expect(db.putMany([{ id: 999999, schema: NOTE_SCHEMA, data: { title: 'X', content: 'y' } }]))
+            .rejects.toMatchObject({ cause: { code: 'ENODOCUMENT' } });
+
+        // and nothing was written
+        const allNotes = (await db.list({})).filter(d => d.schema === NOTE_SCHEMA);
+        expect(allNotes).toHaveLength(0);
+    });
+
+    test('a supplied id that does not exist throws ENODOCUMENT (put)', async () => {
+        await expect(db.put({ id: 999999, schema: NOTE_SCHEMA, data: { title: 'X', content: 'y' } }))
+            .rejects.toMatchObject({ code: 'ENODOCUMENT' });
+    });
+
+    test('an id-less write still inserts, and re-writing the same content dedupes', async () => {
+        const [first] = await db.putMany([note('Id-less', 'body')]);
+        const [again] = await db.putMany([note('Id-less', 'body')]);
+        expect(again).toBe(first); // checksum dedup, not a fork
+
+        const allNotes = (await db.list({})).filter(d => d.schema === NOTE_SCHEMA);
+        expect(allNotes).toHaveLength(1);
     });
 });
