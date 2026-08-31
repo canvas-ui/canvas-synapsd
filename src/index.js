@@ -1107,6 +1107,14 @@ class SynapsD extends EventEmitter {
         return await this.#getById(id, options);
     }
 
+    /** Typed "you named an id that is not here" error — transports map the
+     *  code to 404 rather than a generic 500. */
+    static #documentNotFound(id) {
+        const error = new Error(`Document with ID "${id}" not found`);
+        error.code = 'ENODOCUMENT';
+        return error;
+    }
+
     async put(document, spec = {}) {
         const normSpec = this.#normalizeDocumentOperationSpec(spec);
 
@@ -1114,11 +1122,19 @@ class SynapsD extends EventEmitter {
             throw new Error('Document object is required');
         }
 
+        // A supplied id names the document the caller means to write. If it is
+        // gone, falling through to insert would mint a DIFFERENT id and answer
+        // as though the update succeeded — "update 42" silently becomes
+        // "created 137", and the caller has no way to tell. Content-addressed
+        // dedup remains the path for id-less writes (that is what makes a
+        // re-import of the same bytes resolve to one document); naming an id
+        // that does not exist is an error.
         if (document.id !== undefined && document.id !== null) {
-            const existing = await this.#getById(document.id);
+            const existing = await this.#getById(document.id).catch(() => null);
             if (existing) {
                 return await this.#updateOne(document.id, document, normSpec);
             }
+            throw SynapsD.#documentNotFound(document.id);
         }
 
         return await this.#putOne(document, normSpec);
@@ -1369,18 +1385,22 @@ class SynapsD extends EventEmitter {
                 // it would always equal the new value and the diff would be empty.
                 let prevRelations = null;
 
-                // Dedup priority: a supplied id that exists is an UPDATE — the id
-                // is the stable key every bitmap/timeline/checksum reference hangs
-                // off, so it must be preserved (no new id minted). Only when no id
-                // matches do we fall back to content-addressed (checksum) dedup
-                // (id-less re-imports of the same content resolve to one doc).
+                // Dedup priority: a supplied id is an UPDATE of exactly that
+                // document — the id is the stable key every bitmap/timeline/
+                // checksum reference hangs off, so it must be preserved (no new
+                // id minted), and an id that resolves to nothing is an error
+                // rather than a silent insert. Content-addressed (checksum)
+                // dedup is the path for ID-LESS writes, which is what makes a
+                // re-import of the same content resolve to one document.
                 // Ids are integers; a numeric-string id is normalized before
                 // lookup so the update path resolves and the id is preserved.
                 const suppliedId = (doc && doc.id !== undefined && doc.id !== null)
                     ? (typeof doc.id === 'string' ? parseInt(doc.id, 10) : doc.id)
                     : null;
-                if (suppliedId !== null && !Number.isNaN(suppliedId)) {
-                    existing = await this.#getById(suppliedId).catch(() => null);
+                if (suppliedId !== null) {
+                    existing = Number.isNaN(suppliedId)
+                        ? null
+                        : await this.#getById(suppliedId).catch(() => null);
                     if (existing) {
                         isUpdate = true;
                         // Snapshot previous state BEFORE update() mutates in place,
@@ -1408,6 +1428,10 @@ class SynapsD extends EventEmitter {
                         // mutated instance) — re-assert the canonical numeric id
                         // so a string-coerced input can't fork the storage key.
                         parsed.id = suppliedId;
+                    } else {
+                        // Same rule as put(): a named id that is not here is an
+                        // error, never a silent insert under a fresh id.
+                        throw SynapsD.#documentNotFound(doc.id);
                     }
                 }
 
