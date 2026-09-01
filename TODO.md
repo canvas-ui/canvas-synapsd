@@ -3,6 +3,10 @@
 Only open engine work belongs here. The current API and landed design live in
 `README.md`.
 
+## Replication/sync
+
+- Currently tracked in canvas-server/canvas-edge
+
 ## Event payload contract
 
 Landed (see README, "Events"): the `reason` discriminator on every document
