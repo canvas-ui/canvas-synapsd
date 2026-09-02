@@ -25,6 +25,7 @@ import Application, { APPLICATION_SCHEMA, APPLICATION_TYPES } from './core/Appli
 import Link from './app/Link.js';
 import Note from './app/Note.js';
 import Tab from './app/Tab.js';
+import Drawing from './app/Drawing.js';
 import Dotfile, { DOTFILE_SCHEMA, DOTFILE_TYPES } from './app/Dotfile.js';
 
 // Tree Abstractions
@@ -71,6 +72,7 @@ const CORE_SCHEMAS = {
 const APP_SCHEMAS = {
     'data/schema/note': { SchemaClass: Note },
     'data/schema/tab': { SchemaClass: Tab },
+    'data/schema/drawing': { SchemaClass: Drawing },
     'data/schema/link': { SchemaClass: Link },
     ...withLeaves(DOTFILE_SCHEMA, Dotfile, DOTFILE_TYPES),
 };

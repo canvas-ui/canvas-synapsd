@@ -19,9 +19,16 @@ describe('SCHEMA_ID_RENAMES', () => {
         }
     });
 
-    test('every registered data/schema id is a map target or a child of one', () => {
+    test('every registered data/schema id is a map target, a child of one, or born post-Rev-B', () => {
+        // Schemas introduced AFTER the Rev B rename have no old id to map from
+        // — list them here so the guard keeps catching accidental drift while
+        // allowing the registry to grow.
+        const POST_REV_B = new Set([
+            'data/schema/drawing', // 2026-09-02, sketch editor
+        ]);
         const targets = [...Object.values(SCHEMA_ID_RENAMES)];
         for (const id of schemaRegistry.listSchemas('data/schema')) {
+            if (POST_REV_B.has(id)) continue;
             expect(targets.some((t) => id === t || id.startsWith(`${t}/`))).toBe(true);
         }
     });
