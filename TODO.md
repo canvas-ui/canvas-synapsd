@@ -3,6 +3,33 @@
 Only open engine work belongs here. The current API and landed design live in
 `README.md`.
 
+Support mixed virtual trees - moving the mount feature to the top of the list
+
+Use-case: 
+- Mirror a backend directory 1:1 to a context tree
+- Mount foreign workspace paths into Universe
+  - Fan-out queries across multiple workspaces
+
+## Trees and membership
+
+- [ ] Design context/directory subtree mountpoints:
+  - same tree type only;
+  - origin-path resolution;
+  - lock lifecycle;
+  - cycle rejection;
+  - bounded nested mounts;
+  - writes through a mount target the origin.
+- [ ] Enforce locks for move, remove, delete, and rename.
+- [ ] Define root-layer behavior instead of adding another decorative layer
+      class.
+- [ ] Finish label-layer semantics or remove the unused type.
+- [ ] Extract shared document-target membership operations once mount work makes
+      the duplication concrete.
+
+## Full git repo schema support
+
+
+
 ## Replication/sync
 
 - Currently tracked in canvas-server/canvas-edge
@@ -113,22 +140,6 @@ Rationale worth keeping, because it guards decisions that could be re-litigated:
 - [ ] Design remote schema registration only when a real consumer needs it.
       Resolve persistence, scope, and checksum-identity changes first.
 - [ ] Reduce app-specific bundled schemas as consumers take ownership.
-
-## Trees and membership
-
-- [ ] Design context/directory subtree mountpoints:
-  - same tree type only;
-  - origin-path resolution;
-  - lock lifecycle;
-  - cycle rejection;
-  - bounded nested mounts;
-  - writes through a mount target the origin.
-- [ ] Enforce locks for move, remove, delete, and rename.
-- [ ] Define root-layer behavior instead of adding another decorative layer
-      class.
-- [ ] Finish label-layer semantics or remove the unused type.
-- [ ] Extract shared document-target membership operations once mount work makes
-      the duplication concrete.
 
 ## Query and write semantics
 
