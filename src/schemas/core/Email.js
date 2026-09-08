@@ -19,8 +19,12 @@ const EMAIL_FEATURE_BITMAPS = {
 };
 const DEFAULT_EMAIL_SUBJECT = '(no subject)';
 
+// Addresses as they arrive from the wild: a strict RFC check rejected whole
+// IMAP batches over one header like `undisclosed-recipients:;` or a bare local
+// part, and a message with an odd sender is still a message worth keeping.
+const emailAddressString = z.string().trim().min(1);
 const emailAddressSchema = z.object({
-    address: z.string().email(),
+    address: emailAddressString,
     name: z.string().optional(),
 });
 
@@ -36,23 +40,23 @@ const documentDataSchema = z.object({
 
         // Sender and recipients
         from: z.union([
-            z.string().email(),
+            emailAddressString,
             emailAddressSchema,
         ]),
         to: z.array(z.union([
-            z.string().email(),
+            emailAddressString,
             emailAddressSchema,
         ])),
         cc: z.array(z.union([
-            z.string().email(),
+            emailAddressString,
             emailAddressSchema,
         ])).optional(),
         bcc: z.array(z.union([
-            z.string().email(),
+            emailAddressString,
             emailAddressSchema,
         ])).optional(),
         replyTo: z.array(z.union([
-            z.string().email(),
+            emailAddressString,
             emailAddressSchema,
         ])).optional(),
 
@@ -133,13 +137,17 @@ const documentDataSchema = z.object({
 });
 
 function normalizeEmailAddress(address) {
-    if (!address?.address) {
+    // Whatever the header carried, trimmed — a bare local part or a group
+    // like `undisclosed-recipients:;` is kept as-is (the schema no longer
+    // insists on RFC form); only an empty address is dropped.
+    const value = String(address?.address ?? '').trim();
+    if (!value) {
         return undefined;
     }
 
     return {
-        address: address.address,
-        ...(address.name ? { name: address.name } : {}),
+        address: value,
+        ...(address.name ? { name: String(address.name) } : {}),
     };
 }
 
