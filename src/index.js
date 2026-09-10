@@ -11,7 +11,7 @@ const require = createRequire(import.meta.url);
 const { RoaringBitmap32 } = require('roaring');
 
 // Events
-import { EVENTS, createEvent, membershipDelta } from './utils/events.js';
+import { EVENTS, createEvent } from './utils/events.js';
 
 // DB Backend
 import LmdbBackend from './backends/lmdb/index.js';
@@ -38,23 +38,22 @@ import ContextTree from './views/ContextTree.js';
 import DirectoryTree from './views/DirectoryTree.js';
 
 // Extracted utilities
-import { parseContextSpecForInsert, parseBitmapArray } from './utils/parsing.js';
-import { parseDocumentData, parseInitializeDocument, safeParseDocuments } from './utils/document.js';
+import { parseBitmapArray } from './utils/parsing.js';
+import { parseInitializeDocument, safeParseDocuments } from './utils/document.js';
 import QuerySession from './session/QuerySession.js';
 import TreeRegistry from './trees/TreeRegistry.js';
 import CandidateResolver from './query/CandidateResolver.js';
 import QueryEngine from './query/QueryEngine.js';
 import WriteCoordinator from './write/WriteCoordinator.js';
+import DocumentWriter from './write/DocumentWriter.js';
+import DocumentDeletion from './write/DocumentDeletion.js';
+import MembershipWriter from './write/MembershipWriter.js';
+import { normalizeDocumentOperationSpec } from './write/options.js';
 import DerivedIndexes from './write/DerivedIndexes.js';
 
-import {
-    COMMENT_BITMAP_KEY, MIME_BITMAP_PREFIX,
-    RETIRED_BITMAP_PREFIXES, relationKey, documentFeatureKeys,
-    validateDocumentRelations, documentRelations, facetBitmapKeys, schemaBitmapKeys,
-    derivedBitmapPrefixes,
-} from './documents/derivation.js';
-import { mergeDedupePreservedFields, mergeDocumentLocations } from './documents/deduplication.js';
-import { snapshotDocument, hasSearchContentChanged } from './documents/snapshot.js';
+import { COMMENT_BITMAP_KEY, MIME_BITMAP_PREFIX, RETIRED_BITMAP_PREFIXES, relationKey, documentFeatureKeys, documentRelations, facetBitmapKeys, schemaBitmapKeys, derivedBitmapPrefixes } from './documents/derivation.js';
+
+
 
 // Preserve the existing package entry-point exports.
 export {
@@ -64,7 +63,6 @@ export {
 } from './documents/derivation.js';
 
 // Constants
-const INTERNAL_BITMAP_ID_MAX = 100000;
 // Row-format version of the database. Bump when a change makes rows written by
 // this build unreadable by the previous one; a database below it is REFUSED at
 // open (see start()) rather than migrated — there is no migration code here.
@@ -93,6 +91,9 @@ class SynapsD extends EventEmitter {
     #candidates;
     #queries;
     #writes;
+    #writer;
+    #deletion;
+    #membershipWriter;
     #derived;
 
     // Bitmap Indexes
@@ -225,6 +226,45 @@ class SynapsD extends EventEmitter {
             trees: this.#trees, writes: this.#writes,
             getTimeline: () => this.#timelineIndex, getGeo: () => this.#geoIndex,
             getEdges: () => this.#edges, list: spec => this.list(spec),
+        });
+        this.#writer = new DocumentWriter({
+            documents: this.documents,
+            bitmapIndex: this.bitmapIndex,
+            trees: this.#trees,
+            writes: this.#writes,
+            derived: this.#derived,
+            vectors: this.#vectors,
+            checksumIndex: this.#checksumIndex,
+            internalStore: this.#internalStore,
+            getTimeline: () => this.#timelineIndex,
+            getLance: () => this.#lanceIndex,
+            getAllBitmap: () => this.allDocumentsBitmap,
+            getDeletedBitmap: () => this.deletedDocumentsBitmap,
+            getById: (...args) => this.#getById(...args),
+            getByChecksumString: (...args) => this.getByChecksumString(...args),
+        });
+        this.#deletion = new DocumentDeletion({
+            documents: this.documents,
+            bitmapIndex: this.bitmapIndex,
+            writes: this.#writes,
+            derived: this.#derived,
+            vectors: this.#vectors,
+            checksumIndex: this.#checksumIndex,
+            getTimeline: () => this.#timelineIndex,
+            getGeo: () => this.#geoIndex,
+            getEdges: () => this.#edges,
+            getSynapses: () => this.#synapses,
+            getLance: () => this.#lanceIndex,
+            getAllBitmap: () => this.allDocumentsBitmap,
+            getDeletedBitmap: () => this.deletedDocumentsBitmap,
+            retractIncoming: (...args) => this.#retractIncomingAssertedRelations(...args),
+        });
+        this.#membershipWriter = new MembershipWriter({
+            documents: this.documents,
+            trees: this.#trees,
+            writes: this.#writes,
+            derived: this.#derived,
+            getById: (...args) => this.#getById(...args),
         });
 
     }
@@ -540,58 +580,17 @@ class SynapsD extends EventEmitter {
         return await this.#getById(id, options);
     }
 
-    /** Typed "you named an id that is not here" error — transports map the
-     *  code to 404 rather than a generic 500. */
-    static #documentNotFound(id) {
-        const error = new Error(`Document with ID "${id}" not found`);
-        error.code = 'ENODOCUMENT';
-        return error;
-    }
-
     async put(document, spec = {}) {
-        return this.#writes.withWriteLock(() => this.#put(document, spec));
-    }
-
-    async #put(document, spec = {}) {
-        const normSpec = this.#normalizeDocumentOperationSpec(spec);
-
-        if (!document || typeof document !== 'object' || Array.isArray(document)) {
-            throw new Error('Document object is required');
-        }
-
-        // A supplied id names the document the caller means to write. If it is
-        // gone, falling through to insert would mint a DIFFERENT id and answer
-        // as though the update succeeded — "update 42" silently becomes
-        // "created 137", and the caller has no way to tell. Content-addressed
-        // dedup remains the path for id-less writes (that is what makes a
-        // re-import of the same bytes resolve to one document); naming an id
-        // that does not exist is an error.
-        if (document.id !== undefined && document.id !== null) {
-            const existing = await this.#getById(document.id).catch(() => null);
-            if (existing) {
-                return await this.#updateOne(document.id, document, normSpec);
-            }
-            throw SynapsD.#documentNotFound(document.id);
-        }
-
-        return await this.#putOne(document, normSpec);
+        return this.#writes.withWriteLock(() => this.#writer.put(document, spec));
     }
 
     async link(idOrIds, spec = {}) {
-        return this.#writes.withWriteLock(() => this.#link(idOrIds, spec));
-    }
-
-    async #link(idOrIds, spec = {}) {
-        if (Array.isArray(idOrIds)) {
-            return await this.#linkMany(idOrIds, spec);
-        }
-        if (!idOrIds) { throw new Error('Document id required'); }
-        return await this.#linkOne(idOrIds, this.#normalizeDocumentOperationSpec(spec));
+        return this.#writes.withWriteLock(() => this.#membershipWriter.link(idOrIds, spec));
     }
 
     async has(id, spec = {}) {
         if (!id) { throw new Error('Document id required'); }
-        return await this.#hasOne(id, this.#normalizeDocumentOperationSpec(spec));
+        return await this.#hasOne(id, normalizeDocumentOperationSpec(spec));
     }
 
     /**
@@ -732,13 +731,15 @@ class SynapsD extends EventEmitter {
         else { delete storedDocument.data.relations; }
         storedDocument.updatedAt = new Date().toISOString();
 
-        await this.documents.put(docId, storedDocument);
-        await this.#timelineIndex.insert('crud:updated', docId, storedDocument.updatedAt);
-        this.#derived.syncDocumentRelations(docId, previous, current);
+        await this.#writes.withDeferredMembership(async () => {
+            await this.documents.put(docId, storedDocument);
+            await this.#timelineIndex.insert('crud:updated', docId, storedDocument.updatedAt);
+            this.#derived.syncDocumentRelations(docId, previous, current);
 
-        this.#emitEvent(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
-            id: docId, document: storedDocument, reason: 'relations',
-        }));
+            this.#emitEvent(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
+                id: docId, document: storedDocument, reason: 'relations',
+            }));
+        });
         return true;
     }
 
@@ -772,316 +773,15 @@ class SynapsD extends EventEmitter {
     }
 
     async unlink(idOrIds, spec = {}) {
-        return this.#writes.withWriteLock(() => this.#unlink(idOrIds, spec));
-    }
-
-    async #unlink(idOrIds, spec = {}) {
-        if (Array.isArray(idOrIds)) {
-            return await this.#unlinkMany(idOrIds, spec);
-        }
-        if (!idOrIds) { throw new Error('Document id required'); }
-        // `spec` is the OPTIONS argument (4th), not the feature array (3rd) —
-        // features are unwrapped from the normalized spec inside. Passing it
-        // third silently dropped `recursive`, so unlink(id, { recursive:true })
-        // unticked only the leaf layer while unlinkMany([id], …) honoured it.
-        return await this.#unlinkOne(idOrIds, this.#normalizeDocumentOperationSpec(spec), [], spec);
+        return this.#writes.withWriteLock(() => this.#membershipWriter.unlink(idOrIds, spec));
     }
 
     async delete(id, options = {}) {
-        return this.#writes.withWriteLock(() => this.#delete(id, options));
-    }
-
-    async #delete(id, options = {}) {
-        if (!id) { throw new Error('Document id required'); }
-        return await this.#deleteOne(id, options);
+        return this.#writes.withWriteLock(() => this.#deletion.delete(id, options));
     }
 
     async putMany(documents, spec = {}) {
-        return this.#writes.withWriteLock(() => this.#putMany(documents, spec));
-    }
-
-    async #putMany(documents, spec = {}) {
-        const skipLance = spec.skipLance === true;
-        const deferredLanceBuffer = spec.deferredLanceBuffer;
-
-        const normSpec = this.#normalizeDocumentOperationSpec(spec);
-        if (!Array.isArray(documents)) {
-            throw new Error('Document array must be an array');
-        }
-        if (documents.length === 0) { return []; }
-
-        debug(`putMany: Attempting to store ${documents.length} documents`);
-
-        // ── Phase 1: Parse, validate, dedup ──────────────────────────────
-
-        const contextSpec = normSpec.context ?? null;
-        const directorySpec = normSpec.directory ?? null;
-
-        const featureBitmaps = parseBitmapArray(normSpec.features);
-        const prepared = [];
-        // In-batch content dedup: two identical files in one batch both miss the
-        // checksum lookup (nothing is written until phase 2), so without this they
-        // fork into two docs and the checksum index keeps only the last id —
-        // corrupting the one-blob-one-doc model. Keyed by primary checksum.
-        const batchByChecksum = new Map();
-
-        for (let i = 0; i < documents.length; i++) {
-            try {
-                const doc = documents[i];
-
-                let parsed;
-                let existing = null;
-                let isUpdate = false;
-                let previous = null;
-
-                // Dedup priority: a supplied id is an UPDATE of exactly that
-                // document — the id is the stable key every bitmap/timeline/
-                // checksum reference hangs off, so it must be preserved (no new
-                // id minted), and an id that resolves to nothing is an error
-                // rather than a silent insert. Content-addressed (checksum)
-                // dedup is the path for ID-LESS writes, which is what makes a
-                // re-import of the same content resolve to one document.
-                // Ids are integers; a numeric-string id is normalized before
-                // lookup so the update path resolves and the id is preserved.
-                const suppliedId = (doc && doc.id !== undefined && doc.id !== null)
-                    ? (typeof doc.id === 'string' ? parseInt(doc.id, 10) : doc.id)
-                    : null;
-                if (suppliedId !== null) {
-                    existing = Number.isNaN(suppliedId)
-                        ? null
-                        : await this.#getById(suppliedId).catch(() => null);
-                    if (existing) {
-                        isUpdate = true;
-                        // Snapshot previous state BEFORE update() mutates in place,
-                        // so stale checksums/timelines/device tags can be cleaned.
-                        previous = snapshotDocument(existing);
-                        // Merge input onto existing (preserves locations, metadata,
-                        // parentId chain; regenerates checksums when data changed).
-                        parsed = existing.update(doc);
-                        // update() trusts data.id verbatim (and returns the same
-                        // mutated instance) — re-assert the canonical numeric id
-                        // so a string-coerced input can't fork the storage key.
-                        parsed.id = suppliedId;
-                    } else {
-                        // Same rule as put(): a named id that is not here is an
-                        // error, never a silent insert under a fresh id.
-                        throw SynapsD.#documentNotFound(doc.id);
-                    }
-                }
-
-                if (!parsed) {
-                    parsed = isDocumentInstance(doc) ? doc : parseInitializeDocument(doc);
-                    parsed.validateData();
-
-                    const primaryChecksum = parsed.getPrimaryChecksum();
-                    existing = await this.getByChecksumString(primaryChecksum, { parse: true, schema: parsed.schema }).catch(() => null);
-                    if (existing) {
-                        parsed.id = existing.id;
-                        mergeDedupePreservedFields(parsed, existing);
-                        if (existing.createdAt) { parsed.createdAt = existing.createdAt; }
-                        if (existing.updatedAt) { parsed.updatedAt = existing.updatedAt; }
-                        previous = snapshotDocument(existing);
-                    }
-                }
-
-                // In-batch dedup (content-addressed only; explicit id-updates are
-                // intentional and never folded). Merge this doc's locations into
-                // the earlier identical entry instead of minting a second doc.
-                if (!isUpdate) {
-                    const primaryChecksum = parsed.getPrimaryChecksum();
-                    if (primaryChecksum) {
-                        const dup = batchByChecksum.get(primaryChecksum);
-                        if (dup) {
-                            mergeDocumentLocations(dup.parsed, parsed.locations);
-                            continue;
-                        }
-                    }
-                }
-
-                // Per-doc declarative features unioned with the batch-level list
-                // (which applies to every doc) — this is what lets one putMany
-                // batch carry different tags per document.
-                const docFeatures = [...featureBitmaps];
-                for (const key of documentFeatureKeys(parsed)) {
-                    if (!docFeatures.includes(key)) { docFeatures.push(key); }
-                }
-                for (const key of schemaBitmapKeys(parsed)) {
-                    if (!docFeatures.includes(key)) { docFeatures.push(key); }
-                }
-
-                validateDocumentRelations(parsed);
-
-                const entry = { parsed, existing: !!existing, isUpdate, previous, docFeatures };
-                prepared.push(entry);
-                if (!isUpdate) {
-                    const primaryChecksum = parsed.getPrimaryChecksum();
-                    if (primaryChecksum) { batchByChecksum.set(primaryChecksum, entry); }
-                }
-            } catch (error) {
-                const contextualError = new Error(`Failed to prepare document at index ${i}: ${error.message}`);
-                contextualError.cause = error;
-                contextualError.failedItem = documents[i];
-                contextualError.failedIndex = i;
-                throw contextualError;
-            }
-        }
-
-        // Batch-generate IDs for new documents in one transaction
-        const newDocs = prepared.filter(p => !p.existing);
-        if (newDocs.length > 0) {
-            const ids = this.#allocateDocumentIDs(newDocs.length);
-            for (let i = 0; i < newDocs.length; i++) {
-                newDocs[i].parsed.id = ids[i];
-            }
-        }
-
-        // Validate all (now that IDs are assigned)
-        for (let i = 0; i < prepared.length; i++) {
-            try {
-                prepared[i].parsed.validate();
-            } catch (error) {
-                const contextualError = new Error(`Validation failed for document at index ${i}: ${error.message}`);
-                contextualError.cause = error;
-                contextualError.failedIndex = i;
-                throw contextualError;
-            }
-        }
-
-        // ── Phase 2: Batch write ─────────────────────────────────────────
-
-        try {
-            await this.#writes.withDeferredMembership(async () => {
-                await this.bitmapIndex.tick(this.allDocumentsBitmap.key, prepared.map((p) => p.parsed.id));
-                for (const { parsed, existing, isUpdate, previous, docFeatures } of prepared) {
-                    await this.documents.put(parsed.id, parsed);
-
-                    // Features this write dropped from the document — untick, or a
-                    // removed tag would linger in its bitmap forever. Snapshot was
-                    // taken before update() mutated `existing` in place.
-                    const staleFeatureKeys = (previous?.featureKeys || []).filter((k) => !docFeatures.includes(k));
-                    if (staleFeatureKeys.length) { await this.#writes.applyMembership('untick', parsed.id, staleFeatureKeys); }
-
-                    // Re-point the checksum index: drop checksums the edit dropped
-                    // (empty diff for checksum-matched re-indexes), insert current.
-                    if (existing && previous?.checksums) {
-                        const staleChecksums = previous?.checksums.filter(c => !parsed.checksumArray.includes(c));
-                        if (staleChecksums.length) {await this.#checksumIndex.deleteArray(staleChecksums);}
-                    }
-                    await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
-
-                    // crud:created only for genuinely new docs; updates keep their createdAt
-                    if (!isUpdate) {
-                        await this.#timelineIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
-                    }
-                    if (parsed.updatedAt) {await this.#timelineIndex.insert('crud:updated', parsed.id, parsed.updatedAt);}
-                    if (existing && previous) {await this.#derived.removeDocumentTimelines(parsed.id, previous, parsed);}
-                    await this.#derived.indexDocumentTimelines(parsed.id, parsed);
-                    await this.#derived.indexDocumentGeo(parsed.id, parsed);
-                    this.#derived.syncDocumentRelations(parsed.id, previous?.relations, documentRelations(parsed));
-                    await this.#derived.indexDocument(parsed.id, contextSpec, directorySpec, docFeatures);
-                    if (existing) {
-                        await this.#derived.removeStaleLocationMembership(parsed.id, { locations: previous?.locations, orphanedAt: previous?.orphanedAt }, parsed, docFeatures);
-                    }
-                    await this.#writes.applyMembership(parsed.hasComment ? 'tick' : 'untick', parsed.id, [COMMENT_BITMAP_KEY]);
-                    // Facet bitmaps (mime + status): tick current, untick whatever
-                    // this batch-update left behind (contentType/status change).
-                    const facetKeys = facetBitmapKeys(parsed);
-                    const staleFacetKeys = (previous?.facetKeys || []).filter((k) => !facetKeys.includes(k));
-                    if (staleFacetKeys.length) { await this.#writes.applyMembership('untick', parsed.id, staleFacetKeys); }
-                    if (facetKeys.length) { await this.#writes.applyMembership('tick', parsed.id, facetKeys); }
-                }
-            });
-
-        } catch (error) {
-            throw new Error(`putMany transaction failed: ${error.message}`);
-        }
-
-        // ── Phase 3: Lance (best-effort, single batch add) ───────────────
-
-        // Re-index FTS/vectors only for genuinely new or content-changed docs.
-        // A membership-only re-tick (same content added to another tree path —
-        // e.g. multi-path "Sync To") keeps identical checksums, so its Lance row
-        // and embedding already exist. Re-adding them is wasteful and, because
-        // phase 3 is awaited, was making each extra path's insert slow enough to
-        // blow the client's 10s timeout (only the first path stuck → "order
-        // decides the folder").
-        const reindexDocs = prepared.filter(p => hasSearchContentChanged(p.previous, p.parsed));
-
-        const needLanceRows = !skipLance || Array.isArray(deferredLanceBuffer);
-        const lanceDocs = needLanceRows
-            ? reindexDocs.map(({ parsed }) => parseInitializeDocument(parsed))
-            : [];
-        if (skipLance) {
-            if (Array.isArray(deferredLanceBuffer)) {
-                deferredLanceBuffer.push(...lanceDocs);
-            }
-        } else if (lanceDocs.length > 0) {
-            try {
-                await this.#lanceIndex.addMany(lanceDocs);
-            } catch (_) { }
-        }
-
-        // ── Phase 3.5: Dense vectors ─────────────────────────────────────
-        // Embedding is owned by the external embedd service, driven off the
-        // DOCUMENT_INSERTED event below — synapsd no longer enqueues here.
-
-        // ── Phase 4: Events ──────────────────────────────────────────────
-
-        const storedIds = prepared.map(p => p.parsed.id);
-
-        if (storedIds.length > 0) {
-            // Emit for whichever tree(s) the docs landed in so cross-client
-            // auto-open fires on both context and directory inserts.
-            this.#trees.emitDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'context', contextSpec, storedIds);
-            this.#trees.emitDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'directory', directorySpec, storedIds);
-        }
-
-        // Split inserts from updates so consumers (ws bridge, UIs) can tell an
-        // edit from a new document — an in-place update keeps the same id.
-        const insertedIds = prepared.filter(p => !p.isUpdate).map(p => p.parsed.id);
-        const updatedIds = prepared.filter(p => p.isUpdate).map(p => p.parsed.id);
-
-        if (insertedIds.length > 0) {
-            // Singular event with `batch: true` kept for pre-batch consumers
-            // (ws bridge, embedd enqueue); the .batch event is the canonical
-            // one for batch-aware consumers (workspace hooks).
-            this.#emitEvent(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, {
-                ids: insertedIds,
-                count: insertedIds.length,
-                batch: true,
-                context: contextSpec,
-                directory: directorySpec,
-                reason: 'created',
-                ...(normSpec.provenance || {}),
-            }));
-            this.#emitEvent(EVENTS.DOCUMENT_INSERTED_BATCH, createEvent(EVENTS.DOCUMENT_INSERTED_BATCH, {
-                ids: insertedIds,
-                count: insertedIds.length,
-                context: contextSpec,
-                directory: directorySpec,
-                reason: 'created',
-                ...(normSpec.provenance || {}),
-            }));
-        }
-        if (updatedIds.length > 0) {
-            this.#emitEvent(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
-                ids: updatedIds,
-                count: updatedIds.length,
-                batch: true,
-                reason: 'content',
-                ...(normSpec.provenance || {}),
-            }));
-            this.#emitEvent(EVENTS.DOCUMENT_UPDATED_BATCH, createEvent(EVENTS.DOCUMENT_UPDATED_BATCH, {
-                ids: updatedIds,
-                count: updatedIds.length,
-                context: contextSpec,
-                directory: directorySpec,
-                reason: 'content',
-                ...(normSpec.provenance || {}),
-            }));
-        }
-
-        return storedIds;
+        return this.#writes.withWriteLock(() => this.#writer.putMany(documents, spec));
     }
 
     /** Append parsed documents to the Lance FTS table (same payload as putMany phase 3). */
@@ -1192,415 +892,15 @@ class SynapsD extends EventEmitter {
      * items: [{ document, path: directoryPath }]
      */
     async putManyDirectoryPaths(items, treeName, featureArray = [], options = {}) {
-        return this.#writes.withWriteLock(() => this.#putManyDirectoryPaths(items, treeName, featureArray, options));
-    }
-
-    async #putManyDirectoryPaths(items, treeName, featureArray = [], options = {}) {
-        const skipLance = options.skipLance === true;
-        const deferredLanceBuffer = options.deferredLanceBuffer;
-        const emitEvent = options.emitEvent !== false;
-
-        if (!Array.isArray(items) || items.length === 0) {
-            return [];
-        }
-
-        const featureBitmaps = parseBitmapArray(featureArray);
-
-        const prepared = [];
-        // In-batch content dedup: identical blobs at different directory paths in
-        // one batch would otherwise fork into separate docs (checksum not yet
-        // written). Fold them into a single doc linked under every path.
-        const batchByChecksum = new Map();
-
-        for (let i = 0; i < items.length; i++) {
-            const { document, path: dirPath } = items[i];
-            try {
-                const parsed = isDocumentInstance(document) ? document : parseInitializeDocument(document);
-                parsed.validateData();
-
-                const primaryChecksum = parsed.getPrimaryChecksum();
-                const existing = await this.getByChecksumString(primaryChecksum, { parse: true, schema: parsed.schema }).catch(() => null);
-                if (existing) {
-                    // Already stored — skip re-insertion entirely
-                    continue;
-                }
-
-                const directorySpec = { tree: treeName, path: dirPath };
-
-                // Fold an earlier identical blob: merge locations + add this path.
-                const dup = primaryChecksum ? batchByChecksum.get(primaryChecksum) : null;
-                if (dup) {
-                    mergeDocumentLocations(dup.parsed, parsed.locations);
-                    dup.directorySpecs.push(directorySpec);
-                    continue;
-                }
-
-                const docFeatures = [...featureBitmaps];
-                for (const key of documentFeatureKeys(parsed)) {
-                    if (!docFeatures.includes(key)) { docFeatures.push(key); }
-                }
-                for (const key of schemaBitmapKeys(parsed)) {
-                    if (!docFeatures.includes(key)) { docFeatures.push(key); }
-                }
-
-                const entry = { parsed, docFeatures, directorySpecs: [directorySpec] };
-                prepared.push(entry);
-                if (primaryChecksum) { batchByChecksum.set(primaryChecksum, entry); }
-            } catch (error) {
-                const contextualError = new Error(`Failed to prepare document at index ${i}: ${error.message}`);
-                contextualError.cause = error;
-                throw contextualError;
-            }
-        }
-
-        if (prepared.length === 0) { return []; }
-
-        const ids = this.#allocateDocumentIDs(prepared.length);
-        for (let i = 0; i < prepared.length; i++) {
-            prepared[i].parsed.id = ids[i];
-        }
-
-        for (let i = 0; i < prepared.length; i++) {
-            prepared[i].parsed.validate();
-        }
-
-        try {
-            await this.#writes.withDeferredMembership(async () => {
-                await this.bitmapIndex.tick(this.allDocumentsBitmap.key, prepared.map((p) => p.parsed.id));
-                for (const { parsed, docFeatures, directorySpecs } of prepared) {
-                    await this.documents.put(parsed.id, parsed);
-                    await this.#checksumIndex.insertArray(parsed.checksumArray, parsed.id);
-                    await this.#timelineIndex.insert('crud:created', parsed.id, parsed.createdAt || new Date());
-                    if (parsed.updatedAt) {await this.#timelineIndex.insert('crud:updated', parsed.id, parsed.updatedAt);}
-                    await this.#derived.indexDocumentTimelines(parsed.id, parsed);
-                    await this.#derived.indexDocumentGeo(parsed.id, parsed);
-                    // One doc can be linked under multiple directory paths (folded dups).
-                    for (const directorySpec of directorySpecs) {
-                        await this.#derived.indexDocument(parsed.id, null, directorySpec, docFeatures);
-                    }
-                }
-            });
-        } catch (error) {
-            throw new Error(`putManyDirectoryPaths transaction failed: ${error.message}`);
-        }
-
-        const needLanceRows = !skipLance || Array.isArray(deferredLanceBuffer);
-        const lanceDocs = needLanceRows
-            ? prepared.map(({ parsed }) => parseInitializeDocument(parsed))
-            : [];
-        if (skipLance) {
-            if (Array.isArray(deferredLanceBuffer)) {
-                deferredLanceBuffer.push(...lanceDocs);
-            }
-        } else {
-            try {
-                await this.#lanceIndex.addMany(lanceDocs);
-            } catch (_) { }
-        }
-
-        const storedIds = prepared.map(p => p.parsed.id);
-
-        if (emitEvent) {
-            const directoryPaths = [...new Set(prepared.flatMap(p => p.directorySpecs.map(d => d?.path)).filter(Boolean))];
-            this.#emitEvent(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, {
-                ids: storedIds,
-                count: storedIds.length,
-                batch: true,
-                directory: { tree: prepared[0]?.directorySpecs[0]?.tree, paths: directoryPaths },
-                reason: 'created',
-            }));
-        }
-
-        return storedIds;
+        return this.#writes.withWriteLock(() => this.#writer.putManyDirectoryPaths(items, treeName, featureArray, options));
     }
 
     async linkMany(ids, spec = {}) {
-        return this.#writes.withWriteLock(() => this.#linkMany(ids, spec));
-    }
-
-    async #linkMany(ids, spec = {}) {
-        const normSpec = this.#normalizeDocumentOperationSpec(spec);
-        if (!Array.isArray(ids)) {
-            throw new Error('Document ID array must be an array');
-        }
-
-        const result = {
-            successful: [],
-            failed: [],
-            count: ids.length,
-        };
-
-        // Validate IDs upfront
-        const validEntries = [];
-        for (let i = 0; i < ids.length; i++) {
-            const id = ids[i];
-            if (typeof id !== 'number') {
-                result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
-            } else {
-                validEntries.push({ index: i, id });
-            }
-        }
-
-        if (validEntries.length === 0) { return result; }
-
-        // Resolve spec fields once (same for all docs in this batch)
-        const contextSpec = normSpec.context ?? null;
-        const directorySpec = normSpec.directory ?? null;
-        const featureBitmaps = parseBitmapArray(normSpec.features);
-
-        // Batch-fetch all documents at once
-        const validIds = validEntries.map(e => e.id);
-        const rawDocs = await this.documents.getMany(validIds);
-
-        const toProcess = [];
-        for (let i = 0; i < validEntries.length; i++) {
-            const { index, id } = validEntries[i];
-            const docData = rawDocs[i];
-            if (!docData) {
-                result.failed.push({ index, id, error: `Document with ID "${id}" not found` });
-                continue;
-            }
-            const doc = parseInitializeDocument(docData);
-            const docFeatures = [...featureBitmaps];
-            for (const key of documentFeatureKeys(doc)) {
-                if (!docFeatures.includes(key)) { docFeatures.push(key); }
-            }
-            for (const key of schemaBitmapKeys(doc)) {
-                if (!docFeatures.includes(key)) { docFeatures.push(key); }
-            }
-            toProcess.push({ index, id, docFeatures });
-        }
-
-        if (toProcess.length === 0) { return result; }
-
-        // Single transaction for all index operations
-        try {
-            await this.#writes.withDeferredMembership(async () => {
-                for (const { id, docFeatures } of toProcess) {
-                    await this.#derived.indexDocument(id, contextSpec, directorySpec, docFeatures);
-                }
-            });
-        } catch (error) {
-            for (const { index, id } of toProcess) {
-                result.failed.push({ index, id, error: error.message || 'Transaction failed' });
-            }
-            return result;
-        }
-
-        for (const { index, id } of toProcess) {
-            result.successful.push({ index, id });
-        }
-
-        // One event per op, not per document: a lone doc gets a single event,
-        // many docs collapse into batch events. Linking a folder of 1300 docs
-        // otherwise emitted ~2600 socket messages and froze the browser.
-        try {
-            const ids = toProcess.map((e) => e.id);
-            const delta = membershipDelta(
-                { context: contextSpec, directory: directorySpec },
-                { memberships: { context: contextSpec, directory: directorySpec } },
-            );
-            const shared = { ...delta, reason: 'membership', ...(normSpec.provenance || {}) };
-
-            // DEPRECATED membership-only alias (see #linkOne).
-            if (ids.length === 1) {
-                this.#emitEvent(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: ids[0], ...shared }));
-            } else if (ids.length > 1) {
-                this.#emitEvent(EVENTS.DOCUMENT_UPDATED_BATCH, createEvent(EVENTS.DOCUMENT_UPDATED_BATCH, { ids, ...shared }));
-            }
-
-            // First-class membership events. A lone document gets the singular
-            // form WITH its document — same contract as #linkOne, one read —
-            // so a rule matching on content behaves identically whether the
-            // caller went through link() or linkMany([one]). Bulk links stay
-            // id-only: loading 1000 documents to serve consumers that may not
-            // want them is the cost this whole event family avoids, and the
-            // consumer that does want them hydrates per document on fan-out.
-            if (ids.length === 1) {
-                const linkedData = await this.documents.get(ids[0]);
-                const linkedDocument = linkedData ? parseDocumentData(linkedData) : null;
-                if (linkedDocument) {
-                    this.#emitEvent(EVENTS.DOCUMENT_LINKED, createEvent(EVENTS.DOCUMENT_LINKED, {
-                        id: ids[0], document: linkedDocument, ...shared,
-                    }));
-                }
-            } else if (ids.length > 1) {
-                this.#emitEvent(EVENTS.DOCUMENT_LINKED_BATCH, createEvent(EVENTS.DOCUMENT_LINKED_BATCH, {
-                    ids, count: ids.length, ...shared,
-                }));
-            }
-
-            // Tree-scoped events drive the web UI content refresh + browser
-            // extension. Batch helper handles the single/none cases internally.
-            this.#trees.emitDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'context', contextSpec, ids);
-            this.#trees.emitDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'directory', directorySpec, ids);
-        } catch (eventError) {
-            debug(`linkMany: Failed to emit events: ${eventError.message}`);
-        }
-
-        return result;
+        return this.#writes.withWriteLock(() => this.#membershipWriter.linkMany(ids, spec));
     }
 
     async unlinkMany(ids, spec = {}) {
-        return this.#writes.withWriteLock(() => this.#unlinkMany(ids, spec));
-    }
-
-    async #unlinkMany(ids, spec = {}) {
-        const normSpec = this.#normalizeDocumentOperationSpec(spec);
-        // `recursive` rides in on the spec (Workspace.unlinkMany spreads its options
-        // into the spec). There is no separate `options` param here.
-        const recursive = Boolean(spec.recursive);
-        if (!Array.isArray(ids)) {
-            throw new Error('Document ID array must be an array');
-        }
-
-        const result = {
-            successful: [],
-            failed: [],
-            count: ids.length,
-        };
-
-        // Validate IDs upfront
-        const validEntries = [];
-        for (let i = 0; i < ids.length; i++) {
-            const id = ids[i];
-            if (typeof id !== 'number') {
-                result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
-            } else {
-                validEntries.push({ index: i, id });
-            }
-        }
-
-        if (validEntries.length === 0) { return result; }
-
-        // Resolve layers to remove from spec once (same for all docs in this batch)
-        const contextSpec = normSpec.context ?? null;
-        const directorySpec = normSpec.directory ?? null;
-        const featureKeys = parseBitmapArray(normSpec.features).filter(Boolean);
-        const layersToRemove = [];
-        const removedContextPaths = [];
-        const removedDirectoryPaths = [];
-
-        if (contextSpec) {
-            try {
-                const { tree: contextTree, collection: contextCollection, path: normalizedContextSpec } = this.#trees.resolveSelection('context', contextSpec, '/');
-                const pathLayersArray = parseContextSpecForInsert(normalizedContextSpec);
-                for (const pathLayers of pathLayersArray) {
-                    if (pathLayers.length === 1 && pathLayers[0] === '/') {
-                        throw new Error('Cannot unlink from root context "/". Unlink a real path or delete the document.');
-                    }
-                    const filteredLayers = pathLayers.filter((context) => context !== '/');
-                    if (filteredLayers.length === 0) {
-                        throw new Error('Cannot unlink from root context "/". Unlink a real path or delete the document.');
-                    }
-                    const targetLayers = recursive
-                        ? filteredLayers
-                        : [filteredLayers[filteredLayers.length - 1]];
-                    const layerIds = contextTree.resolveLayerIds(targetLayers);
-                    layersToRemove.push(...layerIds.map((layerId) => contextCollection.makeKey(layerId)));
-                    removedContextPaths.push(...SynapsD.#unlinkedContextPaths(filteredLayers, recursive));
-                }
-            } catch (error) {
-                for (const { index, id } of validEntries) {
-                    result.failed.push({ index, id, error: error.message });
-                }
-                return result;
-            }
-        }
-
-        if (directorySpec) {
-            try {
-                const { tree: directoryTree, collection: directoryCollection, path: normalizedDirectoryPath } = this.#trees.resolveSelection('directory', directorySpec, '/');
-                const directoryPaths = Array.isArray(normalizedDirectoryPath) ? normalizedDirectoryPath : [normalizedDirectoryPath];
-                for (const directoryPath of directoryPaths) {
-                    const nodeIds = directoryTree.getNodeIdsForPath(directoryPath, { recursive });
-                    layersToRemove.push(...nodeIds.map((nodeId) => directoryCollection.makeKey(nodeId)));
-                    if (nodeIds.length > 0) {
-                        removedDirectoryPaths.push(directoryPath);
-                    }
-                }
-            } catch (error) {
-                for (const { index, id } of validEntries) {
-                    result.failed.push({ index, id, error: error.message });
-                }
-                return result;
-            }
-        }
-
-        layersToRemove.push(...normalizeBitmapKeys(featureKeys));
-        const uniqueLayers = Array.from(new Set(layersToRemove));
-
-        // Single transaction for all membership removals
-        try {
-            await this.#writes.withDeferredMembership(async () => {
-                for (const { id } of validEntries) {
-                    if (uniqueLayers.length > 0) {
-                        await this.#writes.removeDocumentMembership(id, uniqueLayers);
-                    }
-                }
-            });
-        } catch (error) {
-            for (const { index, id } of validEntries) {
-                result.failed.push({ index, id, error: error.message || 'Transaction failed' });
-            }
-            return result;
-        }
-
-        for (const { index, id } of validEntries) {
-            result.successful.push({ index, id });
-        }
-
-        // One event per op: single for a lone doc, batch otherwise (avoids a
-        // socket-emit storm on large bulk removes).
-        try {
-            const ids = validEntries.map((e) => e.id);
-            const shared = {
-                ...membershipDelta(
-                    { context: removedContextPaths, directory: removedDirectoryPaths, features: featureKeys },
-                    {
-                        contextArray: removedContextPaths,
-                        directoryArray: removedDirectoryPaths,
-                        featureArray: featureKeys,
-                    },
-                ),
-                recursive,
-                reason: 'membership',
-                ...(normSpec.provenance || {}),
-            };
-
-            // DEPRECATED membership-only alias (see #unlinkOne).
-            if (ids.length === 1) {
-                this.#emitEvent(EVENTS.DOCUMENT_REMOVED, createEvent(EVENTS.DOCUMENT_REMOVED, { id: ids[0], ...shared }));
-            } else if (ids.length > 1) {
-                this.#emitEvent(EVENTS.DOCUMENT_REMOVED_BATCH, createEvent(EVENTS.DOCUMENT_REMOVED_BATCH, { ids, ...shared }));
-            }
-
-            // First-class membership events, mirroring linkMany: singular WITH
-            // the document for a lone id, id-only batch beyond that.
-            if (ids.length === 1) {
-                const unlinkedData = await this.documents.get(ids[0]);
-                const unlinkedDocument = unlinkedData ? parseDocumentData(unlinkedData) : null;
-                if (unlinkedDocument) {
-                    this.#emitEvent(EVENTS.DOCUMENT_UNLINKED, createEvent(EVENTS.DOCUMENT_UNLINKED, {
-                        id: ids[0], document: unlinkedDocument, ...shared,
-                    }));
-                }
-            } else if (ids.length > 1) {
-                this.#emitEvent(EVENTS.DOCUMENT_UNLINKED_BATCH, createEvent(EVENTS.DOCUMENT_UNLINKED_BATCH, {
-                    ids, count: ids.length, ...shared,
-                }));
-            }
-
-            // Tree-scoped events drive cross-client auto-close (browser extension)
-            // and web UI refresh — they carry the path + tree id/name the consumers
-            // match on. Emit for whichever tree(s) the unlink touched.
-            this.#trees.emitDocumentEvent(EVENTS.TREE_DOCUMENT_REMOVED_BATCH, 'context', contextSpec, ids);
-            this.#trees.emitDocumentEvent(EVENTS.TREE_DOCUMENT_REMOVED_BATCH, 'directory', directorySpec, ids);
-        } catch (eventError) {
-            debug(`unlinkMany: Failed to emit events: ${eventError.message}`);
-        }
-
-        return result;
+        return this.#writes.withWriteLock(() => this.#membershipWriter.unlinkMany(ids, spec));
     }
 
     /**
@@ -1648,383 +948,7 @@ class SynapsD extends EventEmitter {
     }
 
     async deleteMany(ids, options = {}) {
-        return this.#writes.withWriteLock(() => this.#deleteMany(ids, options));
-    }
-
-    async #deleteMany(ids, options = {}) {
-        if (!Array.isArray(ids)) {
-            throw new Error('Document ID array must be an array');
-        }
-
-        const result = {
-            successful: [],
-            failed: [],
-            count: ids.length,
-        };
-
-        // Validate IDs upfront
-        const validEntries = [];
-        for (let i = 0; i < ids.length; i++) {
-            const id = ids[i];
-            if (typeof id !== 'number') {
-                result.failed.push({ index: i, id, error: 'Invalid document ID: Must be a number.' });
-            } else {
-                validEntries.push({ index: i, id });
-            }
-        }
-
-        if (validEntries.length === 0) { return result; }
-
-        // Batch-fetch all documents at once
-        const validIds = validEntries.map(e => e.id);
-        const rawDocs = await this.documents.getMany(validIds);
-
-        const toDelete = [];
-        for (let i = 0; i < validEntries.length; i++) {
-            const { index, id } = validEntries[i];
-            const docData = rawDocs[i];
-            if (!docData) {
-                result.failed.push({ index, id, error: 'Document not found or already deleted' });
-            } else {
-                toDelete.push({ index, id, document: parseDocumentData(docData) });
-            }
-        }
-
-        if (toDelete.length === 0) { return result; }
-
-        const { emitEvent = true } = options;
-        const now = new Date().toISOString();
-
-        // Single transaction for all deletes
-        try {
-            await this.#writes.withDeferredMembership(async () => {
-                const doomed = new Set(toDelete.map(({ id }) => id));
-                for (const { id, document } of toDelete) {
-                    await this.#retractIncomingAssertedRelations(id, doomed);
-                    await this.documents.delete(id);
-                    const clearedLayers = await this.#synapses.clearSynapses(id, { syncBitmaps: false });
-                    await this.#writes.applyMembership('untick', id, clearedLayers);
-                    this.#edges.deleteNode(id);
-                    await this.#derived.removeDocumentTimelines(id, document);
-                    await this.#timelineIndex.removeFromAll(id);
-                    if (await this.#geoIndex.has(id)) { await this.#geoIndex.remove(id); }
-                    await this.#checksumIndex.deleteArray(document.checksumArray);
-                    // Free-pool admission deferred until after lance cleanup (below).
-                    await this.#timelineIndex.insert('crud:deleted', id, document.updatedAt || now);
-                }
-            });
-        } catch (error) {
-            for (const { index, id } of toDelete) {
-                result.failed.push({ index, id, error: error.message || 'Transaction failed' });
-            }
-            return result;
-        }
-
-        const deletedIds = toDelete.map(({ id }) => id);
-        // Live-membership untick is UNCONDITIONAL (unlike free-pool admission
-        // below): even if lance cleanup fails and the ids leak, the docs are
-        // gone from the store and must leave internal/docs/all.
-        try { await this.bitmapIndex.untick(this.allDocumentsBitmap.key, deletedIds); } catch (e) {
-            debug(`deleteMany: internal/docs/all untick failed: ${e.message}`);
-        }
-
-        // Best-effort Lance cleanup (outside transaction — separate system).
-        // Bulk delete is all-or-nothing, so free-pool admission is batch-wide:
-        // recycle the ids only if both fts and vector cleanup succeed; otherwise
-        // they leak (stay allocated) rather than risk reuse with stale residue.
-        let lanceClean = true;
-        try {
-            lanceClean = await this.#lanceIndex.deleteMany(deletedIds);
-        } catch (e) {
-            lanceClean = false;
-            debug(`deleteMany: Lance deleteMany failed: ${e.message}`);
-        }
-        if (this.#vectors.openedCount > 0) {
-            try {
-                for (const vi of this.#vectors.openedIndexes()) {
-                    const vecClean = await vi.deleteMany(deletedIds);
-                    lanceClean = lanceClean && vecClean;
-                }
-            } catch (e) {
-                lanceClean = false;
-                debug(`deleteMany: Vector deleteMany failed: ${e.message}`);
-            }
-        }
-
-        if (lanceClean) {
-            try {
-                // Persisting tick (Bitmap.tick is in-memory only); accepts the id array.
-                await this.bitmapIndex.tick(this.deletedDocumentsBitmap.key, deletedIds);
-                debug(`deleteMany: ${deletedIds.length} ids admitted to free-id pool`);
-            } catch (e) {
-                debug(`deleteMany: free-pool admission failed (ids leak): ${e.message}`);
-            }
-        }
-
-        for (const { index, id } of toDelete) {
-            result.successful.push({ index, id });
-        }
-
-        // One event per op: single for a lone doc, batch otherwise (avoids a
-        // socket-emit storm on large purges).
-        if (emitEvent && result.successful.length > 0) {
-            const ids = result.successful.map((e) => e.id);
-            const provenance = this.#normalizeProvenance(options.provenance) || {};
-            if (ids.length === 1) {
-                this.#emitEvent(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: ids[0], reason: 'deleted', ...provenance }));
-            } else {
-                this.#emitEvent(EVENTS.DOCUMENT_DELETED_BATCH, createEvent(EVENTS.DOCUMENT_DELETED_BATCH, { ids, reason: 'deleted', ...provenance }));
-            }
-        }
-
-        return result;
-    }
-
-    /**
-     * Allocate `count` document IDs, reusing freed IDs before minting new ones.
-     *
-     * `internal/gc/deleted` (this.deletedDocumentsBitmap) is a strict free-id
-     * pool: ids land there only after a delete fully cleans (incl. lance). We pop
-     * densest-first (minimum()) so reused ids cluster low → best roaring density,
-     * then top up the shortfall from the monotonic counter.
-     *
-     * Pool pop + counter bump + pool persist run in ONE LMDB transactionSync.
-     * The datasets share a single env (see LmdbBackend), so the writes commit
-     * atomically; and because the callback is fully synchronous, no other async
-     * writer can interleave and grab the same freed id (the allocation lock).
-     *
-     * @param {number} count
-     * @returns {number[]} allocated ids (length === count)
-     */
-    #allocateDocumentIDs(count) {
-        if (!Number.isInteger(count) || count <= 0) { return []; }
-        const counterKey = 'internal/document-id-counter';
-        const pool = this.deletedDocumentsBitmap;
-
-        return this.#internalStore.transactionSync(() => {
-            const ids = [];
-
-            // 1. Reuse freed ids, densest-first.
-            if (pool) {
-                while (ids.length < count && !pool.isEmpty) {
-                    const id = pool.minimum();
-                    pool.remove(id);
-                    ids.push(id);
-                }
-            }
-            const popped = ids.length;
-
-            // 2. Top up the remainder from the monotonic counter.
-            const need = count - popped;
-            if (need > 0) {
-                let currentCounter = this.#internalStore.get(counterKey);
-                if (currentCounter === undefined || currentCounter === null) {
-                    currentCounter = INTERNAL_BITMAP_ID_MAX;
-                }
-                const firstId = currentCounter + 1;
-                this.#internalStore.putSync(counterKey, currentCounter + need);
-                for (let i = 0; i < need; i++) { ids.push(firstId + i); }
-            }
-
-            // 3. Persist the shrunken pool in the SAME tx as the counter bump so a
-            //    crash can't leave a popped id both reused and still in the pool.
-            if (pool && popped > 0) {
-                this.bitmapIndex.saveBitmapSync(pool.key, pool);
-            }
-
-            return ids;
-        });
-    }
-
-    async #putOne(document, contextSpec = { path: '/' }, featureBitmapArray = [], emitEvent = true) {
-        if (!document) { throw new Error('Document is required'); }
-
-        // Canonical document insert signature accepts a selector/options object.
-        let directorySpec = null;
-        let provenance = null;
-        if (this.#isDocumentOperationOptions(contextSpec)) {
-            const opts = contextSpec;
-            // Preserve an explicit null context (consistent with #updateOne /
-            // putMany / link): a directory-only insert into the backends tree should NOT
-            // tick the context root — see #resolveDocumentMembershipKeys, which
-            // skips root for backends directory paths when contextSpec is falsy.
-            contextSpec = opts.context ?? null;
-            directorySpec = opts.directory ?? null;
-            featureBitmapArray = opts.features ?? featureBitmapArray;
-            emitEvent = opts.emitEvent ?? emitEvent;
-            provenance = this.#normalizeProvenance(opts.provenance);
-        }
-
-        const featureBitmaps = parseBitmapArray(featureBitmapArray);
-        const parsedDocument = isDocumentInstance(document) ? document : parseInitializeDocument(document);
-        validateDocumentRelations(parsedDocument);
-        parsedDocument.validateData();
-
-        // Dedup by checksum
-        const primaryChecksum = parsedDocument.getPrimaryChecksum();
-        const storedDocument = await this.getByChecksumString(primaryChecksum, { parse: true, schema: parsedDocument.schema });
-
-        if (storedDocument) {
-            parsedDocument.id = storedDocument.id;
-            mergeDedupePreservedFields(parsedDocument, storedDocument);
-            if (storedDocument.createdAt) { parsedDocument.createdAt = storedDocument.createdAt; }
-            if (storedDocument.updatedAt) { parsedDocument.updatedAt = storedDocument.updatedAt; }
-        } else {
-            parsedDocument.id = this.#allocateDocumentIDs(1)[0];
-        }
-
-        parsedDocument.validate();
-
-        // The document's own features are declarative — bitmaps follow them, so
-        // union them with any caller-supplied ones (tree/insert-time + device
-        // tags). Schema is always among them (Document guarantees it); the
-        // explicit push covers pre-built Document instances.
-        for (const key of documentFeatureKeys(parsedDocument)) {
-            if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
-        }
-        for (const key of schemaBitmapKeys(parsedDocument)) {
-            if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
-        }
-        // A re-put that drops a feature must untick its bitmap, or removals would
-        // never take (same reasoning as the facet keys below). Schema keys are in
-        // the diff too, so a subtype the re-put moved away from unticks.
-        const staleFeatureKeys = storedDocument
-            ? [...documentFeatureKeys(storedDocument), ...schemaBitmapKeys(storedDocument)]
-                .filter((k) => !featureBitmaps.includes(k))
-            : [];
-
-        try {
-            await this.#writes.withDeferredMembership(async () => {
-                await this.documents.put(parsedDocument.id, parsedDocument);
-                await this.bitmapIndex.tick(this.allDocumentsBitmap.key, parsedDocument.id);
-                if (staleFeatureKeys.length) { await this.#writes.applyMembership('untick', parsedDocument.id, staleFeatureKeys); }
-                await this.#checksumIndex.insertArray(parsedDocument.checksumArray, parsedDocument.id);
-                await this.#timelineIndex.insert('crud:created', parsedDocument.id, parsedDocument.createdAt || new Date());
-                if (parsedDocument.updatedAt) {await this.#timelineIndex.insert('crud:updated', parsedDocument.id, parsedDocument.updatedAt);}
-                if (storedDocument) {await this.#derived.removeDocumentTimelines(parsedDocument.id, storedDocument, parsedDocument);}
-                await this.#derived.indexDocumentTimelines(parsedDocument.id, parsedDocument);
-                await this.#derived.indexDocumentGeo(parsedDocument.id, parsedDocument);
-                this.#derived.syncDocumentRelations(
-                    parsedDocument.id,
-                    documentRelations(storedDocument),
-                    documentRelations(parsedDocument),
-                );
-                await this.#derived.indexDocument(parsedDocument.id, contextSpec, directorySpec, featureBitmaps);
-                if (storedDocument) {
-                    await this.#derived.removeStaleLocationMembership(parsedDocument.id, storedDocument, parsedDocument, featureBitmaps);
-                }
-                await this.#writes.applyMembership(parsedDocument.hasComment ? 'tick' : 'untick', parsedDocument.id, [COMMENT_BITMAP_KEY]);
-                // Facet bitmaps (mime + status): tick current, untick stale from
-                // the pre-write doc state when this put replaced an existing doc.
-                const facetKeys = facetBitmapKeys(parsedDocument);
-                const staleFacetKeys = storedDocument
-                    ? facetBitmapKeys(storedDocument).filter((k) => !facetKeys.includes(k))
-                    : [];
-                if (staleFacetKeys.length) { await this.#writes.applyMembership('untick', parsedDocument.id, staleFacetKeys); }
-                if (facetKeys.length) { await this.#writes.applyMembership('tick', parsedDocument.id, facetKeys); }
-            });
-        } catch (error) {
-            throw new Error('Error inserting document atomically: ' + error.message);
-        }
-
-        // Best-effort Lance upsert
-        try { await this.#lanceIndex.upsert(parseInitializeDocument(parsedDocument)); } catch (_) { }
-
-        if (emitEvent) {
-            const { tree: contextTree } = this.#trees.resolveSelection('context', contextSpec, '/');
-            contextTree.emit(EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
-                documentId: parsedDocument.id,
-                contextSpec,
-                directorySpec,
-                source: 'tree',
-            }));
-            this.#emitEvent(EVENTS.DOCUMENT_INSERTED, createEvent(EVENTS.DOCUMENT_INSERTED, {
-                id: parsedDocument.id,
-                document: parsedDocument,
-                context: contextSpec,
-                directory: directorySpec,
-                reason: 'created',
-                ...(provenance || {}),
-            }));
-        }
-
-        return parsedDocument.id;
-    }
-
-    async #linkOne(docId, contextSpec = { path: '/' }, featureBitmapArray = [], emitEvent = true) {
-        if (!docId) { throw new Error('Document id required'); }
-
-        let directorySpec = null;
-        let provenance = null;
-        if (this.#isDocumentOperationOptions(contextSpec)) {
-            const opts = contextSpec;
-            contextSpec = opts.context ?? null;
-            directorySpec = opts.directory ?? null;
-            featureBitmapArray = opts.features ?? featureBitmapArray;
-            emitEvent = opts.emitEvent ?? emitEvent;
-            provenance = this.#normalizeProvenance(opts.provenance);
-        }
-
-        const numericId = typeof docId === 'string' ? parseInt(docId, 10) : docId;
-        if (!Number.isInteger(numericId)) {
-            throw new Error('Document identifier must be a numeric ID');
-        }
-
-        const storedDocument = await this.#getById(numericId);
-        if (!storedDocument) {
-            throw new Error(`Document with ID "${numericId}" not found`);
-        }
-
-        const featureBitmaps = parseBitmapArray(featureBitmapArray).filter(Boolean);
-        // What the CALLER asked to tick, before the schema keys the engine
-        // re-ticks on every link are folded in. Those keys are not a delta —
-        // the document already had them — so they belong in the write path,
-        // not in an event that says "here is what changed".
-        const requestedFeatures = [...featureBitmaps];
-        for (const key of schemaBitmapKeys(storedDocument)) {
-            if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
-        }
-
-        await this.#writes.withDeferredMembership(async () => {
-            await this.#derived.indexDocument(numericId, contextSpec, directorySpec, featureBitmaps);
-        });
-
-        if (emitEvent) {
-            const treeType = contextSpec ? 'context' : (directorySpec ? 'directory' : null);
-            const treeSpec = contextSpec ?? directorySpec;
-            if (treeType && treeSpec) {
-                const { tree } = this.#trees.resolveSelection(treeType, treeSpec, treeType === 'context' ? '/' : null);
-                tree.emit(EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
-                    documentId: numericId,
-                    contextSpec,
-                    directorySpec,
-                    source: 'tree',
-                }));
-            }
-            const delta = membershipDelta(
-                { context: contextSpec, directory: directorySpec, features: requestedFeatures },
-                { memberships: { context: contextSpec, directory: directorySpec, features: featureBitmaps } },
-            );
-            // DEPRECATED membership-only alias — no document, so automation
-            // cannot match on content. Superseded by document.linked below.
-            this.#emitEvent(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, {
-                id: numericId,
-                ...delta,
-                reason: 'membership',
-                ...(provenance || {}),
-            }));
-            // First-class membership event carrying the full document so
-            // automation (hooks/rules) can match on content.
-            this.#emitEvent(EVENTS.DOCUMENT_LINKED, createEvent(EVENTS.DOCUMENT_LINKED, {
-                id: numericId,
-                document: storedDocument,
-                ...delta,
-                reason: 'membership',
-                ...(provenance || {}),
-            }));
-        }
-
-        return numericId;
+        return this.#writes.withWriteLock(() => this.#deletion.deleteMany(ids, options));
     }
 
     async #hasOne(id, spec = {}) {
@@ -2418,329 +1342,6 @@ class SynapsD extends EventEmitter {
         return session;
     }
 
-    async #updateOne(docIdentifier, updateData = null, contextSpec = null, featureBitmapArray = []) {
-        if (!docIdentifier) { throw new Error('Document identifier required'); }
-        if (typeof docIdentifier !== 'number') { throw new Error('Document identifier must be a numeric ID'); }
-        if (!Array.isArray(featureBitmapArray)) { featureBitmapArray = [featureBitmapArray].filter(Boolean); }
-
-        // Canonical update signature accepts a selector/options object.
-        let directorySpec = null;
-        let provenance = null;
-        let emitEvent = true;
-        if (this.#isDocumentOperationOptions(contextSpec)) {
-            const opts = contextSpec;
-            contextSpec = opts.context ?? null;
-            directorySpec = opts.directory ?? null;
-            featureBitmapArray = opts.features ?? featureBitmapArray;
-            provenance = this.#normalizeProvenance(opts.provenance);
-            emitEvent = opts.emitEvent !== false;
-        }
-
-        const docId = docIdentifier;
-        const featureBitmaps = parseBitmapArray(featureBitmapArray);
-
-        const storedDocument = await this.#getById(docId);
-        if (!storedDocument) { throw new Error(`Document with ID "${docId}" not found`); }
-        const previous = snapshotDocument(storedDocument);
-
-        // If no update data provided, we're only updating memberships
-        if (updateData === null) {
-            updateData = storedDocument;
-        } else if (typeof updateData === 'object' && !isDocumentInstance(updateData)) {
-            if (updateData.schema) {
-                updateData = parseInitializeDocument(updateData);
-            }
-        }
-
-        const updatedDocument = storedDocument.update(updateData);
-        validateDocumentRelations(updatedDocument);
-        updatedDocument.validate();
-
-        // Bitmaps follow the document's features — union the updated document's
-        // own array with any caller-supplied keys.
-        for (const key of documentFeatureKeys(updatedDocument)) {
-            if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
-        }
-        for (const key of schemaBitmapKeys(updatedDocument)) {
-            if (!featureBitmaps.includes(key)) { featureBitmaps.push(key); }
-        }
-        const staleFeatureKeys = previous.featureKeys.filter((k) => !featureBitmaps.includes(k));
-
-        try {
-            await this.#writes.withDeferredMembership(async () => {
-                await this.documents.put(updatedDocument.id, updatedDocument);
-                // Idempotent self-heal: updates re-assert live membership.
-                await this.bitmapIndex.tick(this.allDocumentsBitmap.key, updatedDocument.id);
-                await this.#checksumIndex.deleteArray(previous.checksums);
-                await this.#checksumIndex.insertArray(updatedDocument.checksumArray, updatedDocument.id);
-                if (updatedDocument.updatedAt) {await this.#timelineIndex.insert('crud:updated', updatedDocument.id, updatedDocument.updatedAt);}
-                await this.#derived.removeDocumentTimelines(updatedDocument.id, previous, updatedDocument);
-                await this.#derived.indexDocumentTimelines(updatedDocument.id, updatedDocument);
-                await this.#derived.indexDocumentGeo(updatedDocument.id, updatedDocument);
-                this.#derived.syncDocumentRelations(updatedDocument.id, previous.relations, documentRelations(updatedDocument));
-
-                // Untick features this edit removed (e.g. a tag deleted in the UI)
-                // BEFORE re-indexing, so a case-only change re-ticks correctly.
-                if (staleFeatureKeys.length) { await this.#writes.applyMembership('untick', updatedDocument.id, staleFeatureKeys); }
-                // Index across all views using shared helper
-                await this.#derived.indexDocument(updatedDocument.id, contextSpec, directorySpec, featureBitmaps);
-                await this.#derived.removeStaleLocationMembership(updatedDocument.id, { locations: previous.locations, orphanedAt: previous.orphanedAt }, updatedDocument, featureBitmaps);
-                // Presence bitmap tracks comment state; untick when cleared on this edit.
-                await this.#writes.applyMembership(updatedDocument.hasComment ? 'tick' : 'untick', updatedDocument.id, [COMMENT_BITMAP_KEY]);
-                // Facet bitmaps (mime + status): tick current keys, untick any the
-                // contentType/status change left behind (derived from doc state, can't drift).
-                const newFacetKeys = facetBitmapKeys(updatedDocument);
-                const staleFacetKeys = previous.facetKeys.filter(k => !newFacetKeys.includes(k));
-                if (staleFacetKeys.length) { await this.#writes.applyMembership('untick', updatedDocument.id, staleFacetKeys); }
-                if (newFacetKeys.length) { await this.#writes.applyMembership('tick', updatedDocument.id, newFacetKeys); }
-            });
-
-            if (emitEvent) {
-                this.#emitEvent(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument, reason: 'content', ...(provenance || {}) }));
-            }
-
-            // Best-effort Lance upsert
-            try {
-                await this.#lanceIndex.upsert(parseInitializeDocument(updatedDocument));
-            } catch (e) {
-                debug(`put/update: Lance upsert failed for ${updatedDocument.id}: ${e.message}`);
-            }
-            // Content changed → the doc must be re-embedded. The external embedd
-            // service reacts to DOCUMENT_UPDATED; here we drop it from the seen
-            // ledger so a reconcile re-embeds it even if the live event is missed.
-            for (const space of this.#vectors.openedNames()) {
-                try { await this.bitmapIndex.untick(this.#vectors.seenKey(space), Number(updatedDocument.id)); } catch (_) { }
-            }
-
-            return updatedDocument.id;
-        } catch (error) {
-            debug(`put/update: Error during update: ${error.message}`);
-            throw error;
-        }
-    }
-
-    // Removes documents from context and/or feature bitmaps
-    async #unlinkOne(docId, contextSpec = { path: '/' }, featureBitmapArray = [], options = { recursive: false }) {
-        if (!docId) { throw new Error('Document id required'); }
-        if (typeof options !== 'object') { options = { recursive: false }; }
-
-        let directorySpec = null;
-        let provenance = null;
-        if (this.#isDocumentOperationOptions(contextSpec)) {
-            const opts = contextSpec;
-            contextSpec = opts.context ?? null;
-            directorySpec = opts.directory ?? null;
-            featureBitmapArray = opts.features ?? featureBitmapArray;
-            provenance = this.#normalizeProvenance(opts.provenance);
-        }
-
-        const featureKeys = normalizeBitmapKeys(featureBitmapArray);
-        const layersToRemove = [];
-        const removedContextPaths = [];
-        const removedDirectoryPaths = [];
-
-        if (contextSpec) {
-            const { tree: contextTree, collection: contextCollection, path: normalizedContextSpec } = this.#trees.resolveSelection('context', contextSpec, '/');
-            const pathLayersArray = parseContextSpecForInsert(normalizedContextSpec);
-
-            for (const pathLayers of pathLayersArray) {
-                if (pathLayers.length === 1 && pathLayers[0] === '/') {
-                    throw new Error('Cannot unlink from root context "/". Unlink a real path or delete the document.');
-                }
-
-                const filteredLayers = pathLayers.filter((context) => context !== '/');
-                if (filteredLayers.length === 0) {
-                    throw new Error('Cannot unlink from root context "/". Unlink a real path or delete the document.');
-                }
-
-                const targetLayers = options.recursive
-                    ? filteredLayers
-                    : [filteredLayers[filteredLayers.length - 1]];
-                const layerIds = contextTree.resolveLayerIds(targetLayers);
-                layersToRemove.push(...layerIds.map((layerId) => contextCollection.makeKey(layerId)));
-                removedContextPaths.push(...SynapsD.#unlinkedContextPaths(filteredLayers, options.recursive));
-            }
-        }
-
-        if (directorySpec) {
-            const { tree: directoryTree, collection: directoryCollection, path: normalizedDirectoryPath } = this.#trees.resolveSelection('directory', directorySpec, '/');
-            const directoryPaths = Array.isArray(normalizedDirectoryPath) ? normalizedDirectoryPath : [normalizedDirectoryPath];
-
-            for (const directoryPath of directoryPaths) {
-                const nodeIds = directoryTree.getNodeIdsForPath(directoryPath, { recursive: Boolean(options.recursive) });
-                layersToRemove.push(...nodeIds.map((nodeId) => directoryCollection.makeKey(nodeId)));
-                if (nodeIds.length > 0) {
-                    removedDirectoryPaths.push(directoryPath);
-                }
-            }
-        }
-
-        layersToRemove.push(...featureKeys);
-
-        try {
-            if (layersToRemove.length > 0) {
-                await this.#writes.withDeferredMembership(async () => {
-                    await this.#writes.removeDocumentMembership(docId, Array.from(new Set(layersToRemove)));
-                });
-                debug(`unlink: Removed doc ${docId} from ${layersToRemove.length} layers via Synapses`);
-            }
-
-            const delta = membershipDelta(
-                { context: removedContextPaths, directory: removedDirectoryPaths, features: featureKeys },
-                {
-                    contextArray: removedContextPaths,
-                    directoryArray: removedDirectoryPaths,
-                    featureArray: featureKeys,
-                },
-            );
-            // DEPRECATED membership-only alias — superseded by
-            // document.unlinked below, which carries the document.
-            this.#emitEvent(EVENTS.DOCUMENT_REMOVED, createEvent(EVENTS.DOCUMENT_REMOVED, {
-                id: docId,
-                ...delta,
-                recursive: options.recursive,
-                reason: 'membership',
-                ...(provenance || {}),
-            }));
-            // First-class membership event carrying the full document (still in
-            // the store — unlink only drops memberships) so automation can match
-            // on content. Omitted if the document is gone.
-            try {
-                const unlinkedData = await this.documents.get(docId);
-                if (unlinkedData) {
-                    this.#emitEvent(EVENTS.DOCUMENT_UNLINKED, createEvent(EVENTS.DOCUMENT_UNLINKED, {
-                        id: docId,
-                        document: parseDocumentData(unlinkedData),
-                        ...delta,
-                        recursive: options.recursive,
-                        reason: 'membership',
-                        ...(provenance || {}),
-                    }));
-                }
-            } catch (error) {
-                debug(`unlink: document.unlinked emit skipped for ${docId}: ${error.message}`);
-            }
-            return docId;
-        } catch (error) {
-            debug(`Error during unlink for ID ${docId}: ${error.message}`);
-            throw error;
-        }
-    }
-
-    // Deletes documents from all bitmaps and the main dataset
-    async #deleteOne(docId, options = {}) {
-        if (!docId) { throw new Error('Document id required'); }
-        const { emitEvent = true } = options;
-        const provenance = this.#normalizeProvenance(options.provenance);
-        debug(`delete: Document with ID "${docId}" found (or context check passed), proceeding to delete..`);
-
-        let document = null;
-        let transactionSuccess = false;
-
-        try {
-            // Get document before deletion (outside transaction to check existence)
-            const documentData = await this.documents.get(docId);
-            if (!documentData) {
-                debug(`delete: Document with ID "${docId}" not found`);
-                return false;
-            }
-            document = parseDocumentData(documentData);
-            debug('delete > Document: ', document);
-
-            // Wrap all critical database operations in a single transaction for atomicity
-            await this.#writes.withDeferredMembership(async () => {
-                // Delete document from main database
-                await this.documents.delete(docId);
-                // Unconditional (unlike free-pool admission): the doc is gone
-                // from the store, it must leave internal/docs/all either way.
-                await this.bitmapIndex.untick(this.allDocumentsBitmap.key, docId);
-                debug(`delete: Document ${docId} deleted from main store`);
-
-                // Delete document from all bitmaps AND Reverse Index via Synapses
-                // await this.bitmapIndex.untickAll(docId);
-                await this.#retractIncomingAssertedRelations(docId);
-                const clearedLayers = await this.#synapses.clearSynapses(docId, { syncBitmaps: false });
-                await this.#writes.applyMembership('untick', docId, clearedLayers);
-                this.#edges.deleteNode(docId);
-                debug(`delete: Document ${docId} removed from all bitmaps, Synapses index and edge plane`);
-
-                // Remove document from all custom and CRUD timelines before recording deletion.
-                // Doc-derived first: multi-position membership cells can only be
-                // recomputed from the row's entries (removeFromAll covers the BSI planes).
-                await this.#derived.removeDocumentTimelines(docId, document);
-                await this.#timelineIndex.removeFromAll(docId);
-                if (await this.#geoIndex.has(docId)) { await this.#geoIndex.remove(docId); }
-                debug(`delete: Document ${docId} removed from timeline indices`);
-
-                // Delete document checksums from inverted index
-                await this.#checksumIndex.deleteArray(document.checksumArray);
-                debug(`delete: Checksums for document ${docId} deleted from index`);
-
-                // NOTE: free-pool admission (deletedDocumentsBitmap) happens AFTER
-                // lance cleanup succeeds, outside this tx — see below.
-
-                // Update timestamp index
-                await this.#timelineIndex.insert('crud:deleted', docId, document.updatedAt || new Date());
-                debug(`delete: Timestamp for document ${docId} updated in index`);
-            });
-
-            transactionSuccess = true;
-            debug(`delete: All database operations completed atomically for document ID: ${docId}`);
-
-        } catch (error) {
-            debug(`delete: Transaction failed for document ID: ${docId}, error: ${error.message}`);
-            // If transaction failed, ensure we don't attempt Lance cleanup
-            transactionSuccess = false;
-            throw new Error(`Failed to delete document atomically: ${error.message}`);
-        }
-
-        // Best-effort Lance delete (outside transaction since it's a separate system)
-        if (transactionSuccess) {
-            // Gate free-pool admission on lance cleanup: only recycle the id if
-            // the fts (+ vector) rows are gone. If cleanup fails the id leaks
-            // (stays allocated) but is never reused with a stale residue. The
-            // crud:deleted timeline already serves any audit/tombstone need.
-            let lanceClean = true;
-            try {
-                lanceClean = await this.#lanceIndex.delete(docId);
-                debug(`delete: LanceDB cleanup ${lanceClean ? 'completed' : 'FAILED'} for document ${docId}`);
-            } catch (e) {
-                lanceClean = false;
-                debug(`delete: Lance delete failed for ${docId}: ${e.message}`);
-            }
-            if (this.#vectors.openedCount > 0) {
-                try {
-                    for (const vi of this.#vectors.openedIndexes()) {
-                        const vecClean = await vi.deleteDoc(docId);
-                        lanceClean = lanceClean && vecClean;
-                    }
-                } catch (e) {
-                    lanceClean = false;
-                    debug(`delete: Vector delete failed for ${docId}: ${e.message}`);
-                }
-            }
-
-            if (lanceClean) {
-                try {
-                    // Persisting tick (Bitmap.tick is in-memory only); keeps the
-                    // cached deletedDocumentsBitmap instance and the store in sync.
-                    await this.bitmapIndex.tick(this.deletedDocumentsBitmap.key, docId);
-                    debug(`delete: Document ${docId} admitted to free-id pool`);
-                } catch (e) {
-                    debug(`delete: free-pool admission failed for ${docId} (id leaks): ${e.message}`);
-                }
-            }
-
-            if (emitEvent) {
-                this.#emitEvent(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: docId, reason: 'deleted', ...(provenance || {}) }));
-            }
-            debug(`delete: Successfully deleted document ID: ${docId}`);
-            return true;
-        }
-
-        return false;
-    }
-
     /**
      * Convenience methods
      */
@@ -2975,105 +1576,6 @@ class SynapsD extends EventEmitter {
     // membership reconstruction. Pass whichever of context/directory applies.
     emitTreeDocumentEvent(eventName, { context = null, directory = null, documentIds = [] } = {}) {
         return this.#trees.emitTreeDocumentEvent(eventName, { context, directory, documentIds });
-    }
-
-    #isDocumentOperationOptions(value) {
-        return Boolean(
-            value &&
-            typeof value === 'object' &&
-            !Array.isArray(value) &&
-            ['context', 'directory', 'features', 'attributes', 'emitEvent', 'provenance'].some((key) => Object.prototype.hasOwnProperty.call(value, key)),
-        );
-    }
-
-    #normalizeWriteFeatures(features) {
-        if (features == null) {
-            return [];
-        }
-        let keys;
-        if (Array.isArray(features)) {
-            keys = normalizeBitmapKeys(features);
-        } else if (typeof features === 'object') {
-            keys = normalizeBitmapKeys(features.allOf ?? features.features ?? []);
-        } else {
-            keys = normalizeBitmapKeys(features);
-        }
-        // 'default' is the VIRTUAL dataset (docs stamped with no dataset,
-        // computed at query time) — stamping it physically would make those
-        // docs permanently invisible to the dataset selection.
-        if (keys.includes('data/dataset/default')) {
-            throw new Error('"default" is a reserved dataset name (the virtual unstamped-documents dataset); pick another name');
-        }
-        return keys;
-    }
-
-    // Write spec: { paths?, features?/attributes?, context?, directory?, emitEvent? }.
-    // paths use the canonical ctx:/dir: grammar; context/directory are the legacy
-    // selector form kept until consumers migrate. Returns the internal membership
-    // shape { context, directory, features, emitEvent }.
-    #normalizeDocumentOperationSpec(spec = {}) {
-        if (!spec || typeof spec !== 'object' || Array.isArray(spec)) { spec = {}; }
-
-        let context = spec.context !== undefined ? spec.context : { path: '/' };
-        let directory = spec.directory ?? null;
-
-        if (Array.isArray(spec.paths)) {
-            const ctx = [];
-            const dir = [];
-            for (const token of spec.paths.filter(Boolean)) {
-                const body = String(token).replace(/^[+!]/, '');
-                if (body.startsWith('dir:')) { dir.push(body.slice(4)); }
-                else if (body.startsWith('ctx:')) { ctx.push(body.slice(4)); }
-                else { ctx.push(body); }
-            }
-            // The paths grammar is authoritative: derive BOTH selectors from it and
-            // do not retain the implicit root-context default. Otherwise a dir-only
-            // op (e.g. unlink from dir:/foo) also targets ctx:/ → "Cannot unlink
-            // from root context".
-            context = ctx.length > 0 ? { path: ctx.length === 1 ? ctx[0] : ctx } : null;
-            directory = dir.length > 0 ? { path: dir.length === 1 ? dir[0] : dir } : null;
-        }
-
-        const legacyFeatures = spec.features ?? spec.attributes?.allOf ?? spec.attributes ?? [];
-        return {
-            context,
-            directory,
-            features: this.#normalizeWriteFeatures(legacyFeatures),
-            emitEvent: spec.emitEvent ?? true,
-            provenance: this.#normalizeProvenance(spec.provenance),
-        };
-    }
-
-    // Caller-supplied provenance rides on emitted events so automation layers
-    // (workspace hooks/rules) can detect and bound their own cascades. Only the
-    // three known keys pass through; anything else is dropped.
-    /**
-     * The context PATHS an unlink dropped, for the event's membership delta.
-     *
-     * Unlinking `/a/b/c` unticks the leaf layer `c`, or every layer along the
-     * path when recursive — but a consumer reasoning about "what changed"
-     * thinks in paths, not in the layer names a path decomposes into. Layer
-     * names were what the payload used to carry under a field called
-     * `contextArray`, which silently matched nothing for anyone who read the
-     * name literally.
-     *
-     * @param {string[]} filteredLayers layer names of the path, root removed
-     * @param {boolean} recursive
-     * @returns {string[]} '/a/b/c', or every prefix of it when recursive
-     */
-    static #unlinkedContextPaths(filteredLayers, recursive) {
-        if (filteredLayers.length === 0) { return []; }
-        if (!recursive) { return [`/${filteredLayers.join('/')}`]; }
-        return filteredLayers.map((_, i) => `/${filteredLayers.slice(0, i + 1).join('/')}`);
-    }
-
-    #normalizeProvenance(provenance) {
-        if (!provenance || typeof provenance !== 'object' || Array.isArray(provenance)) { return null; }
-        const out = {};
-        if (typeof provenance.origin === 'string' && provenance.origin) { out.origin = provenance.origin; }
-        if (typeof provenance.causedBy === 'string' && provenance.causedBy) { out.causedBy = provenance.causedBy; }
-        if (Number.isInteger(provenance.depth) && provenance.depth >= 0) { out.depth = provenance.depth; }
-        return Object.keys(out).length > 0 ? out : null;
     }
 
     /**
