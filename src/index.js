@@ -30,7 +30,7 @@ import Synapses from './indexes/inverted/Synapses.js';
 import EdgeIndex from './indexes/edges/index.js';
 import LanceIndex from './indexes/lance/index.js';
 import VectorSpaces from './search/VectorSpaces.js';
-import { normalizeBitmapKeys, normalizeBitmapKey } from './indexes/bitmaps/lib/keys.js';
+import { normalizeBitmapKey } from './indexes/bitmaps/lib/keys.js';
 import SemanticEngine from './semantic/index.js';
 
 // Views / Abstractions
@@ -39,7 +39,7 @@ import DirectoryTree from './views/DirectoryTree.js';
 
 // Extracted utilities
 import { parseBitmapArray } from './utils/parsing.js';
-import { parseInitializeDocument, safeParseDocuments } from './utils/document.js';
+import { parseInitializeDocument } from './utils/document.js';
 import QuerySession from './session/QuerySession.js';
 import TreeRegistry from './trees/TreeRegistry.js';
 import CandidateResolver from './query/CandidateResolver.js';
@@ -50,10 +50,10 @@ import DocumentDeletion from './write/DocumentDeletion.js';
 import MembershipWriter from './write/MembershipWriter.js';
 import { normalizeDocumentOperationSpec } from './write/options.js';
 import DerivedIndexes from './write/DerivedIndexes.js';
+import Maintenance from './maintenance/Maintenance.js';
+import EngineLifecycle from './lifecycle/EngineLifecycle.js';
 
-import { COMMENT_BITMAP_KEY, MIME_BITMAP_PREFIX, RETIRED_BITMAP_PREFIXES, relationKey, documentFeatureKeys, documentRelations, facetBitmapKeys, schemaBitmapKeys, derivedBitmapPrefixes } from './documents/derivation.js';
-
-
+import { relationKey, documentRelations } from './documents/derivation.js';
 
 // Preserve the existing package entry-point exports.
 export {
@@ -83,9 +83,9 @@ class SynapsD extends EventEmitter {
 
     // Internal KV store
     #internalStore;
-
-    // Runtime
-    #status;
+    #lifecycle;
+    #options;
+    #storageClosed = false;
 
     #trees;
     #candidates;
@@ -95,6 +95,7 @@ class SynapsD extends EventEmitter {
     #deletion;
     #membershipWriter;
     #derived;
+    #maintenance;
 
     // Bitmap Indexes
     #bitmapStore;   // Bitmap store
@@ -128,19 +129,35 @@ class SynapsD extends EventEmitter {
             maxListeners: 100,
             ...(options.eventEmitterOptions || {}),
         });
+        this.#options = { ...options };
+        this.#openStorage(options);
+        this.#lifecycle = new EngineLifecycle({
+            initialize: async () => {
+                if (this.#storageClosed) {
+                    // Preserve live search tuning/model configuration across restart.
+                    const semantic = this.#vectors.config;
+                    this.#bitmapCache.clear();
+                    this.#openStorage({ ...this.#options, semantic });
+                    this.#storageClosed = false;
+                }
+                await this.#initializeRuntime();
+            },
+            close: () => this.#writes.closeAndDrain(async () => {
+                if (this.#storageClosed) { return; }
+                this.#emitEvent(EVENTS.BEFORE_SHUTDOWN, createEvent(EVENTS.BEFORE_SHUTDOWN));
+                await this.#db.close();
+                this.#storageClosed = true;
+            }),
+            publish: (...args) => this.#emitEvent(...args),
+        });
+    }
+
+    #openStorage(options) {
         debug('Initializing SynapsD');
         debug('DB Options:', options);
 
-        // Runtime
-        this.#status = 'initializing';
-
         // Initialize database backend
         this.#rootPath = options.rootPath ?? options.path;
-        // Opt-in for the v3 row migration — see the gate in start(). Also readable
-        // from the environment, because the constructor option is a whole-DB
-        // switch and the DB is usually constructed deep inside a host process
-        // (canvas-server opens one per workspace), where threading a flag down
-        // means touching every call site.
         if (!this.#rootPath) { throw new Error('Database path required'); }
 
         if (options.backend && options.backend !== 'lmdb') {
@@ -225,7 +242,7 @@ class SynapsD extends EventEmitter {
             documents: this.documents, bitmapIndex: this.bitmapIndex,
             trees: this.#trees, writes: this.#writes,
             getTimeline: () => this.#timelineIndex, getGeo: () => this.#geoIndex,
-            getEdges: () => this.#edges, list: spec => this.list(spec),
+            getEdges: () => this.#edges,
         });
         this.#writer = new DocumentWriter({
             documents: this.documents,
@@ -266,6 +283,20 @@ class SynapsD extends EventEmitter {
             derived: this.#derived,
             getById: (...args) => this.#getById(...args),
         });
+        this.#maintenance = new Maintenance({
+            documents: this.documents,
+            bitmapIndex: this.bitmapIndex,
+            derived: this.#derived,
+            writes: this.#writes,
+            vectors: this.#vectors,
+            getAllBitmap: () => this.allDocumentsBitmap,
+            getTimeline: () => this.#timelineIndex,
+            getEdges: () => this.#edges,
+            getLance: () => this.#lanceIndex,
+            getById: (...args) => this.#getById(...args),
+            assertRelation: (from, p, to) => this.#writeAssertedRelation(from, p, to, 'assert'),
+            isRunning: () => this.isRunning(),
+        });
 
     }
 
@@ -274,12 +305,12 @@ class SynapsD extends EventEmitter {
      */
 
     get rootPath() { return this.#rootPath; }
-    get status() { return this.#status; }
+    get status() { return this.#lifecycle.status; }
     get stats() {
         return {
             dbBackend: this.#dbBackend,
             dbPath: this.#rootPath,
-            status: this.#status,
+            status: this.#lifecycle.status,
             documentCount: this.documents.getCount(),
             metadataCount: this.metadata.getCount(),
             bitmapCacheSize: this.#bitmapCache.size,
@@ -331,121 +362,107 @@ class SynapsD extends EventEmitter {
     /** Stats from the v3 migration if it ran during start(), else null. */
     get semantic() { return this.#semantic; }
 
-    /**
-     * Service methods
-     */
+    async start() { return this.#lifecycle.start(); }
 
-    async start() {
-        debug('Starting SynapsD');
-        try {
-            // Schema-version GATE. There is no migration code in this engine any
-            // more (2026-08-04) — migrations are one-time operator actions and were
-            // living on a hot startup path. What stays is the refusal, because
-            // deleting the check would not make a stale database someone else's
-            // problem, it would make it silent data loss: current code reading a
-            // pre-v2 row never promotes `metadata.features`, so asserted tags that
-            // exist ONLY in bitmaps — the one class of state with no rebuild source,
-            // which is why features[] moved onto the row — would be dropped on the
-            // next write with no error anywhere.
-            //
-            // A brand-new or empty database is simply stamped: there is nothing to
-            // be stale about, and a fresh install must not hit the refusal.
-            const appliedVersion = Number(this.#internalStore.get(SCHEMA_VERSION_KEY)) || 0;
-            if (appliedVersion < SCHEMA_VERSION) {
-                if (await this.#documentStoreIsEmpty()) {
-                    await this.#internalStore.put(SCHEMA_VERSION_KEY, SCHEMA_VERSION);
-                } else {
-                    throw new Error(
-                        `synapsd: database is at schema v${appliedVersion}, this build needs ` +
-                        `v${SCHEMA_VERSION}. Migration code was removed from the engine; migrate ` +
-                        'the database with a one-off script against a backup, then stamp ' +
-                        `${SCHEMA_VERSION_KEY} to ${SCHEMA_VERSION}.`,
-                    );
-                }
+    async #initializeRuntime() {
+        // Schema-version GATE. There is no migration code in this engine any
+        // more (2026-08-04) — migrations are one-time operator actions and were
+        // living on a hot startup path. What stays is the refusal, because
+        // deleting the check would not make a stale database someone else's
+        // problem, it would make it silent data loss: current code reading a
+        // pre-v2 row never promotes `metadata.features`, so asserted tags that
+        // exist ONLY in bitmaps — the one class of state with no rebuild source,
+        // which is why features[] moved onto the row — would be dropped on the
+        // next write with no error anywhere.
+        //
+        // A brand-new or empty database is simply stamped: there is nothing to
+        // be stale about, and a fresh install must not hit the refusal.
+        const appliedVersion = Number(this.#internalStore.get(SCHEMA_VERSION_KEY)) || 0;
+        if (appliedVersion < SCHEMA_VERSION) {
+            if (await this.#maintenance.documentStoreIsEmpty()) {
+                await this.#internalStore.put(SCHEMA_VERSION_KEY, SCHEMA_VERSION);
+            } else {
+                throw new Error(
+                    `synapsd: database is at schema v${appliedVersion}, this build needs ` +
+                    `v${SCHEMA_VERSION}. Migration code was removed from the engine; migrate ` +
+                    'the database with a one-off script against a backup, then stamp ' +
+                    `${SCHEMA_VERSION_KEY} to ${SCHEMA_VERSION}.`,
+                );
             }
-
-            // Initialize deletedDocumentsBitmap here
-            this.deletedDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/gc/deleted');
-
-            // Live-document membership: ticked on every put, unticked on delete
-            // (regardless of free-pool admission, so failed lance cleanup can't
-            // leave phantoms). Makes #buildAllDocumentsBitmap O(1) — the base for
-            // unconstrained noneOf-only queries and the virtual 'default' dataset.
-            this.allDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/docs/all');
-            await this.#backfillAllDocumentsBitmap();
-
-            // 'tasks' (Task due dates) is a point-event axis — instants, not
-            // intervals — so it gets the cheaper single-BSI storage.
-            // DECIDED 2026-08-05: this hardcode is legitimate and Task stays a
-            // core schema BECAUSE of it — the engine registering one point axis
-            // for its own primitive is cheaper than a schema-declared timeline
-            // registration mechanism nothing else needs yet. Revisit only if a
-            // second schema wants its own point timeline.
-            // Membership tiling is ADAPTIVE (per-entry notation-derived floor,
-            // day-clamped) — no per-timeline quantum config exists anymore.
-            this.#timelineIndex = new TimelineIndex(this.bitmapIndex, {
-                pointTimelines: ['tasks'],
-            });
-            this.#geoIndex = new GeoIndex(this.bitmapIndex);
-
-            // Initialize Synapses inverted index
-            this.#synapses = new Synapses(
-                this.#db.createDataset('synapses'),
-                this.bitmapIndex,
-            );
-
-            // Device facets (os/type) are derived onto every document present on a
-            // device, so the registry has to be warm before any write happens.
-            await this.#derived.loadDeviceFacets();
-
-            // Typed doc<->doc edges. dupSort adjacency on the shared root env —
-            // sorted, deduped, O(1)-ish degree. Document-unaware by design: it
-            // speaks node ids and predicates only, so membership inheritance
-            // lives on the SynapsD facade (relate/unrelate) rather than here.
-            this.#edges = new EdgeIndex(
-                this.#db.createDataset('edges_fwd', { dupSort: true, encoding: 'ordered-binary' }),
-                this.#db.createDataset('edges_inv', { dupSort: true, encoding: 'ordered-binary' }),
-                this.#db.createDataset('edge_meta'),
-            );
-
-            // Initialize LanceDB under workspace root (rootPath/lance)
-            this.#lanceIndex = new LanceIndex({
-                rootPath: path.join(this.#rootPath, 'lance'),
-                bitmapIndex: this.bitmapIndex,
-            });
-            await this.#lanceIndex.initialize();
-            await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
-
-            await this.#vectors.initialize();
-
-            await this.#semantic.initialize();
-
-            await this.#trees.initialize();
-
-            // One-time heal (not a schema migration — rows are untouched): the
-            // pre-write-through REST path (server ≤2.5.51) linked asserted edges
-            // directly into the edge plane, leaving them out of their subject
-            // rows' data.relations — invisible to rebuildL3 and unretractable
-            // by the row-owned delete path. Fold them back in once, then stamp.
-            const RELATIONS_BACKFILL_KEY = 'backfill/asserted-relations/v1';
-            if (!this.#internalStore.get(RELATIONS_BACKFILL_KEY)) {
-                const healed = await this.backfillAssertedRelations();
-                if (healed.patched || healed.orphaned) {
-                    debug(`start: asserted-relations backfill patched ${healed.patched}, orphaned ${healed.orphaned}`);
-                }
-                await this.#internalStore.put(RELATIONS_BACKFILL_KEY, new Date().toISOString());
-            }
-
-            // Set status
-            this.#status = 'running';
-
-            this.#emitEvent(EVENTS.STARTED, createEvent(EVENTS.STARTED));
-            debug('SynapsD started');
-        } catch (error) {
-            this.#status = 'error';
-            debug('SynapsD database error during startup: ', error);
-            throw error;
         }
+
+        // Initialize deletedDocumentsBitmap here
+        this.deletedDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/gc/deleted');
+
+        // Live-document membership: ticked on every put, unticked on delete
+        // (regardless of free-pool admission, so failed lance cleanup can't
+        // leave phantoms). Makes #buildAllDocumentsBitmap O(1) — the base for
+        // unconstrained noneOf-only queries and the virtual 'default' dataset.
+        this.allDocumentsBitmap = await this.bitmapIndex.createBitmap('internal/docs/all');
+        await this.#maintenance.backfillAllDocumentsBitmap();
+
+        // 'tasks' (Task due dates) is a point-event axis — instants, not
+        // intervals — so it gets the cheaper single-BSI storage.
+        // DECIDED 2026-08-05: this hardcode is legitimate and Task stays a
+        // core schema BECAUSE of it — the engine registering one point axis
+        // for its own primitive is cheaper than a schema-declared timeline
+        // registration mechanism nothing else needs yet. Revisit only if a
+        // second schema wants its own point timeline.
+        // Membership tiling is ADAPTIVE (per-entry notation-derived floor,
+        // day-clamped) — no per-timeline quantum config exists anymore.
+        this.#timelineIndex = new TimelineIndex(this.bitmapIndex, {
+            pointTimelines: ['tasks'],
+        });
+        this.#geoIndex = new GeoIndex(this.bitmapIndex);
+
+        // Initialize Synapses inverted index
+        this.#synapses = new Synapses(
+            this.#db.createDataset('synapses'),
+            this.bitmapIndex,
+        );
+
+        // Device facets (os/type) are derived onto every document present on a
+        // device, so the registry has to be warm before any write happens.
+        await this.#derived.loadDeviceFacets();
+
+        // Typed doc<->doc edges. dupSort adjacency on the shared root env —
+        // sorted, deduped, O(1)-ish degree. Document-unaware by design: it
+        // speaks node ids and predicates only, so membership inheritance
+        // lives on the SynapsD facade (relate/unrelate) rather than here.
+        this.#edges = new EdgeIndex(
+            this.#db.createDataset('edges_fwd', { dupSort: true, encoding: 'ordered-binary' }),
+            this.#db.createDataset('edges_inv', { dupSort: true, encoding: 'ordered-binary' }),
+            this.#db.createDataset('edge_meta'),
+        );
+
+        // Initialize LanceDB under workspace root (rootPath/lance)
+        this.#lanceIndex = new LanceIndex({
+            rootPath: path.join(this.#rootPath, 'lance'),
+            bitmapIndex: this.bitmapIndex,
+        });
+        await this.#lanceIndex.initialize();
+        await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
+
+        await this.#vectors.initialize();
+
+        await this.#semantic.initialize();
+
+        await this.#trees.initialize();
+
+        // One-time heal (not a schema migration — rows are untouched): the
+        // pre-write-through REST path (server ≤2.5.51) linked asserted edges
+        // directly into the edge plane, leaving them out of their subject
+        // rows' data.relations — invisible to rebuildL3 and unretractable
+        // by the row-owned delete path. Fold them back in once, then stamp.
+        const RELATIONS_BACKFILL_KEY = 'backfill/asserted-relations/v1';
+        if (!this.#internalStore.get(RELATIONS_BACKFILL_KEY)) {
+            const healed = await this.#maintenance.backfillAssertedRelations();
+            if (healed.patched || healed.orphaned) {
+                debug(`start: asserted-relations backfill patched ${healed.patched}, orphaned ${healed.orphaned}`);
+            }
+            await this.#internalStore.put(RELATIONS_BACKFILL_KEY, new Date().toISOString());
+        }
+
     }
 
     async listTrees(type = null) {
@@ -465,15 +482,21 @@ class SynapsD extends EventEmitter {
     }
 
     async createTree(name, type = 'context', options = {}) {
-        return this.#trees.createTree(name, type, options);
+        return this.#writes.withWriteLock(async () => {
+            return this.#trees.createTree(name, type, options);
+        });
     }
 
     async deleteTree(nameOrId) {
-        return this.#trees.deleteTree(nameOrId);
+        return this.#writes.withWriteLock(async () => {
+            return this.#trees.deleteTree(nameOrId);
+        });
     }
 
     async renameTree(nameOrId, newName) {
-        return this.#trees.renameTree(nameOrId, newName);
+        return this.#writes.withWriteLock(async () => {
+            return this.#trees.renameTree(nameOrId, newName);
+        });
     }
 
     getTreePaths(nameOrId) {
@@ -486,35 +509,11 @@ class SynapsD extends EventEmitter {
 
     async stop() { return this.shutdown(); }
 
-    async shutdown() {
-        debug('Shutting down SynapsD');
-        try {
-            this.#status = 'shutting down';
-            this.#emitEvent(EVENTS.BEFORE_SHUTDOWN, createEvent(EVENTS.BEFORE_SHUTDOWN));
-            // Close index backends
-            // LanceDB uses filesystem-based storage; no explicit close needed.
-            // No embedding worker to tear down — embedding lives in the external
-            // embedd service, which the server stops separately.
-            // Close database backend
-            await this.#db.close();
+    async shutdown() { return this.#lifecycle.shutdown(); }
 
-            this.#status = 'shutdown';
-            this.#emitEvent(EVENTS.SHUTDOWN, createEvent(EVENTS.SHUTDOWN));
+    async restart() { return this.#lifecycle.restart(); }
 
-            debug('SynapsD database closed');
-        } catch (error) {
-            this.#status = 'error';
-            debug('SynapsD database error during shutdown: ', error);
-            throw error;
-        }
-    }
-
-    async restart() {
-        await this.stop();
-        await this.start();
-    }
-
-    isRunning() { return this.#status === 'running'; }
+    isRunning() { return this.#lifecycle.status === 'running'; }
 
     /**
      * Schema methods
@@ -616,18 +615,20 @@ class SynapsD extends EventEmitter {
     }
 
     async #relate(fromId, predicate, toId, options = {}) {
-        if (!options.meta?.src) {
-            throw new Error(
-                'relate() writes DERIVED edges and requires meta.src (e.g. "extractor:foo"); ' +
-                'asserted relations are document-owned — use assertRelation()',
-            );
-        }
-        this.#edges.link(fromId, predicate, toId, options.meta);
+        return this.#writes.withDeferredMembership(async () => {
+            if (!options.meta?.src) {
+                throw new Error(
+                    'relate() writes DERIVED edges and requires meta.src (e.g. "extractor:foo"); ' +
+                    'asserted relations are document-owned — use assertRelation()',
+                );
+            }
+            this.#edges.link(fromId, predicate, toId, options.meta);
 
-        if (options.inheritMemberships) {
-            await this.#synapses.createSynapsesFromDocs(Number(toId), [Number(fromId)]);
-        }
-        return true;
+            if (options.inheritMemberships) {
+                await this.#writes.addDocumentMembership(Number(toId), await this.#synapses.listSynapses(Number(fromId)));
+            }
+            return true;
+        });
     }
 
     /**
@@ -641,14 +642,16 @@ class SynapsD extends EventEmitter {
     }
 
     async #unrelate(fromId, predicate, toId) {
-        const existing = this.#edges.edge(fromId, predicate, toId);
-        if (existing && existing.meta?.src === 'doc') {
-            throw new Error(
-                `Edge ${fromId} --${predicate}--> ${toId} is asserted (owned by the document's ` +
-                'data.relations) — use retractRelation() instead of unrelate()',
-            );
-        }
-        return this.#edges.unlink(fromId, predicate, toId);
+        return this.#writes.withDeferredMembership(async () => {
+            const existing = this.#edges.edge(fromId, predicate, toId);
+            if (existing && existing.meta?.src === 'doc') {
+                throw new Error(
+                    `Edge ${fromId} --${predicate}--> ${toId} is asserted (owned by the document's ` +
+                    'data.relations) — use retractRelation() instead of unrelate()',
+                );
+            }
+            return this.#edges.unlink(fromId, predicate, toId);
+        });
     }
 
     /**
@@ -754,22 +757,7 @@ class SynapsD extends EventEmitter {
      *          orphaned = asserted edges whose source document no longer exists
      */
     async backfillAssertedRelations() {
-        // Materialize first: allEdges() pins a read txn, and assertRelation writes.
-        const asserted = [];
-        for (const edge of this.#edges.allEdges()) {
-            if (edge.meta?.src === 'doc') { asserted.push(edge); }
-        }
-
-        let patched = 0;
-        let orphaned = 0;
-        for (const { from, p, to } of asserted) {
-            const doc = await this.#getById(from);
-            if (!doc) { orphaned++; continue; }
-            if (await this.assertRelation(from, p, to)) { patched++; }
-        }
-
-        debug(`backfillAssertedRelations: scanned ${asserted.length} asserted edges, patched ${patched}, orphaned ${orphaned}`);
-        return { scanned: asserted.length, patched, orphaned };
+        return this.#writes.withWriteLock(() => this.#maintenance.backfillAssertedRelations());
     }
 
     async unlink(idOrIds, spec = {}) {
@@ -786,14 +774,18 @@ class SynapsD extends EventEmitter {
 
     /** Append parsed documents to the Lance FTS table (same payload as putMany phase 3). */
     async indexDocumentsInLance(documents) {
-        if (!documents?.length) { return; }
-        try {
-            await this.#lanceIndex.addMany(documents);
-        } catch (_) { }
+        return this.#writes.withWriteLock(async () => {
+            if (!documents?.length) { return; }
+            try {
+                await this.#lanceIndex.addMany(documents);
+            } catch (_) { }
+        });
     }
 
     async optimizeLance() {
-        return await this.#lanceIndex.optimize();
+        return this.#writes.withWriteLock(async () => {
+            return await this.#lanceIndex.optimize();
+        });
     }
 
     /**
@@ -803,9 +795,10 @@ class SynapsD extends EventEmitter {
      * space — safe to call after a bulk import/re-embed. Returns { <space>: stats }.
      */
     async optimizeVectors(space = null) {
-        return this.#vectors.optimizeVectors(space);
+        return this.#writes.withWriteLock(async () => {
+            return this.#vectors.optimizeVectors(space);
+        });
     }
-
 
     /**
      * Every dense-vector table in this workspace's Lance store, with the spaces
@@ -826,7 +819,9 @@ class SynapsD extends EventEmitter {
      * @param {string} name  table name from listVectorTables()
      */
     async dropVectorTable(name) {
-        return this.#vectors.dropVectorTable(name);
+        return this.#writes.withWriteLock(async () => {
+            return this.#vectors.dropVectorTable(name);
+        });
     }
 
     /**
@@ -848,7 +843,9 @@ class SynapsD extends EventEmitter {
      * @param {string} space
      */
     async clearSpace(space = 'text') {
-        return this.#vectors.clearSpace(space);
+        return this.#writes.withWriteLock(async () => {
+            return this.#vectors.clearSpace(space);
+        });
     }
 
     /**
@@ -865,7 +862,9 @@ class SynapsD extends EventEmitter {
      * swap and scatter half its chunks into the outgoing table.
      */
     async setVectorSpaces(spaces = {}) {
-        return this.#vectors.setVectorSpaces(spaces);
+        return this.#writes.withWriteLock(async () => {
+            return this.#vectors.setVectorSpaces(spaces);
+        });
     }
 
     /**
@@ -884,7 +883,9 @@ class SynapsD extends EventEmitter {
      *   'text') + provenance model label stamped on the rows
      */
     async storeDocumentEmbeddings(docId, schema, updatedAt, chunks, opts = {}) {
-        return this.#vectors.storeDocumentEmbeddings(docId, schema, updatedAt, chunks, opts);
+        return this.#writes.withWriteLock(async () => {
+            return this.#vectors.storeDocumentEmbeddings(docId, schema, updatedAt, chunks, opts);
+        });
     }
 
     /**
@@ -930,21 +931,23 @@ class SynapsD extends EventEmitter {
      * @returns {{name, documentsDeleted, failed}}
      */
     async deleteDataset(name, { dropDocuments = true } = {}) {
-        if (!name) { throw new Error('Dataset name required'); }
-        const key = normalizeBitmapKey(String(name).startsWith('data/dataset/') ? String(name) : `data/dataset/${name}`);
-        const bitmap = await this.bitmapIndex.getBitmap(key, false);
-        const ids = bitmap ? bitmap.toArray() : [];
-        let documentsDeleted = 0;
-        let failed = [];
-        if (dropDocuments && ids.length > 0) {
-            const result = await this.deleteMany(ids);
-            documentsDeleted = result.successful.length;
-            failed = result.failed;
-        }
-        // deleteMany untick paths may have already emptied it; remove regardless.
-        await this.bitmapIndex.deleteBitmap(key, { force: true });
-        this.#emitEvent('dataset.deleted', createEvent('dataset.deleted', { name: key.slice('data/dataset/'.length), key, documentsDeleted }));
-        return { name: key.slice('data/dataset/'.length), documentsDeleted, failed };
+        return this.#writes.withWriteLock(async () => {
+            if (!name) { throw new Error('Dataset name required'); }
+            const key = normalizeBitmapKey(String(name).startsWith('data/dataset/') ? String(name) : `data/dataset/${name}`);
+            const bitmap = await this.bitmapIndex.getBitmap(key, false);
+            const ids = bitmap ? bitmap.toArray() : [];
+            let documentsDeleted = 0;
+            let failed = [];
+            if (dropDocuments && ids.length > 0) {
+                const result = await this.#deletion.deleteMany(ids);
+                documentsDeleted = result.successful.length;
+                failed = result.failed;
+            }
+            // deleteMany untick paths may have already emptied it; remove regardless.
+            await this.bitmapIndex.deleteBitmap(key, { force: true });
+            this.#emitEvent('dataset.deleted', createEvent('dataset.deleted', { name: key.slice('data/dataset/'.length), key, documentsDeleted }));
+            return { name: key.slice('data/dataset/'.length), documentsDeleted, failed };
+        });
     }
 
     async deleteMany(ids, options = {}) {
@@ -1021,27 +1024,29 @@ class SynapsD extends EventEmitter {
      * @returns {Promise<string[]>} the copied bitmap keys
      */
     async migrateDocumentMemberships(fromId, toId, { excludeTrees = [] } = {}) {
-        if (!fromId || !toId) { throw new Error('fromId and toId are required'); }
-        const from = Number(fromId);
-        const to = Number(toId);
-        if (from === to) { return []; }
+        return this.#writes.withWriteLock(async () => {
+            if (!fromId || !toId) { throw new Error('fromId and toId are required'); }
+            const from = Number(fromId);
+            const to = Number(toId);
+            if (from === to) { return []; }
 
-        const excludedPrefixes = excludeTrees
-            .map((t) => this.getTree(t))
-            .filter(Boolean)
-            .flatMap((tree) => [
-                BitmapIndex.normalizeKey(this.#trees.directoryCollection(tree.id).prefix),
-                BitmapIndex.normalizeKey(this.#trees.contextCollection(tree.id).prefix),
-            ]);
+            const excludedPrefixes = excludeTrees
+                .map((t) => this.getTree(t))
+                .filter(Boolean)
+                .flatMap((tree) => [
+                    BitmapIndex.normalizeKey(this.#trees.directoryCollection(tree.id).prefix),
+                    BitmapIndex.normalizeKey(this.#trees.contextCollection(tree.id).prefix),
+                ]);
 
-        const layerKeys = await this.#synapses.listSynapses(from);
-        const placementKeys = layerKeys.filter((key) =>
-            (key.startsWith('context/') || key.startsWith('vfs/'))
-            && !excludedPrefixes.some((prefix) => key.startsWith(prefix)));
-        if (placementKeys.length === 0) { return []; }
+            const layerKeys = await this.#synapses.listSynapses(from);
+            const placementKeys = layerKeys.filter((key) =>
+                (key.startsWith('context/') || key.startsWith('vfs/'))
+                && !excludedPrefixes.some((prefix) => key.startsWith(prefix)));
+            if (placementKeys.length === 0) { return []; }
 
-        await this.#writes.applyMembership('tick', to, placementKeys);
-        return placementKeys;
+            await this.#writes.withDeferredMembership(() => this.#writes.addDocumentMembership(to, placementKeys));
+            return placementKeys;
+        });
     }
 
     async listDocumentTreePaths(id, treeNameOrId) {
@@ -1579,139 +1584,20 @@ class SynapsD extends EventEmitter {
     }
 
     /**
-     * One-time idempotent migration: lift legacy flat tree data into the new
-     * per-tree PrefixedStore layout.
-     *
-     * Old format (single global ContextTree, data in raw #internalStore):
-     *   layer/<ULID>          → layer records
-     *   tree                  → serialised tree structure
-     *   context/<layerName>   → context bitmaps (in bitmapIndex)
-     *
-     * New format (per-tree PrefixedStore keyed by treeId):
-     *   tree/<treeId>/meta              → tree metadata
-     *   tree/<treeId>/layer/<ULID>      → layer records
-     *   tree/<treeId>/tree              → serialised tree structure
-     *   context/<treeId>/<layerULID>    → context bitmaps
-     *
-     * The migration is skipped when the tree registry is already populated
-     * (i.e. at least one tree/<id>/meta key exists) so it is safe to run on
-     * every startup.
-     */
-    /**
-     * One-time idempotent migration: rename legacy bitmap keys to new format.
-     *
-     * Context bitmaps: context/<name>  →  context/layer/<ulid>
-     *   Old code keyed context bitmaps by layer name; new code keys by layer ULID.
-     *
-     * Feature bitmaps: feature/<prefix>/...  →  <prefix>/...
-     *   Reverts the short-lived feature/ prefix; features are stored directly in bitmapIndex.
-     */
-    async #documentStoreIsEmpty() {
-        for await (const _ of this.documents.getKeys({ limit: 1 })) { return false; }
-        return true;
-    }
-
-
-
-    /**
      * Merge a legacy bitmap key into its canonical form (OR + delete legacy).
      * For callers that know a key's true spelling after the allowed charset
      * widened ('@'/':' used to squash to '_'). Idempotent; returns true when
      * a merge happened.
      */
     async migrateBitmapKey(legacyKey, canonicalKey) {
-        return this.bitmapIndex.migrateKey(legacyKey, canonicalKey);
+        return this.#writes.withWriteLock(async () => {
+            return this.bitmapIndex.migrateKey(legacyKey, canonicalKey);
+        });
     }
 
     #emitEvent(...args) { return this.#writes.emit(...args); }
 
     emitTreeEvent(tree, eventName, payload) { return this.#writes.emitTreeEvent(tree, eventName, payload); }
-
-    // One-time backfill for stores created before internal/docs/all existed:
-    // an empty maintained bitmap alongside a non-empty document store means the
-    // bitmap predates the feature — rebuild it from the store keys.
-    async #backfillAllDocumentsBitmap() {
-        const bitmap = this.allDocumentsBitmap;
-        if (!bitmap || !bitmap.isEmpty) { return; }
-        const ids = [];
-        for await (const { key } of this.documents.getRange()) {
-            const id = Number(key);
-            if (Number.isInteger(id) && id > 0) { ids.push(id); }
-        }
-        if (ids.length > 0) {
-            await this.bitmapIndex.tick(bitmap.key, ids);
-            debug(`Backfilled internal/docs/all with ${ids.length} live document id(s)`);
-        }
-    }
-
-    /**
-     * One-time rebuild of the crud:* lifecycle timelines from the document store.
-     *
-     * The crud timelines moved from interval/ms (dual-BSI) to point-event/second
-     * (single-BSI ts) storage. Memberships written under the old scheme live in
-     * tiers the new code never reads, so they're orphaned. This deletes the stale
-     * crud bitmaps and re-derives crud:created (createdAt) + crud:updated
-     * (updatedAt) for every stored document, writing them into the new tiers.
-     *
-     * Idempotent (delete + rebuild from the doc store). crud:deleted is NOT
-     * rebuilt — those documents are gone — so past deletion history is dropped.
-     *
-     * @returns {Promise<{ scanned, created, updated, removedTimelines }>}
-     */
-    /**
-     * Recompute the L3 structures derivable from rows: kind/mime/facet bitmaps,
-     * location-derived device+backend features, asserted feature membership, and
-     * asserted edges. Shared by the v3 migration and `rebuild --plane l3`, so the
-     * rebuild invariant is exercised by the same code that migrates.
-     */
-    async #replayDerivedPlane(ids = null) {
-        const documentIds = ids ?? await this.#allDocumentIds();
-        let edges = 0;
-
-        for (const id of documentIds) {
-            const row = this.documents.get(id);
-            if (!row || typeof row !== 'object') { continue; }
-
-            let doc;
-            try { doc = parseInitializeDocument(row); } catch (error) {
-                debug(`rebuild: skipping ${id} — ${error.message}`);
-                continue;
-            }
-            doc.id = id;
-
-            const derived = [
-                ...facetBitmapKeys(doc),
-                ...this.#derived.locationDerivedFeatures(doc),
-                ...documentFeatureKeys(doc),
-                ...schemaBitmapKeys(doc),
-            ];
-            // The user-authored comment is the one text class nothing can
-            // regenerate, so its presence bitmap has to come back from the row like
-            // every other derived key. rebuildL3 drops the bitmap; this re-ticks it.
-            if (doc.hasComment) { derived.push(COMMENT_BITMAP_KEY); }
-            await this.#writes.applyMembership('tick', id, normalizeBitmapKeys(derived));
-
-            const relations = documentRelations(doc);
-            if (relations.length > 0) {
-                // link() is idempotent (dupsort dedups), so a replay over an intact
-                // index is a no-op rather than a duplicate.
-                this.#derived.syncDocumentRelations(id, [], relations);
-                edges += relations.length;
-            }
-        }
-
-        return edges;
-    }
-
-
-    async #allDocumentIds() {
-        const ids = [];
-        for await (const { key } of this.documents.getRange()) {
-            const id = Number(key);
-            if (Number.isInteger(id) && id > 0) { ids.push(id); }
-        }
-        return ids;
-    }
 
     /**
      * Rebuild the derived (L3) plane from rows.
@@ -1733,95 +1619,11 @@ class SynapsD extends EventEmitter {
      * @param {string}  [opts.src]            only drop derived edges from this source
      */
     async rebuildL3(opts = {}) {
-        const {
-            edges = true, bitmaps = true, timelines = false,
-            search = false, embeddings = false, src = null,
-            onProgress = null,
-        } = opts;
-
-        const stats = { edges: 0, bitmapsDropped: 0, documents: 0 };
-
-        if (edges) {
-            if (src) {
-                // Derived edges only — asserted ones have no meta row and are
-                // reproduced from the rows below anyway.
-                this.#edges.removeEdges({ src });
-            } else {
-                this.#edges.clear();
-            }
-        }
-
-        if (bitmaps) {
-            // device/os|type resolve through the #deviceFacets cache rather than off
-            // the document being replayed, so the cache has to be row-fresh BEFORE
-            // the drop. Otherwise those two keys are dropped and only partially put
-            // back, which is the one way this rebuild could lose derived state.
-            await this.#derived.loadDeviceFacets();
-
-            for (const prefix of [...derivedBitmapPrefixes(), ...RETIRED_BITMAP_PREFIXES]) {
-                for (const key of await this.bitmapIndex.listBitmaps(prefix)) {
-                    await this.bitmapIndex.deleteBitmap(key);
-                    stats.bitmapsDropped++;
-                }
-            }
-        }
-
-        if (edges || bitmaps) {
-            const ids = await this.#allDocumentIds();
-            stats.documents = ids.length;
-            stats.edges = await this.#replayDerivedPlane(ids);
-            if (onProgress) { onProgress({ ...stats }); }
-        }
-
-        if (timelines) { await this.reindexCrudTimelines({ onProgress }); }
-        if (search) { await this.reindexSearchIndex({ rebuild: true, onProgress }); }
-        if (embeddings) { await this.reindexEmbeddings({ onProgress }); }
-
-        return stats;
+        return this.#writes.withWriteLock(() => this.#maintenance.rebuildL3(opts));
     }
 
     async reindexCrudTimelines({ batchSize = 1000, onProgress = null } = {}) {
-        if (!this.isRunning()) { throw new Error('Database is not running'); }
-
-        // 1. Drop stale crud timelines (clears BOTH old start/end and any ts bitmaps).
-        const crudTimelines = ['crud:created', 'crud:updated', 'crud:deleted'];
-        let removedTimelines = 0;
-        for (const name of crudTimelines) {
-            if (await this.#timelineIndex.deleteTimeline(name)) { removedTimelines++; }
-        }
-
-        // 2. Collect every document id.
-        const ids = [];
-        for await (const { key } of this.documents.getRange()) {
-            const id = Number(key);
-            if (Number.isInteger(id) && id > 0) { ids.push(id); }
-        }
-
-        // 3. Re-derive crud:created/updated in id batches, buffered per batch.
-        const counts = { scanned: 0, created: 0, updated: 0, removedTimelines };
-        for (let i = 0; i < ids.length; i += batchSize) {
-            const slice = ids.slice(i, i + batchSize);
-            const docs = safeParseDocuments(await this.documents.getMany(slice));
-
-            await this.#writes.withDeferredMembership(async () => {
-                for (const doc of docs) {
-                    counts.scanned++;
-                    if (doc.createdAt) {
-                        await this.#timelineIndex.insert('crud:created', doc.id, new Date(doc.createdAt));
-                        counts.created++;
-                    }
-                    if (doc.updatedAt) {
-                        await this.#timelineIndex.insert('crud:updated', doc.id, new Date(doc.updatedAt));
-                        counts.updated++;
-                    }
-                }
-            });
-
-            if (onProgress) { onProgress({ ...counts, total: ids.length }); }
-        }
-
-        debug(`reindexCrudTimelines: scanned ${counts.scanned}, created ${counts.created}, updated ${counts.updated}`);
-        return counts;
+        return this.#writes.withWriteLock(() => this.#maintenance.reindexCrudTimelines({ batchSize, onProgress }));
     }
 
     /**
@@ -1833,46 +1635,7 @@ class SynapsD extends EventEmitter {
      * @returns {Promise<{scanned:number, ticked:number, keys:number}>}
      */
     async reindexMimeBitmaps({ batchSize = 1000, onProgress = null } = {}) {
-        if (!this.isRunning()) { throw new Error('Database is not running'); }
-
-        // 1. Drop stale data/mime/* bitmaps for a clean rebuild.
-        let dropped = 0;
-        for (const key of await this.bitmapIndex.listBitmaps(MIME_BITMAP_PREFIX)) {
-            try { await this.bitmapIndex.deleteBitmap(key); dropped++; } catch (_) { /* ignore */ }
-        }
-
-        // 2. Collect every document id.
-        const ids = [];
-        for await (const { key } of this.documents.getRange()) {
-            const id = Number(key);
-            if (Number.isInteger(id) && id > 0) { ids.push(id); }
-        }
-
-        // 3. Re-tick mime keys in id batches, buffered per batch.
-        const counts = { scanned: 0, ticked: 0, dropped, total: ids.length };
-        const touchedKeys = new Set();
-        for (let i = 0; i < ids.length; i += batchSize) {
-            const slice = ids.slice(i, i + batchSize);
-            const docs = safeParseDocuments(await this.documents.getMany(slice));
-
-            await this.#writes.withDeferredMembership(async () => {
-                for (const doc of docs) {
-                    counts.scanned++;
-                    const keys = facetBitmapKeys(doc);
-                    if (keys.length) {
-                        await this.#writes.applyMembership('tick', doc.id, keys);
-                        counts.ticked++;
-                        for (const k of keys) { touchedKeys.add(k); }
-                    }
-                }
-            });
-
-            if (onProgress) { onProgress({ ...counts }); }
-        }
-
-        counts.keys = touchedKeys.size;
-        debug(`reindexMimeBitmaps: scanned ${counts.scanned}, ticked ${counts.ticked} docs across ${counts.keys} mime bitmap(s) (dropped ${dropped})`);
-        return counts;
+        return this.#writes.withWriteLock(() => this.#maintenance.reindexMimeBitmaps({ batchSize, onProgress }));
     }
 
     /**
@@ -1883,39 +1646,12 @@ class SynapsD extends EventEmitter {
      * so already-indexed docs are skipped. Runs in batches until no progress.
      *
      * Note: this populates BM25 full-text only. Dense vectors for old docs are a
-     * separate (heavier) embedding backfill via the embedding queue.
+     * separate operation owned by the external embedding service.
      *
      * @returns {Promise<{ indexed, totalDocs, alreadyIndexed }>}
      */
     async reindexSearchIndex({ batchSize = 1000, rebuild = false, onProgress = null } = {}) {
-        if (!this.isRunning()) { throw new Error('Database is not running'); }
-        if (!this.#lanceIndex || !this.#lanceIndex.isReady) {
-            throw new Error('FTS index not available (semantic disabled or Lance not ready)');
-        }
-
-        // rebuild: wipe the table + coverage bitmap first, so a drift where the
-        // bitmap over-claims (rows lost but bitmap persisted) is fully repaired.
-        if (rebuild) { await this.#lanceIndex.clearFts(); }
-
-        const totalDocs = await this.documents.getCount();
-        const startStats = await this.#lanceIndex.stats().catch(() => ({ indexedDocs: 0 }));
-        const alreadyIndexed = startStats.indexedDocs || 0;
-
-        // Loop bounded batches until coverage stops growing (backfill skips indexed
-        // docs and processes up to `batchSize` new ones per call).
-        let prevIndexed = alreadyIndexed;
-        for (;;) {
-            await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, batchSize);
-            const stats = await this.#lanceIndex.stats().catch(() => ({ indexedDocs: prevIndexed }));
-            const nowIndexed = stats.indexedDocs || 0;
-            if (onProgress) { onProgress({ indexed: nowIndexed, totalDocs }); }
-            if (nowIndexed <= prevIndexed) { break; } // no progress → done (or stuck)
-            prevIndexed = nowIndexed;
-        }
-
-        try { await this.#lanceIndex.optimize(); } catch (e) { debug(`reindexSearchIndex: optimize failed: ${e.message}`); }
-
-        return { indexed: prevIndexed - alreadyIndexed, totalDocs, alreadyIndexed: prevIndexed };
+        return this.#writes.withWriteLock(() => this.#maintenance.reindexSearchIndex({ batchSize, rebuild, onProgress }));
     }
 
     /**
@@ -1928,18 +1664,7 @@ class SynapsD extends EventEmitter {
      * @returns {Promise<{ space, unembedded:number[], totalEmbeddable, embeddableSchemas }>}
      */
     async reindexEmbeddings(opts = {}) {
-        if (!this.isRunning()) { throw new Error('Database is not running'); }
-        if (!this.#vectors.primary) {
-            throw new Error('Dense vector store not available (semantic disabled or not ready)');
-        }
-        const space = opts.space || 'text';
-        const embeddableSchemas = (Array.isArray(opts.schemas) && opts.schemas.length)
-            ? opts.schemas
-            : Array.from(this.#vectors.config.embeddableSchemas);
-        const all = await this.bitmapIndex.OR(normalizeBitmapKeys(embeddableSchemas));
-        const totalEmbeddable = all ? all.size : 0;
-        const unembedded = await this.getUnembeddedDocIds(space, embeddableSchemas);
-        return { space, unembedded, totalEmbeddable, embeddableSchemas };
+        return this.#writes.withWriteLock(() => this.#maintenance.reindexEmbeddings(opts));
     }
 
     clearSync() {
@@ -1951,11 +1676,13 @@ class SynapsD extends EventEmitter {
     }
 
     async clearAsync() {
-        if (!this.isRunning()) {
-            throw new Error('Database is not running');
-        }
-        await this.db.clearAsync();
-        return true;
+        return this.#writes.withWriteLock(async () => {
+            if (!this.isRunning()) {
+                throw new Error('Database is not running');
+            }
+            await this.db.clearAsync();
+            return true;
+        });
     }
 
 }

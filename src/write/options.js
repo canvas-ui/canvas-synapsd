@@ -1,6 +1,5 @@
 import { normalizeBitmapKeys } from '../indexes/bitmaps/lib/keys.js';
 
-
 export function isDocumentOperationOptions(value) {
     return Boolean(
         value &&

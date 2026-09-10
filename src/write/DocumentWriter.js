@@ -44,7 +44,6 @@ export default class DocumentWriter {
         this.#getByChecksumString = getByChecksumString;
     }
 
-
     async put(document, spec = {}) {
         const normSpec = normalizeDocumentOperationSpec(spec);
 

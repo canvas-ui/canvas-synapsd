@@ -51,6 +51,7 @@ export default class QuerySession {
     #coarseLabels = new Set();
     #listeners = new Set();
 
+    #onShutdown;
     #onMembership;               // bound db handler (for off())
     #debounceTimer = null;
     #recomputing = false;
@@ -81,6 +82,8 @@ export default class QuerySession {
         // Subscribe to the precise per-key membership signal for live invalidation.
         this.#onMembership = (evt) => this.#handleMembershipChanged(evt);
         this.#db.on(EVENTS.MEMBERSHIP_CHANGED, this.#onMembership);
+        this.#onShutdown = () => this.close();
+        this.#db.on(EVENTS.BEFORE_SHUTDOWN, this.#onShutdown);
     }
 
     // ── introspection ────────────────────────────────────────────────────────
@@ -206,6 +209,7 @@ export default class QuerySession {
         if (this.#closed) { return; }
         this.#closed = true;
         this.#db.off(EVENTS.MEMBERSHIP_CHANGED, this.#onMembership);
+        this.#db.off(EVENTS.BEFORE_SHUTDOWN, this.#onShutdown);
         if (this.#debounceTimer) { clearTimeout(this.#debounceTimer); this.#debounceTimer = null; }
         this.#listeners.clear();
     }

@@ -3,7 +3,7 @@
 Review date: 2026-09-10. Scope: current `src/index.js` and its collaborating
 indexes, backend, schemas, views, sessions, tests, and selected server callers.
 The assessment and source line references below describe the original review
-snapshot. Steps 1–4 have since been implemented; see the implementation
+snapshot. Steps 1–7 have since been implemented; see the implementation
 record at the end for changes and validation.
 
 ## Assessment
@@ -311,8 +311,8 @@ Public method signatures and named helper exports remain intact.
   references held by callers. Storage prefixes, names, default selection, and
   settings retain their existing semantics.
 
-Steps 5–7 remain proposed: membership and derived-index ownership, shared writer
-orchestration, and maintenance/lifecycle cleanup. These extractions do not change transaction policy
+At completion of steps 3–4, membership and derived-index ownership, shared writer
+orchestration, and maintenance/lifecycle cleanup remained proposed. These extractions do not change transaction policy
 or broaden the atomicity guarantees documented for steps 1–2.
 
 
@@ -415,3 +415,89 @@ lines / 94.73% functions / 71.34% branches** across the larger extracted surface
 The shared PreparedChange module is fully line/function covered; the remaining
 uncovered lines primarily concern legacy selector adapters and best-effort error
 paths. Changed-file ESLint and `git diff --check` pass. `index.js` is 1,964 lines.
+
+## Implementation record — step 7
+
+- `maintenance/Maintenance.js` owns rebuilds, reindex jobs, and startup backfills.
+  Public maintenance jobs enter the write queue for their full duration; internal
+  composition calls the service directly to avoid nesting public queue entries.
+- Replay delegates row feature/location/facet/edge derivation to DerivedIndexes
+  and the shared feature helpers. Device-facet preload reads all device-schema
+  members directly, without query pagination or implicit default-dataset filtering.
+- Maintenance rejects non-positive/non-integral batch sizes before clearing
+  indexes. Failed jobs release the write queue and can be rerun.
+- `lifecycle/EngineLifecycle.js` serializes start/shutdown/restart transitions.
+  Repeated start and shutdown calls are idempotent. Shutdown closes admission to
+  queued mutations, drains accepted work, then closes LMDB. Restart constructs
+  fresh storage/index owners on the same facade and preserves live vector-space
+  configuration and tuning. Previously restart attempted to use a closed handle.
+- QuerySession unsubscribes and cancels its pending timer on engine shutdown;
+  callers open a new session after restart. Low-level storage/tree references
+  acquired before shutdown must likewise be reacquired.
+- Tree administration, vector/search mutations, dataset deletion, and membership
+  migration now share the write queue. Derived relation inheritance and copied
+  tree memberships use the coordinator's reverse-membership path.
+
+Startup failures retain the constructor-opened store for inspection until the
+caller shuts it down, preserving the schema-gate behavior. Repair jobs are
+serialized with writes, but are not one atomic transaction spanning all batches
+or Lance; interrupted repairs may need rerunning. Exposed low-level handles and
+`clearSync()` remain administrative escape hatches outside queued coordination.
+
+All **97 public method/getter signatures** match the steps 3–4 checkpoint,
+including argument defaults and async flags. Lifecycle improvements and the
+explicit consistency fixes above are the intended behavior changes; event payload
+and single/batch ordering adapters remain in place for the later API review.
+
+### Final layout
+
+`src/index.js` is **1,691 lines**, down from 4,064 after step 4 and 6,253 at the
+original review (73% smaller than the original). It retains composition, public
+adapters, and document-aware relation/read conveniences. No extracted service
+exceeds 825 lines; the document writer is 626 lines.
+
+```mermaid
+flowchart LR
+    API[Public mutation adapter] --> Queue[WriteCoordinator queue]
+    Queue --> Prepare[DocumentWriter preparation]
+    Prepare --> Change[PreparedChange]
+    Change --> Commit[LMDB row and index commit]
+    Commit --> Flush[Membership flush]
+    Flush --> Publish[Existing search and event adapters]
+    Change --> Derived[DerivedIndexes]
+    Maintenance[Maintenance replay] --> Derived
+    Lifecycle[EngineLifecycle] --> Drain[Drain queue and close or reopen storage]
+```
+
+The same queue coordinates MembershipWriter, DocumentDeletion, and maintenance;
+these do not turn batch operations into repeated calls to the public single API.
+The lifecycle tests also cover `start()` after a failed close: it finishes the
+pending close before reopening, so a running engine cannot retain a closed queue.
+
+### Local batch comparison
+
+Five fresh databases per version, 1,000 deterministic notes per batch, insert
+then update, semantic disabled and Lance ingestion skipped; 100 ID-only bitmap
+queries per run. Baseline: completed steps 3–4 (`fe1ebe4`). Median timings:
+
+| Operation | After step 4 | After step 7 |
+| --- | ---: | ---: |
+| Insert 1,000 documents | 902 ms | 915 ms |
+| Update 1,000 documents | 1,170 ms | 1,164 ms |
+| 100 bitmap queries | 7.53 ms | 7.47 ms |
+
+The approximately +1.4% insert / −0.5% update differences are smaller than the
+run-to-run variation in this smoke benchmark. It provides no evidence of a
+material batch-performance regression; it is not a production throughput or
+embedding/FTS-ingestion benchmark.
+
+The test matrix, reproducible coverage command, measured percentages, and
+remaining coverage gaps are recorded in [ENGINE_TEST_COVERAGE.md](ENGINE_TEST_COVERAGE.md).
+
+
+Final validation: **67 suites / 532 tests pass** (31 tests added in steps 5–7).
+The lifecycle coordinator has **100% line/function/branch coverage**; the broader
+write services have **93.84% line coverage**. Overall measured coverage and
+legacy gaps are detailed in the test report; this is not a claim of 100% coverage
+for the entire engine. ESLint on all changed JavaScript and `git diff --check`
+pass. All three remaining steps were delivered as separate commits.

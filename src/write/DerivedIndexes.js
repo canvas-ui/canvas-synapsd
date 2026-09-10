@@ -1,3 +1,4 @@
+import { rowFeatureKeys } from './PreparedChange.js';
 import debugInstance from 'debug';
 import { parseLocationUrl } from '../utils/path-helpers.js';
 import { parseContextSpecForInsert } from '../utils/parsing.js';
@@ -9,9 +10,9 @@ const debug = debugInstance('canvas:synapsd');
 // Row-derived indexes and tree membership selection. Native timeline/geo/edge
 // writes join the caller's transaction; feature memberships use WriteCoordinator.
 export default class DerivedIndexes {
-    #documents; #bitmapIndex; #trees; #writes; #getTimeline; #getGeo; #getEdges; #list;
+    #documents; #bitmapIndex; #trees; #writes; #getTimeline; #getGeo; #getEdges;
     #deviceFacets = new Map();
-    constructor({ documents, bitmapIndex, trees, writes, getTimeline, getGeo, getEdges, list }) {
+    constructor({ documents, bitmapIndex, trees, writes, getTimeline, getGeo, getEdges }) {
         this.#documents = documents;
         this.#bitmapIndex = bitmapIndex;
         this.#trees = trees;
@@ -19,9 +20,7 @@ export default class DerivedIndexes {
         this.#getTimeline = getTimeline;
         this.#getGeo = getGeo;
         this.#getEdges = getEdges;
-        this.#list = list;
     }
-
 
     /**
      * Shared bitmap indexing for both insert and update operations.
@@ -116,8 +115,8 @@ export default class DerivedIndexes {
     async loadDeviceFacets() {
         this.#deviceFacets.clear();
         try {
-            const result = await this.#list({ features: [DEVICE_SCHEMA_NAME] });
-            const docs = Array.isArray(result) ? result : (result?.data ?? []);
+            const bitmap = await this.#bitmapIndex.OR([DEVICE_SCHEMA_NAME]);
+            const docs = bitmap && !bitmap.isEmpty ? await this.#documents.getMany(bitmap.toArray()) : [];
             for (const doc of docs) { this.cacheDeviceFacets(doc); }
             debug(`Loaded facets for ${this.#deviceFacets.size} device(s)`);
         } catch (error) {
@@ -514,6 +513,13 @@ export default class DerivedIndexes {
         await this.#writes.applyMembership(after.hasComment ? 'tick' : 'untick', id, [COMMENT_BITMAP_KEY]);
         if (staleFacets.length) { await this.#writes.applyMembership('untick', id, staleFacets); }
         if (facetKeys.length) { await this.#writes.applyMembership('tick', id, facetKeys); }
+    }
+
+    async replayDocument(id, doc) {
+        await this.#writes.applyMembership('tick', id, rowFeatureKeys(doc, this.locationDerivedFeatures(doc)));
+        const relations = documentRelations(doc);
+        if (relations.length) { this.syncDocumentRelations(id, [], relations); }
+        return relations.length;
     }
 
 }

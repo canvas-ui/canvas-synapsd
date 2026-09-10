@@ -6,7 +6,6 @@ import { normalizeBitmapKeys } from '../indexes/bitmaps/lib/keys.js';
 
 import { documentFeatureKeys, schemaBitmapKeys } from '../documents/derivation.js';
 
-
 import { isDocumentOperationOptions, normalizeDocumentOperationSpec, normalizeProvenance, unlinkedContextPaths } from './options.js';
 const debug = debugInstance('canvas:synapsd');
 
@@ -23,7 +22,6 @@ export default class MembershipWriter {
         this.#derived = derived;
         this.#getById = getById;
     }
-
 
     async link(idOrIds, spec = {}) {
         if (Array.isArray(idOrIds)) {
