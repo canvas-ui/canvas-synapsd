@@ -75,6 +75,10 @@ class LayerIndex {
 
     }
 
+    async reload() {
+        await this.#initNameToLayerMap();
+    }
+
     /**
      * Getters / Base methods
      */

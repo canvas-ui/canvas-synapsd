@@ -60,4 +60,19 @@ describe('schema version gate', () => {
 
         await expect(open()).rejects.toThrow(/is at schema v2, this build needs v4/);
     });
+
+    test('refusal precedes bitmap, tree, and search initialization writes', async () => {
+        // Seed an incompatible row without ever starting the engine.
+        db = new Db({ path: rootPath, backupOnOpen: false, backupOnClose: false });
+        await db.documents.put(100001, { id: 100001, schema: NOTE, data: { title: 'old', content: 'old' } });
+        await db.internalStore.put('internal/schemaVersion', 2);
+        const internalBefore = [...db.internalStore.entries()];
+        const rowsBefore = [...db.documents.entries()];
+        await expect(db.start()).rejects.toThrow(/is at schema v2/);
+        expect(db.status).toBe('error');
+        expect([...db.internalStore.entries()]).toEqual(internalBefore);
+        expect([...db.documents.entries()]).toEqual(rowsBefore);
+        expect(await db.bitmapIndex.listBitmaps('', { includeInternal: true })).toEqual([]);
+        await expect(fs.stat(path.join(rootPath, 'lance'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
 });

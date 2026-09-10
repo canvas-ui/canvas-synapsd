@@ -80,6 +80,46 @@ describe('document event payload contract', () => {
         expect(inserted[0].hasDocument).toBe(true);
     });
 
+    test('write notifications observe committed rows and final memberships', async () => {
+        const order = [];
+        db.on('membership.changed', () => order.push('membership'));
+        db.on('document.inserted', (evt) => {
+            const ids = evt.ids || [evt.id];
+            for (const id of ids) {
+                expect(db.documents.get(id)).toBeDefined();
+                expect(db.allDocumentsBitmap.has(id)).toBe(true);
+            }
+            order.push('inserted');
+        });
+        const id = await db.put(note('Visible', 'single'), { features: ['tag/visible'] });
+        expect(order).toEqual(['membership', 'inserted']);
+        expect((await db.bitmapIndex.getBitmap('tag/visible')).has(id)).toBe(true);
+        order.length = 0;
+        await db.putMany([note('Visible A', 'a'), note('Visible B', 'b')]);
+        expect(order).toEqual(['membership', 'inserted']);
+        expect(seen.slice(-2).map(e => e.event)).toEqual(['document.inserted', 'document.inserted.batch']);
+    });
+
+    test('a throwing post-commit listener rejects the call but does not undo the row', async () => {
+        let committedId;
+        const listener = evt => { committedId = evt.id; throw new Error('listener failed'); };
+        db.on('document.inserted', listener);
+        await expect(db.put(note('Listener', 'body'))).rejects.toThrow('listener failed');
+        db.off('document.inserted', listener);
+        expect((await db.get(committedId)).data.content).toBe('body');
+        // The failed observer must not strand the write queue.
+        await expect(db.put(note('Next', 'body'))).resolves.toEqual(expect.any(Number));
+    });
+
+    test('a write started by a document listener runs as an independent queued write', async () => {
+        let followup;
+        db.once('document.inserted', () => { followup = db.put(note('Followup', 'body')); });
+        const first = await db.put(note('First', 'body'));
+        const second = await followup;
+        expect(second).not.toBe(first);
+        expect((await db.get(second)).data.title).toBe('Followup');
+    });
+
     test('put() over an existing id: reason content, document carried', async () => {
         const id = await db.put(note('Edit me', 'v1'), { context: { path: '/inbox' } });
         seen = [];

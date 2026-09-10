@@ -782,6 +782,21 @@ class BitmapIndex {
         return this.#saveBitmapSync(key, bitmap);
     }
 
+    // After an aborted storage transaction, restore cached objects in place:
+    // callers (including the engine's live/free-ID bitmaps) retain references.
+    // This runs only on failure, avoiding a full cache snapshot on every write.
+    restoreCache() {
+        for (const [key, bitmap] of this.cache) {
+            const stored = this.dataset.get(key);
+            bitmap.clear();
+            if (stored) {
+                bitmap.orInPlace(RoaringBitmap32.deserialize(stored, true));
+            } else {
+                this.cache.delete(key);
+            }
+        }
+    }
+
     #saveBitmapSync(key, bitmap) {
         debug('Storing bitmap to persistent store', key);
         if (!key) { throw new Error('Key is required'); }
