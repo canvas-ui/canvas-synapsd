@@ -6,7 +6,7 @@ const note = () => parseInitializeDocument({
     schema: 'data/schema/note',
     data: { title: 'Snapshot', content: 'original', relations: [{ p: 'references', to: 100002 }] },
     features: ['tag/original'],
-    locations: [{ url: 'file://device/a', metadata: { source: 'original' } }],
+    locations: [{ url: 'file://device/a', metadata: { source: 'original', backend: 'nas' } }],
     timelines: [{ timeline: 'history', start: '2020-01-01' }],
     comment: 'original comment',
     metadata: { summary: 'original summary', text: { content: 'original text' } },
@@ -18,6 +18,7 @@ describe('document before-state snapshots', () => {
         const before = snapshotDocument(doc);
         const checksum = doc.getPrimaryChecksum();
         doc.locations[0].url = 'file://device/changed';
+        doc.locations[0].metadata.backend = 'archive';
         doc.timelines[0].start = '2021-01-01';
         doc.data.relations[0].to = 100003;
         doc.features.push('tag/later');
@@ -25,6 +26,7 @@ describe('document before-state snapshots', () => {
 
         expect(before.checksums).toContain(checksum);
         expect(before.locations[0].url).toBe('file://device/a');
+        expect(before.locations[0].metadata).toEqual({ backend: 'nas' });
         expect(before.timelines[0].start).toBe('2020-01-01');
         expect(before.relations).toEqual([{ p: 'references', to: 100002 }]);
         expect(before.featureKeys).not.toContain('tag/later');

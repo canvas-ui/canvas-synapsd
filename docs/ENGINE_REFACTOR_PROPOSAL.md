@@ -342,3 +342,42 @@ Measured write differences were about 2.5% and 4.8% (22 ms and 54 ms per batch).
 The runs varied substantially, so this smoke benchmark cannot distinguish small
 refactor overhead from local timing noise. It does not measure production
 throughput or embedding/FTS ingestion. No transaction or batching policy changed.
+
+## Implementation record — step 5
+
+The write consistency boundary is now explicit:
+
+- `write/WriteCoordinator.js` owns the write queue, transaction-local membership
+  and event buffers, native transaction entry, rollback restoration, and
+  post-commit publication. Existing public writes still enter the queue before
+  reading rows or allocating IDs; internal nested work shares the transaction.
+- `write/DerivedIndexes.js` owns tree membership selection and row-derived
+  locations, device facets, timelines, geo, and asserted-edge diffs. It receives
+  storage/index dependencies explicitly and retains no facade reference.
+- The before-state snapshot now includes `locations[].metadata.backend`. New
+  single/batch regression tests reproduced stale declared-backend memberships
+  after moving a document; both the bitmap and reverse membership must retire.
+
+### Transaction ownership audit
+
+| State | Owner and write boundary |
+| --- | --- |
+| Rows, checksums, reverse memberships, edges | Shared LMDB environment; document transaction |
+| Timeline/geo and live-document bitmap during puts | Native transaction; cached bitmaps restored in place on abort |
+| Device facets and cached tree state | DerivedIndexes/TreeRegistry; reloaded on abort |
+| Collection memberships | WriteCoordinator buffers operations, flushes after native commit |
+| Tree/document/membership events | WriteCoordinator defers transactional events, then publishes after membership flush |
+| Lance FTS/vector tables | Separate storage; best-effort writes outside the LMDB transaction |
+| Recycled IDs | Returned only after successful external search cleanup |
+
+The extraction preserves the existing post-commit membership failure policy:
+failed bitmap flushes are logged, not converted into rollback of committed rows.
+It does not make reads isolated from in-flight cached mutations or turn external
+Lance operations into part of an LMDB transaction. Maintenance concurrency is
+addressed in step 7; event-order compatibility remains explicit in step 6.
+
+Validation: **63 suites / 503 tests pass**, including the two new regressions
+that failed before the snapshot correction. Measured coverage for the extracted
+write services is **98.35% lines / 100% functions / 79% branches**. This is
+coverage evidence, not a claim that every possible failure is tested. Changed-file
+ESLint and `git diff --check` pass. `index.js` is 3,462 lines at this checkpoint.

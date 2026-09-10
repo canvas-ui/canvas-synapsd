@@ -3,14 +3,18 @@
 import { documentFeatureKeys, documentRelations, facetBitmapKeys, schemaBitmapKeys } from './derivation.js';
 
 // Only capture fields used by index diffs, not the document's potentially large
-// body. Location derivation reads only URLs, not arbitrary protocol metadata.
+// body. Location derivation reads URLs and declared backends, not arbitrary protocol metadata.
 // Detach timeline entries before freezing so the snapshot neither aliases nor
 // freezes the caller's mutable document.
 export function snapshotDocument(doc) {
     if (!doc) { return null; }
     return freezeSnapshot({
         checksums: Array.isArray(doc.checksumArray) ? [...doc.checksumArray] : [],
-        locations: Array.isArray(doc.locations) ? doc.locations.map(location => ({ url: location?.url })) : [],
+        locations: Array.isArray(doc.locations) ? doc.locations.map(location => ({
+            url: location?.url,
+            metadata: typeof location?.metadata?.backend === 'string'
+                ? { backend: location.metadata.backend } : undefined,
+        })) : [],
         orphanedAt: doc.orphanedAt || null,
         comment: typeof doc.comment === 'string' ? doc.comment : '',
         summary: typeof doc.metadata?.summary === 'string' ? doc.metadata.summary : '',

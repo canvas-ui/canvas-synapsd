@@ -182,4 +182,15 @@ describe('data/backend/* derived from locations', () => {
         const sourceKeys = await db.bitmapIndex.listBitmaps('data/source');
         expect(sourceKeys).toEqual([]);
     });
+    test.each(['single', 'batch'])('%s updates retire a declared backend after a move', async mode => {
+        const id = await db.put(blob('declared-move', [
+            { url: 'file://laptop-a/mnt/nas/x.bin', metadata: { backend: 'homenas' } },
+        ]));
+        const update = { id, locations: [{ url: 's3://archive/x.bin' }] };
+        if (mode === 'single') { await db.put(update); }
+        else { await db.putMany([update], { skipLance: true }); }
+        expect(await backendKeys(id)).toEqual(['data/backend/s3', 'data/backend/s3/archive']);
+        expect(await db.synapses.listSynapses(id)).not.toContain('data/backend/homenas');
+    });
+
 });
