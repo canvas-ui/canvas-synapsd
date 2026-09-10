@@ -30,6 +30,19 @@ describe('SynapsD putMany id-preserving updates', () => {
         if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
     });
 
+    test('single put frees the previous checksum without losing the edited document', async () => {
+        const id = await db.put(note('Single', 'original'));
+        const oldChecksum = (await db.get(id)).getPrimaryChecksum();
+        await db.put({ id, ...note('Single', 'changed') });
+        const currentChecksum = (await db.get(id)).getPrimaryChecksum();
+        expect(currentChecksum).not.toBe(oldChecksum);
+        expect(await db.checksumIndex.get(oldChecksum)).toBeUndefined();
+        expect(await db.checksumIndex.get(currentChecksum)).toBe(id);
+        const reimported = await db.put(note('Single', 'original'));
+        expect(reimported).not.toBe(id);
+        expect((await db.get(id)).data.content).toBe('changed');
+    });
+
     test('putMany with a supplied id updates in place, preserving the id and context membership', async () => {
         const [id] = await db.putMany([note('Draft', 'v1 content')], {
             context: { path: '/Projects/Alpha' },

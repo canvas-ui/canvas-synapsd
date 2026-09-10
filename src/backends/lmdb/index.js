@@ -19,6 +19,7 @@ class Db {
 
     #dataset = 'default';
     #path;
+    #datasets = new Set();
 
     // TODO: Wrap versioning support
     // TODO: Extend using openAsClass()
@@ -143,7 +144,9 @@ class Db {
         };
 
         const db = this.db.openDB(dataset, datasetOptions);
-        return new Db(db, dataset);
+        const wrapped = new Db(db, dataset);
+        this.#datasets.add(wrapped);
+        return wrapped;
     }
 
 
@@ -253,7 +256,23 @@ class Db {
     * Execute a transaction asynchronously
     * @param action The function to execute within the transaction
     **/
-    transaction(action) { return this.db.transaction(action); }
+    async transaction(action) {
+        // LMDB transaction() batches callbacks but does not roll back their
+        // earlier writes on a throw. An abortable child transaction does.
+        try {
+            return await this.db.childTransaction(action);
+        } catch (error) {
+            // Native caching tracks the root handle's child transaction, but
+            // writes also touch named datasets in the same environment.
+            this.#invalidateCaches();
+            throw error;
+        }
+    }
+
+    #invalidateCaches() {
+        this.db.cache?.clear();
+        for (const dataset of this.#datasets) { dataset.#invalidateCaches(); }
+    }
 
     /**
     * Execute a transaction synchronously

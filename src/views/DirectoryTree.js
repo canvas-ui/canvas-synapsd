@@ -66,6 +66,10 @@ class DirectoryTree extends EventEmitter {
         this.#initialized = true;
     }
 
+    async reload() {
+        this.root = await this.#loadTree();
+    }
+
     async put(oid, path) {
         const node = await this.#ensureNode(path);
         await this.#collection.tick(node.id, oid);
@@ -756,7 +760,9 @@ class DirectoryTree extends EventEmitter {
     }
 
     #emitTreeEvent(eventName, payload = {}) {
-        this.emit(eventName, buildTreeEventPayload(this, eventName, payload));
+        const event = buildTreeEventPayload(this, eventName, payload);
+        if (this.#db?.emitTreeEvent) { this.#db.emitTreeEvent(this, eventName, event); }
+        else { this.emit(eventName, event); }
     }
 }
 

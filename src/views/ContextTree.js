@@ -111,6 +111,12 @@ class ContextTree extends EventEmitter {
         this.#initialized = true;
     }
 
+    // Reload rolled-back tree state without replacing the public tree instance.
+    async reload() {
+        await this.#layerIndex.reload();
+        await this.initialize();
+    }
+
     /**
      * ============================================================================
      * Getters / Setters
@@ -1629,7 +1635,9 @@ class ContextTree extends EventEmitter {
     }
 
     #emitTreeEvent(eventName, payload = {}) {
-        this.emit(eventName, buildTreeEventPayload(this, eventName, payload));
+        const event = buildTreeEventPayload(this, eventName, payload);
+        if (this.#db?.emitTreeEvent) { this.#db.emitTreeEvent(this, eventName, event); }
+        else { this.emit(eventName, event); }
     }
 }
 
