@@ -61,4 +61,17 @@ describe('vector space facade contracts', () => {
         expect((await search()).slice()).toEqual([id]);
         expect(await db.getUnembeddedDocIds('text', [schema])).toEqual([]);
     });
+    test('restart retains live model selection, tuning, and stored embeddings', async () => {
+        const id = await db.put({ schema, data: { title: 'Restart', content: 'restart' } });
+        await db.setVectorSpaces(spaces('model-b'));
+        db.setSearchTuning({ imageMaxDistance: 0.8, searchWeights: { dense: 3 } });
+        await db.storeDocumentEmbeddings(id, schema, new Date().toISOString(), [{ chunkId: 0, text: 'restart', vector }]);
+        await db.restart();
+        const stats = await db.getStats();
+        expect(stats.semantic.vector.model).toBe('model-b');
+        expect(await db.getDocumentVector(id, 'text')).toEqual(vector);
+        expect(await db.getUnembeddedDocIds('text')).not.toContain(id);
+        expect(await db.search({ query: 'restart', mode: 'vector', idsOnly: true })).toContain(id);
+    });
+
 });

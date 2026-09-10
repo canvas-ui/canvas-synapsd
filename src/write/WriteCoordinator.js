@@ -11,6 +11,7 @@ export default class WriteCoordinator {
     #backend; #bitmapIndex; #getSynapses; #restoreTrees; #restoreDevices; #publish;
     #writeContext = new AsyncLocalStorage();
     #writeTail = Promise.resolve();
+    #accepting = true;
     constructor({ backend, bitmapIndex, getSynapses, restoreTrees, restoreDevices, publish }) {
         this.#backend = backend;
         this.#bitmapIndex = bitmapIndex;
@@ -30,9 +31,18 @@ export default class WriteCoordinator {
         tree.emit(eventName, payload);
     }
 
-
     // Public document mutations queue before reads, ID allocation, or writes.
     async withWriteLock(action) {
+        if (!this.#accepting) { throw new Error('Database is shutting down or closed'); }
+        return this.#enqueue(action);
+    }
+
+    closeAndDrain(action) {
+        this.#accepting = false;
+        return this.#enqueue(action);
+    }
+
+    async #enqueue(action) {
         const previous = this.#writeTail;
         let release;
         this.#writeTail = new Promise(resolve => { release = resolve; });

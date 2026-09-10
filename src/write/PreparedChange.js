@@ -1,4 +1,4 @@
-import { documentFeatureKeys, schemaBitmapKeys, facetBitmapKeys } from '../documents/derivation.js';
+import { documentFeatureKeys, schemaBitmapKeys, facetBitmapKeys, COMMENT_BITMAP_KEY } from '../documents/derivation.js';
 import { hasSearchContentChanged } from '../documents/snapshot.js';
 
 export function writeFeatureKeys(document, asserted = []) {
@@ -17,4 +17,12 @@ export function preparedChange({ after, before = null, features = [], context = 
         staleFeatures: (before?.featureKeys || []).filter(key => !features.includes(key)),
         facetKeys, staleFacets: (before?.facetKeys || []).filter(key => !facetKeys.includes(key)),
     };
+}
+
+// Rebuild and incremental writes use the same schema/features/facet definitions.
+export function rowFeatureKeys(document, locationFeatures = []) {
+    return [...new Set([
+        ...writeFeatureKeys(document), ...facetBitmapKeys(document), ...locationFeatures,
+        ...(document.hasComment ? [COMMENT_BITMAP_KEY] : []),
+    ])];
 }

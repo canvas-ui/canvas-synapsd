@@ -2,11 +2,6 @@ import debugInstance from 'debug';
 import { EVENTS, createEvent } from '../utils/events.js';
 import { parseDocumentData } from '../utils/document.js';
 
-
-
-
-
-
 import { normalizeProvenance } from './options.js';
 const debug = debugInstance('canvas:synapsd');
 
@@ -41,7 +36,6 @@ export default class DocumentDeletion {
         this.#getDeletedBitmap = getDeletedBitmap;
         this.#retractIncoming = retractIncoming;
     }
-
 
     async delete(id, options = {}) {
         if (!id) { throw new Error('Document id required'); }
