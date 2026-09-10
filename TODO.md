@@ -228,17 +228,33 @@ Rationale worth keeping, because it guards decisions that could be re-litigated:
       Resolve persistence, scope, and checksum-identity changes first.
 - [ ] Reduce app-specific bundled schemas as consumers take ownership.
 
-## Query and write semantics
+## Query and write API — priority order
 
+- [ ] **1. Standardize results and errors.** Use an explicit result envelope
+      instead of arrays with attached properties; distinguish empty results,
+      failures, exact counts, and bounded retrieval counts. Define result shaping
+      for IDs, metadata, and full documents, including JSON/websocket transport.
+- [ ] **2. Define one canonical query spec.** Separate scope, match, ranking,
+      and pagination; share it across one-shot queries and sessions. Normalize
+      URL/token shorthand and legacy selectors into it, and align engine versus
+      workspace `list()`/`search()` behavior.
+- [ ] **3. Clarify session consistency.** Separate anchored/sliding time from
+      following data changes and snapshot guarantees; clarify `patch()` array
+      concatenation versus `set()` replacement. Add session revisions to correlate
+      concurrent cue updates, results, and change events.
+- [ ] **4. Make refinement inspectable.** Define ordered refinement stages and
+      distinguish exact predicates from bounded relevance retrieval. Expose
+      stage-level candidate counts and contributing timelines, sources, and time
+      bounds without moving inference or historical interpretation into SynapsD.
+- [ ] **5. Tighten mutation contracts.** Report created/updated/deduplicated
+      outcomes; standardize batch item correlation and failure reporting. Settle
+      replace-versus-patch semantics and distinguish committed rows from completed
+      search indexing while retaining optimized batch execution.
+- [ ] Migrate these contracts through compatibility adapters and consumer tests;
+      cover event ordering, websocket serialization, and concurrent sessions.
+      Prioritize contracts over tree renaming, namespace reshuffling, or a new DSL.
 - [ ] Implement or remove recognized `g:` and `re:` filter syntax.
 - [ ] Settle raw bitmap filter sigil consistency.
-- [ ] Decide whether `list()` should stop returning runtime errors as an empty
-      array with `.error`.
-- [ ] Revisit replace-versus-patch writes as a dedicated API change.
-- [ ] Add explicit result shaping for IDs, metadata, and full documents.
-- [ ] Split `src/index.js`; start with maintenance/rebuild code and pure
-      derivation helpers. Preserve the write and candidate-resolution choke
-      points.
 
 ## Scale and operations
 
