@@ -7,13 +7,9 @@ import path from 'path';
 import { createRequire } from 'module';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import debugInstance from 'debug';
-import { ulid } from 'ulid';
 const debug = debugInstance('canvas:synapsd');
 const require = createRequire(import.meta.url);
 const { RoaringBitmap32 } = require('roaring');
-
-// Errors
-import { ArgumentError } from './utils/errors.js';
 
 // Events
 import { EVENTS, createEvent, membershipDelta } from './utils/events.js';
@@ -35,8 +31,7 @@ import GeoIndex from './indexes/inverted/GeoIndex.js';
 import Synapses from './indexes/inverted/Synapses.js';
 import EdgeIndex from './indexes/edges/index.js';
 import LanceIndex from './indexes/lance/index.js';
-import VectorIndex from './indexes/lance/VectorIndex.js';
-import * as lancedb from '@lancedb/lancedb';
+import VectorSpaces from './search/VectorSpaces.js';
 import { normalizeBitmapKeys, normalizeBitmapKey } from './indexes/bitmaps/lib/keys.js';
 import { deviceFacetKeys } from './utils/device-facets.js';
 import SemanticEngine from './semantic/index.js';
@@ -47,11 +42,11 @@ import DirectoryTree from './views/DirectoryTree.js';
 
 // Extracted utilities
 import { parseContextSpecForInsert, parseBitmapArray } from './utils/parsing.js';
-import { parseFilters, applyTimelineFilter, applyGeoFilter } from './utils/filters.js';
-import { parseSpec } from './utils/spec.js';
-import { parseDocumentData, parseInitializeDocument } from './utils/document.js';
+import { parseDocumentData, parseInitializeDocument, safeParseDocuments } from './utils/document.js';
 import QuerySession from './session/QuerySession.js';
-import PrefixedStore from './utils/PrefixedStore.js';
+import TreeRegistry from './trees/TreeRegistry.js';
+import CandidateResolver from './query/CandidateResolver.js';
+import QueryEngine from './query/QueryEngine.js';
 
 import {
     COMMENT_BITMAP_KEY, MIME_BITMAP_PREFIX, DEVICE_SCHEMA_NAME, ORPHANED_FEATURE,
@@ -71,79 +66,15 @@ export {
 
 // Constants
 const INTERNAL_BITMAP_ID_MAX = 100000;
-// Default page size for list() when no limit is supplied. "All documents" is an
-// explicit opt-in (limit:0), never the implicit default — a full parse on a 7M
-// row store is a cost cliff.
-const DEFAULT_LIST_LIMIT = 100;
 // Row-format version of the database. Bump when a change makes rows written by
 // this build unreadable by the previous one; a database below it is REFUSED at
 // open (see start()) rather than migrated — there is no migration code here.
 const SCHEMA_VERSION = 4;
 const SCHEMA_VERSION_KEY = 'internal/schemaVersion';
 
-// ── Embedding ledger keys ────────────────────────────────────────────────────
-// Two per-space ledgers, both under `internal/embed/`:
-//   internal/embed/vectors/<space>/<model-slug>  — presence ("this doc has vectors")
-//   internal/embed/seen/<space>/<model-slug>     — processed (incl. deliberate skips)
-//
-// ALWAYS model-keyed, and the model segment is ALWAYS the leaf. A namespace must
-// never also be a key: listBitmaps() range-scans `prefix + '/' .. prefix + '/￿'`,
-// so a bare `internal/embed/vectors/text` sitting above
-// `internal/embed/vectors/text/<slug>` would be invisible to a prefix query of its
-// own namespace. That is exactly what the legacy `internal/lance/vectors` key did:
-// it was the text presence bitmap AND the parent path of the image one, so
-// listing `internal/lance/vectors` returned image and silently omitted text.
-const VECTOR_PRESENCE_PREFIX = 'internal/embed/vectors';
-const VECTOR_SEEN_PREFIX = 'internal/embed/seen';
-
-function vectorModelSlug(model) {
-    return String(model || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
-}
-function vectorPresenceKey(space, model) { return `${VECTOR_PRESENCE_PREFIX}/${space}/${vectorModelSlug(model)}`; }
-function vectorSeenKey(space, model) { return `${VECTOR_SEEN_PREFIX}/${space}/${vectorModelSlug(model)}`; }
-
-// Baseline models — the ones every pre-config workspace is running.
-const BASELINE_TEXT_MODEL = 'bge-small-en-v1.5';
-const BASELINE_IMAGE_MODEL = 'Xenova/siglip-base-patch16-224';
-
-/** Default vector spaces when no embedd service supplies them. */
-function defaultVectorSpaces(dim = 384) {
-    return {
-        text: {
-            table: 'vec_text', model: BASELINE_TEXT_MODEL, dim,
-            bitmapKey: vectorPresenceKey('text', BASELINE_TEXT_MODEL),
-            seenKey: vectorSeenKey('text', BASELINE_TEXT_MODEL),
-        },
-        // annIndex:false — image search is CROSS-MODAL (text query vector vs
-        // photo vectors) with a tight distance floor. Lance's quantized ANN
-        // indexes (SQ/PQ) train on the stored (image) distribution; a text query
-        // lands far outside it and gets back wrong neighbours with wildly
-        // inflated distances (measured: true 0.96 → ANN 1.49), which the
-        // imageMaxDistance floor then rejects wholesale → zero results. Exact
-        // scan is correct and fast at this scale once compacted.
-        image: {
-            table: 'vec_image', model: BASELINE_IMAGE_MODEL, dim: 768, annIndex: false,
-            bitmapKey: vectorPresenceKey('image', BASELINE_IMAGE_MODEL),
-            seenKey: vectorSeenKey('image', BASELINE_IMAGE_MODEL),
-        },
-    };
-}
-
 /**
- * Inverse of SynapsD#vectorTableName — recover (space, slug, dim) from a
- * model-keyed table name so a superseded model's leftovers can be identified
- * and its bitmap keys derived. Legacy `vec_text` / `vec_image` carry no model,
- * so only the space comes back.
- */
-function parseVectorTableName(name) {
-    const keyed = String(name).match(/^vec_([^_]+)__(.+)__(\d+)$/);
-    if (keyed) { return { space: keyed[1], slug: keyed[2], model: keyed[2], dim: Number(keyed[3]) }; }
-    const legacy = String(name).match(/^vec_(.+)$/);
-    return legacy ? { space: legacy[1], slug: null, model: null, dim: null } : { space: null, slug: null, model: null, dim: null };
-}
-
-/**
- * Simplified SynapsD class
+ * Public engine facade and composition root. Coordinates storage and writes;
+ * delegates query resolution, ranking, vector spaces, and tree registration.
  */
 
 class SynapsD extends EventEmitter {
@@ -159,13 +90,9 @@ class SynapsD extends EventEmitter {
     // Runtime
     #status;
 
-    // Tree Abstractions
-    #treeCache = new Map();
-    #treeMetadata = new Map();
-    #defaultTreeIds = {
-        context: null,
-        directory: null,
-    };
+    #trees;
+    #candidates;
+    #queries;
 
     // Bitmap Indexes
     #bitmapStore;   // Bitmap store
@@ -193,9 +120,7 @@ class SynapsD extends EventEmitter {
 
     // Semantic recall (dense + hybrid vector search)
     #semantic;
-    #vectorIndex;              // the 'text' space (primary; drives search)
-    #vectorSpaces = new Map(); // space name -> VectorIndex (includes 'text')
-    #semanticConfig;
+    #vectors;
 
     constructor(options = {
         backupOnOpen: false,
@@ -265,59 +190,38 @@ class SynapsD extends EventEmitter {
         this.#geoIndex = null;
         this.#semantic = new SemanticEngine({ db: this });
 
-        // Semantic / dense-vector config. Disabled => fts-only (vector + hybrid
-        // search degrade gracefully to lexical). synapsd owns no embedding model:
-        // vectors arrive via storeDocumentEmbeddings (the embedd service / any app),
-        // and query embedding is an injected `embedQuery(text, space)` callback.
-        const sem = options.semantic || {};
-        this.#semanticConfig = {
-            enabled: sem.enabled !== false,
-            dim: sem.dim || 384,
-            // Injected query-embedder (embedd service). Absent → vector/hybrid
-            // search degrades to FTS (see rank()).
-            embedQuery: typeof sem.embedQuery === 'function' ? sem.embedQuery : null,
-            // Default candidate schemas for the unembedded-gap ledger when a caller
-            // passes none. embedd normally supplies per-space candidate schemas.
-            embeddableSchemas: new Set(sem.embeddableSchemas || ['data/schema/note']),
-            // Vector "spaces": one LanceDB table per embedding model/dim. The
-            // embedd service pushes vectors keyed by space and supplies these; the
-            // defaults describe the baseline models so a workspace running without
-            // embedd still reads and writes the same ledgers.
-            spaces: sem.spaces || defaultVectorSpaces(sem.dim || 384),
-            // Image search relevance floor (cosine distance, 0 = identical). CLIP
-            // image kNN returns its top-K for ANY query, so without a cap every
-            // search folds in unrelated photos. 0.945 calibrated against SigLIP
-            // base fp32 (embedd's default dtype): true matches measured at
-            // 0.90–0.94 across car/wine/table/audi known-item queries, noise
-            // floor starts ~0.95. (The old 0.97 default was calibrated on q8
-            // vectors.) Live-tunable per workspace (setSearchTuning) and
-            // env-overridable (CANVAS_IMAGE_MAX_DISTANCE). null/0 = no floor.
-            imageMaxDistance: typeof sem.imageMaxDistance === 'number' ? sem.imageMaxDistance : 0.945,
-            // How the image floor is applied — see #imageVectorSearch.
-            // 'relative' (default): keep hits within imageRelativeMargin of the
-            // query's OWN best hit, capped by imageMaxDistance. Adapts to the
-            // per-query, per-model scale shift that makes a single global cutoff
-            // unusable (CLIP ViT-B/32 ~0.73 vs SigLIP ~0.92 for the same match).
-            // 'absolute': imageMaxDistance alone (pre-2026-08 behaviour).
-            imageFloorMode: sem.imageFloorMode === 'absolute' ? 'absolute' : 'relative',
-            // Width of the relative window, in cosine distance from the best hit.
-            imageRelativeMargin: Number.isFinite(sem.imageRelativeMargin) && sem.imageRelativeMargin > 0
-                ? sem.imageRelativeMargin
-                : 0.035,
-            // Hybrid RRF fusion weights. fts > dense: text kNN has no relevance
-            // floor, so its rank-0 hit on an irrelevant corpus would otherwise tie
-            // a rank-0 EXACT lexical match. image == fts: image kNN IS floored
-            // (imageMaxDistance), so a photo that clears the floor is as much a
-            // "real match" as a filename hit — "red car" should surface the red
-            // car photo alongside red-car.pdf, not below every ngram coincidence.
-            searchWeights: {
-                fts: sem.searchWeights?.fts ?? 2,
-                dense: sem.searchWeights?.dense ?? 1,
-                image: sem.searchWeights?.image ?? 2,
-            },
-        };
+        this.#vectors = new VectorSpaces({
+            rootPath: this.#rootPath, bitmapIndex: this.bitmapIndex, semantic: options.semantic,
+        });
 
         this.contextBitmapCollection = null;
+        this.#trees = new TreeRegistry({
+            internalStore: this.#internalStore,
+            bitmapIndex: this.bitmapIndex,
+            // Existing tree document APIs still call the facade for compatibility.
+            createTreeInstance: (type, options) => type === 'directory'
+                ? new DirectoryTree({ ...options, db: this })
+                : new ContextTree({ ...options, db: this }),
+            publish: (...args) => this.#emitEvent(...args),
+            onContextCollection: collection => { this.contextBitmapCollection = collection; },
+        });
+        this.#candidates = new CandidateResolver({
+            bitmapIndex: this.bitmapIndex,
+            documents: this.documents,
+            trees: this.#trees,
+            getLiveDocumentsBitmap: () => this.allDocumentsBitmap,
+            getTimelineIndex: () => this.#timelineIndex,
+            getGeoIndex: () => this.#geoIndex,
+            getEdges: () => this.#edges,
+        });
+        this.#queries = new QueryEngine({
+            documents: this.documents,
+            bitmapIndex: this.bitmapIndex,
+            candidates: this.#candidates,
+            vectors: this.#vectors,
+            getTimelineIndex: () => this.#timelineIndex,
+            getLanceIndex: () => this.#lanceIndex,
+        });
 
     }
 
@@ -356,42 +260,7 @@ class SynapsD extends EventEmitter {
             try { out.fts = await this.#lanceIndex.stats(); } catch (e) { out.fts = { ready: false, error: e.message }; }
         }
 
-        if (!this.#semanticConfig?.enabled) {
-            out.semantic = { enabled: false };
-            return out;
-        }
-
-        // Per-space stats for every CONFIGURED vector space (text + image), not
-        // just the ones lazily initialized so far — otherwise the image space
-        // disappears from the summary until something embeds/queries it. Lazily
-        // opens each (embeddedDocs comes from the persistent presence bitmap, so
-        // the count is right even for a freshly-opened table).
-        const vectorSpaces = {};
-        for (const name of Object.keys(this.#semanticConfig.spaces || {})) {
-            try {
-                const vi = await this.#getVectorSpace(name);
-                vectorSpaces[name] = vi ? await vi.stats() : { ready: false };
-            } catch (e) { vectorSpaces[name] = { ready: false, error: e.message }; }
-        }
-
-        out.semantic = {
-            enabled: true,
-            dim: this.#semanticConfig.dim,
-            // Embedding is external (embedd service); synapsd owns no model.
-            embedder: 'external',
-            embedQuery: !!this.#semanticConfig.embedQuery,
-            embeddableSchemas: [...this.#semanticConfig.embeddableSchemas],
-            spaces: Object.keys(this.#semanticConfig.spaces || {}),
-            // Tunable search knobs (surfaced so the UI can show/edit current values).
-            imageMaxDistance: this.#semanticConfig.imageMaxDistance,
-            imageFloorMode: this.#semanticConfig.imageFloorMode,
-            imageRelativeMargin: this.#semanticConfig.imageRelativeMargin,
-            searchWeights: { ...this.#semanticConfig.searchWeights },
-            // Back-compat: `vector` stays the text space; `vectorSpaces` breaks it
-            // out per space (text, image, …) so image embedding is observable.
-            vector: vectorSpaces.text || (this.#vectorIndex ? await this.#vectorIndex.stats().catch(e => ({ ready: false, error: e.message })) : { ready: false }),
-            vectorSpaces,
-        };
+        out.semantic = await this.#vectors.getStats();
         return out;
     }
 
@@ -401,29 +270,7 @@ class SynapsD extends EventEmitter {
      * @param {{imageMaxDistance?: number|null, searchWeights?: {fts?:number, dense?:number, image?:number}}} tuning
      */
     setSearchTuning(tuning = {}) {
-        if (Object.prototype.hasOwnProperty.call(tuning, 'imageMaxDistance')) {
-            const v = tuning.imageMaxDistance;
-            this.#semanticConfig.imageMaxDistance = (v === null || Number.isFinite(v)) ? v : this.#semanticConfig.imageMaxDistance;
-        }
-        if (tuning.imageFloorMode === 'absolute' || tuning.imageFloorMode === 'relative') {
-            this.#semanticConfig.imageFloorMode = tuning.imageFloorMode;
-        }
-        if (Number.isFinite(tuning.imageRelativeMargin) && tuning.imageRelativeMargin > 0) {
-            this.#semanticConfig.imageRelativeMargin = tuning.imageRelativeMargin;
-        }
-        if (tuning.searchWeights && typeof tuning.searchWeights === 'object') {
-            const w = this.#semanticConfig.searchWeights;
-            for (const k of ['fts', 'dense', 'image']) {
-                const v = tuning.searchWeights[k];
-                if (Number.isFinite(v) && v >= 0) { w[k] = v; }
-            }
-        }
-        return {
-            imageMaxDistance: this.#semanticConfig.imageMaxDistance,
-            imageFloorMode: this.#semanticConfig.imageFloorMode,
-            imageRelativeMargin: this.#semanticConfig.imageRelativeMargin,
-            searchWeights: { ...this.#semanticConfig.searchWeights },
-        };
+        return this.#vectors.setSearchTuning(tuning);
     }
 
     get db() { return this.#db; } // For testing only
@@ -525,37 +372,11 @@ class SynapsD extends EventEmitter {
             await this.#lanceIndex.initialize();
             await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
 
-            // Dense-vector stack (best-effort: failure leaves fts-only search intact).
-            // The ledger-key migration runs FIRST: VectorIndex latches its presence
-            // bitmap key at construction, so migrating afterwards would leave it
-            // writing to the canonical key while the legacy one still held the data.
-            if (this.#semanticConfig.enabled) {
-                try {
-                    const textSpace = this.#semanticConfig.spaces.text || defaultVectorSpaces(this.#semanticConfig.dim).text;
-                    this.#vectorIndex = new VectorIndex({
-                        rootPath: path.join(this.#rootPath, 'lance'),
-                        tableName: this.#vectorTableName('text', textSpace),
-                        dim: textSpace.dim,
-                        model: textSpace.model,
-                        vectorBitmapKey: textSpace.bitmapKey,
-                        bitmapIndex: this.bitmapIndex,
-                    });
-                    await this.#vectorIndex.initialize();
-                    this.#vectorSpaces.set('text', this.#vectorIndex);
-                    // No embedder/queue here anymore — embedding is owned by the
-                    // external embedd service, which drives ingestion off-thread and
-                    // pushes vectors back via storeDocumentEmbeddings. synapsd only
-                    // stores + searches, and reads the unembedded gap on request.
-                } catch (e) {
-                    debug(`Semantic vector stack init failed (continuing fts-only): ${e.message}`);
-                    this.#vectorIndex = null;
-                }
-            }
+            await this.#vectors.initialize();
 
             await this.#semantic.initialize();
 
-            await this.#loadTreeRegistry();
-            await this.#ensureDefaultTrees();
+            await this.#trees.initialize();
 
             // One-time heal (not a schema migration — rows are untouched): the
             // pre-write-through REST path (server ≤2.5.51) linked asserted edges
@@ -584,117 +405,39 @@ class SynapsD extends EventEmitter {
     }
 
     async listTrees(type = null) {
-        const trees = Array.from(this.#treeMetadata.values());
-        return type ? trees.filter((tree) => tree.type === type) : trees;
+        return this.#trees.listTrees(type);
     }
 
     getTree(nameOrId) {
-        if (!nameOrId) {
-            return null;
-        }
-
-        const directMatch = this.#treeMetadata.get(String(nameOrId));
-        if (directMatch) {
-            return this.#instantiateTree(directMatch);
-        }
-
-        const normalized = this.#normalizeTreeName(nameOrId);
-        for (const meta of this.#treeMetadata.values()) {
-            if (this.#normalizeTreeName(meta.name) === normalized) {
-                return this.#instantiateTree(meta);
-            }
-        }
-
-        return null;
+        return this.#trees.getTree(nameOrId);
     }
 
     getDefaultContextTree() {
-        return this.#getDefaultTreeByType('context');
+        return this.#trees.getDefaultContextTree();
     }
 
     getDefaultDirectoryTree() {
-        return this.#getDefaultTreeByType('directory');
+        return this.#trees.getDefaultDirectoryTree();
     }
 
     async createTree(name, type = 'context', options = {}) {
-        const normalizedName = this.#normalizeTreeName(name);
-        if (!normalizedName) { throw new Error('Tree name is required'); }
-        if (!['context', 'directory'].includes(type)) { throw new Error(`Unsupported tree type "${type}"`); }
-        if (this.getTree(name)) { throw new Error(`Tree already exists: ${name}`); }
-
-        const now = new Date().toISOString();
-        const meta = {
-            id: options.id || ulid(),
-            name: String(name).trim(),
-            type,
-            createdAt: now,
-            updatedAt: now,
-            isDefault: options.isDefault ?? !this.#defaultTreeIds[type],
-            // Generic per-tree settings bag; synapsd only interprets generic
-            // flags (e.g. linkContextRoot) — policy names live at the caller.
-            settings: options.settings && typeof options.settings === 'object'
-                ? { ...options.settings }
-                : {},
-        };
-
-        await this.#internalStore.put(this.#treeMetaKey(meta.id), meta);
-        this.#treeMetadata.set(meta.id, meta);
-        if (meta.isDefault || !this.#defaultTreeIds[type]) {
-            this.#defaultTreeIds[type] = meta.id;
-        }
-
-        const tree = this.#instantiateTree(meta);
-        await tree.initialize();
-        if (type === 'context' && meta.id === this.#defaultTreeIds.context) {
-            this.contextBitmapCollection = tree.collection || this.#contextBitmapCollectionForTree(meta.id);
-        }
-
-        this.#emitEvent(EVENTS.TREE_CREATED, createEvent(EVENTS.TREE_CREATED, { treeId: meta.id, treeName: meta.name, treeType: meta.type }));
-        return meta;
+        return this.#trees.createTree(name, type, options);
     }
 
     async deleteTree(nameOrId) {
-        const meta = this.#resolveTreeMeta(nameOrId);
-        if (!meta) { throw new Error(`Tree not found: ${nameOrId}`); }
-        await this.#deleteTreeStorage(meta);
-        this.#treeMetadata.delete(meta.id);
-        this.#treeCache.delete(meta.id);
-        if (this.#defaultTreeIds[meta.type] === meta.id) {
-            this.#defaultTreeIds[meta.type] = null;
-            const next = (await this.listTrees(meta.type))[0];
-            if (next) {
-                this.#defaultTreeIds[meta.type] = next.id;
-            }
-        }
-        this.#emitEvent(EVENTS.TREE_DELETED, createEvent(EVENTS.TREE_DELETED, { treeId: meta.id, treeName: meta.name, treeType: meta.type }));
-        return true;
+        return this.#trees.deleteTree(nameOrId);
     }
 
     async renameTree(nameOrId, newName) {
-        const meta = this.#resolveTreeMeta(nameOrId);
-        if (!meta) { throw new Error(`Tree not found: ${nameOrId}`); }
-        if (this.getTree(newName)) { throw new Error(`Tree already exists: ${newName}`); }
-        meta.name = String(newName).trim();
-        meta.updatedAt = new Date().toISOString();
-        await this.#internalStore.put(this.#treeMetaKey(meta.id), meta);
-        // Update the cached instance so `tree.name` reflects the rename instead
-        // of the stale construction-time value.
-        const cached = this.#treeCache.get(meta.id);
-        if (cached) { cached.name = meta.name; }
-        this.#emitEvent(EVENTS.TREE_RENAMED, createEvent(EVENTS.TREE_RENAMED, { treeId: meta.id, treeName: meta.name, treeType: meta.type }));
-        return meta;
+        return this.#trees.renameTree(nameOrId, newName);
     }
 
     getTreePaths(nameOrId) {
-        const tree = this.getTree(nameOrId);
-        if (!tree) { throw new Error(`Tree not found: ${nameOrId}`); }
-        return tree.paths;
+        return this.#trees.getTreePaths(nameOrId);
     }
 
     getTreeJson(nameOrId) {
-        const tree = this.getTree(nameOrId);
-        if (!tree) { throw new Error(`Tree not found: ${nameOrId}`); }
-        return tree.buildJsonTree();
+        return this.#trees.getTreeJson(nameOrId);
     }
 
     async stop() { return this.shutdown(); }
@@ -1285,8 +1028,8 @@ class SynapsD extends EventEmitter {
         if (storedIds.length > 0) {
             // Emit for whichever tree(s) the docs landed in so cross-client
             // auto-open fires on both context and directory inserts.
-            this.#emitTreeDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'context', contextSpec, storedIds);
-            this.#emitTreeDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'directory', directorySpec, storedIds);
+            this.#trees.emitDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'context', contextSpec, storedIds);
+            this.#trees.emitDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'directory', directorySpec, storedIds);
         }
 
         // Split inserts from updates so consumers (ws bridge, UIs) can tell an
@@ -1356,32 +1099,7 @@ class SynapsD extends EventEmitter {
      * space — safe to call after a bulk import/re-embed. Returns { <space>: stats }.
      */
     async optimizeVectors(space = null) {
-        const names = space ? [space] : Object.keys(this.#semanticConfig.spaces || {});
-        const out = {};
-        for (const name of names) {
-            const vi = await this.#getVectorSpace(name);
-            if (!vi) { out[name] = { ready: false }; continue; }
-            try {
-                await vi.optimize();
-                out[name] = await vi.ensureVectorIndex();
-            } catch (e) {
-                out[name] = { error: e.message };
-            }
-        }
-        return out;
-    }
-
-    /**
-     * Per-space "seen" bitmap key — docs the embedder has processed (incl. skips).
-     *
-     * Scoped to the space's MODEL, which is what makes a model swap reversible:
-     * the new model embeds into its own table with its own empty ledger, and
-     * switching back finds the previous model's vectors AND its "already embedded"
-     * bookkeeping intact, so nothing is re-embedded.
-     */
-    #seenKey(space) {
-        const cfg = this.#semanticConfig.spaces?.[space];
-        return cfg?.seenKey || vectorSeenKey(space, cfg?.model);
+        return this.#vectors.optimizeVectors(space);
     }
 
 
@@ -1393,26 +1111,7 @@ class SynapsD extends EventEmitter {
      * how an operator finds the ones worth reclaiming.
      */
     async listVectorTables() {
-        const spaces = this.#semanticConfig.spaces || {};
-        const activeByTable = new Map();
-        for (const [space, cfg] of Object.entries(spaces)) {
-            activeByTable.set(this.#vectorTableName(space, cfg), { space, model: cfg.model || null, dim: cfg.dim });
-        }
-
-        let names = [];
-        try {
-            const db = await lancedb.connect(path.join(this.#rootPath, 'lance'));
-            names = (await db.tableNames()).filter((n) => n.startsWith('vec_'));
-        } catch (e) {
-            debug(`listVectorTables failed: ${e.message}`);
-            return { tables: [], error: e.message };
-        }
-
-        const tables = names.map((name) => {
-            const active = activeByTable.get(name) || null;
-            return { name, active: !!active, ...(active || parseVectorTableName(name)) };
-        });
-        return { tables };
+        return this.#vectors.listVectorTables();
     }
 
     /**
@@ -1423,28 +1122,7 @@ class SynapsD extends EventEmitter {
      * @param {string} name  table name from listVectorTables()
      */
     async dropVectorTable(name) {
-        const { tables, error } = await this.listVectorTables();
-        if (error) { return { dropped: false, error }; }
-        const entry = tables.find((t) => t.name === name);
-        if (!entry) { return { dropped: false, error: `unknown vector table '${name}'` }; }
-        if (entry.active) {
-            return { dropped: false, error: `'${name}' is the live table for space '${entry.space}' — switch the model first, or use clearSpace to re-embed it` };
-        }
-
-        const db = await lancedb.connect(path.join(this.#rootPath, 'lance'));
-        await db.dropTable(name);
-
-        // Ledger keys for a model-keyed table are derivable from its name (the
-        // slug is the same one #vectorTableName wrote), so both go with it.
-        const cleared = [];
-        if (entry.space && entry.slug) {
-            for (const key of [`${VECTOR_PRESENCE_PREFIX}/${entry.space}/${entry.slug}`, `${VECTOR_SEEN_PREFIX}/${entry.space}/${entry.slug}`]) {
-                try { await this.bitmapIndex.deleteBitmap(key); cleared.push(key); }
-                catch (e) { debug(`dropVectorTable: could not clear bitmap ${key}: ${e.message}`); }
-            }
-        }
-        debug(`dropped vector table '${name}' (${cleared.length} bitmap(s) cleared)`);
-        return { dropped: true, name, bitmaps: cleared };
+        return this.#vectors.dropVectorTable(name);
     }
 
     /**
@@ -1457,19 +1135,7 @@ class SynapsD extends EventEmitter {
      * @returns {Promise<number[]>}
      */
     async getUnembeddedDocIds(space = 'text', schemas = null) {
-        const cand = (Array.isArray(schemas) && schemas.length)
-            ? schemas
-            : Array.from(this.#semanticConfig.embeddableSchemas);
-        // The user-authored comment always embeds into the text space, so any doc
-        // carrying one belongs in the text gap even when its schema is not otherwise
-        // embeddable (photos, files, tabs). hasComment AND-NOT seen = lazy-embed queue.
-        const keys = space === 'text' ? [...cand, COMMENT_BITMAP_KEY] : cand;
-        if (keys.length === 0) { return []; }
-        const set = await this.bitmapIndex.OR(normalizeBitmapKeys(keys));
-        if (!set || set.isEmpty) { return []; }
-        const seen = await this.bitmapIndex.getBitmap(this.#seenKey(space), false);
-        if (seen) { set.andNotInPlace(seen); }
-        return set.toArray();
+        return this.#vectors.getUnembeddedDocIds(space, schemas);
     }
 
     /**
@@ -1478,168 +1144,7 @@ class SynapsD extends EventEmitter {
      * @param {string} space
      */
     async clearSpace(space = 'text') {
-        const vi = await this.#getVectorSpace(space);
-        if (!vi) { return false; }
-        // Ids currently tracked in either bitmap.
-        const seenKey = this.#seenKey(space);
-        const presenceKey = this.#semanticConfig.spaces[space]?.bitmapKey;
-        const ids = new Set();
-        for (const key of [seenKey, presenceKey]) {
-            if (!key) { continue; }
-            const bm = await this.bitmapIndex.getBitmap(key, false);
-            if (bm) { for (const id of bm.toArray()) { ids.add(id); } }
-        }
-        const idArr = [...ids];
-        if (idArr.length > 0) {
-            await vi.deleteMany(idArr);                       // rows + presence untick
-            try { await this.bitmapIndex.untickMany([seenKey], idArr); } catch (_) { }
-        }
-        return true;
-    }
-
-    /**
-     * kNN the image (CLIP/SigLIP) space with a text query embedded by that space's
-     * text encoder — the joint space means "red car" lands near matching photos.
-     * Returns [] (and loads no model) unless photos are actually embedded, so
-     * text-only searches never pay for the image model.
-     *
-     * Floor modes (imageFloorMode, or forced per call by `opts.relativeFloor`):
-     *
-     * - relative (default): keep everything within `imageRelativeMargin` of the
-     *   BEST hit for this query, then apply imageMaxDistance as a ceiling.
-     *   Text→image distances are not comparable across queries — the modality
-     *   gap shifts and compresses the whole distribution per query and per model
-     *   (CLIP ViT-B/32 lands ~0.73 where SigLIP lands ~0.92), so one global
-     *   cutoff either keeps everything or nothing. Anchoring on the query's own
-     *   best hit adapts to that scale automatically, and re-embedding with a new
-     *   model no longer invalidates the setting.
-     * - absolute: drop hits beyond imageMaxDistance and nothing else. The
-     *   pre-2026-08 behaviour; correct when a corpus IS calibrated and you want
-     *   "no match" to mean no results.
-     *
-     * The ceiling is what keeps a relative floor honest: on its own it always
-     * returns the nearest photo, so a camera pointed at a blank wall would still
-     * surface something. imageMaxDistance caps that — set it loose (or off) and
-     * the relative window governs; set it tight and an irrelevant query can
-     * still come back empty. Refinement stages always force relative: the scope
-     * already established relevance, so a global ceiling would empty them out.
-     * @returns {Promise<number[]>} candidate docIds, best-first
-     */
-    async #imageVectorSearch(queryString, scopedIds, depth, opts = {}) {
-        const cfg = this.#semanticConfig.spaces?.image;
-        const embedQuery = this.#semanticConfig.embedQuery;
-        if (!cfg || typeof embedQuery !== 'function') { return []; }
-        const presence = await this.bitmapIndex.getBitmap(cfg.bitmapKey, false);
-        if (!presence || presence.isEmpty) { return []; }
-        const vi = await this.#getVectorSpace('image');
-        if (!vi || !vi.isReady) { return []; }
-        const qv = await embedQuery(queryString, 'image');
-        if (!qv) { return []; }
-        // Absolute ceiling (cosine distance cap, 0 = identical; smaller =
-        // stricter). Precedence: env override → workspace setting → default.
-        // A non-positive value disables it (pure top-K / pure relative window).
-        const envMax = process.env.CANVAS_IMAGE_MAX_DISTANCE;
-        const cfgMax = (envMax != null && envMax !== '') ? Number(envMax) : this.#semanticConfig.imageMaxDistance;
-        const ceiling = Number.isFinite(cfgMax) && cfgMax > 0 ? cfgMax : undefined;
-
-        // A refinement stage always uses the relative window (its scope already
-        // established relevance); otherwise the configured mode decides.
-        const relative = opts.relativeFloor || this.#semanticConfig.imageFloorMode !== 'absolute';
-
-        if (!relative) {
-            const res = await vi.vectorSearch(qv, scopedIds, { limit: depth, offset: 0, maxDistance: ceiling });
-            return res.pageIds || [];
-        }
-
-        // Refinement keeps its own margin knob for backwards compatibility; a
-        // stage-one query uses the general one.
-        const envMargin = Number(opts.relativeFloor
-            ? (process.env.CANVAS_IMAGE_REFINE_MARGIN ?? process.env.CANVAS_IMAGE_RELATIVE_MARGIN)
-            : (process.env.CANVAS_IMAGE_RELATIVE_MARGIN ?? process.env.CANVAS_IMAGE_REFINE_MARGIN));
-        const margin = Number.isFinite(envMargin) && envMargin > 0
-            ? envMargin
-            : this.#semanticConfig.imageRelativeMargin;
-
-        // Fetch unfloored: the window is measured from THIS query's best hit, so
-        // the ceiling must not prune before the anchor is known.
-        const res = await vi.vectorSearch(qv, scopedIds, { limit: depth, offset: 0, minDistance: 0, maxDistance: 2, withDistances: true });
-        const ids = res.pageIds || [];
-        if (ids.length === 0) { return []; }
-        const dist = res.distances || {};
-        const best = dist[ids[0]];
-        if (!Number.isFinite(best)) { return ids; }
-        // Ceiling applies to a stage-one query only. On a refinement it would
-        // undo the whole point — "red" over car photos legitimately peaks above
-        // any global cutoff.
-        const cap = (!opts.relativeFloor && ceiling !== undefined)
-            ? Math.min(best + margin, ceiling)
-            : best + margin;
-        return ids.filter((id) => Number.isFinite(dist[id]) && dist[id] <= cap);
-    }
-
-    /**
-     * The FULL set of docIds a single query matches, across modalities — doc-level
-     * FTS (lexical, all schemas) UNION image kNN (photos, above the relevance
-     * floor). Used by searchRefined's intermediate fold: FTS alone can never match
-     * a photo (blobs have no text), so refining "library" then "table" over images
-     * needs the image side here. Not a ranking — just membership, for AND-ing.
-     * `opts.relativeImageFloor` switches the image side to the scope-adaptive
-     * cutoff (see #imageVectorSearch) — used for refinement stages, where the
-     * scope already established relevance and the absolute floor would empty out.
-     * `opts.imageDepth` bounds the kNN side separately: `limit` means "all
-     * matches" to FTS, but a kNN has no such notion and would happily return the
-     * whole library (see #foldQueryScope).
-     * @returns {Promise<number[]>}
-     */
-    async #queryMatchSet(queryString, scopeIds, limit, opts = {}) {
-        const [fts, img] = await Promise.all([
-            this.#lanceIndex.ftsQuery(queryString, scopeIds, { limit, offset: 0 }).catch(() => ({ pageIds: [] })),
-            this.#imageVectorSearch(queryString, scopeIds, opts.imageDepth ?? limit, { relativeFloor: !!opts.relativeImageFloor }).catch(() => []),
-        ]);
-        const ids = new Set(fts.pageIds || []);
-        for (const id of img) { ids.add(id); }
-        return [...ids];
-    }
-
-    /**
-     * Debug/calibration: the top-N image kNN matches for a query WITH their cosine
-     * distances (0 = identical … 1 = orthogonal … 2 = opposite; distance = 1 −
-     * cosine similarity) and NO relevance floor — so you can see where matches
-     * actually land and pick a sane `imageMaxDistance`. Best-first.
-     * @returns {Promise<Array<{id:number, distance:number}>>}
-     */
-    async #imageDistances(queryString, scopedIds, n = 25) {
-        const cfg = this.#semanticConfig.spaces?.image;
-        const embedQuery = this.#semanticConfig.embedQuery;
-        if (!cfg || typeof embedQuery !== 'function') { return []; }
-        const presence = await this.bitmapIndex.getBitmap(cfg.bitmapKey, false);
-        if (!presence || presence.isEmpty) { return []; }
-        const vi = await this.#getVectorSpace('image');
-        if (!vi || !vi.isReady) { return []; }
-        const qv = await embedQuery(queryString, 'image');
-        if (!qv) { return []; }
-        // min 0 / max 2 forces cosine and keeps the full range (no filtering), so
-        // every returned neighbour comes back with an interpretable distance.
-        const res = await vi.vectorSearch(qv, scopedIds, { limit: n, offset: 0, minDistance: 0, maxDistance: 2, withDistances: true });
-        const dist = res.distances || {};
-        return (res.pageIds || []).map((id) => ({ id, distance: dist[id] }));
-    }
-
-    /**
-     * Lazily create + initialize the VectorIndex for a named space. Returns null
-     * if the semantic stack is disabled or the space is unknown.
-     */
-    // Lance table name for a vector space. An explicit `cfg.table` pins the space
-    // to an existing table — baseline spaces keep vec_text/vec_image so making the
-    // model configurable orphans nothing. Otherwise the table is keyed by
-    // (space, model, dim) — `vec_text__qwen3-embedding-0.6b__1024` — so a model or
-    // dim change lands in its OWN table instead of colliding with (and destroying)
-    // another config's vectors; two models coexist and stay independently
-    // queryable.
-    #vectorTableName(space, cfg) {
-        if (cfg?.table) { return cfg.table; }
-        if (!cfg?.model) { return `vec_${space}`; }
-        return `vec_${space}__${vectorModelSlug(cfg.model)}__${cfg.dim}`;
+        return this.#vectors.clearSpace(space);
     }
 
     /**
@@ -1656,45 +1161,7 @@ class SynapsD extends EventEmitter {
      * swap and scatter half its chunks into the outgoing table.
      */
     async setVectorSpaces(spaces = {}) {
-        if (!this.#semanticConfig.enabled) { return { applied: false, reason: 'semantic stack disabled' }; }
-        if (!spaces || Object.keys(spaces).length === 0) { return { applied: false, reason: 'no spaces supplied' }; }
-
-        this.#semanticConfig.spaces = spaces;
-        this.#vectorSpaces.clear();
-        this.#vectorIndex = null;
-
-        // Re-open the text space eagerly: it drives search, and rank() checks
-        // #vectorIndex directly rather than going through #getVectorSpace.
-        this.#vectorIndex = await this.#getVectorSpace('text');
-        const applied = Object.fromEntries(
-            Object.entries(spaces).map(([name, cfg]) => [name, this.#vectorTableName(name, cfg)]),
-        );
-        debug(`vector spaces swapped: ${JSON.stringify(applied)}`);
-        return { applied: true, tables: applied, textReady: !!this.#vectorIndex };
-    }
-
-    async #getVectorSpace(space) {
-        if (!this.#semanticConfig.enabled) { return null; }
-        if (this.#vectorSpaces.has(space)) { return this.#vectorSpaces.get(space); }
-        const cfg = this.#semanticConfig.spaces[space];
-        if (!cfg) { debug(`unknown vector space '${space}'`); return null; }
-        try {
-            const vi = new VectorIndex({
-                rootPath: path.join(this.#rootPath, 'lance'),
-                tableName: this.#vectorTableName(space, cfg),
-                dim: cfg.dim,
-                model: cfg.model,
-                vectorBitmapKey: cfg.bitmapKey,
-                bitmapIndex: this.bitmapIndex,
-                annIndex: cfg.annIndex,
-            });
-            await vi.initialize();
-            this.#vectorSpaces.set(space, vi);
-            return vi;
-        } catch (e) {
-            debug(`failed to init vector space '${space}': ${e.message}`);
-            return null;
-        }
+        return this.#vectors.setVectorSpaces(spaces);
     }
 
     /**
@@ -1713,15 +1180,7 @@ class SynapsD extends EventEmitter {
      *   'text') + provenance model label stamped on the rows
      */
     async storeDocumentEmbeddings(docId, schema, updatedAt, chunks, opts = {}) {
-        const space = opts.space || 'text';
-        const vi = await this.#getVectorSpace(space);
-        if (!vi) { return false; }
-        // upsertChunks ticks the presence bitmap when chunks>0 (unticks otherwise).
-        await vi.upsertChunks(docId, schema, updatedAt, chunks, { model: opts.model });
-        // Always mark the doc as processed in the ledger — even a deliberate skip
-        // (0 chunks) must leave the unembedded gap, or reconcile re-fetches it forever.
-        try { await this.bitmapIndex.tick(this.#seenKey(space), Number(docId)); } catch (_) { }
-        return true;
+        return this.#vectors.storeDocumentEmbeddings(docId, schema, updatedAt, chunks, opts);
     }
 
     /**
@@ -1969,8 +1428,8 @@ class SynapsD extends EventEmitter {
 
             // Tree-scoped events drive the web UI content refresh + browser
             // extension. Batch helper handles the single/none cases internally.
-            this.#emitTreeDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'context', contextSpec, ids);
-            this.#emitTreeDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'directory', directorySpec, ids);
+            this.#trees.emitDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'context', contextSpec, ids);
+            this.#trees.emitDocumentEvent(EVENTS.TREE_DOCUMENT_INSERTED_BATCH, 'directory', directorySpec, ids);
         } catch (eventError) {
             debug(`linkMany: Failed to emit events: ${eventError.message}`);
         }
@@ -2020,7 +1479,7 @@ class SynapsD extends EventEmitter {
 
         if (contextSpec) {
             try {
-                const { tree: contextTree, collection: contextCollection, path: normalizedContextSpec } = this.#resolveTreeSelection('context', contextSpec, '/');
+                const { tree: contextTree, collection: contextCollection, path: normalizedContextSpec } = this.#trees.resolveSelection('context', contextSpec, '/');
                 const pathLayersArray = parseContextSpecForInsert(normalizedContextSpec);
                 for (const pathLayers of pathLayersArray) {
                     if (pathLayers.length === 1 && pathLayers[0] === '/') {
@@ -2047,7 +1506,7 @@ class SynapsD extends EventEmitter {
 
         if (directorySpec) {
             try {
-                const { tree: directoryTree, collection: directoryCollection, path: normalizedDirectoryPath } = this.#resolveTreeSelection('directory', directorySpec, '/');
+                const { tree: directoryTree, collection: directoryCollection, path: normalizedDirectoryPath } = this.#trees.resolveSelection('directory', directorySpec, '/');
                 const directoryPaths = Array.isArray(normalizedDirectoryPath) ? normalizedDirectoryPath : [normalizedDirectoryPath];
                 for (const directoryPath of directoryPaths) {
                     const nodeIds = directoryTree.getNodeIdsForPath(directoryPath, { recursive });
@@ -2131,8 +1590,8 @@ class SynapsD extends EventEmitter {
             // Tree-scoped events drive cross-client auto-close (browser extension)
             // and web UI refresh — they carry the path + tree id/name the consumers
             // match on. Emit for whichever tree(s) the unlink touched.
-            this.#emitTreeDocumentEvent(EVENTS.TREE_DOCUMENT_REMOVED_BATCH, 'context', contextSpec, ids);
-            this.#emitTreeDocumentEvent(EVENTS.TREE_DOCUMENT_REMOVED_BATCH, 'directory', directorySpec, ids);
+            this.#trees.emitDocumentEvent(EVENTS.TREE_DOCUMENT_REMOVED_BATCH, 'context', contextSpec, ids);
+            this.#trees.emitDocumentEvent(EVENTS.TREE_DOCUMENT_REMOVED_BATCH, 'directory', directorySpec, ids);
         } catch (eventError) {
             debug(`unlinkMany: Failed to emit events: ${eventError.message}`);
         }
@@ -2276,9 +1735,9 @@ class SynapsD extends EventEmitter {
             lanceClean = false;
             debug(`deleteMany: Lance deleteMany failed: ${e.message}`);
         }
-        if (this.#vectorSpaces.size > 0) {
+        if (this.#vectors.openedCount > 0) {
             try {
-                for (const vi of this.#vectorSpaces.values()) {
+                for (const vi of this.#vectors.openedIndexes()) {
                     const vecClean = await vi.deleteMany(deletedIds);
                     lanceClean = lanceClean && vecClean;
                 }
@@ -2468,7 +1927,7 @@ class SynapsD extends EventEmitter {
         try { await this.#lanceIndex.upsert(parseInitializeDocument(parsedDocument)); } catch (_) { }
 
         if (emitEvent) {
-            const { tree: contextTree } = this.#resolveTreeSelection('context', contextSpec, '/');
+            const { tree: contextTree } = this.#trees.resolveSelection('context', contextSpec, '/');
             contextTree.emit(EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
                 documentId: parsedDocument.id,
                 contextSpec,
@@ -2530,7 +1989,7 @@ class SynapsD extends EventEmitter {
             const treeType = contextSpec ? 'context' : (directorySpec ? 'directory' : null);
             const treeSpec = contextSpec ?? directorySpec;
             if (treeType && treeSpec) {
-                const { tree } = this.#resolveTreeSelection(treeType, treeSpec, treeType === 'context' ? '/' : null);
+                const { tree } = this.#trees.resolveSelection(treeType, treeSpec, treeType === 'context' ? '/' : null);
                 tree.emit(EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
                     documentId: numericId,
                     contextSpec,
@@ -2572,7 +2031,7 @@ class SynapsD extends EventEmitter {
             return false;
         }
 
-        const selectorBitmap = await this.#buildSelectorBitmap({
+        const selectorBitmap = await this.#candidates.buildSelectorBitmap({
             context: spec.context ?? null,
             directory: spec.directory ?? null,
         });
@@ -2580,7 +2039,7 @@ class SynapsD extends EventEmitter {
             return false;
         }
 
-        const featureBitmap = await this.#buildFeaturesBitmap(spec.features ?? null);
+        const featureBitmap = await this.#candidates.buildFeaturesBitmap(spec.features ?? null);
         if (featureBitmap && featureBitmap.isEmpty) {
             return false;
         }
@@ -2643,8 +2102,8 @@ class SynapsD extends EventEmitter {
             .map((t) => this.getTree(t))
             .filter(Boolean)
             .flatMap((tree) => [
-                BitmapIndex.normalizeKey(this.#directoryBitmapCollectionForTree(tree.id).prefix),
-                BitmapIndex.normalizeKey(this.#contextBitmapCollectionForTree(tree.id).prefix),
+                BitmapIndex.normalizeKey(this.#trees.directoryCollection(tree.id).prefix),
+                BitmapIndex.normalizeKey(this.#trees.contextCollection(tree.id).prefix),
             ]);
 
         const layerKeys = await this.#synapses.listSynapses(from);
@@ -2667,7 +2126,7 @@ class SynapsD extends EventEmitter {
             throw new Error(`Tree "${tree.name}" is not a directory tree`);
         }
 
-        const collection = this.#directoryBitmapCollectionForTree(tree.id);
+        const collection = this.#trees.directoryCollection(tree.id);
         const layerKeys = await this.#synapses.listSynapses(id);
         // Synapse keys are stored normalized (lowercased); the raw collection
         // prefix carries the uppercase ULID tree id, so normalize to compare.
@@ -2703,7 +2162,7 @@ class SynapsD extends EventEmitter {
             return await this.listDocumentTreePaths(id, tree.id);
         }
 
-        const collection = this.#contextBitmapCollectionForTree(tree.id);
+        const collection = this.#trees.contextCollection(tree.id);
         const prefix = BitmapIndex.normalizeKey(collection.prefix);
         const paths = [];
 
@@ -2739,10 +2198,10 @@ class SynapsD extends EventEmitter {
         const path = `/${String(rawPath || '').replace(/^\/+/, '')}`;
 
         let tree = null;
-        if (alias === 'ctx' || alias === 'context') { tree = this.getTree(this.#defaultTreeIds.context); }
-        else if (alias === 'dir' || alias === 'directory') { tree = this.getTree(this.#defaultTreeIds.directory); }
+        if (alias === 'ctx' || alias === 'context') { tree = this.getDefaultContextTree(); }
+        else if (alias === 'dir' || alias === 'directory') { tree = this.getDefaultDirectoryTree(); }
         else if (alias) { tree = this.getTree(m[1]); }
-        else { tree = this.getTree(this.#defaultTreeIds.context); }
+        else { tree = this.getDefaultContextTree(); }
         if (!tree) { return null; }
 
         const bitmap = await tree.findRecursive(path);
@@ -2757,8 +2216,8 @@ class SynapsD extends EventEmitter {
         }
 
         const prefix = BitmapIndex.normalizeKey(tree.type === 'directory'
-            ? this.#directoryBitmapCollectionForTree(tree.id).prefix
-            : this.#contextBitmapCollectionForTree(tree.id).prefix);
+            ? this.#trees.directoryCollection(tree.id).prefix
+            : this.#trees.contextCollection(tree.id).prefix);
         const layerKeys = await this.#synapses.listSynapses(id);
         return layerKeys.some((layerKey) => layerKey.startsWith(prefix));
     }
@@ -2811,13 +2270,13 @@ class SynapsD extends EventEmitter {
     // union of their node bitmaps.
     async #membershipBitmapExcludingTree(excludedTreeId) {
         const union = new RoaringBitmap32();
-        for (const meta of this.#treeMetadata.values()) {
+        for (const meta of this.#trees.metadata()) {
             if (meta.id === excludedTreeId) { continue; }
             const other = this.getTree(meta.id);
             if (!other) { continue; }
             if (meta.type === 'context') {
                 if (!other.rootLayer) { continue; }
-                const bitmap = await this.#contextBitmapCollectionForTree(meta.id).getBitmap(other.rootLayer.id, false);
+                const bitmap = await this.#trees.contextCollection(meta.id).getBitmap(other.rootLayer.id, false);
                 if (bitmap) { union.orInPlace(bitmap); }
             } else {
                 const bitmap = await other.findRecursive('/');
@@ -2841,640 +2300,24 @@ class SynapsD extends EventEmitter {
     // stable key and must be re-resolved on any relevant write. Nothing cached here.
 
     async resolveCandidates(rawSpec = {}) {
-        return await this.#resolveParsed(parseSpec(rawSpec));
-    }
-
-    async #resolveParsed(parsed) {
-        const { paths, features, filters, rel = [], ids = null } = parsed;
-        const keys = [];
-        // collectionKeys: the actual bitmap keys (collection vocabulary) consulted,
-        // for precise QuerySession invalidation. coarse: this candidate set depends
-        // on an operand with no stable key (temporal BSI range) → consumers must
-        // re-resolve it on any relevant write rather than key-intersect.
-        const collectionKeys = [];
-        let coarse = false;
-        let bitmap = null;
-        let constrained = false;
-
-        // Datasets (data/dataset/*) get their own algebra bucket. Every doc
-        // implicitly belongs to the VIRTUAL 'default' dataset (= stamped with no
-        // dataset); the candidate set is intersected with OR(selected datasets),
-        // and 'default' starts selected. So: anyOf data/dataset/X ADDS the
-        // dataset to the mix, allOf shows only it (the feature AND constrains),
-        // noneOf deselects. anyOf/noneOf dataset keys are pulled OUT of the
-        // generic feature buckets — a plain anyOf union would let dataset docs
-        // bypass the caller's other feature filters.
-        const DATASET_PREFIX = 'data/dataset/';
-        const DEFAULT_DATASET_KEY = `${DATASET_PREFIX}default`;
-        const isDatasetKey = (key) => normalizeBitmapKey(key)?.startsWith(DATASET_PREFIX);
-        const selectedDatasets = new Set([DEFAULT_DATASET_KEY]);
-        // allOf 'default' means "only unstamped docs" — there is no physical
-        // bitmap to AND (default is virtual), so it resolves as the selection
-        // {default} alone. Combined with an allOf NAMED dataset the result is
-        // correctly empty (a doc cannot be both stamped and unstamped).
-        const allOfDefault = features.allOf.some((key) => normalizeBitmapKey(key) === DEFAULT_DATASET_KEY);
-        for (const key of [...features.allOf, ...features.anyOf].filter(isDatasetKey)) {
-            selectedDatasets.add(normalizeBitmapKey(key));
-        }
-        for (const key of features.noneOf.filter(isDatasetKey)) {
-            selectedDatasets.delete(normalizeBitmapKey(key));
-        }
-        if (allOfDefault) {
-            selectedDatasets.clear();
-            selectedDatasets.add(DEFAULT_DATASET_KEY);
-        }
-        // Named allOf keys stay in the bucket (the feature AND constrains);
-        // 'default' has no physical bitmap and must not reach bitmapIndex.AND.
-        features.allOf = features.allOf.filter((key) => normalizeBitmapKey(key) !== DEFAULT_DATASET_KEY);
-        features.anyOf = features.anyOf.filter((key) => !isDatasetKey(key));
-        features.noneOf = features.noneOf.filter((key) => !isDatasetKey(key));
-
-        const includeBitmap = await this.#buildPathsBitmap(paths.in, keys, collectionKeys);
-        if (includeBitmap) {
-            bitmap = includeBitmap;
-            constrained = true;
-        }
-
-        const featureBitmap = await this.#buildFeaturesBitmap(features);
-        if (featureBitmap) {
-            keys.push(...features.allOf, ...features.anyOf, ...features.noneOf);
-            // Feature keys are already collection vocabulary (same normalization as
-            // membership feature keys), so they intersect tick keys directly.
-            collectionKeys.push(...normalizeBitmapKeys([...features.allOf, ...features.anyOf, ...features.noneOf]));
-            if (bitmap) { bitmap.andInPlace(featureBitmap); } else { bitmap = featureBitmap; }
-            constrained = true;
-        }
-
-        if (filters.length > 0) {
-            const { bitmapFilters, timelineFilters, geoFilters } = parseFilters(filters);
-            if (bitmapFilters.length > 0) {
-                const filterKeys = normalizeBitmapKeys(bitmapFilters);
-                keys.push(...filterKeys);
-                collectionKeys.push(...filterKeys);
-                const filterBitmap = await this.bitmapIndex.AND(filterKeys);
-                if (bitmap) { bitmap.andInPlace(filterBitmap); } else { bitmap = filterBitmap; }
-                constrained = true;
-            }
-            if (timelineFilters.length > 0) {
-                const timelineBitmap = await this.#combineTimelineFilters(timelineFilters);
-                keys.push(...timelineFilters.map((f) => `t:${f.name}`));
-                // Temporal filters live in BSI tiers, not stable membership keys —
-                // a write does not tick a key we can intersect. Mark coarse.
-                coarse = true;
-                if (bitmap) { bitmap.andInPlace(timelineBitmap); } else { bitmap = timelineBitmap; }
-                constrained = true;
-            }
-            if (geoFilters.length > 0) {
-                const geoBitmap = await this.#combineGeoFilters(geoFilters);
-                keys.push(...geoFilters.map((f) => `geo:${f.kind}`));
-                // Spatial filters live in the S2 BSI — same no-stable-key story
-                // as temporal ones. Mark coarse.
-                coarse = true;
-                if (bitmap) { bitmap.andInPlace(geoBitmap); } else { bitmap = geoBitmap; }
-                constrained = true;
-            }
-        }
-
-        // Graph adjacency: one hop from a known document, composed under the same
-        // sigil algebra as features and the BSI filter families.
-        if (rel.length > 0) {
-            const relBitmap = await this.#combineRelFilters(rel);
-            keys.push(...rel.map((r) => `rel:${r.dir}:${r.p}:${r.of}`));
-            // A rel operand is built from a dupsort scan, so it has NO stable
-            // bitmap key — link()/unlink() fire no membership event a QuerySession
-            // could intersect, and a cached operand would go stale silently. Same
-            // no-stable-key story as the temporal and spatial families: mark
-            // coarse so consumers re-resolve rather than key-invalidate.
-            coarse = true;
-            if (bitmap) { bitmap.andInPlace(relBitmap); } else { bitmap = relBitmap; }
-            constrained = true;
-        }
-
-        // Literal id-set from an external producer (kNN results, sensor anchor
-        // emissions, an agent-curated working set). No collection keys and never
-        // coarse: the set only changes when the caller replaces it, so a live
-        // QuerySession caches it with zero invalidation cost. [] constrains to
-        // the empty set — distinct from absent (unconstrained).
-        if (ids) {
-            keys.push(`ids:${ids.length}`);
-            const idBitmap = new RoaringBitmap32(ids);
-            if (bitmap) { bitmap.andInPlace(idBitmap); } else { bitmap = idBitmap; }
-            constrained = true;
-        }
-
-        if (paths.not.length > 0) {
-            const excludeBitmap = await this.#buildPathsBitmap(paths.not, keys, collectionKeys);
-            if (excludeBitmap && !excludeBitmap.isEmpty) {
-                const base = bitmap || await this.#buildAllDocumentsBitmap();
-                base.andNotInPlace(excludeBitmap);
-                bitmap = base;
-                constrained = true;
-            }
-        }
-
-        // Apply the dataset selection: candidate ∩ (default ∪ OR(selected named)).
-        // 'default' is virtual — candidate \ OR(all named dataset bitmaps). Until
-        // the first dataset exists this is a no-op, preserving the bitmap:null
-        // fast path for unconstrained listings.
-        const allDatasetKeys = await this.bitmapIndex.listBitmaps(DATASET_PREFIX);
-        const defaultSelected = selectedDatasets.has(`${DATASET_PREFIX}default`);
-        const namedSelected = [...selectedDatasets].filter((key) => key !== `${DATASET_PREFIX}default` && allDatasetKeys.includes(key));
-        if (allDatasetKeys.length > 0 && !(defaultSelected && namedSelected.length === allDatasetKeys.length)) {
-            collectionKeys.push(...allDatasetKeys);
-            const base = bitmap || await this.#buildAllDocumentsBitmap();
-            const selectedUnion = namedSelected.length > 0 ? await this.bitmapIndex.OR(namedSelected) : null;
-            if (defaultSelected) {
-                // (candidate \ all-datasets) ∪ (candidate ∩ selected-datasets)
-                const keep = selectedUnion ? RoaringBitmap32.and(base, selectedUnion) : null;
-                base.andNotInPlace(await this.bitmapIndex.OR(allDatasetKeys));
-                if (keep) { base.orInPlace(keep); }
-            } else if (selectedUnion) {
-                // default deselected: only the selected datasets remain
-                base.andInPlace(selectedUnion);
-            } else {
-                // nothing selected at all
-                base.andInPlace(new RoaringBitmap32());
-            }
-            bitmap = base;
-            constrained = true;
-        }
-
-        return {
-            bitmap: constrained ? (bitmap || new RoaringBitmap32()) : null,
-            keys,
-            collectionKeys: Array.from(new Set(collectionKeys)),
-            coarse,
-        };
-    }
-
-    // Union bitmap for a set of {type, path} entries; null when there are none.
-    // collectionKeys (optional) collects the real bitmap keys consulted per entry
-    // (context/<treeId>/<layerId>, vfs/<treeId>/<nodeId>) for precise invalidation.
-    async #buildPathsBitmap(entries = [], keys = [], collectionKeys = null) {
-        if (!Array.isArray(entries) || entries.length === 0) { return null; }
-        let result = null;
-        for (const { type, path, tree, recursive } of entries) {
-            keys.push(`${type}:${path}`);
-            const selector = { path, ...(tree ? { tree } : {}), ...(recursive ? { recursive: true } : {}) };
-            const bm = type === 'directory'
-                ? await this.#buildDirectorySelectorBitmap(selector, collectionKeys)
-                : await this.#buildContextSelectorBitmap(selector, collectionKeys);
-            if (!bm) { continue; }
-            if (result) { result.orInPlace(bm); } else { result = bm; }
-        }
-        return result;
-    }
-
-    async #combineTimelineFilters(timelineFilters) {
-        return await this.#combineSigilFilters(timelineFilters, (f) => applyTimelineFilter(f, this.#timelineIndex));
-    }
-
-    // One rel entry -> the sorted adjacency list for (of, p) in the requested
-    // direction, lifted into an ephemeral bitmap. `new RoaringBitmap32(array)` is
-    // fine here: the dupsort iteration is already sorted. A multi-id `of` unions
-    // its adjacency lists into ONE operand (see parseRel) before the sigil
-    // algebra runs.
-    async #combineRelFilters(relFilters) {
-        return await this.#combineSigilFilters(relFilters, (f) => {
-            const anchors = Array.isArray(f.of) ? f.of : [f.of];
-            const bitmap = new RoaringBitmap32();
-            for (const anchor of anchors) {
-                const iterator = f.dir === 'in'
-                    ? this.#edges.incoming(anchor, f.p)
-                    : this.#edges.outgoing(anchor, f.p);
-                // Drain promptly — a live iterator pins an LMDB read txn.
-                bitmap.orInPlace(new RoaringBitmap32([...iterator]));
-            }
-            return bitmap;
-        });
-    }
-
-    async #combineGeoFilters(geoFilters) {
-        return await this.#combineSigilFilters(geoFilters, (f) => applyGeoFilter(f, this.#geoIndex));
-    }
-
-    // Shared sigil algebra for BSI-backed filter families (timeline, geo):
-    // AND(allOf) ∩ OR(anyOf) \ OR(noneOf). Returns a bitmap (never null) when
-    // given a non-empty filter set.
-    async #combineSigilFilters(filters, apply) {
-        const bySigil = { allOf: [], anyOf: [], noneOf: [] };
-        for (const filter of filters) { bySigil[filter.sigil].push(filter); }
-
-        const orOf = async (list) => {
-            const result = new RoaringBitmap32();
-            for (const filter of list) { result.orInPlace(await apply(filter)); }
-            return result;
-        };
-
-        let positive = null;
-        if (bySigil.allOf.length > 0) {
-            for (const filter of bySigil.allOf) {
-                const bm = await apply(filter);
-                if (positive) { positive.andInPlace(bm); } else { positive = bm; }
-            }
-        }
-        if (bySigil.anyOf.length > 0) {
-            const anyBitmap = await orOf(bySigil.anyOf);
-            if (positive) { positive.andInPlace(anyBitmap); } else { positive = anyBitmap; }
-        }
-        if (bySigil.noneOf.length > 0) {
-            const base = positive || await this.#buildAllDocumentsBitmap();
-            base.andNotInPlace(await orOf(bySigil.noneOf));
-            positive = base;
-        }
-
-        return positive || new RoaringBitmap32();
+        return this.#candidates.resolveCandidates(rawSpec);
     }
 
     // bitmap===null => unconstrained (all docs / search-all); empty => no survivors.
     async rank(bitmap, match = null, options = {}) {
-        const parseDocuments = options.parse !== false;
-        // idsOnly short-circuits the LMDB fetch: the result array holds document
-        // ids instead of documents, with the same count/totalCount/error shape.
-        const idsOnly = options.idsOnly === true;
-        const idResult = (ids, totalCount, error = null) => {
-            const result = [...ids];
-            result.count = result.length;
-            result.totalCount = totalCount;
-            result.error = error;
-            return result;
-        };
-
-        if (match == null) {
-            const providedLimit = Number.isFinite(options.limit) ? Number(options.limit) : undefined;
-            const providedOffset = Number.isFinite(options.offset) ? Number(options.offset) : undefined;
-            const providedPage = Number.isFinite(options.page) ? Number(options.page) : undefined;
-            // Bounded by default; limit:0 is the explicit "all documents" opt-in.
-            const limit = providedLimit !== undefined ? Math.max(0, providedLimit) : DEFAULT_LIST_LIMIT;
-            const offset = Math.max(0, providedOffset !== undefined ? providedOffset : (providedPage && providedPage > 0 ? (providedPage - 1) * (limit || 100) : 0));
-            // 'desc' = newest ids first (ids are allocated in insertion order;
-            // GC id-reuse makes this approximate for reused ids).
-            const descending = options.order === 'desc';
-
-            // Timeline sort: order the candidate set by its values on a named
-            // timeline (BSI value extraction), THEN paginate — the whole point is
-            // that page 1 of a 1300-photo gallery is already in capture order.
-            const sortTimeline = this.#normalizeSortBy(options.sortBy);
-            if (sortTimeline && this.#timelineIndex) {
-                const base = bitmap === null ? await this.#buildAllDocumentsBitmap() : bitmap;
-                if (base.isEmpty) { return this.#emptyResult(); }
-                const keyMap = await this.#timelineIndex.getSortKeys(sortTimeline, base);
-                const keyed = [];
-                const missing = [];
-                for (const id of base) { (keyMap.has(id) ? keyed : missing).push(id); }
-                keyed.sort((a, b) => {
-                    const d = keyMap.get(a) - keyMap.get(b);
-                    return d < 0n ? -1 : d > 0n ? 1 : a - b;
-                });
-                if (descending) { keyed.reverse(); missing.reverse(); }
-                // Docs without a value on the timeline are unsortable — they
-                // always trail (in id order) rather than polluting the sequence.
-                const ids = keyed.concat(missing);
-                const totalCount = ids.length;
-                const slicedIds = limit === 0 ? ids : ids.slice(offset, offset + limit);
-                if (idsOnly) { return idResult(slicedIds, totalCount); }
-                const docs = await this.documents.getMany(slicedIds);
-                const resultArray = parseDocuments ? this.#safeParseDocuments(docs) : docs;
-                resultArray.count = resultArray.length;
-                resultArray.totalCount = totalCount;
-                resultArray.error = null;
-                return resultArray;
-            }
-
-            if (bitmap === null) {
-                const totalCount = await this.documents.getCount();
-                const pagedDocs = [];
-                const pagedIds = [];
-                let seen = 0;
-                for await (const { key, value } of this.documents.getRange({ reverse: descending })) {
-                    if (seen++ < offset) { continue; }
-                    if (idsOnly) { pagedIds.push(key); } else { pagedDocs.push(value); }
-                    if (limit > 0 && (idsOnly ? pagedIds.length : pagedDocs.length) >= limit) { break; }
-                }
-                if (idsOnly) { return idResult(pagedIds, totalCount); }
-                const resultArray = parseDocuments ? this.#safeParseDocuments(pagedDocs) : pagedDocs;
-                resultArray.count = resultArray.length;
-                resultArray.totalCount = totalCount;
-                resultArray.error = null;
-                return resultArray;
-            }
-
-            const ids = bitmap.toArray();
-            if (ids.length === 0) { return this.#emptyResult(); }
-            if (descending) { ids.reverse(); }
-            const totalCount = ids.length;
-            const slicedIds = limit === 0 ? ids : ids.slice(offset, offset + limit);
-            if (idsOnly) { return idResult(slicedIds, totalCount); }
-            const docs = await this.documents.getMany(slicedIds);
-            const resultArray = parseDocuments ? this.#safeParseDocuments(docs) : docs;
-            resultArray.count = resultArray.length;
-            resultArray.totalCount = totalCount;
-            resultArray.error = null;
-            return resultArray;
-        }
-
-        // Typed match: a plain string is the classic text query; an object is a
-        // descriptor { text?, vectors?: [{space, vector, weight?, minDistance?,
-        // maxDistance?}] }. Extra vector legs are caller-supplied embeddings
-        // (an image query via embedd, a camera frame, a stored doc vector) that
-        // fuse into the same RRF ranking as the built-in fts/dense/image legs.
-        const desc = this.#normalizeMatch(match);
-        const queryString = desc.text;
-
-        if (bitmap !== null && bitmap.isEmpty) { return this.#emptyResult(); }
-        const scopedIds = bitmap ? bitmap.toArray() : [];
-        const { pageIds, totalCount, error } = await this.#rankIds(scopedIds, desc, options);
-        if (idsOnly) { return idResult(pageIds, totalCount, error); }
-
-        const docs = pageIds.length > 0 ? await this.documents.getMany(pageIds) : [];
-        const result = this.#safeParseDocuments(docs);
-        result.count = result.length;
-        result.totalCount = totalCount;
-        result.error = error;
-        // Calibration aid: when debug is requested, attach the raw (unfloored)
-        // image kNN distances for this query so a caller can pick imageMaxDistance
-        // from real numbers. Best-effort; never fails the search.
-        if (options.debug && queryString) {
-            // Depth matters for calibration: the top-25 neighbours of ANY query
-            // are all near by construction, so a short window shows a tight
-            // cluster with no boundary in it. The match/noise transition is
-            // usually further down — ask for more when you are picking a floor.
-            const debugLimit = Math.min(Math.max(Number(options.debugLimit) || 25, 1), 500);
-            try { result.debug = { imageDistances: await this.#imageDistances(queryString, scopedIds, debugLimit) }; }
-            catch (e) { result.debug = { imageDistances: [], error: e.message }; }
-        }
-        return result;
-    }
-
-    // Match → { text: string|null, vectors: [{space, vector, weight?, minDistance?, maxDistance?}] }.
-    // Throws unless at least one leg (text or vector) is present and well-formed.
-    #normalizeMatch(match) {
-        if (typeof match === 'string') { return { text: match, vectors: [] }; }
-        if (!match || typeof match !== 'object' || Array.isArray(match)) {
-            throw new ArgumentError('match must be a query string or a { text?, vectors? } descriptor', 'match');
-        }
-        const text = match.text ?? match.query ?? null;
-        if (text !== null && typeof text !== 'string') {
-            throw new ArgumentError('match.text must be a string', 'match');
-        }
-        const vectors = match.vectors ?? [];
-        if (!Array.isArray(vectors)) {
-            throw new ArgumentError('match.vectors must be an array of { space, vector } legs', 'match');
-        }
-        for (const leg of vectors) {
-            if (!leg || typeof leg.space !== 'string' || !leg.space) {
-                throw new ArgumentError('each vector leg requires a space name', 'match');
-            }
-            if (!Array.isArray(leg.vector) || leg.vector.length === 0 || !leg.vector.every(Number.isFinite)) {
-                throw new ArgumentError(`vector leg for space '${leg.space}' requires a non-empty numeric vector`, 'match');
-            }
-        }
-        if ((text === null || text === '') && vectors.length === 0) {
-            throw new ArgumentError('match needs text and/or at least one vector leg', 'match');
-        }
-        return { text: typeof text === 'string' && text.length > 0 ? text : null, vectors };
-    }
-
-    /**
-     * The id-producing core of rank(): FTS/vector/hybrid ranking within a scope,
-     * returning ranked doc ids without fetching documents — reused by rank()
-     * (which hydrates a page) and searchCompound() (which fuses per-line
-     * rankings before hydrating anything).
-     * `options.imageRelativeFloor` switches the image kNN leg to the
-     * scope-adaptive cutoff (refinement chains — see #imageVectorSearch).
-     * @param {number[]} scopedIds  candidate ids ([] = unscoped)
-     * @returns {Promise<{pageIds:number[], totalCount:number, error:string|null}>}
-     */
-    async #rankIds(scopedIds, match, options = {}) {
-        // Accept the classic string or a normalized { text, vectors } descriptor
-        // (rank() normalizes; internal callers still pass plain strings).
-        const desc = typeof match === 'string' ? { text: match, vectors: [] } : match;
-        const queryString = desc.text;
-        const legs = desc.vectors || [];
-
-        // fts (BM25) | vector (kNN) | hybrid (RRF); vector/hybrid degrade to fts
-        // when the dense stack is unavailable.
-        let mode = (options.mode || 'hybrid').toLowerCase();
-        if ((mode === 'vector' || mode === 'hybrid') && (!this.#vectorIndex || !this.#vectorIndex.isReady)) {
-            debug(`rank: mode '${mode}' requested but vector index not ready; falling back to fts`);
-            mode = 'fts';
-        }
-        if (mode === 'fts' && legs.length === 0 && (!this.#lanceIndex || !this.#lanceIndex.isReady)) {
-            return { pageIds: [], totalCount: 0, error: 'FTS not initialized' };
-        }
-
-        const limit = Number.isFinite(options.limit) ? Math.max(0, Number(options.limit)) : 50;
-        const offset = Math.max(0, Number.isFinite(options.offset) ? Number(options.offset) : 0);
-        const depth = Math.max((limit + offset) * 5, 100);
-
-        // Caller-supplied vector legs rank in their own spaces and fuse into
-        // whatever the text side produces. A leg whose space is offline degrades
-        // to an empty contribution (same philosophy as the hybrid text path:
-        // one failed leg must not blank a search another leg answered).
-        const legOperands = legs.length > 0
-            ? await Promise.all(legs.map((leg) => this.#vectorLegSearch(leg, scopedIds, depth)))
-            : [];
-        const legErrors = legOperands.filter((o) => o.error).map((o) => o.error);
-
-        // Legs-only match (no text): pure dense ranking. A single leg keeps its
-        // exact kNN order (no RRF noise); multiple legs fuse weighted.
-        if (!queryString) {
-            let ids;
-            if (legOperands.length === 1) {
-                ids = legOperands[0].ids;
-            } else {
-                ids = this.#rrfMerge(legOperands.map((o) => ({ ids: o.ids, weight: o.weight })));
-            }
-            const allFailed = legErrors.length === legOperands.length && legErrors.length > 0;
-            return {
-                pageIds: ids.slice(offset, offset + limit),
-                totalCount: ids.length,
-                error: allFailed ? legErrors.join('; ') : null,
-            };
-        }
-
-        let pageIds, totalCount, error;
-        if (mode === 'vector' || mode === 'hybrid') {
-            let queryVector = null;
-            try {
-                // Query embedding is injected (embedd service); absent → FTS fallback.
-                const embedQuery = this.#semanticConfig.embedQuery;
-                queryVector = embedQuery ? await embedQuery(queryString, 'text') : null;
-            } catch (e) {
-                console.warn(`synapsd: rank query embedding failed, falling back to fts: ${e.message}`);
-            }
-            // CLIP/SigLIP image fan-out: embed the query with the image space's
-            // text encoder and kNN the photo vectors (shared space), so "red car"
-            // matches pictures. No-op (and no model load) unless photos are embedded.
-            let imgIds = [];
-            try {
-                imgIds = await this.#imageVectorSearch(queryString, scopedIds, depth, { relativeFloor: !!options.imageRelativeFloor });
-            } catch (e) {
-                console.warn(`synapsd: rank image kNN failed, continuing without image results: ${e.message}`);
-            }
-            if (!queryVector && imgIds.length === 0 && legOperands.length === 0) {
-                ({ pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit, offset }));
-            } else if (mode === 'hybrid') {
-                // Fuse DOCUMENT-level FTS (every doc — tabs included) with dense
-                // kNN (embedded docs only) and image kNN via RRF. The VectorIndex's
-                // own hybridSearch only fuses chunk-text BM25 over the vector table,
-                // so it can't see un-embedded docs (e.g. tabs); doc-level FTS can.
-                const [vec, fts] = await Promise.all([
-                    queryVector
-                        ? this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit: depth, offset: 0, minDistance: options.minDistance, maxDistance: options.maxDistance })
-                        : Promise.resolve({ pageIds: [], error: null }),
-                    this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit: depth, offset: 0 }),
-                ]);
-                // Weights: see semanticConfig.searchWeights — fts outranks the
-                // floor-less text kNN, while floored image kNN fuses at parity
-                // with lexical (a photo that clears imageMaxDistance is as real
-                // a match as a filename hit).
-                const w = this.#semanticConfig.searchWeights;
-                const operands = [
-                    { ids: fts.pageIds || [], weight: w.fts },
-                    { ids: vec.pageIds || [], weight: w.dense },
-                ];
-                if (imgIds.length) { operands.push({ ids: imgIds, weight: w.image }); }
-                for (const o of legOperands) { operands.push({ ids: o.ids, weight: o.weight }); }
-                const fused = this.#rrfMerge(operands);
-                totalCount = fused.length;
-                pageIds = fused.slice(offset, offset + limit);
-                // Hybrid degrades, it doesn't fail: a transient dense-side error
-                // (e.g. Lance mid-compaction during ingest) must not blank a
-                // search the lexical side answered. Only surface an error when
-                // BOTH legs failed.
-                if (vec.error || fts.error) {
-                    console.warn(`synapsd: hybrid search leg failed (fts: ${fts.error || 'ok'}, vector: ${vec.error || 'ok'})`);
-                }
-                error = (vec.error && fts.error) ? `${fts.error}; ${vec.error}` : null;
-            } else {
-                // Pure vector mode: fuse text + image kNN (both dense, equal weight).
-                const vec = queryVector
-                    ? await this.#vectorIndex.vectorSearch(queryVector, scopedIds, { limit: depth, offset: 0, minDistance: options.minDistance, maxDistance: options.maxDistance })
-                    : { pageIds: [], error: null };
-                if (imgIds.length || legOperands.length) {
-                    const wv = this.#semanticConfig.searchWeights;
-                    const operands = [{ ids: vec.pageIds || [], weight: wv.dense }];
-                    if (imgIds.length) { operands.push({ ids: imgIds, weight: wv.image }); }
-                    for (const o of legOperands) { operands.push({ ids: o.ids, weight: o.weight }); }
-                    const fused = this.#rrfMerge(operands);
-                    totalCount = fused.length;
-                    pageIds = fused.slice(offset, offset + limit);
-                    error = vec.error || null;
-                } else {
-                    totalCount = (vec.pageIds || []).length;
-                    pageIds = (vec.pageIds || []).slice(offset, offset + limit);
-                    error = vec.error || null;
-                }
-            }
-        } else if (legOperands.length > 0) {
-            // fts mode + explicit vector legs: lexical ranks, legs still fuse —
-            // the caller supplied them on purpose.
-            const fts = (this.#lanceIndex && this.#lanceIndex.isReady)
-                ? await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit: depth, offset: 0 })
-                : { pageIds: [], error: 'FTS not initialized' };
-            const w = this.#semanticConfig.searchWeights;
-            const operands = [{ ids: fts.pageIds || [], weight: w.fts }];
-            for (const o of legOperands) { operands.push({ ids: o.ids, weight: o.weight }); }
-            const fused = this.#rrfMerge(operands);
-            totalCount = fused.length;
-            pageIds = fused.slice(offset, offset + limit);
-            error = null;
-        } else {
-            ({ pageIds, totalCount, error } = await this.#lanceIndex.ftsQuery(queryString, scopedIds, { limit, offset }));
-        }
-
-        return { pageIds: pageIds || [], totalCount: totalCount ?? 0, error: error ?? null };
-    }
-
-    // One caller-supplied vector leg → a ranked-id RRF operand. Space offline or
-    // scan failure degrades to an empty contribution carrying its error; a dim
-    // mismatch is a caller bug and throws.
-    async #vectorLegSearch(leg, scopedIds, depth) {
-        const vi = await this.#getVectorSpace(leg.space);
-        if (!vi || !vi.isReady) {
-            return { ids: [], weight: 0, error: `vector space '${leg.space}' not available` };
-        }
-        if (leg.vector.length !== vi.dim) {
-            throw new ArgumentError(`vector leg dim ${leg.vector.length} != space '${leg.space}' dim ${vi.dim}`, 'match');
-        }
-        const w = this.#semanticConfig.searchWeights;
-        const weight = Number.isFinite(leg.weight) && leg.weight > 0 ? leg.weight : (w[leg.space] ?? 1);
-        const maxDistance = Number.isFinite(leg.maxDistance) && leg.maxDistance > 0 ? leg.maxDistance : undefined;
-        const minDistance = Number.isFinite(leg.minDistance) ? leg.minDistance : undefined;
-        const res = await vi.vectorSearch(leg.vector, scopedIds, { limit: depth, offset: 0, minDistance, maxDistance });
-        return { ids: res.pageIds || [], weight, error: res.error || null };
-    }
-
-    // Weighted Reciprocal Rank Fusion of ranked id lists → one ranking. A doc's
-    // score is Σ weight/(k + rank) across the lists it appears in (k=60 standard),
-    // so agreement across signals floats to the top and either signal alone still
-    // contributes. Accepts plain id arrays (weight 1) or { ids, weight } entries.
-    // Returns doc ids, best first.
-    #rrfMerge(lists, k = 60) {
-        const score = new Map();
-        for (const entry of lists) {
-            const ids = Array.isArray(entry) ? entry : entry.ids;
-            const weight = Array.isArray(entry) ? 1 : (entry.weight ?? 1);
-            for (let rank = 0; rank < ids.length; rank++) {
-                const id = ids[rank];
-                score.set(id, (score.get(id) || 0) + weight / (k + rank + 1));
-            }
-        }
-        return [...score.keys()].sort((a, b) => score.get(b) - score.get(a));
-    }
-
-    #emptyResult() {
-        const empty = [];
-        empty.count = 0;
-        empty.totalCount = 0;
-        empty.error = null;
-        return empty;
-    }
-
-    // sortBy accepts 'content', 't:content', 'crud:created', or { timeline }.
-    #normalizeSortBy(sortBy) {
-        const raw = typeof sortBy === 'string'
-            ? sortBy
-            : (sortBy && typeof sortBy === 'object' ? sortBy.timeline : null);
-        if (typeof raw !== 'string') { return null; }
-        const name = raw.trim().replace(/^t:/, '');
-        return name.length > 0 ? name : null;
+        return this.#queries.rank(bitmap, match, options);
     }
 
     async query(match = null, spec = {}) {
-        const parsed = parseSpec(spec);
-        const { bitmap } = await this.#resolveParsed(parsed);
-        return await this.rank(bitmap, match, parsed.options);
+        return this.#queries.query(match, spec);
     }
 
     async list(spec = {}) {
-        const parsed = parseSpec(spec);
-        try {
-            const { bitmap } = await this.#resolveParsed(parsed);
-            return await this.rank(bitmap, null, parsed.options);
-        } catch (error) {
-            debug(`Error in list: ${error.message}`);
-            const errorArray = [];
-            errorArray.count = 0;
-            errorArray.totalCount = 0;
-            errorArray.error = error.message;
-            return errorArray;
-        }
+        return this.#queries.list(spec);
     }
 
     async search(spec = {}) {
-        if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
-            throw new Error('search() expects a query spec object');
-        }
-        // A string is the classic text query; an object is a typed multimodal
-        // match descriptor { text?, vectors?: [{space, vector, ...}] } — see
-        // rank(). Validation lives in #normalizeMatch, shared by both entries.
-        const match = spec.query ?? spec.search ?? spec.q ?? null;
-        if (typeof match !== 'string' && (match === null || typeof match !== 'object' || Array.isArray(match))) {
-            throw new ArgumentError('Query must be a string or a { text?, vectors? } descriptor', 'query');
-        }
-        return await this.query(match, spec);
+        return this.#queries.search(spec);
     }
 
     /**
@@ -3498,67 +2341,7 @@ class SynapsD extends EventEmitter {
      *          plus .debug.distances when withDistances is set
      */
     async searchByVector(queryVector, spec = {}, options = {}) {
-        if (!Array.isArray(queryVector) || queryVector.length === 0 || !queryVector.every(Number.isFinite)) {
-            throw new ArgumentError('searchByVector() expects a non-empty numeric query vector', 'queryVector');
-        }
-        const space = options.space || 'image';
-        const vi = await this.#getVectorSpace(space);
-        if (!vi || !vi.isReady) {
-            const empty = this.#emptyResult();
-            empty.error = `vector space '${space}' not available`;
-            return empty;
-        }
-        if (queryVector.length !== vi.dim) {
-            throw new ArgumentError(`query vector dim ${queryVector.length} != space '${space}' dim ${vi.dim}`, 'queryVector');
-        }
-
-        // Structured scope → candidate ids pushed down into the Lance scan.
-        const scope = (spec && Object.keys(spec).length > 0)
-            ? (await this.#resolveParsed(parseSpec(spec))).bitmap
-            : null;
-        if (scope && scope.isEmpty) { return this.#emptyResult(); }
-        const scopedIds = scope ? scope.toArray() : [];
-
-        const limit = Math.max(1, Number(options.limit ?? 25));
-        const offset = Math.max(0, Number(options.offset ?? 0));
-        const excludeIds = new Set((options.excludeIds || []).map(Number));
-        // Non-positive maxDistance disables the floor (explicit top-K opt-in),
-        // mirroring the text path's imageMaxDistance semantics.
-        const maxDistance = Number.isFinite(options.maxDistance) && options.maxDistance > 0 ? options.maxDistance : undefined;
-        const minDistance = Number.isFinite(options.minDistance) ? options.minDistance : undefined;
-
-        // Overfetch by the exclusion count so a filtered self-match (similarTo)
-        // still fills the page.
-        const res = await vi.vectorSearch(queryVector, scopedIds, {
-            limit: limit + excludeIds.size,
-            offset,
-            minDistance,
-            maxDistance,
-            withDistances: !!options.withDistances,
-        });
-        if (res.error) {
-            const empty = this.#emptyResult();
-            empty.error = res.error;
-            return empty;
-        }
-        const pageIds = (res.pageIds || []).filter((id) => !excludeIds.has(id)).slice(0, limit);
-        const totalCount = Math.max(0, (res.totalCount || 0) - excludeIds.size);
-
-        let result;
-        if (options.idsOnly === true) {
-            result = [...pageIds];
-        } else {
-            // getMany preserves input order → the page stays in kNN (best-first) order.
-            const docs = await this.documents.getMany(pageIds);
-            result = options.parse !== false ? this.#safeParseDocuments(docs) : docs;
-        }
-        result.count = result.length;
-        result.totalCount = totalCount;
-        result.error = null;
-        if (options.withDistances && res.distances) {
-            result.debug = { distances: pageIds.map((id) => ({ id, distance: res.distances[id] })) };
-        }
-        return result;
+        return this.#queries.searchByVector(queryVector, spec, options);
     }
 
     /**
@@ -3567,9 +2350,7 @@ class SynapsD extends EventEmitter {
      * crossing the API boundary — pair with searchByVector(excludeIds:[docId]).
      */
     async getDocumentVector(docId, space = 'image') {
-        const vi = await this.#getVectorSpace(space);
-        if (!vi || !vi.isReady) { return null; }
-        return await vi.getDocVector(docId);
+        return this.#vectors.getDocumentVector(docId, space);
     }
 
     /**
@@ -3587,74 +2368,7 @@ class SynapsD extends EventEmitter {
      * @returns docs[] with .count/.totalCount/.error (same shape as rank())
      */
     async searchRefined(queries = [], baseSpec = null, options = {}) {
-        const texts = (Array.isArray(queries) ? queries : [queries])
-            .filter((q) => typeof q === 'string' && q.trim().length > 0);
-
-        // Structured base scope (null = unconstrained / all docs).
-        const base = baseSpec ? (await this.#resolveParsed(parseSpec(baseSpec))).bitmap : null;
-
-        // No text → plain structured listing (slice path, no Lance needed).
-        if (texts.length === 0) {
-            return await this.rank(base, null, options);
-        }
-        // Single text → one scoped ranked search (existing behavior).
-        if (texts.length === 1) {
-            return await this.rank(base, texts[0], options);
-        }
-
-        if (!this.#lanceIndex || !this.#lanceIndex.isReady) {
-            const empty = this.#emptyResult();
-            empty.error = 'FTS not initialized';
-            return empty;
-        }
-
-        // Fold all but the last query into a scope bitmap. Intermediate steps need
-        // the FULL matching id set (not a page), so request a large internal limit;
-        // scoped fts fetches every candidate, so the AND is exact for query 2+.
-        const scope = await this.#foldQueryScope(texts.slice(0, -1), base, options);
-        if (scope && scope.isEmpty) { return this.#emptyResult(); }
-
-        // Final query ranks + paginates within the folded scope. The scope came
-        // from a text stage, so the image leg switches to the scope-adaptive
-        // cutoff — the absolute floor already did its job in stage one.
-        return await this.rank(scope, texts[texts.length - 1], { ...options, imageRelativeFloor: true });
-    }
-
-    /**
-     * Fold an ordered list of text queries into a scope bitmap by CHAINING: stage
-     * i's match set is computed within stage i-1's ids (Lance candidateIds
-     * pushdown), so each query narrows the previous survivors. Match across FTS
-     * ∪ image kNN (not FTS-only) so refinement narrows by photos too — otherwise
-     * "library" folds to text docs and image refine is impossible. Stage one uses
-     * the absolute image floor (global query — floor separates match from noise);
-     * later stages use the scope-adaptive cutoff (see #imageVectorSearch).
-     * Returns null only when texts is empty and base is null (unconstrained).
-     * @param {string[]} texts
-     * @param {RoaringBitmap32|null} base  structured scope (null = all docs)
-     * @returns {Promise<RoaringBitmap32|null>}
-     */
-    async #foldQueryScope(texts, base, options = {}) {
-        const FOLD_LIMIT = 1_000_000;
-        // FOLD_LIMIT is right for FTS — "every lexical match" is a well-defined,
-        // finite set. It is meaningless for the image leg: a kNN ALWAYS returns
-        // its top-K, so asking for a million nearest photos folds the entire
-        // library into the scope and the refine AND stops constraining
-        // ("winter" then "window" returned summer windows). Bound the image side
-        // to the same depth a single-query search of this stage would have used,
-        // so refining narrows within what the user just saw.
-        const imageDepth = Math.max(
-            ((Number(options.limit) || 50) + (Number(options.offset) || 0)) * 5,
-            100,
-        );
-        let scope = base; // RoaringBitmap32 | null (null = all docs)
-        for (let i = 0; i < texts.length; i++) {
-            if (scope && scope.isEmpty) { return scope; }
-            const scopeIds = scope ? scope.toArray() : [];
-            const matchedIds = await this.#queryMatchSet(texts[i], scopeIds, FOLD_LIMIT, { relativeImageFloor: i > 0, imageDepth });
-            const matched = new RoaringBitmap32(matchedIds);
-            scope = scope ? RoaringBitmap32.and(scope, matched) : matched;
-        }
-        return scope;
+        return this.#queries.searchRefined(queries, baseSpec, options);
     }
 
     /**
@@ -3677,87 +2391,7 @@ class SynapsD extends EventEmitter {
      * @returns docs[] with .count/.totalCount/.error/.lines (per-line totals)
      */
     async searchCompound(lines = [], options = {}) {
-        const op = (options.op || 'or').toLowerCase() === 'and' ? 'and' : 'or';
-        const baseSpec = options.baseSpec || null;
-        const list = (Array.isArray(lines) ? lines : [lines]).filter((l) => l && typeof l === 'object');
-        if (list.length === 0) { return this.#emptyResult(); }
-
-        // Ranked lists are capped: fusion only needs the head, membership (counts,
-        // set ops) uses the full bitmaps.
-        const FUSE_DEPTH = 500;
-
-        const evaluated = await Promise.all(list.map(async (line) => {
-            const texts = (Array.isArray(line.queries) ? line.queries : [])
-                .filter((q) => typeof q === 'string' && q.trim().length > 0);
-            // Per-line structured pieces AND-compose over the shared base spec.
-            const spec = { ...(baseSpec || {}) };
-            for (const key of ['filters', 'features', 'context', 'directory', 'attributes']) {
-                if (line[key] !== undefined) {
-                    spec[key] = Array.isArray(spec[key]) && Array.isArray(line[key])
-                        ? [...spec[key], ...line[key]]
-                        : line[key];
-                }
-            }
-            const hasSpec = Object.keys(spec).length > 0;
-            const base = hasSpec ? (await this.#resolveParsed(parseSpec(spec))).bitmap : null;
-
-            if (texts.length === 0) {
-                // Filters-only line: membership is the structured scope itself.
-                const bitmap = base ?? await this.#buildAllDocumentsBitmap();
-                return { bitmap, rankedIds: [], error: null };
-            }
-            const scope = await this.#foldQueryScope(texts.slice(0, -1), base, options);
-            if (scope && scope.isEmpty) { return { bitmap: scope, rankedIds: [], error: null }; }
-
-            const last = texts[texts.length - 1];
-            const scopeIds = scope ? scope.toArray() : [];
-            const relative = texts.length > 1;
-            // Membership (full match set of the last stage) and ranking (its head)
-            // in parallel — same stage, two views.
-            const [memberIds, ranked] = await Promise.all([
-                // Same rule as the fold: FTS may return everything it matches, the
-                // kNN side must stay bounded or a line's membership becomes the
-                // whole photo library.
-                this.#queryMatchSet(last, scopeIds, 1_000_000, { relativeImageFloor: relative, imageDepth: FUSE_DEPTH }),
-                this.#rankIds(scopeIds, last, { mode: options.mode, minDistance: options.minDistance, maxDistance: options.maxDistance, limit: FUSE_DEPTH, offset: 0, imageRelativeFloor: relative }),
-            ]);
-            const bitmap = new RoaringBitmap32(memberIds);
-            return { bitmap, rankedIds: (ranked.pageIds || []).filter((id) => bitmap.has(id)), error: ranked.error };
-        }));
-
-        // Set semantics across lines.
-        let members = null;
-        for (const line of evaluated) {
-            members = members === null
-                ? line.bitmap.clone()
-                : (op === 'and' ? RoaringBitmap32.and(members, line.bitmap) : RoaringBitmap32.or(members, line.bitmap));
-        }
-        const lineCounts = evaluated.map((l) => ({ count: l.bitmap.size }));
-
-        if (!members || members.isEmpty) {
-            const empty = this.#emptyResult();
-            empty.lines = lineCounts;
-            return empty;
-        }
-
-        // Ranking: RRF across the per-line ranked heads (agreement floats up),
-        // restricted to the combined member set; members past every line's
-        // ranking depth trail in id order (still reachable by paging).
-        const fused = this.#rrfMerge(evaluated.map((l) => l.rankedIds)).filter((id) => members.has(id));
-        const inFused = new Set(fused);
-        const orderedIds = fused.concat(members.toArray().filter((id) => !inFused.has(id)));
-
-        const limit = Number.isFinite(options.limit) ? Math.max(0, Number(options.limit)) : 50;
-        const offset = Math.max(0, Number.isFinite(options.offset) ? Number(options.offset) : 0);
-        const pageIds = limit === 0 ? orderedIds : orderedIds.slice(offset, offset + limit);
-
-        const docs = pageIds.length > 0 ? await this.documents.getMany(pageIds) : [];
-        const result = this.#safeParseDocuments(docs);
-        result.count = result.length;
-        result.totalCount = orderedIds.length;
-        result.error = evaluated.every((l) => l.error) ? evaluated.map((l) => l.error).join('; ') : null;
-        result.lines = lineCounts;
-        return result;
+        return this.#queries.searchCompound(lines, options);
     }
 
     /**
@@ -3870,8 +2504,8 @@ class SynapsD extends EventEmitter {
             // Content changed → the doc must be re-embedded. The external embedd
             // service reacts to DOCUMENT_UPDATED; here we drop it from the seen
             // ledger so a reconcile re-embeds it even if the live event is missed.
-            for (const space of this.#vectorSpaces.keys()) {
-                try { await this.bitmapIndex.untick(this.#seenKey(space), Number(updatedDocument.id)); } catch (_) { }
+            for (const space of this.#vectors.openedNames()) {
+                try { await this.bitmapIndex.untick(this.#vectors.seenKey(space), Number(updatedDocument.id)); } catch (_) { }
             }
 
             return updatedDocument.id;
@@ -3902,7 +2536,7 @@ class SynapsD extends EventEmitter {
         const removedDirectoryPaths = [];
 
         if (contextSpec) {
-            const { tree: contextTree, collection: contextCollection, path: normalizedContextSpec } = this.#resolveTreeSelection('context', contextSpec, '/');
+            const { tree: contextTree, collection: contextCollection, path: normalizedContextSpec } = this.#trees.resolveSelection('context', contextSpec, '/');
             const pathLayersArray = parseContextSpecForInsert(normalizedContextSpec);
 
             for (const pathLayers of pathLayersArray) {
@@ -3925,7 +2559,7 @@ class SynapsD extends EventEmitter {
         }
 
         if (directorySpec) {
-            const { tree: directoryTree, collection: directoryCollection, path: normalizedDirectoryPath } = this.#resolveTreeSelection('directory', directorySpec, '/');
+            const { tree: directoryTree, collection: directoryCollection, path: normalizedDirectoryPath } = this.#trees.resolveSelection('directory', directorySpec, '/');
             const directoryPaths = Array.isArray(normalizedDirectoryPath) ? normalizedDirectoryPath : [normalizedDirectoryPath];
 
             for (const directoryPath of directoryPaths) {
@@ -4070,9 +2704,9 @@ class SynapsD extends EventEmitter {
                 lanceClean = false;
                 debug(`delete: Lance delete failed for ${docId}: ${e.message}`);
             }
-            if (this.#vectorSpaces.size > 0) {
+            if (this.#vectors.openedCount > 0) {
                 try {
-                    for (const vi of this.#vectorSpaces.values()) {
+                    for (const vi of this.#vectors.openedIndexes()) {
                         const vecClean = await vi.deleteDoc(docId);
                         lanceClean = lanceClean && vecClean;
                     }
@@ -4326,189 +2960,6 @@ class SynapsD extends EventEmitter {
 
     }
 
-    /**
-     * Internal methods
-     */
-
-    async #loadTreeRegistry() {
-        this.#treeMetadata.clear();
-        this.#defaultTreeIds = { context: null, directory: null };
-
-        const treeIds = new Set();
-        for await (const key of this.#internalStore.getKeys({
-            start: 'tree/',
-            end: 'tree/\uffff',
-        })) {
-            const match = String(key).match(/^tree\/([^/]+)\/meta$/);
-            if (match) {
-                treeIds.add(match[1]);
-            }
-        }
-
-        for (const treeId of treeIds) {
-            const meta = this.#internalStore.get(this.#treeMetaKey(treeId));
-            if (!meta) { continue; }
-            this.#treeMetadata.set(meta.id, meta);
-            if (meta.isDefault && !this.#defaultTreeIds[meta.type]) {
-                this.#defaultTreeIds[meta.type] = meta.id;
-            }
-        }
-    }
-
-    async #ensureDefaultTrees() {
-        if ((await this.listTrees('context')).length === 0) {
-            await this.createTree('default', 'context', { isDefault: true });
-        }
-        if ((await this.listTrees('directory')).length === 0) {
-            await this.createTree('directory', 'directory', { isDefault: true });
-        }
-
-        if (!this.#defaultTreeIds.context) {
-            this.#defaultTreeIds.context = (await this.listTrees('context'))[0]?.id || null;
-        }
-        if (!this.#defaultTreeIds.directory) {
-            this.#defaultTreeIds.directory = (await this.listTrees('directory'))[0]?.id || null;
-        }
-
-        if (this.#defaultTreeIds.context) {
-            this.contextBitmapCollection = this.#contextBitmapCollectionForTree(this.#defaultTreeIds.context);
-        }
-
-        for (const meta of this.#treeMetadata.values()) {
-            await this.#instantiateTree(meta).initialize();
-        }
-    }
-
-    #resolveTreeMeta(nameOrId, type = null) {
-        const tree = this.getTree(nameOrId);
-        if (!tree) {
-            return null;
-        }
-        const meta = this.#treeMetadata.get(tree.id) || null;
-        if (type && meta?.type !== type) {
-            return null;
-        }
-        return meta;
-    }
-
-    #getDefaultTreeByType(type) {
-        const treeId = this.#defaultTreeIds[type] || null;
-        return treeId ? this.getTree(treeId) : null;
-    }
-
-    #instantiateTree(meta) {
-        if (!meta) { return null; }
-        if (this.#treeCache.has(meta.id)) {
-            return this.#treeCache.get(meta.id);
-        }
-
-        const dataStore = new PrefixedStore(this.#internalStore, `tree/${meta.id}`);
-        const tree = meta.type === 'directory'
-            ? new DirectoryTree({
-                dataStore,
-                db: this,
-                bitmapIndex: this.bitmapIndex,
-                treeId: meta.id,
-                treeName: meta.name,
-                settings: meta.settings,
-                bitmapCollection: this.#directoryBitmapCollectionForTree(meta.id),
-            })
-            : new ContextTree({
-                dataStore,
-                db: this,
-                treeId: meta.id,
-                treeName: meta.name,
-                settings: meta.settings,
-                bitmapCollection: this.#contextBitmapCollectionForTree(meta.id),
-            });
-
-        this.#registerTreeEvents(tree, meta);
-        this.#treeCache.set(meta.id, tree);
-        return tree;
-    }
-
-    #registerTreeEvents(tree, meta) {
-        if (tree.__synapsdTreeEventsBound) { return; }
-        tree.__synapsdTreeEventsBound = true;
-        const db = this;
-        tree.on('**', function (payload = {}) {
-            const eventName = this.event;
-            if (!eventName) { return; }
-            const forwarded = payload && typeof payload === 'object' ? { ...payload } : { value: payload };
-            if (!forwarded.treeId) { forwarded.treeId = meta.id; }
-            if (!forwarded.treeName) { forwarded.treeName = meta.name; }
-            if (!forwarded.treeType) { forwarded.treeType = meta.type; }
-            if (!forwarded.source) { forwarded.source = 'tree'; }
-            db.#emitEvent(eventName, forwarded);
-        });
-    }
-
-    #treeMetaKey(treeId) {
-        return `tree/${treeId}/meta`;
-    }
-
-    #contextBitmapCollectionForTree(treeId) {
-        return this.bitmapIndex.createCollection(`context/${treeId}`);
-    }
-
-    #directoryBitmapCollectionForTree(treeId) {
-        return this.bitmapIndex.createCollection(`vfs/${treeId}`);
-    }
-
-    #normalizeTreeName(name) {
-        return String(name ?? '')
-            .normalize('NFKC')
-            .trim()
-            .replace(/\s+/g, ' ')
-            .toLowerCase();
-    }
-
-    async #deleteTreeStorage(meta) {
-        const internalKeys = [];
-        for await (const key of this.#internalStore.getKeys({
-            start: `tree/${meta.id}/`,
-            end: `tree/${meta.id}/\uffff`,
-        })) {
-            internalKeys.push(key);
-        }
-        for (const key of internalKeys) {
-            await this.#internalStore.remove(key);
-        }
-
-        const bitmapPrefix = meta.type === 'directory' ? `vfs/${meta.id}` : `context/${meta.id}`;
-        const bitmapKeys = await this.bitmapIndex.listBitmaps(bitmapPrefix);
-        for (const key of bitmapKeys) {
-            await this.bitmapIndex.deleteBitmap(key);
-        }
-    }
-
-    #resolveTreeSelection(type, spec, defaultPath = null) {
-        if (typeof spec === 'string' || Array.isArray(spec)) {
-            throw new Error(`Legacy ${type} path strings are no longer supported. Pass { tree, path } instead.`);
-        }
-        const pathFallbackKey = type === 'directory' ? 'directory' : 'context';
-        const treeSelector = spec && typeof spec === 'object' && !Array.isArray(spec)
-            ? (spec.tree ?? spec.treeId ?? spec.nameOrId ?? null)
-            : null;
-        const path = spec && typeof spec === 'object' && !Array.isArray(spec)
-            ? (spec.path ?? spec[pathFallbackKey] ?? defaultPath)
-            : (spec ?? defaultPath);
-        const tree = treeSelector ? this.getTree(treeSelector) : this.#getDefaultTreeByType(type);
-        if (!tree) {
-            throw new Error(`No ${type} tree available`);
-        }
-        if (tree.type !== type) {
-            throw new Error(`Tree "${tree.name}" is not a ${type} tree`);
-        }
-        return {
-            tree,
-            collection: type === 'context'
-                ? this.#contextBitmapCollectionForTree(tree.id)
-                : this.#directoryBitmapCollectionForTree(tree.id),
-            path,
-        };
-    }
-
     // Emit a tree.document.* event for a context/directory selection. Emitting on
     // the tree means #registerTreeEvents stamps treeId/treeName/treeType, and the
     // workspace runtime listener adds workspaceId — the shape clients (browser
@@ -4519,19 +2970,7 @@ class SynapsD extends EventEmitter {
     // that hold the selector drive cross-client auto-close without per-doc
     // membership reconstruction. Pass whichever of context/directory applies.
     emitTreeDocumentEvent(eventName, { context = null, directory = null, documentIds = [] } = {}) {
-        this.#emitTreeDocumentEvent(eventName, 'context', context, documentIds);
-        this.#emitTreeDocumentEvent(eventName, 'directory', directory, documentIds);
-    }
-
-    #emitTreeDocumentEvent(eventName, type, spec, documentIds) {
-        if (!spec || !Array.isArray(documentIds) || documentIds.length === 0) { return; }
-        try {
-            const { tree, path } = this.#resolveTreeSelection(type, spec, '/');
-            const contextSpec = Array.isArray(path) ? (path[0] ?? '/') : (path ?? '/');
-            tree.emit(eventName, createEvent(eventName, { documentIds, contextSpec, source: 'tree' }));
-        } catch (error) {
-            debug(`#emitTreeDocumentEvent ${eventName} (${type}) failed: ${error.message}`);
-        }
+        return this.#trees.emitTreeDocumentEvent(eventName, { context, directory, documentIds });
     }
 
     #isDocumentOperationOptions(value) {
@@ -4562,102 +3001,6 @@ class SynapsD extends EventEmitter {
             throw new Error('"default" is a reserved dataset name (the virtual unstamped-documents dataset); pick another name');
         }
         return keys;
-    }
-
-    #normalizeQueryFeatures(features) {
-        if (!features) {
-            return null;
-        }
-
-        if (Array.isArray(features)) {
-            return {
-                allOf: [],
-                anyOf: normalizeBitmapKeys(features),
-                noneOf: [],
-            };
-        }
-
-        if (typeof features !== 'object') {
-            throw new Error('list(): features must be an array or object');
-        }
-
-        return {
-            allOf: normalizeBitmapKeys(features.allOf ?? []),
-            anyOf: normalizeBitmapKeys(features.anyOf ?? []),
-            noneOf: normalizeBitmapKeys(features.noneOf ?? []),
-        };
-    }
-
-    #resolveGenericTreeSelection(selector = null, defaultPath = '/', fallbackType = 'context') {
-        if (selector == null) {
-            const tree = this.#getDefaultTreeByType(fallbackType);
-            if (!tree) {
-                throw new Error(`No ${fallbackType} tree available`);
-            }
-            return {
-                type: tree.type,
-                tree,
-                path: defaultPath,
-                spec: { tree: tree.id, path: defaultPath },
-            };
-        }
-
-        if (typeof selector === 'string' || Array.isArray(selector)) {
-            const tree = this.#getDefaultTreeByType(fallbackType);
-            if (!tree) {
-                throw new Error(`No ${fallbackType} tree available`);
-            }
-            return {
-                type: tree.type,
-                tree,
-                path: selector,
-                spec: { tree: tree.id, path: selector },
-            };
-        }
-
-        if (typeof selector !== 'object' || Array.isArray(selector)) {
-            throw new Error('Invalid tree selector');
-        }
-
-        if (Object.prototype.hasOwnProperty.call(selector, 'context')) {
-            const { tree, path } = this.#resolveTreeSelection('context', {
-                tree: selector.tree ?? selector.treeId ?? selector.nameOrId ?? null,
-                path: selector.path ?? selector.context ?? defaultPath,
-            }, defaultPath);
-            return {
-                type: 'context',
-                tree,
-                path,
-                spec: { tree: tree.id, path },
-            };
-        }
-
-        if (Object.prototype.hasOwnProperty.call(selector, 'directory')) {
-            const { tree, path } = this.#resolveTreeSelection('directory', {
-                tree: selector.tree ?? selector.treeId ?? selector.nameOrId ?? null,
-                path: selector.path ?? selector.directory ?? defaultPath,
-            }, defaultPath);
-            return {
-                type: 'directory',
-                tree,
-                path,
-                spec: { tree: tree.id, path },
-            };
-        }
-
-        const treeSelector = selector.tree ?? selector.treeId ?? selector.nameOrId ?? null;
-        const tree = treeSelector ? this.getTree(treeSelector) : this.#getDefaultTreeByType(fallbackType);
-        if (!tree) {
-            throw new Error(`Tree not found: ${treeSelector}`);
-        }
-
-        const path = selector.path ?? defaultPath;
-        return {
-            type: tree.type,
-            tree,
-            path,
-            spec: { tree: tree.id, path },
-        };
     }
 
     // Write spec: { paths?, features?/attributes?, context?, directory?, emitEvent? }.
@@ -5212,7 +3555,7 @@ class SynapsD extends EventEmitter {
         const allSynapseKeys = [];
 
         if (contextSpec) {
-            const { tree: contextTree, collection, path: contextPath } = this.#resolveTreeSelection('context', contextSpec, '/');
+            const { tree: contextTree, collection, path: contextPath } = this.#trees.resolveSelection('context', contextSpec, '/');
             const pathLayersArray = parseContextSpecForInsert(contextPath);
             for (const pathLayers of pathLayersArray) {
                 const pathString = pathLayers.join('/');
@@ -5228,12 +3571,12 @@ class SynapsD extends EventEmitter {
         }
 
         if (directorySpec) {
-            const { tree: directoryTree, path: directoryPath } = this.#resolveTreeSelection('directory', directorySpec, null);
+            const { tree: directoryTree, path: directoryPath } = this.#trees.resolveSelection('directory', directorySpec, null);
             const dirs = Array.isArray(directoryPath) ? directoryPath : [directoryPath];
             const nodeIds = typeof directoryTree.ensurePaths === 'function'
                 ? await directoryTree.ensurePaths(dirs)
                 : [];
-            const collection = this.#directoryBitmapCollectionForTree(directoryTree.id);
+            const collection = this.#trees.directoryCollection(directoryTree.id);
             allSynapseKeys.push(...nodeIds.map((nodeId) => collection.makeKey(nodeId)));
 
             // Directory-only inserts surface at the default context root unless
@@ -5243,7 +3586,7 @@ class SynapsD extends EventEmitter {
             if (!contextSpec && directoryTree.settings?.linkContextRoot !== false) {
                 const contextTree = this.getDefaultContextTree();
                 if (contextTree?.rootLayer) {
-                    const collection = this.#contextBitmapCollectionForTree(contextTree.id);
+                    const collection = this.#trees.contextCollection(contextTree.id);
                     allSynapseKeys.push(collection.makeKey(contextTree.rootLayer.id));
                 }
             }
@@ -5294,7 +3637,7 @@ class SynapsD extends EventEmitter {
                 result = await this.#db.transaction(() => this.#writeContext.run(context, txBody));
             } catch (error) {
                 this.bitmapIndex.restoreCache();
-                for (const tree of this.#treeCache.values()) { await tree.reload(); }
+                await this.#trees.reloadCached();
                 await this.#loadDeviceFacets();
                 throw error;
             } finally {
@@ -5384,213 +3727,6 @@ class SynapsD extends EventEmitter {
         return true;
     }
 
-    async #buildSelectorBitmap(selector = null) {
-        if (!selector) {
-            return null;
-        }
-
-        if (selector.context || selector.directory) {
-            const contextBitmap = selector.context ? await this.#buildContextSelectorBitmap(selector.context) : null;
-            const directoryBitmap = selector.directory ? await this.#buildDirectorySelectorBitmap(selector.directory) : null;
-
-            if (contextBitmap && directoryBitmap) {
-                contextBitmap.andInPlace(directoryBitmap);
-                return contextBitmap;
-            }
-            return contextBitmap ?? directoryBitmap ?? null;
-        }
-
-        if (selector.type === 'context') {
-            return await this.#buildContextSelectorBitmap(selector.spec);
-        }
-        if (selector.type === 'directory') {
-            return await this.#buildDirectorySelectorBitmap(selector.spec);
-        }
-
-        const selection = this.#resolveGenericTreeSelection(selector, '/', 'context');
-        return selection.type === 'directory'
-            ? await this.#buildDirectorySelectorBitmap(selection.spec)
-            : await this.#buildContextSelectorBitmap(selection.spec);
-    }
-
-    async #buildContextSelectorBitmap(contextSpec, collectionKeys = null) {
-        if (!contextSpec) {
-            return null;
-        }
-
-        const { tree, collection, path } = this.#resolveTreeSelection('context', contextSpec, '/');
-        const pathLayersArray = parseContextSpecForInsert(path);
-        const recordKey = (id) => { if (collectionKeys && id != null) { collectionKeys.push(collection.makeKey(id)); } };
-        let resultBitmap = null;
-        let sawExplicitPath = false;
-        let sawExistingPath = false;
-
-        for (const pathLayers of pathLayersArray) {
-            if (pathLayers.length === 1 && pathLayers[0] === '/') {
-                sawExplicitPath = true;
-                if (tree.rootLayer) { recordKey(tree.rootLayer.id); }
-                const rootBitmap = await this.#getContextRootBitmap(tree, collection);
-                if (rootBitmap && !rootBitmap.isEmpty) {
-                    if (resultBitmap) {
-                        resultBitmap.orInPlace(rootBitmap);
-                    } else {
-                        resultBitmap = rootBitmap;
-                    }
-                    sawExistingPath = true;
-                }
-                continue;
-            }
-
-            sawExplicitPath = true;
-            const pathString = pathLayers.join('/');
-            if (!tree.getLayerForPath(pathString)) {
-                continue;
-            }
-
-            sawExistingPath = true;
-            const layerIds = tree.resolveLayerIds(pathLayers);
-            // After resolveLayerIds drops canvas leaves and root, an empty result
-            // means the path effectively reduces to root (e.g. /<canvas-leaf>).
-            // Fall back to the root layer bitmap so canvases anchored directly
-            // under '/' return all docs at the root, not zero.
-            let pathBitmap;
-            if (layerIds.length === 0) {
-                if (tree.rootLayer) { recordKey(tree.rootLayer.id); }
-                pathBitmap = await this.#getContextRootBitmap(tree, collection);
-            } else {
-                for (const id of layerIds) { recordKey(id); }
-                pathBitmap = await collection.AND(layerIds);
-            }
-            if (!pathBitmap || pathBitmap.isEmpty) {
-                continue;
-            }
-
-            if (resultBitmap) {
-                resultBitmap.orInPlace(pathBitmap);
-            } else {
-                resultBitmap = pathBitmap;
-            }
-        }
-
-        if (!sawExplicitPath) {
-            return null;
-        }
-
-        return sawExistingPath ? (resultBitmap || new RoaringBitmap32()) : new RoaringBitmap32();
-    }
-
-    async #getContextRootBitmap(tree, collection) {
-        if (!tree?.rootLayer) {
-            return new RoaringBitmap32();
-        }
-        return await collection.OR([tree.rootLayer.id]);
-    }
-
-    async #buildDirectorySelectorBitmap(directorySpec, collectionKeys = null) {
-        if (!directorySpec) {
-            return null;
-        }
-
-        const { tree, collection, path } = this.#resolveTreeSelection('directory', directorySpec, '/');
-        const directoryPaths = Array.isArray(path) ? path.filter(Boolean) : [path].filter(Boolean);
-        if (directoryPaths.length === 0) {
-            return null;
-        }
-
-        // Node-exact by default (folder listings); recursive widens to the whole
-        // subtree (searches — docs tick only their leaf node, so a node-exact
-        // scope at an ancestor folder would match nothing).
-        const recursive = directorySpec?.recursive === true;
-
-        let resultBitmap = null;
-        let sawExistingPath = false;
-        for (const directoryPath of directoryPaths) {
-            if (!tree.pathExists(directoryPath)) {
-                continue;
-            }
-
-            sawExistingPath = true;
-            // find() reads exactly the path's own node bitmap (non-recursive) — the
-            // same node a doc inserted at this path ticks. Record the consulted
-            // collection keys so a write to this scope precisely invalidates the operand.
-            if (collectionKeys) {
-                for (const nodeId of tree.getNodeIdsForPath(directoryPath, { recursive })) {
-                    collectionKeys.push(collection.makeKey(nodeId));
-                }
-            }
-            const directoryBitmap = recursive
-                ? await tree.findRecursive(directoryPath)
-                : await tree.find(directoryPath);
-            if (!directoryBitmap || directoryBitmap.isEmpty) {
-                continue;
-            }
-
-            if (resultBitmap) {
-                resultBitmap.orInPlace(directoryBitmap);
-            } else {
-                resultBitmap = directoryBitmap;
-            }
-        }
-
-        return sawExistingPath ? (resultBitmap || new RoaringBitmap32()) : new RoaringBitmap32();
-    }
-
-    async #buildFeaturesBitmap(features) {
-        const normalizedFeatures = this.#normalizeQueryFeatures(features);
-        if (!normalizedFeatures) {
-            return null;
-        }
-
-        const { allOf, anyOf, noneOf } = normalizedFeatures;
-        if (allOf.length === 0 && anyOf.length === 0 && noneOf.length === 0) {
-            return null;
-        }
-
-        let featureBitmap = null;
-        if (allOf.length > 0) {
-            featureBitmap = await this.bitmapIndex.AND(allOf);
-        }
-
-        if (anyOf.length > 0) {
-            const anyBitmap = await this.bitmapIndex.OR(anyOf);
-            if (featureBitmap) {
-                featureBitmap.andInPlace(anyBitmap);
-            } else {
-                featureBitmap = anyBitmap;
-            }
-        }
-
-        if (noneOf.length > 0) {
-            if (!featureBitmap) {
-                featureBitmap = await this.#buildAllDocumentsBitmap();
-            }
-            const noneBitmap = await this.bitmapIndex.OR(noneOf);
-            if (noneBitmap && !noneBitmap.isEmpty) {
-                featureBitmap.andNotInPlace(noneBitmap);
-            }
-        }
-
-        return featureBitmap || new RoaringBitmap32();
-    }
-
-    // O(1): clone of the maintained live-document bitmap (internal/docs/all).
-    // Callers mutate the result in place, hence the clone. Falls back to the
-    // full document-store scan only if the maintained bitmap is unavailable.
-    async #buildAllDocumentsBitmap() {
-        if (this.allDocumentsBitmap) {
-            const bm = await this.bitmapIndex.getBitmap(this.allDocumentsBitmap.key, false);
-            if (bm) { return new RoaringBitmap32(bm); }
-        }
-        const ids = [];
-        for await (const { key } of this.documents.getRange()) {
-            const id = Number(key);
-            if (Number.isInteger(id) && id > 0) {
-                ids.push(id);
-            }
-        }
-        return new RoaringBitmap32(ids);
-    }
-
     // One-time backfill for stores created before internal/docs/all existed:
     // an empty maintained bitmap alongside a non-empty document store means the
     // bitmap predates the feature — rebuild it from the store keys.
@@ -5606,25 +3742,6 @@ class SynapsD extends EventEmitter {
             await this.bitmapIndex.tick(bitmap.key, ids);
             debug(`Backfilled internal/docs/all with ${ids.length} live document id(s)`);
         }
-    }
-
-    /**
-     * Rebuild feature bitmaps from document data. Scans all documents and ensures
-     * each document's schema is indexed in the feature bitmap collection.
-     */
-    /**
-     * Safely parse an array of raw documents, skipping corrupted entries instead of crashing.
-     */
-    #safeParseDocuments(docs) {
-        const result = [];
-        for (const doc of docs) {
-            try {
-                result.push(parseInitializeDocument(doc));
-            } catch (e) {
-                debug(`safeParseDocuments: Skipping corrupted document (id=${doc?.id ?? 'unknown'}): ${e.message}`);
-            }
-        }
-        return result;
     }
 
     /**
@@ -5784,7 +3901,7 @@ class SynapsD extends EventEmitter {
         const counts = { scanned: 0, created: 0, updated: 0, removedTimelines };
         for (let i = 0; i < ids.length; i += batchSize) {
             const slice = ids.slice(i, i + batchSize);
-            const docs = this.#safeParseDocuments(await this.documents.getMany(slice));
+            const docs = safeParseDocuments(await this.documents.getMany(slice));
 
             await this.#withDeferredMembership(async () => {
                 for (const doc of docs) {
@@ -5836,7 +3953,7 @@ class SynapsD extends EventEmitter {
         const touchedKeys = new Set();
         for (let i = 0; i < ids.length; i += batchSize) {
             const slice = ids.slice(i, i + batchSize);
-            const docs = this.#safeParseDocuments(await this.documents.getMany(slice));
+            const docs = safeParseDocuments(await this.documents.getMany(slice));
 
             await this.#withDeferredMembership(async () => {
                 for (const doc of docs) {
@@ -5912,13 +4029,13 @@ class SynapsD extends EventEmitter {
      */
     async reindexEmbeddings(opts = {}) {
         if (!this.isRunning()) { throw new Error('Database is not running'); }
-        if (!this.#vectorIndex) {
+        if (!this.#vectors.primary) {
             throw new Error('Dense vector store not available (semantic disabled or not ready)');
         }
         const space = opts.space || 'text';
         const embeddableSchemas = (Array.isArray(opts.schemas) && opts.schemas.length)
             ? opts.schemas
-            : Array.from(this.#semanticConfig.embeddableSchemas);
+            : Array.from(this.#vectors.config.embeddableSchemas);
         const all = await this.bitmapIndex.OR(normalizeBitmapKeys(embeddableSchemas));
         const totalEmbeddable = all ? all.size : 0;
         const unembedded = await this.getUnembeddedDocIds(space, embeddableSchemas);

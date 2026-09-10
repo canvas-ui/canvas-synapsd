@@ -3,7 +3,7 @@
 Review date: 2026-09-10. Scope: current `src/index.js` and its collaborating
 indexes, backend, schemas, views, sessions, tests, and selected server callers.
 The assessment and source line references below describe the original review
-snapshot. Steps 1 and 2 have since been implemented; see the implementation
+snapshot. Steps 1–4 have since been implemented; see the implementation
 record at the end for changes and validation.
 
 ## Assessment
@@ -273,6 +273,72 @@ coordination add overhead that should remain visible during subsequent writer
 work. The existing benchmark script uses a retired schema ID, so the comparison
 used an isolated temporary harness with current note schemas instead.
 
-Steps 3–7 remain proposed. In particular, shared write orchestration, broader
+At completion of steps 1–2, steps 3–7 remained proposed. Shared write orchestration, broader
 failure-policy changes, and search/embedding event-order unification are still
 separate work.
+
+
+## Implementation record — steps 3 and 4
+
+Implemented on 2026-09-10. `src/index.js` is now **4,064 lines**, down from
+5,947 after steps 1–2 (a further 32% reduction), and 6,253 at the original review.
+Public method signatures and named helper exports remain intact.
+
+### Step 3: query and vector services
+
+- `src/search/VectorSpaces.js` owns vector configuration, opened indexes,
+  model-specific tables, embedding ledgers, and vector administration.
+- `src/query/CandidateResolver.js` resolves tree, dataset, feature, relation,
+  timeline, and geo scopes. It retains the consulted membership keys and coarse
+  dependencies used by sessions, including unconstrained versus empty candidates.
+- `src/query/QueryEngine.js` owns ranking, pagination, FTS/vector fusion, and
+  compound/refined searches. It reads current vector configuration and indexes
+  through VectorSpaces, so model switches and live tuning remain visible.
+- The facade constructs these services with explicit dependencies. Runtime index
+  getters avoid capturing uninitialized indexes. QuerySession still uses the
+  public facade's `resolveCandidates()` and `rank()` methods.
+- Corrupt-row-tolerant parsing is shared through `src/utils/document.js` by query
+  materialization and maintenance.
+
+### Step 4: tree registry
+
+- `src/trees/TreeRegistry.js` owns tree metadata, defaults, cached instances,
+  selection, collection access, and event forwarding.
+- The facade supplies tree construction and event publication callbacks. Existing
+  tree document APIs retain their facade access, and transactional events still
+  flow through the existing deferred publication mechanism.
+- Rollback reloads the registry's existing cached tree instances, preserving
+  references held by callers. Storage prefixes, names, default selection, and
+  settings retain their existing semantics.
+
+Steps 5–7 remain proposed: membership and derived-index ownership, shared writer
+orchestration, and maintenance/lifecycle cleanup. These extractions do not change transaction policy
+or broaden the atomicity guarantees documented for steps 1–2.
+
+
+### Validation
+
+- Full suite: **63 suites / 501 tests passed**.
+- Four new integration tests cover context/directory rename and reopen, cached
+  identity and forwarded events, default-tree replacement/deletion, and vector
+  model switching with search, stats, ledgers, inactive-table cleanup, and reopen.
+- Existing session invalidation, tree settings, linked queries, vector provenance,
+  refined searches, and transaction rollback tests remain green.
+- AST comparison against the steps 1–2 checkpoint confirms all **97 public
+  method/getter signatures** are unchanged, including defaults and async flags.
+- ESLint on changed/new JavaScript and `git diff --check` pass.
+
+A local comparison against the completed steps 1–2 checkpoint used five fresh
+runs per version, each with 1,000 deterministic notes, batch insert/update with
+Lance writes skipped, and 100 ID-only bitmap queries. Median timings:
+
+| Operation | After steps 1–2 | After steps 3–4 |
+| --- | ---: | ---: |
+| Insert 1,000 documents | 852 ms | 874 ms |
+| Update 1,000 documents | 1,115 ms | 1,169 ms |
+| 100 bitmap queries | 7.28 ms | 7.66 ms |
+
+Measured write differences were about 2.5% and 4.8% (22 ms and 54 ms per batch).
+The runs varied substantially, so this smoke benchmark cannot distinguish small
+refactor overhead from local timing noise. It does not measure production
+throughput or embedding/FTS ingestion. No transaction or batching policy changed.

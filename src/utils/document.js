@@ -1,5 +1,8 @@
 'use strict';
 
+import debugInstance from 'debug';
+const debug = debugInstance('canvas:synapsd');
+
 
 import schemaRegistry from '../schemas/SchemaRegistry.js';
 import { isDocumentData, isDocumentInstance } from '../schemas/SchemaRegistry.js';
@@ -106,4 +109,17 @@ export function generateDocumentIDs(internalStore, count, minId = 100000) {
         }
         return ids;
     });
+}
+
+// Materialize readable rows while tolerating corrupted legacy documents.
+export function safeParseDocuments(docs) {
+    const result = [];
+    for (const doc of docs) {
+        try {
+            result.push(parseInitializeDocument(doc));
+        } catch (e) {
+            debug(`safeParseDocuments: Skipping corrupted document (id=${doc?.id ?? 'unknown'}): ${e.message}`);
+        }
+    }
+    return result;
 }
