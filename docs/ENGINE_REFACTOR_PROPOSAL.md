@@ -381,3 +381,37 @@ that failed before the snapshot correction. Measured coverage for the extracted
 write services is **98.35% lines / 100% functions / 79% branches**. This is
 coverage evidence, not a claim that every possible failure is tested. Changed-file
 ESLint and `git diff --check` pass. `index.js` is 3,462 lines at this checkpoint.
+
+## Implementation record — step 6
+
+- `write/DocumentWriter.js` shares insert/dedup preparation, update snapshots,
+  feature derivation, and a single commit pipeline across single, batch, and
+  multi-directory writes. `write/PreparedChange.js` holds the explicit before /
+  after state and index diffs; batch search selection uses its content-change flag.
+- `DerivedIndexes.applyChange()` applies the common timeline, geo, relation,
+  feature, location, comment, and facet rules. The directory-batch shortcut now
+  indexes comments/facets/asserted relations and validates relations, closing
+  omissions exposed by sharing the pipeline.
+- `write/DocumentDeletion.js` shares durable row/index deletion. Batch live-doc
+  membership removal now joins the native transaction, as single deletion did.
+  External search cleanup still gates free-ID admission.
+- `write/MembershipWriter.js` owns single/batch link/unlink adapters; normalized
+  selectors and provenance live in `write/options.js`.
+- Asserted-relation row/timeline/edge updates now run in the existing transaction
+  coordinator, including nested retractions during deletion.
+
+Compatibility adapters preserve result/error shapes, provenance, single versus
+batch event payloads and ordering, batch ID allocation, checksum folding, and one
+Lance batch submission. Single updates still publish before best-effort Lance
+upsert; batch events still follow it. Event-order unification is an API decision,
+not an incidental effect of moving code.
+
+New tests exercise the three insert entry points, multi-path checksum folding,
+row-derived indexes before/after rebuild, injected timeline failures, queue
+recovery, invalid directory-batch relations, and asserted-relation rollback.
+
+Validation: **64 suites / 511 tests pass**. Write-service coverage is **89.4%
+lines / 94.73% functions / 71.34% branches** across the larger extracted surface.
+The shared PreparedChange module is fully line/function covered; the remaining
+uncovered lines primarily concern legacy selector adapters and best-effort error
+paths. Changed-file ESLint and `git diff --check` pass. `index.js` is 1,964 lines.

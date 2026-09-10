@@ -3,7 +3,7 @@ import { parseLocationUrl } from '../utils/path-helpers.js';
 import { parseContextSpecForInsert } from '../utils/parsing.js';
 import { normalizeBitmapKeys, normalizeBitmapKey } from '../indexes/bitmaps/lib/keys.js';
 import { deviceFacetKeys } from '../utils/device-facets.js';
-import { DEVICE_SCHEMA_NAME, ORPHANED_FEATURE, relationKey } from '../documents/derivation.js';
+import { DEVICE_SCHEMA_NAME, ORPHANED_FEATURE, relationKey, documentRelations, COMMENT_BITMAP_KEY } from '../documents/derivation.js';
 const debug = debugInstance('canvas:synapsd');
 
 // Row-derived indexes and tree membership selection. Native timeline/geo/edge
@@ -501,4 +501,19 @@ export default class DerivedIndexes {
         allSynapseKeys.push(...normalizeBitmapKeys(featureBitmaps ?? []));
         return Array.from(new Set(allSynapseKeys));
     }
+    // Shared by single, batch, and multi-directory document commits.
+    async applyChange(change) {
+        const { id, before, after, features, context, directories, staleFeatures, facetKeys, staleFacets } = change;
+        if (staleFeatures.length) { await this.#writes.applyMembership('untick', id, staleFeatures); }
+        if (before) { await this.removeDocumentTimelines(id, before, after); }
+        await this.indexDocumentTimelines(id, after);
+        await this.indexDocumentGeo(id, after);
+        this.syncDocumentRelations(id, before?.relations, documentRelations(after));
+        for (const directory of directories) { await this.indexDocument(id, context, directory, features); }
+        if (before) { await this.removeStaleLocationMembership(id, before, after, features); }
+        await this.#writes.applyMembership(after.hasComment ? 'tick' : 'untick', id, [COMMENT_BITMAP_KEY]);
+        if (staleFacets.length) { await this.#writes.applyMembership('untick', id, staleFacets); }
+        if (facetKeys.length) { await this.#writes.applyMembership('tick', id, facetKeys); }
+    }
+
 }
