@@ -8,7 +8,7 @@ A small KV database built on top of `LMDB`, with `roaring-bitmap` and `LanceDB` 
 
 Synapsd exports virtual bitmap-powered FS-like trees on top of your data - index any data as once, then "tick" it in as many views(tree paths) as you need. 
 
-A photo of a nice kitchen may belong to `universe://travel/barcelona` and `universe://work/architecture/interior/kitchens`, while being hosted on `nas@home`, `s3://bucket/key`, `red-usb:/some/path`.
+A photo of a nice kitchen may belong to `ctx:/travel/barcelona` and `ctx:/work/architecture/interior/kitchens`, while being hosted on `nas@home`, `s3://bucket/key`, `red-usb:/some/path`.
 
 
 ## Highlights
@@ -22,7 +22,6 @@ A photo of a nice kitchen may belong to `universe://travel/barcelona` and `unive
 - **[Spatial index](#spatial-index-s2)** - "photos in this map viewport", "everything within 500 m of me" as a single range query over S2 cells.
 - **[Schemas that publish themselves](#schemas)** - hierarchical ids (`data/schema/message/email` *is a* `data/schema/message`), zod validation, and derived JSON Schema consumers can fetch instead of hand-copying enums.
 
-> **v3.x** - schema version **3**, hierarchical `data/schema/*` ids. A database below that version refuses to open. There is no migration code in the engine; run `scripts/migrate-schema-v3.js`. See **[Schema version and rebuild](#schema-version-and-rebuild)**.
 
 ## Quick start
 
