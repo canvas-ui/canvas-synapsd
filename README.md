@@ -4,9 +4,12 @@
 
 # SynapsD
 
-A small KV database built on top of `LMDB`, with `roaring-bitmap` and `LanceDB` indexes in-the-mix, purpose-built to index the inflow of unstructured data in an almost ordinary Universe. Synapsd exports virtual bitmap-powered FS-like trees on top of your data - store a JSON document once, then place it in as many views as you need: a project tree, a tag, a timeline, a map, a dataset. Each appearance costs bitmap bits, not copies. Every filter below narrows the same candidate set, so they combine freely in one query.
+A small KV database built on top of `LMDB`, with `roaring-bitmap` and `LanceDB` indexes in-the-mix, purpose-built to index the inflow of unstructured data in an almost ordinary Universe in the [Canvas UI](https://github.com/canvas-ui) application. 
 
-SynapsD indexes metadata and structure. It does not store blob bytes, and it does not run an embedding model. Point `locations[]` at wherever the bytes live. Push vectors in from your own embedder, or skip that stack and everything falls back to full-text.
+Synapsd exports virtual bitmap-powered FS-like trees on top of your data - index any data as once, then "tick" it in as many views(tree paths) as you need. 
+
+A photo of a nice kitchen may belong to `universe://travel/barcelona` and `universe://work/architecture/interior/kitchens`, while being hosted on `nas@home`, `s3://bucket/key`, `red-usb:/some/path`.
+
 
 ## Highlights
 
