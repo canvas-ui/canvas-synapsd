@@ -197,6 +197,13 @@ const documentSchema = z.object({
     // Timestamps
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
+    // Monotonic row version, owned by the DB (DocumentWriter): 1 on insert,
+    // +1 on every row write (content, metadata, locations, relations).
+    // Tree/tag membership is bitmap-only and does not touch the row, so it
+    // does not bump. Caller-supplied values are ignored on write — the DB is
+    // the single authority — so replicas, agents and UIs can use it as an
+    // `If-Match` precondition and as "is my copy current" evidence.
+    version: z.number().int().positive().optional(),
     // Orphan lifecycle: set when the document lost its last resolvable location.
     // null = not orphaned. Cleared on re-bind, read by the retention GC.
     // Source of the derived `feature/orphaned` bitmap (this + empty
@@ -360,6 +367,9 @@ class Document {
         // Timestamps
         this.createdAt = options.createdAt ?? new Date().toISOString();
         this.updatedAt = options.updatedAt ?? new Date().toISOString();
+        // Row version (see documentSchema.version); rows written before the
+        // field existed read back as version 1.
+        this.version = Number.isInteger(options.version) && options.version > 0 ? options.version : 1;
         // Orphan lifecycle marker (null = has locations / never orphaned)
         this.orphanedAt = options.orphanedAt ?? null;
     }
@@ -815,6 +825,7 @@ class Document {
             metadata: this.metadata,
             createdAt: this.createdAt,
             updatedAt: this.updatedAt,
+            version: this.version,
             orphanedAt: this.orphanedAt,
             checksumArray: this.checksumArray,
         };

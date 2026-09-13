@@ -733,6 +733,7 @@ class SynapsD extends EventEmitter {
         if (current.length > 0) { storedDocument.data.relations = current; }
         else { delete storedDocument.data.relations; }
         storedDocument.updatedAt = new Date().toISOString();
+        storedDocument.version = (Number.isInteger(storedDocument.version) ? storedDocument.version : 1) + 1;
 
         await this.#writes.withDeferredMembership(async () => {
             await this.documents.put(docId, storedDocument);
