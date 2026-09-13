@@ -16,6 +16,7 @@ export function snapshotDocument(doc) {
                 ? { backend: location.metadata.backend } : undefined,
         })) : [],
         orphanedAt: doc.orphanedAt || null,
+        version: Number.isInteger(doc.version) && doc.version > 0 ? doc.version : 1,
         comment: typeof doc.comment === 'string' ? doc.comment : '',
         summary: typeof doc.metadata?.summary === 'string' ? doc.metadata.summary : '',
         text: typeof doc.metadata?.text?.content === 'string' ? doc.metadata.text.content : '',

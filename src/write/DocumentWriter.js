@@ -580,8 +580,18 @@ export default class DocumentWriter {
             if (batchTick) {
                 await this.#bitmapIndex.tick(this.#getAllBitmap().key, changes.map(change => change.id));
             }
+            // Row version is minted HERE and only here: whatever the caller put
+            // on the parsed document is discarded. Two changes to the same id in
+            // one batch chain off each other, not off the same stale snapshot.
+            const minted = new Map();
             for (const change of changes) {
                 const { id, after, before, operation } = change;
+                // `before` is null only for a brand-new row; a content-addressed
+                // re-put of existing bytes is an 'insert' op over a live row and
+                // must continue its counter, so key off the snapshot, not the op.
+                const base = Math.max(minted.get(id) ?? 0, before?.version ?? 0);
+                after.version = base + 1;
+                minted.set(id, after.version);
                 await this.#documents.put(id, after);
                 if (!batchTick) { await this.#bitmapIndex.tick(this.#getAllBitmap().key, id); }
                 const drop = change.replaceChecksums ? before.checksums : change.staleChecksums;
