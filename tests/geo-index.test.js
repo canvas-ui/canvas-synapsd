@@ -44,6 +44,15 @@ describe('geo index + geo: filters', () => {
         expect(await db.geo.has(nowhere)).toBe(false);
     });
 
+    test('missing locations are excluded by default and can be explicitly included', async () => {
+        const missing = await db.list({ filters: ['geo:missing'], limit: 0 });
+        expect(missing.map(d => d.id)).toEqual([nowhere]);
+        const included = await db.list({ filters: ['geo:bbox:47.5,15.5,48.8,17.8', 'geo:missing'], limit: 0 });
+        expect(included.map(d => d.id).sort()).toEqual([bratislava, vienna, nowhere].sort());
+        // Operand evaluation must not mutate the maintained all-document set.
+        expect((await db.list({ limit: 0 })).length).toBe(4);
+    });
+
     test('bbox filter (mapbox viewport) matches contained docs only', async () => {
         // Central-Europe box: Bratislava + Vienna in, Sydney + no-geo out.
         const res = await db.list({ filters: ['geo:bbox:47.5,15.5,48.8,17.8'], limit: 0 });

@@ -64,6 +64,11 @@ export default class GeoIndex {
         return !!ebm && ebm.has(Number(id));
     }
 
+    async locatedBitmap() {
+        const ebm = await this.bitmapIndex.getBitmap(this.#bsi.ebmKey, false);
+        return ebm ? new RoaringBitmap32(ebm) : new RoaringBitmap32();
+    }
+
     async getCount() {
         const ebm = await this.bitmapIndex.getBitmap(this.#bsi.ebmKey, false);
         return ebm ? ebm.size : 0;

@@ -253,7 +253,13 @@ export default class CandidateResolver {
     }
 
     async #combineGeoFilters(geoFilters) {
-        return await this.#combineSigilFilters(geoFilters, (f) => applyGeoFilter(f, this.#getGeoIndex()));
+        return await this.#combineSigilFilters(geoFilters, async (f) => {
+            const geo = this.#getGeoIndex();
+            if (f.kind !== 'missing') { return applyGeoFilter(f, geo); }
+            const missing = await this.allDocumentsBitmap();
+            if (geo) { missing.andNotInPlace(await geo.locatedBitmap()); }
+            return missing;
+        });
     }
 
     // Shared sigil algebra for BSI-backed filter families (timeline, geo):
