@@ -61,7 +61,9 @@ function parseTimelineToken(rest) {
 //   geo:bbox:<minLat>,<minLon>,<maxLat>,<maxLon>   viewport / mapbox rect
 //   geo:near:<lat>,<lon>,<radius[m|km]>            spherical-cap radius
 //   geo:cell:<s2CellId>[,<s2CellId>...]            explicit S2 cells (decimal ids)
+//   geo:missing                                  documents without indexed coordinates
 function parseGeoToken(rest) {
+    if (rest === 'missing') { return { kind: 'missing' }; }
     const idx = rest.indexOf(':');
     if (idx < 0) { return null; }
     const kind = rest.slice(0, idx);
@@ -123,7 +125,7 @@ export function parseFilters(filterArray) {
             if (!parsed) {
                 throw new Error(
                     `Unparseable geo filter "${filter}". Expected geo:bbox:<minLat>,<minLon>,<maxLat>,<maxLon>, ` +
-                    'geo:near:<lat>,<lon>,<radius[m|km]>, or geo:cell:<s2CellId>[,…].',
+                    'geo:near:<lat>,<lon>,<radius[m|km]>, geo:cell:<s2CellId>[,…], or geo:missing.',
                 );
             }
             geoFilters.push({ sigil, ...parsed });
