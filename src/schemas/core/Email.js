@@ -1,6 +1,6 @@
 'use strict';
 
-import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
+import Document, { documentSchema as baseDocumentSchema, withDerivedContentTimeline } from '../Document.js';
 import { generateChecksum } from '../../utils/crypto.js';
 import { z } from 'zod';
 
@@ -274,6 +274,9 @@ export default class Email extends Document {
         // Set schema before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
+        // Content time = when the message was sent (data.date), on the
+        // built-in 'content' timeline — "all mail from this year" filters on it.
+        options.timelines = withDerivedContentTimeline(options.timelines, options.data?.date);
 
         super(options);
     }

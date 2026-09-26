@@ -42,11 +42,13 @@
  * short of a migration. The subject is the MEMBER, per the document-as-subject
  * convention; "who works here" is the incoming axis.
  *
- * Recipients (email To/Cc -> identity) are deferred, not rejected: the role is
- * distinct from authorship and cannot live in edge meta without colliding with the
- * asserted-edge convention above. `data.to`/`data.cc` stay ordinary fields until
- * the reverse query ("everything sent to Alice") is actually wanted. Deferring is
- * safe here precisely because there is no conflation risk — unlike the two above.
+ * `addressed-to` (added 2026-09-27) is the recipient role: email To/Cc (and
+ * Bcc on your own sent mail) -> identity. It was deferred until the reverse
+ * query ("everything sent to Alice") was wanted — contact extraction from filed
+ * email wants it. It is its own predicate, not `authored-by` + edge meta, for
+ * the reason given above: role in meta would collide with the asserted-edge
+ * convention (no meta row). To vs Cc is NOT split: both answer "was Alice on
+ * this", and the message itself still says which header she was in.
  */
 
 export const PREDICATES = {
@@ -58,6 +60,7 @@ export const PREDICATES = {
     'depicts': { id: 6 },       // media subject: image -> identity (face tags)
     'authored-by': { id: 7 },   // authorship: message/document -> identity (sender, author)
     'member-of': { id: 8 },     // affiliation: identity -> identity (person -> organization)
+    'addressed-to': { id: 9 },  // recipient: message -> identity (email To/Cc)
 };
 
 // id -> name, built once. Used to decode ids read back out of keys.
@@ -78,6 +81,8 @@ const INVERSE_STYLE = new Set([
     'depicted-in',
     'authors',
     'authored',
+    'addressed-by',
+    'received',
 ]);
 
 /**

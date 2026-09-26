@@ -926,6 +926,20 @@ class Document {
 }
 
 // Export document class and schemas
+// The built-in 'content' timeline answers "when did this content come into
+// existence" (EXIF capture for photos, the Date header for mail) — distinct
+// from the crud:* lifecycle of the ROW. Schemas whose content carries its own
+// date derive the entry from the data (doc declares, index derives), so it can
+// never drift from the document: any caller-supplied 'content' entry is
+// replaced, every other timeline entry is kept.
+export const CONTENT_TIMELINE = 'content';
+export function withDerivedContentTimeline(timelines, start) {
+    const kept = (Array.isArray(timelines) ? timelines : [])
+        .filter((t) => (t?.timeline || t?.name) !== CONTENT_TIMELINE);
+    if (typeof start !== 'string' || !start || Number.isNaN(Date.parse(start))) { return kept; }
+    return [...kept, { timeline: CONTENT_TIMELINE, start }];
+}
+
 export default Document;
 export { documentDataSchema, documentSchema, locationSchema, timelineEntrySchema };
 export { DERIVED_FEATURE_PREFIXES, RETIRED_FEATURE_PREFIXES, PRESERVED_FEATURE_PREFIXES, normalizeFeatureArray };

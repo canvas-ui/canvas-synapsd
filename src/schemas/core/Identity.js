@@ -1,5 +1,6 @@
 'use strict';
 
+import crypto from 'node:crypto';
 import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
 import { z } from 'zod';
 
@@ -100,6 +101,37 @@ export default class Identity extends Document {
         super(options);
 
         this.#ensureArrays(['identifiers', 'channels', 'organizations', 'links', 'tags']);
+    }
+
+    // ----- Email alias keys -----
+    //
+    // "Who is alice@example.com?" is a checksum-index lookup: every email
+    // address an identity carries (primaryEmail, email channels, email
+    // identifiers) adds an `identity-email/<sha256(lowercased)>` key after the
+    // primary checksum. The primary [0] still hashes checksumFields, so dedup
+    // semantics are unchanged; the aliases only make the address resolvable —
+    // contact extraction reuses a hand-made contact instead of forking it.
+
+    static emailAliasKey(address) {
+        const normalized = String(address ?? '').trim().toLowerCase();
+        if (!normalized.includes('@')) { return null; }
+        return `identity-email/${crypto.createHash('sha256').update(normalized).digest('hex')}`;
+    }
+
+    emailAddresses() {
+        const data = this.data || {};
+        const found = [
+            data.primaryEmail,
+            ...(Array.isArray(data.channels) ? data.channels : []).filter((c) => c?.kind === 'email').map((c) => c.value),
+            ...(Array.isArray(data.identifiers) ? data.identifiers : []).filter((i) => i?.type === 'email').map((i) => i.identifier),
+        ];
+        return [...new Set(found.filter((a) => typeof a === 'string' && a.includes('@')).map((a) => a.trim().toLowerCase()))];
+    }
+
+    generateChecksumStrings() {
+        const base = super.generateChecksumStrings();
+        const aliases = this.emailAddresses().map((a) => Identity.emailAliasKey(a)).filter(Boolean);
+        return [...new Set([...base, ...aliases])];
     }
 
     // ----- Getters / Setters -----

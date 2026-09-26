@@ -614,6 +614,26 @@ class SynapsD extends EventEmitter {
         return this.#writes.withWriteLock(() => this.#relate(fromId, predicate, toId, options));
     }
 
+    /**
+     * Many DERIVED edges in one write-queue entry and one transaction (an
+     * extractor's output for a batch of documents). Same contract as relate():
+     * `meta.src` is required and applies to every edge.
+     *
+     * @param {Array<{from:number, p:string, to:number}>} edges
+     * @param {{meta: {src:string, conf?:number}}} options
+     * @returns {Promise<number>} edges written
+     */
+    async relateMany(edges, options = {}) {
+        if (!options.meta?.src) {
+            throw new Error('relateMany() writes DERIVED edges and requires meta.src (e.g. "extractor:foo")');
+        }
+        if (!Array.isArray(edges) || edges.length === 0) { return 0; }
+        return this.#writes.withWriteLock(() => this.#writes.withDeferredMembership(async () => {
+            for (const { from, p, to } of edges) { this.#edges.link(from, p, to, options.meta); }
+            return edges.length;
+        }));
+    }
+
     async #relate(fromId, predicate, toId, options = {}) {
         return this.#writes.withDeferredMembership(async () => {
             if (!options.meta?.src) {
@@ -1625,6 +1645,15 @@ class SynapsD extends EventEmitter {
 
     async reindexCrudTimelines({ batchSize = 1000, onProgress = null } = {}) {
         return this.#writes.withWriteLock(() => this.#maintenance.reindexCrudTimelines({ batchSize, onProgress }));
+    }
+
+    /**
+     * Backfill timelines a schema derives from its data (Email/Message →
+     * 'content', Event → 'events', …) onto rows written before the derivation
+     * existed. Rows whose derived timelines already match are untouched.
+     */
+    async rederiveSchemaTimelines({ schemas, batchSize = 500, onProgress = null } = {}) {
+        return this.#writes.withWriteLock(() => this.#maintenance.rederiveSchemaTimelines({ schemas, batchSize, onProgress }));
     }
 
     /**

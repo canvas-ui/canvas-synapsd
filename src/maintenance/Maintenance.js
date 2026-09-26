@@ -176,6 +176,73 @@ export default class Maintenance {
     }
 
     /**
+     * Re-run each row's schema timeline derivation and persist + re-index the
+     * rows whose timelines changed. Parsing a row runs its schema constructor,
+     * which is where derivations live (Email/Message 'content', Event 'events',
+     * Task 'tasks'), so a row stored before a derivation existed parses WITH it
+     * — this writes that back. Row version is bumped (a replica must see the
+     * change); no document events (nothing a user did, and inferd must not
+     * re-embed: timelines are not content).
+     *
+     * @param {object} opts
+     * @param {string[]} opts.schemas schema id prefixes to consider
+     *        (e.g. ['data/schema/message']); required — a full-store rewrite
+     *        is never implied
+     * @returns {Promise<{scanned:number, matched:number, updated:number}>}
+     */
+    async rederiveSchemaTimelines({ schemas, batchSize = 500, onProgress = null } = {}) {
+        this.#validateBatchSize(batchSize);
+        if (!this.#isRunning()) { throw new Error('Database is not running'); }
+        if (!Array.isArray(schemas) || schemas.length === 0) { throw new Error('rederiveSchemaTimelines requires schema prefixes'); }
+        const wanted = (schema) => typeof schema === 'string'
+            && schemas.some((prefix) => schema === prefix || schema.startsWith(`${prefix}/`));
+
+        // Candidates from the schema bitmaps (a schema id ticks its ancestors,
+        // so 'data/schema/message' covers email too) — never a full-store scan
+        // for a few thousand mails in a multi-million-row workspace.
+        const candidates = new Set();
+        for (const prefix of schemas) {
+            const bitmap = await this.#bitmapIndex.getBitmap(prefix, false);
+            if (bitmap) { for (const id of bitmap.toArray()) { candidates.add(id); } }
+        }
+        const ids = [...candidates].sort((a, b) => a - b);
+
+        const counts = { scanned: 0, matched: 0, updated: 0 };
+        for (let i = 0; i < ids.length; i += batchSize) {
+            const rows = (await this.#documents.getMany(ids.slice(i, i + batchSize))).filter(Boolean);
+            const changed = [];
+            for (const row of rows) {
+                counts.scanned++;
+                if (!wanted(row.schema)) { continue; }
+                counts.matched++;
+                // Parse a COPY: schema constructors assign options.timelines,
+                // so parsing the row itself would overwrite the very state we
+                // compare against (and must un-index).
+                const previous = { timelines: Array.isArray(row.timelines) ? row.timelines : [] };
+                let parsed;
+                try { parsed = parseInitializeDocument({ ...row }); } catch { continue; }
+                if (JSON.stringify(parsed.timelines ?? []) === JSON.stringify(previous.timelines)) { continue; }
+                changed.push({ row, previous, parsed });
+            }
+            if (changed.length) {
+                await this.#writes.withDeferredMembership(async () => {
+                    for (const { row, previous, parsed } of changed) {
+                        parsed.version = (Number.isInteger(row.version) ? row.version : 0) + 1;
+                        await this.#derived.removeDocumentTimelines(parsed.id, previous);
+                        await this.#documents.put(parsed.id, parsed);
+                        await this.#derived.indexDocumentTimelines(parsed.id, parsed);
+                        counts.updated++;
+                    }
+                });
+            }
+            if (onProgress) { onProgress({ ...counts, total: ids.length }); }
+        }
+
+        debug(`rederiveSchemaTimelines(${schemas.join(',')}): scanned ${counts.scanned}, matched ${counts.matched}, updated ${counts.updated}`);
+        return counts;
+    }
+
+    /**
      * Rebuild the per-MIME-type presence bitmaps (data/mime/*) from stored docs.
      * Like the comment bitmap these are derived-on-write with no synapse backing,
      * so this backfills them for a corpus indexed before mime bitmaps existed (e.g.

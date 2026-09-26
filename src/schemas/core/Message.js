@@ -1,6 +1,6 @@
 'use strict';
 
-import Document, { documentSchema as baseDocumentSchema } from '../Document.js';
+import Document, { documentSchema as baseDocumentSchema, withDerivedContentTimeline } from '../Document.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/schema/message';
@@ -96,6 +96,9 @@ export default class Message extends Document {
         // Set schema before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
+        // Content time = when the message was sent (data.timestamp), on the
+        // built-in 'content' timeline — "all mail from this year" filters on it.
+        options.timelines = withDerivedContentTimeline(options.timelines, options.data?.timestamp);
 
         super(options);
     }
