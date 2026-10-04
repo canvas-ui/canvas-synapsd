@@ -89,4 +89,23 @@ describe('directory tree segments + backend locks', () => {
         const removed = await tree.removePath('/imap/me@idnc.sk', true);
         expect(removed.error).toBeNull();
     });
+
+    test('folders created implicitly by filing are announced as tree.path.inserted', async () => {
+        const tree = await createDirectoryTree();
+        await tree.insertPath('/workspace/home');
+        const seen = [];
+        tree.on('tree.path.inserted', (event) => seen.push(event.path ?? event.payload?.path));
+
+        await tree.ensurePaths(['/workspace/home/photos/2026']);
+        expect(seen).toEqual(['/workspace/home/photos', '/workspace/home/photos/2026']);
+
+        // Existing folders stay quiet.
+        seen.length = 0;
+        await tree.ensurePaths(['/workspace/home/photos/2026']);
+        expect(seen).toEqual([]);
+
+        // insertPath announces the leaf once, plus the parents it had to create.
+        await tree.insertPath('/a/b/c');
+        expect(seen).toEqual(['/a', '/a/b', '/a/b/c']);
+    });
 });

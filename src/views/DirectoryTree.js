@@ -195,7 +195,9 @@ class DirectoryTree extends EventEmitter {
             };
         }
 
-        const node = existing || await this.#ensureNode(normalizedPath, { leafType });
+        // The leaf is announced below whether or not it is new; only the
+        // missing parents it creates on the way need announcing here.
+        const node = existing || await this.#ensureNode(normalizedPath, { leafType, announce: 'parents' });
         if (leafType === 'canvas') {
             this.#applyNodeUpdates(node, options);
             await this.#persistNode(node);
@@ -401,6 +403,17 @@ class DirectoryTree extends EventEmitter {
         return view;
     }
 
+    /**
+     * Resolve `path`, creating any missing folders on the way.
+     *
+     * Folders created here are announced as `tree.path.inserted`, exactly as an
+     * explicit insertPath() would: documents filed into a path that does not
+     * exist yet (a backend mirror ingesting `photos/2026/x.jpg`, a putMany into
+     * a new folder) are the common way folders appear in a directory tree, and
+     * a silent creation leaves every listener — web clients reloading their
+     * tree, the backend-tree-sync hook — unaware the folder exists.
+     * `announce`: 'all' (default) | 'parents' (all but the leaf) | false.
+     */
     async #ensureNode(path, options = {}) {
         const normalizedPath = this.#normalizePath(path);
         if (normalizedPath === '/') { return this.root; }
@@ -408,9 +421,12 @@ class DirectoryTree extends EventEmitter {
         let current = this.root;
         const segments = normalizedPath.split('/').filter(Boolean);
         const touched = new Set();
+        const created = [];
+        let currentPath = '';
         for (let index = 0; index < segments.length; index++) {
             const rawName = segments[index];
             const name = this.#sanitizeSegment(rawName);
+            currentPath = `${currentPath}/${name}`;
             let child = this.#findChildByName(current, name);
             if (!child) {
                 const isLeaf = index === segments.length - 1;
@@ -425,12 +441,23 @@ class DirectoryTree extends EventEmitter {
                 current.addChild(child);
                 touched.add(current);
                 touched.add(child);
+                created.push({ path: currentPath, nodeId: child.id, leaf: index === segments.length - 1 });
             }
             current = child;
         }
 
         for (const node of touched) {
             await this.#persistNode(node);
+        }
+
+        const announce = options.announce ?? 'all';
+        if (announce) {
+            // Parent before child, after the nodes are persisted: a listener
+            // that reads the tree back must find them.
+            for (const entry of created) {
+                if (announce === 'parents' && entry.leaf) { continue; }
+                this.#emitTreeEvent(EVENTS.TREE_PATH_INSERTED, { path: entry.path, nodeId: entry.nodeId, implicit: true });
+            }
         }
 
         return current;
