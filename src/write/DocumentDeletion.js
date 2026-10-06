@@ -10,28 +10,26 @@ export default class DocumentDeletion {
     #bitmapIndex;
     #writes;
     #derived;
-    #vectors;
     #checksumIndex;
     #getTimeline;
     #getGeo;
     #getEdges;
     #getSynapses;
-    #getLance;
+    #searchQueue;
     #getAllBitmap;
     #getDeletedBitmap;
     #retractIncoming;
-    constructor({ documents, bitmapIndex, writes, derived, vectors, checksumIndex, getTimeline, getGeo, getEdges, getSynapses, getLance, getAllBitmap, getDeletedBitmap, retractIncoming }) {
+    constructor({ documents, bitmapIndex, writes, derived, checksumIndex, getTimeline, getGeo, getEdges, getSynapses, searchQueue, getAllBitmap, getDeletedBitmap, retractIncoming }) {
         this.#documents = documents;
         this.#bitmapIndex = bitmapIndex;
         this.#writes = writes;
         this.#derived = derived;
-        this.#vectors = vectors;
         this.#checksumIndex = checksumIndex;
         this.#getTimeline = getTimeline;
         this.#getGeo = getGeo;
         this.#getEdges = getEdges;
         this.#getSynapses = getSynapses;
-        this.#getLance = getLance;
+        this.#searchQueue = searchQueue;
         this.#getAllBitmap = getAllBitmap;
         this.#getDeletedBitmap = getDeletedBitmap;
         this.#retractIncoming = retractIncoming;
@@ -102,38 +100,11 @@ export default class DocumentDeletion {
         }
 
         const deletedIds = toDelete.map(({ id }) => id);
-        // Best-effort Lance cleanup (outside transaction — separate system).
-        // Bulk delete is all-or-nothing, so free-pool admission is batch-wide:
-        // recycle the ids only if both fts and vector cleanup succeed; otherwise
-        // they leak (stay allocated) rather than risk reuse with stale residue.
-        let lanceClean = true;
-        try {
-            lanceClean = await this.#getLance().deleteMany(deletedIds);
-        } catch (e) {
-            lanceClean = false;
-            debug(`deleteMany: Lance deleteMany failed: ${e.message}`);
-        }
-        if (this.#vectors.openedCount > 0) {
-            try {
-                for (const vi of this.#vectors.openedIndexes()) {
-                    const vecClean = await vi.deleteMany(deletedIds);
-                    lanceClean = lanceClean && vecClean;
-                }
-            } catch (e) {
-                lanceClean = false;
-                debug(`deleteMany: Vector deleteMany failed: ${e.message}`);
-            }
-        }
-
-        if (lanceClean) {
-            try {
-                // Persisting tick (Bitmap.tick is in-memory only); accepts the id array.
-                await this.#bitmapIndex.tick(this.#getDeletedBitmap().key, deletedIds);
-                debug(`deleteMany: ${deletedIds.length} ids admitted to free-id pool`);
-            } catch (e) {
-                debug(`deleteMany: free-pool admission failed (ids leak): ${e.message}`);
-            }
-        }
+        // Lance cleanup is queued (write-behind). Free-pool admission still
+        // waits for it: an id is recycled only once its fts + vector rows are
+        // gone, otherwise it leaks rather than resurfacing with stale residue.
+        // Admission is its own short write once the queue confirms.
+        this.#recycleWhenClean(deletedIds);
 
         for (const { index, id } of toDelete) {
             result.successful.push({ index, id });
@@ -189,42 +160,9 @@ export default class DocumentDeletion {
             throw new Error(`Failed to delete document atomically: ${error.message}`);
         }
 
-        // Best-effort Lance delete (outside transaction since it's a separate system)
         if (transactionSuccess) {
-            // Gate free-pool admission on lance cleanup: only recycle the id if
-            // the fts (+ vector) rows are gone. If cleanup fails the id leaks
-            // (stays allocated) but is never reused with a stale residue. The
-            // crud:deleted timeline already serves any audit/tombstone need.
-            let lanceClean = true;
-            try {
-                lanceClean = await this.#getLance().delete(docId);
-                debug(`delete: LanceDB cleanup ${lanceClean ? 'completed' : 'FAILED'} for document ${docId}`);
-            } catch (e) {
-                lanceClean = false;
-                debug(`delete: Lance delete failed for ${docId}: ${e.message}`);
-            }
-            if (this.#vectors.openedCount > 0) {
-                try {
-                    for (const vi of this.#vectors.openedIndexes()) {
-                        const vecClean = await vi.deleteDoc(docId);
-                        lanceClean = lanceClean && vecClean;
-                    }
-                } catch (e) {
-                    lanceClean = false;
-                    debug(`delete: Vector delete failed for ${docId}: ${e.message}`);
-                }
-            }
-
-            if (lanceClean) {
-                try {
-                    // Persisting tick (Bitmap.tick is in-memory only); keeps the
-                    // cached deletedDocumentsBitmap instance and the store in sync.
-                    await this.#bitmapIndex.tick(this.#getDeletedBitmap().key, docId);
-                    debug(`delete: Document ${docId} admitted to free-id pool`);
-                } catch (e) {
-                    debug(`delete: free-pool admission failed for ${docId} (id leaks): ${e.message}`);
-                }
-            }
+            // Queued Lance cleanup; the id is recycled only once it is clean.
+            this.#recycleWhenClean([docId]);
 
             if (emitEvent) {
                 this.#writes.emit(EVENTS.DOCUMENT_DELETED, createEvent(EVENTS.DOCUMENT_DELETED, { id: docId, reason: 'deleted', ...(provenance || {}) }));
@@ -235,6 +173,22 @@ export default class DocumentDeletion {
 
         return false;
     }
+    #recycleWhenClean(ids) {
+        if (!ids.length) { return; }
+        this.#searchQueue.deleteDocs(ids).then(async (clean) => {
+            if (!clean) {
+                debug(`free-pool admission skipped for ${ids.length} id(s): Lance cleanup failed (ids leak)`);
+                return;
+            }
+            await this.#writes.withWriteLock(async () => {
+                // Persisting tick (Bitmap.tick is in-memory only); keeps the
+                // cached deletedDocumentsBitmap instance and the store in sync.
+                await this.#bitmapIndex.tick(this.#getDeletedBitmap().key, ids);
+            });
+            debug(`${ids.length} id(s) admitted to free-id pool`);
+        }).catch((e) => debug(`free-pool admission failed (ids leak): ${e.message}`));
+    }
+
     async #deleteStored(id, document, now, doomed) {
         await this.#retractIncoming(id, doomed);
         await this.#documents.delete(id);

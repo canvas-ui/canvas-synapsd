@@ -47,6 +47,7 @@ import QueryEngine from './query/QueryEngine.js';
 import WriteCoordinator from './write/WriteCoordinator.js';
 import DocumentWriter from './write/DocumentWriter.js';
 import DocumentDeletion from './write/DocumentDeletion.js';
+import SearchWriteQueue from './write/SearchWriteQueue.js';
 import MembershipWriter from './write/MembershipWriter.js';
 import { normalizeDocumentOperationSpec } from './write/options.js';
 import DerivedIndexes from './write/DerivedIndexes.js';
@@ -110,6 +111,7 @@ class SynapsD extends EventEmitter {
 
     // LanceDB
     #lanceIndex;
+    #searchQueue;
 
     // Semantic recall (dense + hybrid vector search)
     #semantic;
@@ -142,12 +144,15 @@ class SynapsD extends EventEmitter {
                 }
                 await this.#initializeRuntime();
             },
-            close: () => this.#writes.closeAndDrain(async () => {
-                if (this.#storageClosed) { return; }
-                this.#emitEvent(EVENTS.BEFORE_SHUTDOWN, createEvent(EVENTS.BEFORE_SHUTDOWN));
-                await this.#db.close();
-                this.#storageClosed = true;
-            }),
+            close: async () => {
+                await this.#searchQueue.close();
+                return this.#writes.closeAndDrain(async () => {
+                    if (this.#storageClosed) { return; }
+                    this.#emitEvent(EVENTS.BEFORE_SHUTDOWN, createEvent(EVENTS.BEFORE_SHUTDOWN));
+                    await this.#db.close();
+                    this.#storageClosed = true;
+                });
+            },
             publish: (...args) => this.#emitEvent(...args),
         });
     }
@@ -242,6 +247,16 @@ class SynapsD extends EventEmitter {
             onSlowWrite: options.onSlowWrite,
             slowWriteMs: options.slowWriteMs,
         });
+        // FTS rows, vectors and their compaction: written behind the user's
+        // write, off the write lock (see SearchWriteQueue).
+        this.#searchQueue = new SearchWriteQueue({
+            getLance: () => this.#lanceIndex,
+            vectors: this.#vectors,
+            bitmapIndex: this.bitmapIndex,
+            writes: this.#writes,
+            ...(options.searchQueue || {}),
+        });
+        this.#vectors.setReadBarrier(() => this.#searchQueue.settle());
         this.#derived = new DerivedIndexes({
             documents: this.documents, bitmapIndex: this.bitmapIndex,
             trees: this.#trees, writes: this.#writes,
@@ -259,6 +274,7 @@ class SynapsD extends EventEmitter {
             internalStore: this.#internalStore,
             getTimeline: () => this.#timelineIndex,
             getLance: () => this.#lanceIndex,
+            searchQueue: this.#searchQueue,
             getAllBitmap: () => this.allDocumentsBitmap,
             getDeletedBitmap: () => this.deletedDocumentsBitmap,
             getById: (...args) => this.#getById(...args),
@@ -276,6 +292,7 @@ class SynapsD extends EventEmitter {
             getEdges: () => this.#edges,
             getSynapses: () => this.#synapses,
             getLance: () => this.#lanceIndex,
+            searchQueue: this.#searchQueue,
             getAllBitmap: () => this.allDocumentsBitmap,
             getDeletedBitmap: () => this.deletedDocumentsBitmap,
             retractIncoming: (...args) => this.#retractIncomingAssertedRelations(...args),
@@ -339,6 +356,7 @@ class SynapsD extends EventEmitter {
             try { out.fts = await this.#lanceIndex.stats(); } catch (e) { out.fts = { ready: false, error: e.message }; }
         }
 
+        await this.#searchQueue.settle();
         out.semantic = await this.#vectors.getStats();
         return out;
     }
@@ -445,6 +463,8 @@ class SynapsD extends EventEmitter {
             bitmapIndex: this.bitmapIndex,
         });
         await this.#lanceIndex.initialize();
+        this.#lanceIndex.setReadBarrier(() => this.#searchQueue.settle());
+        this.#searchQueue.open();
         await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
 
         await this.#vectors.initialize();
@@ -799,18 +819,18 @@ class SynapsD extends EventEmitter {
 
     /** Append parsed documents to the Lance FTS table (same payload as putMany phase 3). */
     async indexDocumentsInLance(documents) {
-        return this.#writes.withWriteLock(async () => {
-            if (!documents?.length) { return; }
-            try {
-                await this.#lanceIndex.addMany(documents);
-            } catch (_) { }
-        });
+        if (documents?.length) { this.#searchQueue.upsertText(documents); }
     }
 
+    /** Write out queued FTS/vector work now (tests, bulk-import checkpoints). */
+    async flushSearchIndex() {
+        return this.#searchQueue.flush();
+    }
+
+    // Compaction runs on the search lane, never under the write lock: it can
+    // take seconds and has no business blocking document writes.
     async optimizeLance() {
-        return this.#writes.withWriteLock(async () => {
-            return await this.#lanceIndex.optimize();
-        });
+        return this.#searchQueue.exclusive(() => this.#lanceIndex.optimize());
     }
 
     /**
@@ -820,9 +840,7 @@ class SynapsD extends EventEmitter {
      * space — safe to call after a bulk import/re-embed. Returns { <space>: stats }.
      */
     async optimizeVectors(space = null) {
-        return this.#writes.withWriteLock(async () => {
-            return this.#vectors.optimizeVectors(space);
-        });
+        return this.#searchQueue.exclusive(() => this.#vectors.optimizeVectors(space));
     }
 
     /**
@@ -844,9 +862,10 @@ class SynapsD extends EventEmitter {
      * @param {string} name  table name from listVectorTables()
      */
     async dropVectorTable(name) {
-        return this.#writes.withWriteLock(async () => {
+        // Lane first, then the lock — the only safe order (see SearchWriteQueue).
+        return this.#searchQueue.exclusive(() => this.#writes.withWriteLock(async () => {
             return this.#vectors.dropVectorTable(name);
-        });
+        }));
     }
 
     /**
@@ -859,6 +878,8 @@ class SynapsD extends EventEmitter {
      * @returns {Promise<number[]>}
      */
     async getUnembeddedDocIds(space = 'text', schemas = null) {
+        // Ledger reads see queued embedding writes (read-your-writes).
+        await this.#searchQueue.settle();
         return this.#vectors.getUnembeddedDocIds(space, schemas);
     }
 
@@ -868,9 +889,10 @@ class SynapsD extends EventEmitter {
      * @param {string} space
      */
     async clearSpace(space = 'text') {
-        return this.#writes.withWriteLock(async () => {
+        // Lane first, then the lock — the only safe order (see SearchWriteQueue).
+        return this.#searchQueue.exclusive(() => this.#writes.withWriteLock(async () => {
             return this.#vectors.clearSpace(space);
-        });
+        }));
     }
 
     /**
@@ -887,9 +909,10 @@ class SynapsD extends EventEmitter {
      * swap and scatter half its chunks into the outgoing table.
      */
     async setVectorSpaces(spaces = {}) {
-        return this.#writes.withWriteLock(async () => {
+        // Lane first, then the lock — the only safe order (see SearchWriteQueue).
+        return this.#searchQueue.exclusive(() => this.#writes.withWriteLock(async () => {
             return this.#vectors.setVectorSpaces(spaces);
-        });
+        }));
     }
 
     /**
@@ -908,9 +931,8 @@ class SynapsD extends EventEmitter {
      *   'text') + provenance model label stamped on the rows
      */
     async storeDocumentEmbeddings(docId, schema, updatedAt, chunks, opts = {}) {
-        return this.#writes.withWriteLock(async () => {
-            return this.#vectors.storeDocumentEmbeddings(docId, schema, updatedAt, chunks, opts);
-        });
+        // Queued: the embedder awaits the write, but nothing else waits on it.
+        return this.#searchQueue.storeEmbeddings(opts.space || 'text', docId, schema, updatedAt, chunks, opts);
     }
 
     /**
@@ -1263,6 +1285,7 @@ class SynapsD extends EventEmitter {
 
     // bitmap===null => unconstrained (all docs / search-all); empty => no survivors.
     async rank(bitmap, match = null, options = {}) {
+        await this.#searchQueue.settle();
         return this.#queries.rank(bitmap, match, options);
     }
 
@@ -1275,6 +1298,9 @@ class SynapsD extends EventEmitter {
     }
 
     async search(spec = {}) {
+        // Candidate scoping reads the FTS/vector presence bitmaps, so queued
+        // index writes must land first (read-your-writes, capped wait).
+        await this.#searchQueue.settle();
         return this.#queries.search(spec);
     }
 
@@ -1299,6 +1325,7 @@ class SynapsD extends EventEmitter {
      *          plus .debug.distances when withDistances is set
      */
     async searchByVector(queryVector, spec = {}, options = {}) {
+        await this.#searchQueue.settle();
         return this.#queries.searchByVector(queryVector, spec, options);
     }
 
@@ -1326,6 +1353,7 @@ class SynapsD extends EventEmitter {
      * @returns docs[] with .count/.totalCount/.error (same shape as rank())
      */
     async searchRefined(queries = [], baseSpec = null, options = {}) {
+        await this.#searchQueue.settle();
         return this.#queries.searchRefined(queries, baseSpec, options);
     }
 
@@ -1349,6 +1377,7 @@ class SynapsD extends EventEmitter {
      * @returns docs[] with .count/.totalCount/.error/.lines (per-line totals)
      */
     async searchCompound(lines = [], options = {}) {
+        await this.#searchQueue.settle();
         return this.#queries.searchCompound(lines, options);
     }
 
@@ -1685,7 +1714,7 @@ class SynapsD extends EventEmitter {
      * @returns {Promise<{ indexed, totalDocs, alreadyIndexed }>}
      */
     async reindexSearchIndex({ batchSize = 1000, rebuild = false, onProgress = null } = {}) {
-        return this.#writes.withWriteLock(() => this.#maintenance.reindexSearchIndex({ batchSize, rebuild, onProgress }));
+        return this.#searchQueue.exclusive(() => this.#writes.withWriteLock(() => this.#maintenance.reindexSearchIndex({ batchSize, rebuild, onProgress })));
     }
 
     /**
@@ -1698,7 +1727,7 @@ class SynapsD extends EventEmitter {
      * @returns {Promise<{ space, unembedded:number[], totalEmbeddable, embeddableSchemas }>}
      */
     async reindexEmbeddings(opts = {}) {
-        return this.#writes.withWriteLock(() => this.#maintenance.reindexEmbeddings(opts));
+        return this.#searchQueue.exclusive(() => this.#writes.withWriteLock(() => this.#maintenance.reindexEmbeddings(opts)));
     }
 
     clearSync() {

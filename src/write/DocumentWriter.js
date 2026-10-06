@@ -22,12 +22,12 @@ export default class DocumentWriter {
     #checksumIndex;
     #internalStore;
     #getTimeline;
-    #getLance;
+    #searchQueue;
     #getAllBitmap;
     #getDeletedBitmap;
     #getById;
     #getByChecksumString;
-    constructor({ documents, bitmapIndex, trees, writes, derived, vectors, checksumIndex, internalStore, getTimeline, getLance, getAllBitmap, getDeletedBitmap, getById, getByChecksumString }) {
+    constructor({ documents, bitmapIndex, trees, writes, derived, vectors, checksumIndex, internalStore, getTimeline, searchQueue, getAllBitmap, getDeletedBitmap, getById, getByChecksumString }) {
         this.#documents = documents;
         this.#bitmapIndex = bitmapIndex;
         this.#trees = trees;
@@ -37,7 +37,7 @@ export default class DocumentWriter {
         this.#checksumIndex = checksumIndex;
         this.#internalStore = internalStore;
         this.#getTimeline = getTimeline;
-        this.#getLance = getLance;
+        this.#searchQueue = searchQueue;
         this.#getAllBitmap = getAllBitmap;
         this.#getDeletedBitmap = getDeletedBitmap;
         this.#getById = getById;
@@ -225,9 +225,8 @@ export default class DocumentWriter {
                 deferredLanceBuffer.push(...lanceDocs);
             }
         } else if (lanceDocs.length > 0) {
-            try {
-                await this.#getLance().addMany(lanceDocs);
-            } catch (_) { }
+            // Write-behind: FTS rows never hold up the document write.
+            this.#searchQueue.upsertText(lanceDocs);
         }
 
         // ── Phase 3.5: Dense vectors ─────────────────────────────────────
@@ -336,8 +335,8 @@ export default class DocumentWriter {
             throw new Error('Error inserting document atomically: ' + error.message);
         }
 
-        // Best-effort Lance upsert
-        try { await this.#getLance().upsert(parseInitializeDocument(parsedDocument)); } catch (_) { }
+        // FTS row: queued (write-behind), see SearchWriteQueue.
+        this.#searchQueue.upsertText([parseInitializeDocument(parsedDocument)]);
 
         if (emitEvent) {
             const { tree: contextTree } = this.#trees.resolveSelection('context', contextSpec, '/');
@@ -404,12 +403,8 @@ export default class DocumentWriter {
                 this.#writes.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument, reason: 'content', ...(provenance || {}) }));
             }
 
-            // Best-effort Lance upsert
-            try {
-                await this.#getLance().upsert(parseInitializeDocument(updatedDocument));
-            } catch (e) {
-                debug(`put/update: Lance upsert failed for ${updatedDocument.id}: ${e.message}`);
-            }
+            // FTS row: queued (write-behind), see SearchWriteQueue.
+            this.#searchQueue.upsertText([parseInitializeDocument(updatedDocument)]);
             // Content changed → the doc must be re-embedded. The external embedd
             // service reacts to DOCUMENT_UPDATED; here we drop it from the seen
             // ledger so a reconcile re-embeds it even if the live event is missed.
@@ -498,10 +493,8 @@ export default class DocumentWriter {
             if (Array.isArray(deferredLanceBuffer)) {
                 deferredLanceBuffer.push(...lanceDocs);
             }
-        } else {
-            try {
-                await this.#getLance().addMany(lanceDocs);
-            } catch (_) { }
+        } else if (lanceDocs.length > 0) {
+            this.#searchQueue.upsertText(lanceDocs);
         }
 
         const storedIds = prepared.map(p => p.parsed.id);

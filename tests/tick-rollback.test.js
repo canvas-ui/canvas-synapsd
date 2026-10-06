@@ -87,6 +87,8 @@ describe('SynapsD bitmap tick rollback safety', () => {
 
     test('aborted batch restores rows, indexes, cached trees, and emits no committed changes', async () => {
         const target = await db.put(note('target'));
+        // Let the write-behind FTS row land, so the snapshot is the settled state.
+        await db.flushSearchIndex();
         const context = db.getDefaultContextTree();
         const directory = db.getDefaultDirectoryTree();
         const contextBefore = context.paths;

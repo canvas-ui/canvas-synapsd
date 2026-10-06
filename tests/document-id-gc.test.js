@@ -33,6 +33,8 @@ describe('SynapsD document-id GC / reuse', () => {
     test('a deleted id is reused by the next insert', async () => {
         const [id1] = await db.putMany([note('a')]);
         await db.delete(id1);
+        // Ids are recycled once the queued Lance cleanup confirms (write-behind).
+        await db.flushSearchIndex();
 
         const [id2] = await db.putMany([note('b')]);
         expect(id2).toBe(id1);
@@ -47,6 +49,8 @@ describe('SynapsD document-id GC / reuse', () => {
 
         await db.delete(c);
         await db.delete(b);
+        // Ids are recycled once the queued Lance cleanup confirms (write-behind).
+        await db.flushSearchIndex();
         // pool = {b, c}
 
         const [d] = await db.putMany([note('d')]);
@@ -65,6 +69,8 @@ describe('SynapsD document-id GC / reuse', () => {
 
         const del = await db.deleteMany(created);
         expect(del.successful.map(s => s.id).sort((x, y) => x - y)).toEqual(sorted);
+        // Ids are recycled once the queued Lance cleanup confirms (write-behind).
+        await db.flushSearchIndex();
         // pool = {a, b, c}
 
         const next = await db.putMany([note('d'), note('e'), note('f'), note('g'), note('h')]);
@@ -90,6 +96,8 @@ describe('SynapsD document-id GC / reuse', () => {
     test('the free pool grows on delete and shrinks on reuse', async () => {
         const ids = await db.putMany([note('a'), note('b')]);
         await db.deleteMany(ids);
+        // Ids are recycled once the queued Lance cleanup confirms (write-behind).
+        await db.flushSearchIndex();
         expect(db.deletedDocumentsBitmap.size).toBe(2);
 
         // Reusing an id removes it from the pool.

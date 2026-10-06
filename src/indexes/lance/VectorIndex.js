@@ -37,6 +37,7 @@ export default class VectorIndex {
     #dim;
     #model;
     #vectorBitmapKey;
+    #readBarrier;
     #bitmapIndex;
     #annIndex;
     #dimMismatch = null; // { tableDim, configuredDim, rows } when init refused a non-empty table
@@ -53,6 +54,7 @@ export default class VectorIndex {
         // embedding ledger key notes in SynapsD); this fallback only covers a
         // bare VectorIndex constructed without one.
         this.#vectorBitmapKey = options.vectorBitmapKey || 'internal/embed/vectors/text/unknown';
+        this.#readBarrier = typeof options.readBarrier === 'function' ? options.readBarrier : null;
         this.#bitmapIndex = options.bitmapIndex || null;
         // annIndex:false pins the space to exact scans (see ensureVectorIndex).
         this.#annIndex = options.annIndex !== false;
@@ -211,6 +213,63 @@ export default class VectorIndex {
         }
     }
 
+    /** Presence bitmap key: ids that have vector rows in this space. */
+    get presenceKey() { return this.#vectorBitmapKey; }
+
+    #rows(docId, schema, updatedAt, chunks, model, embeddedAt) {
+        return chunks
+            .filter(c => Array.isArray(c?.vector) && c.vector.length === this.#dim)
+            .map(c => ({
+                id: docId,
+                chunkId: c.chunkId,
+                schema: schema || '',
+                updatedAt: updatedAt || embeddedAt,
+                chunkText: c.text || '',
+                vector: c.vector,
+                model: typeof model === 'string' && model ? model : this.#model,
+                dim: this.#dim,
+                embeddedAt,
+            }));
+    }
+
+    /**
+     * Queued-batch counterpart of upsertChunks/deleteMany: one predicate delete
+     * (only for docs the presence bitmap says may have rows) and one append.
+     * Bitmap bookkeeping is returned for the caller to apply under the write lock.
+     * @param {{upserts?: {docId:number, schema?:string, updatedAt?:string, chunks:object[], model?:string}[], deletes?: number[]}} batch
+     * @returns {Promise<{ ok: boolean, tick: number[], untick: number[] }>}
+     */
+    async writeBatch({ upserts = [], deletes = [] } = {}) {
+        if (!this.#table) { return { ok: true, tick: [], untick: [] }; }
+        const embeddedAt = new Date().toISOString();
+        const byDoc = new Map();
+        for (const u of upserts) {
+            if (!u?.docId || !Array.isArray(u.chunks)) { continue; }
+            byDoc.set(Number(u.docId), this.#rows(Number(u.docId), u.schema, u.updatedAt, u.chunks, u.model, embeddedAt));
+        }
+        const removed = deletes.map(Number).filter((id) => id && !byDoc.has(id));
+        const candidates = [...byDoc.keys(), ...removed];
+        let stale = candidates;
+        if (this.#bitmapIndex && candidates.length) {
+            try {
+                const present = await this.#bitmapIndex.getBitmap(this.#vectorBitmapKey, false);
+                stale = present ? candidates.filter((id) => present.has(id)) : candidates;
+            } catch (_) { stale = candidates; }
+        }
+        const rows = [...byDoc.values()].flat();
+        try {
+            if (stale.length) { await this.#table.delete(`id IN (${stale.join(',')})`); }
+            if (rows.length) { await this.#table.add(rows); }
+        } catch (e) {
+            console.warn(`synapsd: vector batch write failed (table=${this.#tableName}, docs=${candidates.length}): ${e.message}`);
+            return { ok: false, tick: [], untick: [] };
+        }
+        const tick = [];
+        const untick = [...removed];
+        for (const [id, docRows] of byDoc) { (docRows.length ? tick : untick).push(id); }
+        return { ok: true, tick, untick };
+    }
+
     // Returns true when vector rows are gone (or nothing to clean), false when the
     // delete threw — callers gate doc-ID free-pool admission on this.
     async deleteDoc(docId) {
@@ -242,6 +301,7 @@ export default class VectorIndex {
 
     /** Pure dense kNN. Returns { pageIds, totalCount, error } deduped to docIds (best chunk wins). */
     async vectorSearch(queryVector, candidateIds = [], opts = {}) {
+        await this.#readBarrier?.();
         const { minDistance, maxDistance } = opts;
         const hasFloor = minDistance != null || maxDistance != null;
         return this.#search((q) => {
@@ -266,6 +326,7 @@ export default class VectorIndex {
      * search when the chunkText index is absent.
      */
     async hybridSearch(queryVector, queryText, candidateIds = [], opts = {}) {
+        await this.#readBarrier?.();
         if (!this.#table) { return { pageIds: [], totalCount: 0, error: 'VectorIndex not ready' }; }
 
         // RRFReranker.create() is async (builds the native reranker). With no
@@ -347,6 +408,7 @@ export default class VectorIndex {
      * vector that never leaves the process. Returns number[] or null.
      */
     async getDocVector(docId) {
+        await this.#readBarrier?.();
         const id = Number(docId);
         if (!this.#table || !Number.isFinite(id)) { return null; }
         try {

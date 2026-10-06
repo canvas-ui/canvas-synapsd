@@ -61,6 +61,7 @@ class LanceIndex {
     #ftsBitmapKey;
     #bitmapIndex;
     #ftsColumn = 'fts_text';
+    #readBarrier = null;
 
     constructor(options = {}) {
         this.#rootPath = options.rootPath;
@@ -70,6 +71,67 @@ class LanceIndex {
     }
 
     get isReady() { return !!this.#table; }
+
+    /** Presence bitmap key: ids that have an FTS row. */
+    get presenceKey() { return this.#ftsBitmapKey; }
+
+    /**
+     * Awaited before every read, so a query sees writes still sitting in the
+     * search write queue (read-your-writes without making writers wait).
+     */
+    setReadBarrier(fn) { this.#readBarrier = typeof fn === 'function' ? fn : null; }
+
+    #row(doc) {
+        const ftsArray = typeof doc.generateFtsData === 'function' ? doc.generateFtsData() : null;
+        return {
+            id: doc.id,
+            schema: doc.schema,
+            updatedAt: doc.updatedAt,
+            fts_text: Array.isArray(ftsArray) ? ftsArray.join('\n') : '',
+        };
+    }
+
+    /**
+     * One Lance round trip for a queued batch: a single predicate delete (only
+     * for ids that may have a row) and a single append — one fragment instead of
+     * one per document. Bitmap bookkeeping is RETURNED, not applied: the caller
+     * applies it under the database write lock.
+     * @returns {{ ok: boolean, tick: number[], untick: number[] }}
+     */
+    async writeBatch({ upserts = [], deletes = [] } = {}) {
+        if (!this.#table) { return { ok: true, tick: [], untick: [] }; }
+        const rows = new Map();
+        for (const doc of upserts) { if (doc?.id) { rows.set(Number(doc.id), this.#row(doc)); } }
+        const removed = deletes.map(Number).filter((id) => id && !rows.has(id));
+        const stale = await this.#idsWithRows([...rows.keys(), ...removed]);
+        try {
+            if (stale.length) { await this.#table.delete(`id IN (${stale.join(',')})`); }
+            if (rows.size) { await this.#table.add([...rows.values()]); }
+        } catch (e) {
+            debug(`LanceIndex writeBatch failed: ${e.message}`);
+            return { ok: false, tick: [], untick: [] };
+        }
+        return { ok: true, tick: [...rows.keys()], untick: removed };
+    }
+
+    /**
+     * The ids among `ids` that may already have a row. A predicate delete has no
+     * index on `id` to use — it scans every fragment, and each single-row add
+     * makes another, so put latency grew with the table (26 ms → 285 ms over
+     * 1500 puts; 16 s on a busy workspace, all under the global write lock).
+     * New documents never have a row, so the FTS presence bitmap lets their
+     * insert skip the delete. Without a bitmap, assume every id may have one.
+     */
+    async #idsWithRows(ids) {
+        if (!this.#bitmapIndex) { return ids; }
+        try {
+            const present = await this.#bitmapIndex.getBitmap(this.#ftsBitmapKey, false);
+            if (!present) { return ids; }
+            return ids.filter((id) => present.has(Number(id)));
+        } catch (_) {
+            return ids;
+        }
+    }
 
     async initialize() {
         try {
@@ -131,7 +193,8 @@ class LanceIndex {
         if (rows.length === 0) { return; }
 
         try {
-            await this.#table.delete?.(`id IN (${ids.join(',')})`);
+            const stale = await this.#idsWithRows(ids);
+            if (stale.length) { await this.#table.delete?.(`id IN (${stale.join(',')})`); }
             await this.#table.add(rows);
         } catch (e) {
             debug(`LanceIndex addMany failed: ${e.message}`);
@@ -156,7 +219,9 @@ class LanceIndex {
             fts_text: ftsText,
         };
 
-        try { await this.#table.delete?.(`id = ${doc.id}`); } catch (_) { }
+        if ((await this.#idsWithRows([doc.id])).length) {
+            try { await this.#table.delete?.(`id = ${doc.id}`); } catch (_) { }
+        }
         await this.#table.add([row]);
 
         if (this.#bitmapIndex) {
@@ -207,6 +272,7 @@ class LanceIndex {
      * candidateIds: if non-empty, results are post-filtered to this set.
      */
     async ftsQuery(queryString, candidateIds = [], opts = {}) {
+        await this.#readBarrier?.();
         if (!this.#table) {
             return { pageIds: [], totalCount: 0, error: 'LanceDB not ready' };
         }
@@ -215,7 +281,7 @@ class LanceIndex {
         const offset = Math.max(0, Number(opts.offset ?? 0));
         const candidateSet = candidateIds.length > 0 ? new Set(candidateIds) : null;
 
-        const ftsQueryObj = this.#buildFtsQuery(queryString);
+        const ftsQueryObj = await this.#buildFtsQuery(queryString);
         if (!ftsQueryObj) {
             // Query had no usable tokens (e.g. all punctuation) — empty, not error.
             return { pageIds: [], totalCount: 0, error: null };
@@ -376,31 +442,41 @@ class LanceIndex {
      *
      * @returns {FullTextQuery|null} null when the string has no usable tokens
      */
-    #buildFtsQuery(queryString) {
+    async #buildFtsQuery(queryString) {
         const tokens = this.#tokenizeQuery(queryString);
         if (tokens.length === 0) { return null; }
 
-        const toMatch = (token) => {
-            // ngram fields already give partial/substring matching; fuzzy on top of
-            // ngrams over-expands wildly, so match exactly there. For word-token
-            // tokenizers, keep the length-scaled fuzziness for typo tolerance.
-            const fuzziness = IS_NGRAM ? 0 : (token.length <= 3 ? 0 : token.length <= 6 ? 1 : 2);
-            // On an ngram field a term expands to its character ngrams. OR-ing them
-            // matches any shared ngram → a common trigram ("and", "lan") pulls in a
-            // third of the corpus. AND-ing requires the term's FULL ngram set →
-            // effectively a substring match (high precision). Word tokenizers keep
-            // OR (each token is already a whole word).
-            const operator = IS_NGRAM ? Operator.And : Operator.Or;
+        // Lance's `Operator.And` on an ngram MatchQuery does not require every
+        // ngram (0.39: "winter" matched "summer window" via a shared "win"), so
+        // the AND is spelled out: one Must clause per ngram of the word — a
+        // substring match, identical on indexed and not-yet-indexed rows. The
+        // ngrams come from Lance's own tokenizer with the index config, so
+        // folding/lowercasing match the index exactly.
+        const exact = (text) => new MatchQuery(text, this.#ftsColumn, { fuzziness: 0, operator: Operator.Or });
+        const ngrams = IS_NGRAM
+            ? await Promise.all(tokens.map(async (token) => [...new Set((await lancedb.tokenize(token, FTS_INDEX_CONFIG)).map((t) => t.text))]))
+            : [];
+
+        const toMatch = (token, index) => {
+            if (IS_NGRAM) {
+                const grams = ngrams[index];
+                if (grams.length <= 1) { return exact(grams[0] || token); }
+                return new BooleanQuery(grams.map((gram) => [Occur.Must, exact(gram)]));
+            }
+            // Word tokenizers: each token is a whole word, so length-scaled
+            // fuzziness gives typo tolerance (ngram fields above match exactly —
+            // fuzzy on top of ngrams over-expands wildly).
+            const fuzziness = token.length <= 3 ? 0 : token.length <= 6 ? 1 : 2;
             return new MatchQuery(token, this.#ftsColumn, {
                 fuzziness,
                 prefixLength: 1,
                 maxExpansions: 50,
-                operator,
+                operator: Operator.Or,
             });
         };
 
-        if (tokens.length === 1) { return toMatch(tokens[0]); }
-        return new BooleanQuery(tokens.map(t => [Occur.Should, toMatch(t)]));
+        if (tokens.length === 1) { return toMatch(tokens[0], 0); }
+        return new BooleanQuery(tokens.map((t, i) => [Occur.Should, toMatch(t, i)]));
     }
 
     async #ensureFtsIndex() {

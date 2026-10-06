@@ -78,6 +78,11 @@ export default class VectorSpaces {
     #vectorIndex;
     #vectorSpaces = new Map();
 
+    #readBarrier = null;
+
+    /** Awaited before every vector read (see SearchWriteQueue): read-your-writes. */
+    setReadBarrier(fn) { this.#readBarrier = typeof fn === 'function' ? fn : null; }
+
     constructor({ rootPath, bitmapIndex, semantic = {} }) {
         this.#rootPath = rootPath;
         this.#bitmapIndex = bitmapIndex;
@@ -156,6 +161,7 @@ export default class VectorSpaces {
                     model: textSpace.model,
                     vectorBitmapKey: textSpace.bitmapKey,
                     bitmapIndex: this.#bitmapIndex,
+                    readBarrier: () => this.#readBarrier?.(),
                 });
                 await this.#vectorIndex.initialize();
                 this.#vectorSpaces.set('text', this.#vectorIndex);
@@ -488,6 +494,7 @@ export default class VectorSpaces {
                 vectorBitmapKey: cfg.bitmapKey,
                 bitmapIndex: this.#bitmapIndex,
                 annIndex: cfg.annIndex,
+                readBarrier: () => this.#readBarrier?.(),
             });
             await vi.initialize();
             this.#vectorSpaces.set(space, vi);
