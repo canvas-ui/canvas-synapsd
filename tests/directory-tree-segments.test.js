@@ -107,5 +107,31 @@ describe('directory tree segments + backend locks', () => {
         // insertPath announces the leaf once, plus the parents it had to create.
         await tree.insertPath('/a/b/c');
         expect(seen).toEqual(['/a', '/a/b', '/a/b/c']);
+
+        seen.length = 0;
+        const original = tree.getLayerForPath('/a/b/c');
+        for (let i = 0; i < 20; i++) {
+            const result = await tree.insertPath('/a/b/c', { ignoreLocks: true });
+            expect(result.data).toEqual([original.id]);
+        }
+        expect(seen).toEqual([]);
+    });
+
+    test('upserting an existing canvas announces only actual metadata changes', async () => {
+        const tree = await createDirectoryTree();
+        const inserted = [];
+        const updated = [];
+        tree.on('tree.path.inserted', event => inserted.push(event.path));
+        tree.on('tree.layer.updated', event => updated.push(event.path));
+        await tree.insertPath('/view', { leafType: 'canvas', label: 'One' });
+        await tree.insertPath('/view', { leafType: 'canvas', label: 'One' });
+        await tree.insertPath('/view', { leafType: 'canvas', label: 'Two' });
+        expect(inserted).toEqual(['/view']);
+        expect(updated).toEqual(['/view']);
+        expect(tree.getLayerForPath('/view').label).toBe('Two');
+
+        await tree.insertPath('/folder');
+        await tree.insertPath('/folder', { leafType: 'canvas' });
+        expect(updated).toEqual(['/view', '/folder']);
     });
 });

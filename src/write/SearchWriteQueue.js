@@ -1,4 +1,5 @@
 import debugInstance from 'debug';
+import { AsyncLocalStorage } from 'node:async_hooks';
 const debug = debugInstance('canvas:synapsd:search-queue');
 
 /**
@@ -22,8 +23,8 @@ const debug = debugInstance('canvas:synapsd:search-queue');
  * - Deletes resolve with whether the Lance rows are gone — document deletion
  *   gates id recycling on that, asynchronously.
  * - Reads (FTS/vector queries) call `settle()` first: pending writes flush
- *   before the query runs (read-your-writes), bounded by `readWaitMs` so a
- *   long compaction on the lane never stalls a search.
+ *   before the query runs (read-your-writes), bounded by `readWaitMs` per
+ *   query so nested search legs cannot multiply the wait during compaction.
  * - `exclusive(fn)` runs maintenance (optimize, clears, backfills) on the
  *   lane between batches.
  *
@@ -41,6 +42,7 @@ export default class SearchWriteQueue {
     #timer = null;
     #flushQueued = null;
     #accepting = true;
+    #reads = new AsyncLocalStorage();
 
     constructor({ getLance, vectors, bitmapIndex, writes, delayMs = 250, maxBatch = 500, readWaitMs = 1500, highWater = 2000 }) {
         this.#getLance = getLance;
@@ -133,8 +135,27 @@ export default class SearchWriteQueue {
         return this.#flushQueued;
     }
 
+    /**
+     * One bounded indexing wait for a whole query, including its nested FTS,
+     * vector and refinement reads. Separate concurrent queries get their own
+     * barrier; a busy lane must not charge readWaitMs again for every leg.
+     */
+    read(fn) {
+        if (this.#reads.getStore()) { return fn(); }
+        return this.#reads.run({}, async () => {
+            await this.settle();
+            return fn();
+        });
+    }
+
     /** Read barrier: pending writes land before a query, within readWaitMs. */
-    async settle() {
+    settle() {
+        const read = this.#reads.getStore();
+        if (read) { return read.barrier ??= this.#settle(); }
+        return this.#settle();
+    }
+
+    async #settle() {
         if (this.pending === 0) { return; }
         let timer;
         const cap = new Promise((resolve) => { timer = setTimeout(resolve, this.#readWaitMs); });
@@ -165,9 +186,13 @@ export default class SearchWriteQueue {
     }
 
     #run(task) {
-        const result = this.#lane.then(task);
-        this.#lane = result.catch((e) => debug(`lane task failed: ${e.message}`));
-        return result;
+        // Indexing can outlive the read that triggered its flush. Events from
+        // that work must not pass the initiating query's barrier to new reads.
+        return this.#reads.exit(() => {
+            const result = this.#lane.then(task);
+            this.#lane = result.catch((e) => debug(`lane task failed: ${e.message}`));
+            return result;
+        });
     }
 
     async #flushNow() {

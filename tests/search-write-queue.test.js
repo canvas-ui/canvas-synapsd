@@ -1,12 +1,13 @@
 'use strict';
 
-import { afterEach, describe, expect, test } from '@jest/globals';
+import { afterEach, describe, expect, jest, test } from '@jest/globals';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import Db from '../src/index.js';
 import SearchWriteQueue from '../src/write/SearchWriteQueue.js';
+import LanceIndex from '../src/indexes/lance/index.js';
 
 const note = (title, content = title) => ({ schema: 'data/schema/note', data: { title, content } });
 // File docs carry their searchable text in metadata.text (see blob-text-fts.test.js).
@@ -132,6 +133,34 @@ describe('SearchWriteQueue', () => {
         await queue.flush();
         expect(calls).toHaveLength(2);
     });
+
+    test('nested reads share a barrier but concurrent queries and later queries each flush their writes', async () => {
+        const { queue, calls } = fakes();
+        queue.upsertText([{ id: 1 }]);
+        let release;
+        const held = new Promise((resolve) => { release = resolve; });
+        let entered;
+        const started = new Promise((resolve) => { entered = resolve; });
+        const first = queue.read(async () => {
+            expect(calls).toHaveLength(1);
+            entered();
+            await held;
+            // Newly arrived work must not restart this query's wait budget.
+            queue.upsertText([{ id: 3 }]);
+            await Promise.all([queue.settle(), queue.read(() => queue.settle())]);
+            expect(calls).toHaveLength(2);
+        });
+        try {
+            await started;
+            queue.upsertText([{ id: 2 }]);
+            await queue.read(async () => { expect(calls).toHaveLength(2); });
+        } finally {
+            release();
+            await first;
+            await queue.read(async () => { expect(calls).toHaveLength(3); });
+            await queue.close();
+        }
+    });
 });
 
 // ── Integration: the database writes behind, reads see their writes ───────
@@ -155,6 +184,67 @@ describe('write-behind search indexing', () => {
         await open({ searchQueue: { delayMs: 60_000 } }); // only the read barrier can flush it
         const id = await db.put(fileDoc('birds.md', 'pelican migration routes'));
         expect(ids(await db.search({ query: 'pelican migration', mode: 'fts', idsOnly: true }))).toContain(id);
+    });
+
+    test('hybrid search shares one indexing wait across image, text and FTS reads', async () => {
+        const vector = [1, 0, 0, 0, 0, 0, 0, 0];
+        const spaces = Object.fromEntries(['text', 'image'].map((space) => [space, {
+            table: `vec_${space}_wait_test`, model: 'wait-test', dim: vector.length, annIndex: false,
+            bitmapKey: `internal/embed/vectors/${space}/wait-test`,
+            seenKey: `internal/embed/seen/${space}/wait-test`,
+        }]));
+        const readWaitMs = 125;
+        await open({
+            searchQueue: { delayMs: 60_000, readWaitMs },
+            semantic: { enabled: true, spaces, embedQuery: async () => vector },
+        });
+        const id = await db.put(fileDoc('pelican.md', 'pelican migration'));
+        for (const space of ['text', 'image']) {
+            await db.storeDocumentEmbeddings(id, 'data/schema/file', new Date().toISOString(),
+                [{ chunkId: 0, text: 'pelican migration', vector }], { space });
+        }
+        await db.flushSearchIndex();
+
+        let release;
+        const held = new Promise((resolve) => { release = resolve; });
+        let entered;
+        const started = new Promise((resolve) => { entered = resolve; });
+        const optimize = jest.spyOn(LanceIndex.prototype, 'optimize').mockImplementation(async () => {
+            entered();
+            await held;
+        });
+        const maintenance = db.optimizeLance();
+        await started;
+        // Keep a real write queued behind maintenance for the whole search.
+        await db.put(fileDoc('queued.md', 'waiting for maintenance'));
+        const timers = jest.spyOn(globalThis, 'setTimeout');
+        try {
+            const reads = {
+                hybrid: () => db.search({ query: 'pelican', idsOnly: true }),
+                query: () => db.query('pelican', { idsOnly: true }),
+                rank: () => db.rank(null, 'pelican', { idsOnly: true }),
+                vector: () => db.searchByVector(vector, {}, { idsOnly: true }),
+                refined: () => db.searchRefined(['pelican', 'migration'], {}, { idsOnly: true }),
+                compound: () => db.searchCompound([{ queries: ['pelican'] }, { queries: ['migration'] }], { idsOnly: true }),
+                list: () => db.list({ idsOnly: true }),
+                plainRank: () => db.rank(null, null, { idsOnly: true }),
+                plainQuery: () => db.query(null, { idsOnly: true }),
+            };
+            const waits = {};
+            for (const [name, read] of Object.entries(reads)) {
+                timers.mockClear();
+                const hits = await read();
+                expect([...hits].map((hit) => hit.id ?? hit)).toContain(id);
+                waits[name] = timers.mock.calls.filter(([, delay]) => delay === readWaitMs).length;
+            }
+            expect(waits).toEqual({ hybrid: 1, query: 1, rank: 1, vector: 1, refined: 1, compound: 1, list: 0, plainRank: 0, plainQuery: 0 });
+        } finally {
+            timers.mockRestore();
+            release();
+            await maintenance;
+            await db.flushSearchIndex();
+            optimize.mockRestore();
+        }
     });
 
     test('updates re-index and deletes drop out of search', async () => {

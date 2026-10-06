@@ -45,6 +45,27 @@ describe('asserted relations write-through', () => {
         expect(db.edges.edge(from, 'references', to).meta).toEqual({ src: 'doc' });
     });
 
+    test('extractor reconciliation replaces its own edges without changing asserted or other extractor edges', async () => {
+        const [from, first, second, manual, foreign] = await db.putMany(['message', 'first', 'second', 'manual', 'foreign'].map(note));
+        const src = 'extractor:contacts';
+        await db.assertRelation(from, 'authored-by', manual);
+        await db.relate(from, 'authored-by', foreign, { meta: { src: 'extractor:other' } });
+        await db.reconcileDerivedRelations([{ from, relations: [{ p: 'authored-by', to: first }, { p: 'authored-by', to: manual }] }], { src });
+        expect(db.edges.edge(from, 'authored-by', manual).meta.src).toBe('doc');
+        await db.reconcileDerivedRelations([{ from, relations: [{ p: 'addressed-to', to: second }] }], { src });
+        expect(db.edges.edge(from, 'authored-by', first)).toBeNull();
+        expect(db.edges.edge(from, 'addressed-to', second).meta.src).toBe(src);
+        expect(db.edges.edge(from, 'authored-by', manual).meta.src).toBe('doc');
+        expect(db.edges.edge(from, 'authored-by', foreign).meta.src).toBe('extractor:other');
+        expect(await db.reconcileDerivedRelations([{ from, relations: [{ p: 'addressed-to', to: second }] }], { src })).toBe(0);
+        await db.assertRelation(from, 'addressed-to', second);
+        await db.reconcileDerivedRelations([{ from, relations: [] }], { src });
+        expect(db.edges.edge(from, 'addressed-to', second).meta.src).toBe('doc');
+        expect((await db.get(from)).data.relations).toContainEqual({ p: 'addressed-to', to: second });
+        await expect(db.reconcileDerivedRelations([{ from, relations: [] }], { src: 'doc' })).rejects.toThrow();
+        await expect(db.reconcileDerivedRelations([{ from, relations: [] }], { src, previousSources: ['doc'] })).rejects.toThrow();
+    });
+
     test('assertRelation is a no-op when the relation is already declared', async () => {
         const from = await db.put(note('subject'));
         const to = await db.put(note('target'));

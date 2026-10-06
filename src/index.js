@@ -658,6 +658,47 @@ class SynapsD extends EventEmitter {
         }));
     }
 
+    /** Replace one extractor's outgoing relations, preserving all other owners. */
+    async reconcileDerivedRelations(entries, { src, previousSources = [] } = {}) {
+        const owned = new Set([src, ...previousSources]);
+        if ([...owned].some((source) => typeof source !== 'string' || !source || source === 'doc')) {
+            throw new Error('Derived relation reconciliation requires non-doc source names');
+        }
+        // Validate the whole batch before changing anything.
+        for (const { from, relations } of entries) {
+            if (!Number.isSafeInteger(from) || from <= 0) throw new Error('Invalid relation source id');
+            for (const { p, to } of relations) {
+                predicateId(p);
+                if (!Number.isSafeInteger(to) || to <= 0) throw new Error('Invalid relation target id');
+            }
+        }
+        return this.#writes.withWriteLock(() => this.#writes.withDeferredMembership(async () => {
+            let changed = 0;
+            for (const { from, relations } of entries) {
+                if (!this.documents.doesExist(from)) continue;
+                const wanted = new Map(relations.map(({ p, to }) => [`${p}:${to}`, { p, to }]));
+                let asserted;
+                for (const edge of this.#edges.edgesOf(from).outgoing) {
+                    const current = this.#edges.edge(from, edge.p, edge.to);
+                    if (owned.has(current?.meta?.src) && !wanted.has(`${edge.p}:${edge.to}`)) {
+                        asserted ??= new Set(documentRelations(await this.documents.get(from)).map(({ p, to }) => `${p}:${to}`));
+                        this.#edges.unlink(from, edge.p, edge.to);
+                        // A user may have asserted this same triple AFTER the
+                        // extractor created it. Retire our claim, keep theirs.
+                        if (asserted.has(`${edge.p}:${edge.to}`)) this.#edges.link(from, edge.p, edge.to);
+                        changed++;
+                    }
+                }
+                for (const { p, to } of wanted.values()) {
+                    if (this.#edges.exists(from, p, to) || !this.documents.doesExist(to)) continue;
+                    this.#edges.link(from, p, to, { src });
+                    changed++;
+                }
+            }
+            return changed;
+        }));
+    }
+
     async #relate(fromId, predicate, toId, options = {}) {
         return this.#writes.withDeferredMembership(async () => {
             if (!options.meta?.src) {
@@ -1285,12 +1326,13 @@ class SynapsD extends EventEmitter {
 
     // bitmap===null => unconstrained (all docs / search-all); empty => no survivors.
     async rank(bitmap, match = null, options = {}) {
-        await this.#searchQueue.settle();
-        return this.#queries.rank(bitmap, match, options);
+        if (match == null) { return this.#queries.rank(bitmap, match, options); }
+        return this.#searchQueue.read(() => this.#queries.rank(bitmap, match, options));
     }
 
     async query(match = null, spec = {}) {
-        return this.#queries.query(match, spec);
+        if (match == null) { return this.#queries.query(match, spec); }
+        return this.#searchQueue.read(() => this.#queries.query(match, spec));
     }
 
     async list(spec = {}) {
@@ -1300,8 +1342,7 @@ class SynapsD extends EventEmitter {
     async search(spec = {}) {
         // Candidate scoping reads the FTS/vector presence bitmaps, so queued
         // index writes must land first (read-your-writes, capped wait).
-        await this.#searchQueue.settle();
-        return this.#queries.search(spec);
+        return this.#searchQueue.read(() => this.#queries.search(spec));
     }
 
     /**
@@ -1325,8 +1366,7 @@ class SynapsD extends EventEmitter {
      *          plus .debug.distances when withDistances is set
      */
     async searchByVector(queryVector, spec = {}, options = {}) {
-        await this.#searchQueue.settle();
-        return this.#queries.searchByVector(queryVector, spec, options);
+        return this.#searchQueue.read(() => this.#queries.searchByVector(queryVector, spec, options));
     }
 
     /**
@@ -1353,8 +1393,7 @@ class SynapsD extends EventEmitter {
      * @returns docs[] with .count/.totalCount/.error (same shape as rank())
      */
     async searchRefined(queries = [], baseSpec = null, options = {}) {
-        await this.#searchQueue.settle();
-        return this.#queries.searchRefined(queries, baseSpec, options);
+        return this.#searchQueue.read(() => this.#queries.searchRefined(queries, baseSpec, options));
     }
 
     /**
@@ -1377,8 +1416,7 @@ class SynapsD extends EventEmitter {
      * @returns docs[] with .count/.totalCount/.error/.lines (per-line totals)
      */
     async searchCompound(lines = [], options = {}) {
-        await this.#searchQueue.settle();
-        return this.#queries.searchCompound(lines, options);
+        return this.#searchQueue.read(() => this.#queries.searchCompound(lines, options));
     }
 
     /**

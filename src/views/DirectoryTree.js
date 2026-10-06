@@ -1,6 +1,7 @@
 'use strict';
 
 import EventEmitter from 'eventemitter2';
+import { isDeepStrictEqual } from 'node:util';
 import { ulid } from 'ulid';
 import TreeNode from './lib/TreeNode.js';
 import { EVENTS } from '../utils/events.js';
@@ -182,6 +183,7 @@ class DirectoryTree extends EventEmitter {
                 existing.payload.type = 'canvas';
                 this.#applyNodeUpdates(existing, options);
                 await this.#persistNode(existing);
+                this.#emitTreeEvent(EVENTS.TREE_LAYER_UPDATED, { path: normalizedPath, layerId: existing.id });
                 return {
                     data: [existing.id],
                     count: 1,
@@ -195,8 +197,21 @@ class DirectoryTree extends EventEmitter {
             };
         }
 
-        // The leaf is announced below whether or not it is new; only the
-        // missing parents it creates on the way need announcing here.
+        // Sync repeatedly ensures the same folder. Only actual insertions
+        // change the tree; announcing existing paths makes every client reload.
+        if (existing) {
+            if (leafType === 'canvas') {
+                const previous = { ...existing.payload };
+                this.#applyNodeUpdates(existing, options);
+                if (!isDeepStrictEqual(previous, existing.payload)) {
+                    await this.#persistNode(existing);
+                    this.#emitTreeEvent(EVENTS.TREE_LAYER_UPDATED, { path: normalizedPath, layerId: existing.id });
+                }
+            }
+            return { data: [existing.id], count: 1, error: null };
+        }
+
+        // Announce missing parents first, then the new leaf below.
         const node = existing || await this.#ensureNode(normalizedPath, { leafType, announce: 'parents' });
         if (leafType === 'canvas') {
             this.#applyNodeUpdates(node, options);
