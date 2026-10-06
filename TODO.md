@@ -256,6 +256,96 @@ Rationale worth keeping, because it guards decisions that could be re-litigated:
 - [ ] Implement or remove recognized `g:` and `re:` filter syntax.
 - [ ] Settle raw bitmap filter sigil consistency.
 
+## Generated descriptions and summaries
+
+Goal: every indexed document — notes, mail, files, photos, audio — gets a
+machine-written description and/or summary from inferd, so it is findable by
+what it *is* and *says*, not only by its name or raw bytes.
+
+Today (2026-10-06): one plane exists. `metadata.summary` is a single
+machine-authored string (never user-written; `comment` stays human), folded
+into FTS (`Document.generateFtsData`) and embedded under a reserved chunkId
+(inferd `constants.js`). Only IMAGES produce it, via a manual, per-workspace
+opt-in foreground run (`inferd.startImageSummaries`, SmolVLM default, BLIP
+optional) that the server stores through `ws.setSummary` → `put({ id, metadata:
+{ summary } })`. inferd's config already reserves `summarize.{image,audio,text}`;
+audio and text have no implementation, and nothing runs on ingest.
+
+Engine side (here):
+
+- [ ] Split the plane by kind instead of overloading one string:
+      `description` (what it is — a photo caption, "a 40 min call about Q3
+      hiring") vs `summary` (what it says — the gist of a long mail thread,
+      PDF, transcript). Short documents get a description only.
+- [ ] Namespace generated text by model + version, like vector spaces: store
+      which model produced it, keep a per-model seen ledger (bitmap), and make a
+      model swap reversible (switching back must not regenerate).
+- [ ] Invalidate on content change: a content update drops the doc from the
+      summary seen ledger (same rule as embeddings in `updateOne`), so reconcile
+      regenerates it. Membership-only writes must not.
+- [ ] Expose a gap API (`getUndescribedDocIds(kind, schemas)`) mirroring
+      `getUnembeddedDocIds`, so inferd can reconcile after downtime instead of
+      depending on live events.
+- [ ] Write generated text through the search write queue (write-behind,
+      `SearchWriteQueue`) — never under the document write lock — and keep it
+      out of the document checksum (it is derived, like metadata.text).
+- [ ] Keep the L3 invariant: generated text is disposable and reproducible from
+      the document + a versioned model; a wipe-and-regenerate must be safe.
+
+Depends on (other repos, for reference):
+
+- inferd: text summarizer (local small instruct model or the configured
+  `openai`-type provider), audio via transcription → summary, automatic
+  trigger on ingest with a per-workspace budget/rate limit (captioning is
+  expensive; opt-in per modality stays the default).
+- canvas-server: store via the new API instead of `setDocumentSummary`'s
+  metadata patch; surface description/summary in the web UI (object card,
+  tiles) and to agents (tree/context renderers).
+
+## Search
+
+### Quoted phrase search (exact word sequence)
+
+Revisit later; feasibility verified 2026-10-06 on LanceDB 0.39.
+
+`"aston martin"` in a query must match that exact word sequence (case- and
+accent-insensitive, order-sensitive; punctuation splits words, so
+"Aston-Martin" matches). It composes with refinement: `winter` → `"aston
+martin"` → `blue` narrows a hybrid winter search to documents containing the
+exact phrase, then ranks the survivors by `blue` (text + image vectors).
+
+Why a second column: the FTS index on `fts_text` is ngram-tokenized with
+`withPosition: false` — required for substring matching, but it cannot answer
+phrase queries (positions absent; phrases over character ngrams are
+meaningless). Verified: a word-tokenized column with positions supports
+`PhraseQuery` on indexed AND not-yet-indexed rows, combines with ngram
+`MatchQuery` clauses on `fts_text` in one `BooleanQuery`, and can be added to an
+existing table in place.
+
+- [ ] Add `fts_words` to the Lance documents table: same text as `fts_text`,
+      FTS index `{ baseTokenizer: 'simple', withPosition: true, lowercase,
+      asciiFolding, stem: false, removeStopWords: false }`. Existing tables
+      migrate at startup via `table.addColumns([{ name: 'fts_words', valueSql:
+      'fts_text' }])` + `createIndex`; record it in the FTS signature so a
+      config change rebuilds.
+- [ ] Fill both columns in `LanceIndex.writeBatch` (and backfill).
+- [ ] Query parsing in `#buildFtsQuery`: quoted segments → `PhraseQuery(phrase,
+      'fts_words', { slop: 0 })` as `Occur.Must`; the remaining words keep the
+      per-ngram Must clauses (Should across words). Several phrases are all
+      required; an unclosed quote runs to the end of the step.
+- [ ] Refinement semantics (`searchRefined` / `#foldQueryScope`): a step with
+      phrases is an exact FTS filter — no vector/image legs (an embedding cannot
+      guarantee a phrase). A mixed step (`"aston martin" blue`) filters by the
+      phrase and ranks the survivors by the loose words, vectors included.
+- [ ] No grammar conflict: quotes today only appear inside inline
+      `@predicate:"Jane Doe"` values, which canvas-server strips before the text
+      reaches synapsd; free-standing quotes are currently discarded by
+      `#tokenizeQuery`.
+- [ ] Cost to measure first: a second FTS index over the same text (disk +
+      write time per batch).
+- [ ] Tests: phrase vs reversed order vs substring-inside-word, unindexed rows,
+      a refine chain with a phrase step, mixed step ranking.
+
 ## Scale and operations
 
 - [ ] Batch `rebuildL3()` bitmap replay. The current per-document loop is not
