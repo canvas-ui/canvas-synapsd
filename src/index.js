@@ -237,6 +237,10 @@ class SynapsD extends EventEmitter {
             restoreTrees: () => this.#trees.reloadCached(),
             restoreDevices: () => this.#derived.loadDeviceFacets(),
             publish: (...args) => super.emit(...args),
+            // Diagnostics: called when a write waited + held the lock longer
+            // than slowWriteMs, naming the ops that held it meanwhile.
+            onSlowWrite: options.onSlowWrite,
+            slowWriteMs: options.slowWriteMs,
         });
         this.#derived = new DerivedIndexes({
             documents: this.documents, bitmapIndex: this.bitmapIndex,

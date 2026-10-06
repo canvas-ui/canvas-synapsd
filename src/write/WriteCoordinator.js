@@ -1,8 +1,29 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { fileURLToPath } from 'node:url';
 import debugInstance from 'debug';
 import { EVENTS, createEvent } from '../utils/events.js';
 import { normalizeBitmapKeys } from '../indexes/bitmaps/lib/keys.js';
 const debug = debugInstance('canvas:synapsd');
+
+// Every public write queues on ONE lock, so a quick write (a paste = linkMany)
+// can sit behind seconds of unrelated work (ingest batches, embedding upserts,
+// vector compaction). When that happens the waiter cannot tell why; these
+// reports name who held the lock meanwhile.
+const HISTORY = 256;
+// synapsd's own source root: frames under it are synapsd, the first one
+// outside is the caller worth naming (canvas-server's mail ingest, …).
+const SRC_URL = new URL('..', import.meta.url).href;
+const SRC_DIR = fileURLToPath(SRC_URL);
+
+/** `SynapsD.linkMany` + first caller outside synapsd, from a lazily formatted stack. */
+function describeCaller(trace) {
+    const frames = String(trace?.stack || '').split('\n').slice(1).map((line) => line.trim());
+    const own = (frame) => frame.includes(SRC_DIR) || frame.includes(SRC_URL);
+    const method = frames.find((f) => !/WriteCoordinator\.js/.test(f) && !/node:internal/.test(f));
+    const caller = frames.find((f) => !own(f) && !/node:internal|node_modules[\\/](?!canvas-)/.test(f));
+    const name = (frame) => frame ? (/^at (?:async )?([^\s(]+)/.exec(frame)?.[1] || frame.replace(/^at /, '')) : null;
+    return { method: name(method), caller: name(caller) };
+}
 
 // Owns document write serialization, native transactions, membership buffering,
 // and event publication. Reverse memberships are durable inside the transaction;
@@ -12,7 +33,11 @@ export default class WriteCoordinator {
     #writeContext = new AsyncLocalStorage();
     #writeTail = Promise.resolve();
     #accepting = true;
-    constructor({ backend, bitmapIndex, getSynapses, restoreTrees, restoreDevices, publish }) {
+    #onSlowWrite; #slowWriteMs;
+    #history = []; // recent ops that held the lock: { trace, start, end }
+    constructor({ backend, bitmapIndex, getSynapses, restoreTrees, restoreDevices, publish, onSlowWrite = null, slowWriteMs = 1000 }) {
+        this.#onSlowWrite = typeof onSlowWrite === 'function' ? onSlowWrite : null;
+        this.#slowWriteMs = Number(slowWriteMs) > 0 ? Number(slowWriteMs) : 1000;
         this.#backend = backend;
         this.#bitmapIndex = bitmapIndex;
         this.#getSynapses = getSynapses;
@@ -43,17 +68,49 @@ export default class WriteCoordinator {
     }
 
     async #enqueue(action) {
+        // Captured, not formatted: V8 only builds the string if .stack is read,
+        // which happens solely when this op ends up in a slow-write report.
+        const limit = Error.stackTraceLimit;
+        Error.stackTraceLimit = 30;
+        const trace = new Error('write');
+        Error.stackTraceLimit = limit;
+        const queuedAt = performance.now();
+
         const previous = this.#writeTail;
         let release;
         this.#writeTail = new Promise(resolve => { release = resolve; });
         await previous;
+        const start = performance.now();
         const context = { locked: true, active: false, memberships: [], events: [] };
         try {
             return await this.#writeContext.run(context, action);
         } finally {
             context.locked = false;
             release();
+            this.#record(trace, queuedAt, start, performance.now());
         }
+    }
+
+    #record(trace, queuedAt, start, end) {
+        this.#history.push({ trace, start, end });
+        if (this.#history.length > HISTORY) {this.#history.shift();}
+        const waitMs = start - queuedAt;
+        const holdMs = end - start;
+        if (!this.#onSlowWrite && !debug.enabled) {return;}
+        if (waitMs + holdMs < this.#slowWriteMs) {return;}
+        // Who held the lock while this op waited, longest first.
+        const ahead = this.#history
+            .filter((op) => op.trace !== trace && op.end > queuedAt && op.start < start)
+            .sort((a, b) => (b.end - b.start) - (a.end - a.start));
+        const report = {
+            ...describeCaller(trace),
+            waitMs: Math.round(waitMs),
+            holdMs: Math.round(holdMs),
+            aheadCount: ahead.length,
+            ahead: ahead.slice(0, 5).map((op) => ({ ...describeCaller(op.trace), holdMs: Math.round(op.end - op.start) })),
+        };
+        debug('Slow write: %o', report);
+        try { this.#onSlowWrite?.(report); } catch { /* diagnostics never break a write */ }
     }
 
     /**
