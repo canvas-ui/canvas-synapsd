@@ -291,7 +291,10 @@ class DirectoryTree extends EventEmitter {
         };
     }
 
-    async movePath(pathFrom, pathTo) {
+    // Allows storage callers to check compatibility BEFORE moving any bytes.
+    get supportsStorageMoves() { return true; }
+
+    async movePath(pathFrom, pathTo, _recursive = true, options = {}) {
         const sourcePath = this.#normalizePath(pathFrom);
         const targetPath = this.#normalizePath(pathTo);
         if (sourcePath === '/' || targetPath === '/') {
@@ -300,13 +303,17 @@ class DirectoryTree extends EventEmitter {
 
         const node = this.#getNodeForPath(sourcePath);
         if (!node) { throw new Error(`Path not found: ${sourcePath}`); }
-        this.#assertNodeMutable(node);
-        this.#assertPathMutableForInsert(targetPath);
+        // Internal backend projection may move below its protected root after
+        // the storage operation has succeeded. Public callers keep lock checks.
+        if (!options.ignoreLocks) {
+            this.#assertNodeMutable(node);
+            this.#assertPathMutableForInsert(targetPath);
+        }
 
         const currentParent = this.#getParentNode(sourcePath);
         const { parentNode: targetParent, targetName } = await this.#resolveTargetParent(targetPath);
         if (!currentParent || !targetParent) { throw new Error('Unable to resolve move target'); }
-        this.#assertNodeMutable(targetParent);
+        if (!options.ignoreLocks) this.#assertNodeMutable(targetParent);
         if (this.#hasChildWithName(targetParent, targetName, node.id)) {
             throw new Error(`Target path already exists: ${targetPath}`);
         }

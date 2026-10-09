@@ -65,6 +65,20 @@ describe('directory tree segments + backend locks', () => {
         expect(removed.error).toBeNull();
     });
 
+    test('storage projection moves a subtree below a protected root without recreating its nodes', async () => {
+        const tree = await createDirectoryTree();
+        await tree.insertPath('/workspace/home/Kitchen/Empty');
+        await tree.lockPath('/workspace/home', 'system:backend:workspace:home');
+        const ids = tree.getNodeIdsForPath('/workspace/home/Kitchen', { recursive: true });
+        await expect(tree.movePath('/workspace/home/Kitchen', '/workspace/home/Kitchens')).rejects.toThrow(/locked/i);
+        await tree.movePath('/workspace/home/Kitchen', '/workspace/home/Kitchens', true, { ignoreLocks: true });
+        expect(tree.getNodeIdsForPath('/workspace/home/Kitchens', { recursive: true })).toEqual(ids);
+        expect(tree.pathExists('/workspace/home/Kitchen')).toBe(false);
+        expect(tree.getLayerForPath('/workspace/home').lockedBy).toContain('system:backend:workspace:home');
+        await expect(tree.removePath('/workspace/home', true)).rejects.toThrow(/locked/i);
+        await expect(tree.movePath('/workspace/home/Kitchens', '/workspace/home/Kitchens/inside', true, { ignoreLocks: true })).rejects.toThrow(/itself/);
+    });
+
     test('system unlock then removePath succeeds', async () => {
         const tree = await createDirectoryTree();
         await tree.insertPath('/imap/me@idnc.sk');
