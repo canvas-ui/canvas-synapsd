@@ -5,8 +5,7 @@ import { generateChecksum } from '../../utils/crypto.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/schema/message/email';
-// 3.1: attachments use `url` (stored://) + `checksum`; ad-hoc `storageRef` removed.
-const DOCUMENT_SCHEMA_VERSION = '3.0';
+const DOCUMENT_SCHEMA_VERSION = '3.1';
 // Boolean mailbox flags, NOT subtypes — under `feature/` (a derived prefix), never
 // under the schema id: since the hierarchy ticks ancestor segments (Rev B), a key
 // like `data/schema/message/email/sent` would be indistinguishable from a subtype
@@ -34,7 +33,9 @@ const documentDataSchema = z.object({
     data: z.object({
         // Core email fields
         subject: z.string(),
-        body: z.string(),
+        // Blob-backed messages keep only a preview here; legacy/API-created
+        // messages may still carry inline content until it has been persisted.
+        body: z.string().optional(),
         bodyHtml: z.string().optional(),
         bodyPreview: z.string().optional(),
 
@@ -265,8 +266,8 @@ export default class Email extends Document {
     // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = {
-        ftsSearchFields: ['data.subject', 'data.body', 'data.from.address', 'data.from', 'data.to'],
-        vectorEmbeddingFields: ['data.subject', 'data.body'],
+        ftsSearchFields: ['data.subject', 'data.bodyPreview', 'data.body', 'data.from.address', 'data.from', 'data.to'],
+        vectorEmbeddingFields: ['data.subject', 'data.bodyPreview', 'data.body'],
         checksumFields: ['data.messageId', 'data.from.address', 'data.subject'],
     };
 

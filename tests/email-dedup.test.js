@@ -39,6 +39,20 @@ describe('Email ingestion dedup', () => {
         if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
     });
 
+    test('blob-backed email indexes headers and preview without storing a body', async () => {
+        const email = Email.fromIMAP(parsed({ messageId: '<preview@example.com>', text: 'Searchable preview' }));
+        delete email.data.body;
+        delete email.data.bodyHtml;
+        email.locations = [{ url: 'stored://emails/raw' }];
+        const [id] = await db.putMany([email]);
+        const stored = await db.get(id);
+        expect(stored.data.body).toBeUndefined();
+        expect(stored.data.bodyHtml).toBeUndefined();
+        expect(stored.data.bodyPreview).toBe('Searchable preview');
+        expect(stored.generateFtsData()).toContain('Searchable preview');
+        expect(stored.generateFtsData()).toContain('Quarterly report');
+    });
+
     test('same Message-ID re-ingested with different uid/flags/receivedAt dedups to one doc', async () => {
         const e1 = Email.fromIMAP(parsed({ messageId: '<m1@example.com>' }), { uid: 1, flags: ['\\Seen'] });
         const e2 = Email.fromIMAP(parsed({ messageId: '<m1@example.com>' }), { uid: 99, flags: [] });
