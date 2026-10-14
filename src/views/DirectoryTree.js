@@ -2,6 +2,7 @@
 
 import EventEmitter from 'eventemitter2';
 import { isDeepStrictEqual } from 'node:util';
+import { setImmediate as yieldToIO } from 'node:timers/promises';
 import { ulid } from 'ulid';
 import TreeNode from './lib/TreeNode.js';
 import { EVENTS } from '../utils/events.js';
@@ -143,8 +144,12 @@ class DirectoryTree extends EventEmitter {
         if (nodeId === ROOT_NODE_ID) { return '/'; }
 
         const segments = [];
+        const visited = new Set();
         let currentId = nodeId;
         while (currentId && currentId !== ROOT_NODE_ID) {
+            if (visited.has(currentId)) { throw this.#corruptNode(currentId); }
+            visited.add(currentId);
+            if (visited.size % 128 === 0) { await yieldToIO(); }
             const nodeData = this.#dataStore.get(this.#nodeKey(currentId));
             if (!nodeData) { return null; }
             segments.unshift(nodeData.name);
@@ -561,17 +566,34 @@ class DirectoryTree extends EventEmitter {
             await this.#persistNode(root);
             return root;
         }
-        return await this.#loadNode(rootData);
+        // Reads resolve from memory. Awaiting recursive calls alone never lets
+        // sockets or timers run while a large NAS directory tree is hydrated.
+        // Build off to the side, publishing only a complete, acyclic tree.
+        const root = new TreeNode(rootData.id, { ...rootData });
+        const pending = [{ node: root, data: rootData }];
+        const visited = new Set([rootData.id]);
+        let loaded = 0;
+        while (pending.length) {
+            const { node, data } = pending.pop();
+            for (const childId of data.childIds || []) {
+                if (++loaded % 128 === 0) { await yieldToIO(); }
+                if (visited.has(childId)) { throw this.#corruptNode(childId); }
+                visited.add(childId);
+                const childData = this.#dataStore.get(this.#nodeKey(childId));
+                if (!childData) { continue; }
+                if (childData.id !== childId) { throw this.#corruptNode(childId); }
+                const child = new TreeNode(childData.id, { ...childData });
+                node.addChild(child);
+                pending.push({ node: child, data: childData });
+            }
+        }
+        return root;
     }
 
-    async #loadNode(nodeData) {
-        const node = new TreeNode(nodeData.id, { ...nodeData });
-        for (const childId of nodeData.childIds || []) {
-            const childData = this.#dataStore.get(this.#nodeKey(childId));
-            if (!childData) { continue; }
-            node.addChild(await this.#loadNode(childData));
-        }
-        return node;
+    #corruptNode(nodeId) {
+        return Object.assign(new Error(`Invalid directory tree ${this.id}: repeated or inconsistent node ${nodeId}`), {
+            code: 'CORRUPT_TREE', treeId: this.id, nodeId,
+        });
     }
 
     async #persistNode(node) {

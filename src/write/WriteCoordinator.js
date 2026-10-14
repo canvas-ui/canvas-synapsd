@@ -35,6 +35,9 @@ export default class WriteCoordinator {
     #accepting = true;
     #onSlowWrite; #slowWriteMs;
     #history = []; // recent ops that held the lock: { trace, start, end }
+    #active = null;
+    #waiting = new Set();
+    #watchdog = null;
     constructor({ backend, bitmapIndex, getSynapses, restoreTrees, restoreDevices, publish, onSlowWrite = null, slowWriteMs = 1000 }) {
         this.#onSlowWrite = typeof onSlowWrite === 'function' ? onSlowWrite : null;
         this.#slowWriteMs = Number(slowWriteMs) > 0 ? Number(slowWriteMs) : 1000;
@@ -75,17 +78,39 @@ export default class WriteCoordinator {
         const trace = new Error('write');
         Error.stackTraceLimit = limit;
         const queuedAt = performance.now();
+        const pending = { trace, queuedAt };
+        this.#waiting.add(pending);
+        if (!this.#watchdog && (this.#onSlowWrite || debug.enabled)) {
+            this.#watchdog = setInterval(() => {
+                const now = performance.now();
+                const active = this.#active;
+                if (!active || now - active.start < this.#slowWriteMs) return;
+                const report = {
+                    ...describeCaller(active.trace), pending: true,
+                    waitMs: Math.round(active.start - active.queuedAt), aheadCount: 0, ahead: [],
+                    holdMs: Math.round(now - active.start), queuedCount: this.#waiting.size,
+                    waiting: [...this.#waiting].slice(0, 5).map(op => ({ ...describeCaller(op.trace), waitMs: Math.round(now - op.queuedAt) })),
+                };
+                debug('Write still pending: %o', report);
+                try { this.#onSlowWrite?.(report); } catch { /* diagnostic only */ }
+            }, Math.max(100, this.#slowWriteMs));
+            this.#watchdog.unref?.();
+        }
 
         const previous = this.#writeTail;
         let release;
         this.#writeTail = new Promise(resolve => { release = resolve; });
         await previous;
         const start = performance.now();
+        this.#waiting.delete(pending);
+        this.#active = { trace, start, queuedAt };
         const context = { locked: true, active: false, memberships: [], events: [] };
         try {
             return await this.#writeContext.run(context, action);
         } finally {
             context.locked = false;
+            this.#active = null;
+            if (!this.#waiting.size) { clearInterval(this.#watchdog); this.#watchdog = null; }
             release();
             this.#record(trace, queuedAt, start, performance.now());
         }

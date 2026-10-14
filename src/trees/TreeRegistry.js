@@ -215,7 +215,9 @@ export default class TreeRegistry {
         }
 
         for (const meta of this.#treeMetadata.values()) {
+            debug('Initializing %s tree %s', meta.type, meta.id);
             await this.#instantiateTree(meta).initialize();
+            debug('Initialized %s tree %s', meta.type, meta.id);
         }
     }
 
@@ -406,11 +408,13 @@ export default class TreeRegistry {
     }
 
     contextCollection(treeId) {
-        return this.#bitmapIndex.createCollection(`context/${treeId}`);
+        const name = `context/${treeId}`;
+        return this.#bitmapIndex.getCollection(name) || this.#bitmapIndex.createCollection(name);
     }
 
     directoryCollection(treeId) {
-        return this.#bitmapIndex.createCollection(`vfs/${treeId}`);
+        const name = `vfs/${treeId}`;
+        return this.#bitmapIndex.getCollection(name) || this.#bitmapIndex.createCollection(name);
     }
 
     emitDocumentEvent(eventName, type, spec, documentIds) {

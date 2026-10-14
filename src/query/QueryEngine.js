@@ -91,11 +91,14 @@ export default class QueryEngine {
                 const totalCount = await this.#documents.getCount();
                 const pagedDocs = [];
                 const pagedIds = [];
-                let seen = 0;
-                for await (const { key, value } of this.#documents.getRange({ reverse: descending })) {
-                    if (seen++ < offset) { continue; }
-                    if (idsOnly) { pagedIds.push(key); } else { pagedDocs.push(value); }
-                    if (limit > 0 && (idsOnly ? pagedIds.length : pagedDocs.length) >= limit) { break; }
+                // Skip in the cursor before decoding values. A reconciliation
+                // paging through the library used to unpack every preceding
+                // page again, and idsOnly unnecessarily decoded full documents.
+                const range = { reverse: descending, offset: Math.ceil(offset), ...(limit > 0 ? { limit: Math.ceil(limit) } : {}) };
+                if (idsOnly) {
+                    for await (const key of this.#documents.getKeys(range)) { pagedIds.push(key); }
+                } else {
+                    for await (const { value } of this.#documents.getRange(range)) { pagedDocs.push(value); }
                 }
                 if (idsOnly) { return idResult(pagedIds, totalCount); }
                 const resultArray = parseDocuments ? safeParseDocuments(pagedDocs) : pagedDocs;

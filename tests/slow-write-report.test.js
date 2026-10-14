@@ -55,3 +55,19 @@ describe('slow write reports', () => {
         await expect(db.put(note('still saved'), { context: { path: '/q' } })).resolves.toBeGreaterThan(0);
     });
 });
+
+test('a stalled write reports its holder and queued callers before either completes', async () => {
+    const { default: WriteCoordinator } = await import('../src/write/WriteCoordinator.js');
+    const reports = [], calls = [];
+    const writes = new WriteCoordinator({ onSlowWrite: report => reports.push(report), slowWriteMs: 5 });
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const holder = writes.withWriteLock(async () => { calls.push('holder'); await gate; });
+    const waiting = writes.withWriteLock(() => { calls.push('waiting'); });
+    try {
+        await new Promise(resolve => setTimeout(resolve, 150));
+        expect(calls).toEqual(['holder']);
+        expect(reports.some(r => r.pending === true && r.queuedCount === 1 && r.waiting.length === 1)).toBe(true);
+    } finally { release(); await Promise.all([holder, waiting]); }
+    expect(calls).toEqual(['holder', 'waiting']);
+});
