@@ -712,6 +712,41 @@ await db.put({ id, features: ['tag/important', 'tag/reviewed'] });
 
 To change only *view* membership (trees), use `link()` / `unlink()`, which never touch the row.
 
+### Atomic succession
+
+`putSuccessor(fromId, document, spec, options)` creates or updates a successor,
+copies the predecessor's placements, tags and asserted incoming/outgoing
+relations, and adds `successor --derived-from--> predecessor`. The caller decides
+when content divergence warrants a successor. Ordinary edits still use `put()`
+with the existing ID.
+
+```js
+const successorId = await db.putSuccessor(original.id, revisedFile, {
+    context: null,
+    directory: { tree: 'backends', path: '/edited' },
+}, {
+    excludeTrees: ['backends'],
+    predecessor: {
+        version: original.version,
+        changes: { locations: remainingLocations },
+        unlink: [{ context: null, directory: { tree: 'backends', path: '/edited' } }],
+    },
+});
+```
+
+Row writes, versions, checksum mappings, forward/reverse memberships, timelines,
+geo indexes and asserted edges share one LMDB transaction. A failure restores
+cached bitmaps and trees as well as durable data. Events and search indexing
+are queued only after commit; external Lance storage and file bytes are outside
+this transaction. The predecessor retains its curation and is never deleted by
+this operation. Extractor-generated relations are not copied.
+
+`predecessor.version` and `successorVersion` are optional optimistic concurrency
+checks; the latter applies when `document.id` names an existing successor.
+`successorUnlinks` accepts write specs for removing stale successor placements
+in the same commit. A stale version rejects with `VERSION_CONFLICT`; a write
+that resolves to the predecessor itself is rejected and rolled back.
+
 ### Link and unlink
 
 `link()` adds tree/feature membership. `unlink()` removes it. Neither touches the document body, and `unlink()` never deletes the document.

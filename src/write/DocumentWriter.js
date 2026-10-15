@@ -336,11 +336,11 @@ export default class DocumentWriter {
         }
 
         // FTS row: queued (write-behind), see SearchWriteQueue.
-        this.#searchQueue.upsertText([parseInitializeDocument(parsedDocument)]);
+        this.#writes.afterCommit(() => this.#searchQueue.upsertText([parseInitializeDocument(parsedDocument)]));
 
         if (emitEvent) {
             const { tree: contextTree } = this.#trees.resolveSelection('context', contextSpec, '/');
-            contextTree.emit(EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
+            this.#writes.emitTreeEvent(contextTree, EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
                 documentId: parsedDocument.id,
                 contextSpec,
                 directorySpec,
@@ -404,7 +404,7 @@ export default class DocumentWriter {
             }
 
             // FTS row: queued (write-behind), see SearchWriteQueue.
-            this.#searchQueue.upsertText([parseInitializeDocument(updatedDocument)]);
+            this.#writes.afterCommit(() => this.#searchQueue.upsertText([parseInitializeDocument(updatedDocument)]));
             // Content changed → the doc must be re-embedded. The external embedd
             // service reacts to DOCUMENT_UPDATED; here we drop it from the seen
             // ledger so a reconcile re-embeds it even if the live event is missed.

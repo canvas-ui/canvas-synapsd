@@ -27,7 +27,8 @@ function describeCaller(trace) {
 
 // Owns document write serialization, native transactions, membership buffering,
 // and event publication. Reverse memberships are durable inside the transaction;
-// collection bitmaps flush after commit, retaining the existing recovery policy.
+// collection bitmaps normally flush after commit. Compound operations can opt
+// into atomic bitmap persistence with cache restoration on rollback.
 export default class WriteCoordinator {
     #backend; #bitmapIndex; #getSynapses; #restoreTrees; #restoreDevices; #publish;
     #writeContext = new AsyncLocalStorage();
@@ -57,6 +58,14 @@ export default class WriteCoordinator {
         const context = this.#writeContext.getStore();
         if (context?.active) { context.events.push(() => tree.emit(eventName, payload)); return; }
         tree.emit(eventName, payload);
+    }
+
+    // External indexes cannot join LMDB. Queue their work only after the
+    // enclosing transaction commits, never for a rolled-back document.
+    afterCommit(action) {
+        const context = this.#writeContext.getStore();
+        if (context?.active) { context.events.push(action); return; }
+        action();
     }
 
     // Public document mutations queue before reads, ID allocation, or writes.
@@ -146,24 +155,35 @@ export default class WriteCoordinator {
      * are flushed to the bitmap index only after the transaction commits — so a
      * rollback leaves no phantom ticks in the shared bitmap cache. The synapse
      * reverse index is still written transactionally inside `txBody`.
+     * With `atomicMemberships`, flush before commit and restore cached objects
+     * on failure instead; bitmap errors then abort the whole mutation.
      *
      * Internal nested work shares the transaction. Public writes, including ones
      * initiated by event listeners, enter the queue as independent operations.
      */
-    async withDeferredMembership(txBody) {
+    async withDeferredMembership(txBody, { atomicMemberships = false } = {}) {
         const transact = async () => {
             const context = this.#writeContext.getStore();
             if (context.active) { return txBody(); }
             context.active = true;
             context.memberships = [];
             context.events = [];
+            const cachedBitmaps = atomicMemberships ? new Map(this.#bitmapIndex.cache) : [];
             let result;
             try {
                 // Bind inside the queued native callback as well: LMDB may run
                 // callbacks from several callers on the same async resource.
-                result = await this.#backend.transaction(() => this.#writeContext.run(context, txBody));
+                result = await this.#backend.transaction(() => this.#writeContext.run(context, async () => {
+                    const value = await txBody();
+                    // Compound document mutations need forward memberships in
+                    // the same commit as rows, reverse memberships and edges.
+                    // A failed bitmap write aborts the entire operation; the
+                    // catch below restores cached bitmap objects in place.
+                    if (atomicMemberships) { await this.flushMembershipBuffer(context.memberships, { strict: true }); }
+                    return value;
+                }));
             } catch (error) {
-                this.#bitmapIndex.restoreCache();
+                this.#bitmapIndex.restoreCache(cachedBitmaps);
                 await this.#restoreTrees();
                 await this.#restoreDevices();
                 throw error;
@@ -171,14 +191,14 @@ export default class WriteCoordinator {
                 context.active = false;
             }
             const events = context.events;
-            await this.flushMembershipBuffer(context.memberships);
+            if (!atomicMemberships) { await this.flushMembershipBuffer(context.memberships); }
             for (const publish of events) { publish(); }
             return result;
         };
         return this.#writeContext.getStore()?.locked ? transact() : this.withWriteLock(transact);
     }
 
-    async flushMembershipBuffer(buffer) {
+    async flushMembershipBuffer(buffer, { strict = false } = {}) {
         const changes = [];
         for (const { op, docId, keys } of buffer) {
             try {
@@ -187,6 +207,7 @@ export default class WriteCoordinator {
                     : await this.#bitmapIndex.untickMany(keys, docId);
                 if (affected && affected.length) { changes.push({ docId, op, keys: affected }); }
             } catch (error) {
+                if (strict) { throw error; }
                 // Committed doc may now lack/keep a bitmap membership it should
                 // not — recoverable by reindexing from the synapse reverse index.
                 debug(`Post-commit bitmap ${op} failed for doc ${docId}: ${error.message}`);

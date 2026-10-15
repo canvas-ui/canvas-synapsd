@@ -197,7 +197,7 @@ export default class MembershipWriter {
             const treeSpec = contextSpec ?? directorySpec;
             if (treeType && treeSpec) {
                 const { tree } = this.#trees.resolveSelection(treeType, treeSpec, treeType === 'context' ? '/' : null);
-                tree.emit(EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
+                this.#writes.emitTreeEvent(tree, EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
                     documentId: numericId,
                     contextSpec,
                     directorySpec,

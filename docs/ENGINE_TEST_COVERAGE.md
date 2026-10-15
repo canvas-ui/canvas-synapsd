@@ -49,6 +49,10 @@ on the final write/maintenance/lifecycle refactor; they do not filter the tests.
   cleanup must succeed before deleted IDs become reusable.
 - Collection bitmap flushes remain best-effort after native commit. A failed flush
   is repairable; it is not reported as a rollback of already committed rows.
+  `putSuccessor()` uses atomic membership persistence instead: forward and reverse
+  memberships commit with the rows and edges. `document-successor` tests inject
+  failures during relations, predecessor updates and bitmap additions/removals,
+  verify cache and disk rollback, and retry after reopening the database.
 - Repair jobs exclude queued writers, but span multiple batches and storage
   systems. An interrupted job may need to be rerun.
 - Low-level exposed handles and synchronous administrative operations bypass the

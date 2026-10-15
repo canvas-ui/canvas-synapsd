@@ -44,6 +44,25 @@ describe('Document version', () => {
         expect((await db.getDocument(id)).version).toBe(2);
     });
 
+    test('file edits keep their ID, advance the version and replace every old checksum mapping', async () => {
+        const sha = n => `sha256/${String(n).padStart(64, '0')}`;
+        const id = await db.put({ schema: 'data/schema/file', data: {}, checksumArray: [sha(0)],
+            locations: [{ url: 'stored://workspace:home/draft.txt' }] });
+        for (let n = 1; n <= 7; n++) {
+            const updated = await db.put({ id, checksumArray: [sha(n)] });
+            expect(updated).toBe(id);
+            expect((await db.getDocument(id)).version).toBe(n + 1);
+            expect((await db.getByChecksumString(sha(n))).id).toBe(id);
+            for (let old = 0; old < n; old++) expect(await db.getByChecksumString(sha(old))).toBeNull();
+        }
+        await db.shutdown();
+        db = new Db({ path: rootPath, backupOnOpen: false, backupOnClose: false });
+        await db.start();
+        expect((await db.getByChecksumString(sha(7))).id).toBe(id);
+        expect((await db.getDocument(id)).version).toBe(8);
+        expect(await db.getByChecksumString(sha(0))).toBeNull();
+    });
+
     test('re-putting identical content updates the same row and bumps', async () => {
         const id = await db.put(note('same'));
         const again = await db.put(note('same'));

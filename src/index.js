@@ -1118,23 +1118,83 @@ class SynapsD extends EventEmitter {
             const to = Number(toId);
             if (from === to) { return []; }
 
-            const excludedPrefixes = excludeTrees
-                .map((t) => this.getTree(t))
-                .filter(Boolean)
-                .flatMap((tree) => [
-                    BitmapIndex.normalizeKey(this.#trees.directoryCollection(tree.id).prefix),
-                    BitmapIndex.normalizeKey(this.#trees.contextCollection(tree.id).prefix),
-                ]);
-
-            const layerKeys = await this.#synapses.listSynapses(from);
-            const placementKeys = layerKeys.filter((key) =>
-                (key.startsWith('context/') || key.startsWith('vfs/'))
-                && !excludedPrefixes.some((prefix) => key.startsWith(prefix)));
+            const placementKeys = await this.#successorMembershipKeys(from, excludeTrees);
             if (placementKeys.length === 0) { return []; }
 
             await this.#writes.withDeferredMembership(() => this.#writes.addDocumentMembership(to, placementKeys));
             return placementKeys;
         });
+    }
+
+    async #successorMembershipKeys(from, excludeTrees, { includeTags = false } = {}) {
+        const excludedPrefixes = excludeTrees
+            .map((t) => this.getTree(t))
+            .filter(Boolean)
+            .flatMap((tree) => [
+                BitmapIndex.normalizeKey(this.#trees.directoryCollection(tree.id).prefix),
+                BitmapIndex.normalizeKey(this.#trees.contextCollection(tree.id).prefix),
+            ]);
+        return (await this.#synapses.listSynapses(from)).filter((key) =>
+            (key.startsWith('context/') || key.startsWith('vfs/') || (includeTags && key.startsWith('tag/')))
+            && !excludedPrefixes.some((prefix) => key.startsWith(prefix)));
+    }
+
+    /**
+     * Commit a successor and its inherited curation as one LMDB transaction.
+     * The caller decides WHEN succession is appropriate and supplies location
+     * and mirror-path changes; the database owns the atomic write mechanics.
+     *
+     * Copies placements, tags and asserted incoming/outgoing relations, adds
+     * successor --derived-from--> predecessor, and optionally patches/unlinks
+     * the predecessor and unlinks stale successor paths. Source memberships
+     * are retained unless explicitly unlinked. Derived extractor edges are
+     * recomputed from the successor's content, not copied.
+     *
+     * `predecessor`: { version?, changes?, unlink?: writeSpec[] }
+     * `successorUnlinks`: writeSpec[]; `successorVersion`: optional precondition.
+     * All row/index/cache changes roll back together. Events and search work
+     * are released only after commit. Returns the successor document ID.
+     */
+    async putSuccessor(fromId, document, spec = {}, {
+        excludeTrees = [], predecessor = {}, successorUnlinks = [], successorVersion,
+    } = {}) {
+        return this.#writes.withWriteLock(() => this.#writes.withDeferredMembership(async () => {
+            const from = Number(fromId);
+            if (!Number.isInteger(from) || from <= 0) { throw new Error('Invalid predecessor document ID'); }
+            const source = await this.#getById(from);
+            if (!source) { throw new Error(`Predecessor document ${from} not found`); }
+            const checkVersion = (row, expected) => {
+                if (expected !== undefined && row?.version !== expected) {
+                    throw Object.assign(new Error('Document changed before succession could commit'), { code: 'VERSION_CONFLICT', statusCode: 409 });
+                }
+            };
+            checkVersion(source, predecessor.version);
+            if (successorVersion !== undefined) { checkVersion(await this.#getById(document.id), successorVersion); }
+
+            // Snapshot inheritance before any writes, including incoming edges
+            // whose owning rows also need to be updated in this transaction.
+            const keys = await this.#successorMembershipKeys(from, excludeTrees, { includeTags: true });
+            const { outgoing, incoming } = this.#edges.edgesOf(from);
+            const assertedOut = outgoing.filter(({ p, to }) => this.#edges.edge(from, p, to)?.meta?.src === 'doc');
+            const assertedIn = incoming.filter(({ p, from: subject }) => this.#edges.edge(subject, p, from)?.meta?.src === 'doc');
+
+            const to = await this.#writer.put(document, spec);
+            if (to === from) { throw new Error('A successor must have a different document ID'); }
+            await this.#writes.addDocumentMembership(to, keys);
+            for (const { p, to: target } of assertedOut) {
+                if (target !== from && target !== to) { await this.#writeAssertedRelation(to, p, target, 'assert'); }
+            }
+            for (const { p, from: subject } of assertedIn) {
+                if (subject !== from && subject !== to) { await this.#writeAssertedRelation(subject, p, to, 'assert'); }
+            }
+            await this.#writeAssertedRelation(to, 'derived-from', from, 'assert');
+            // Re-read inside the writer: relations added above must survive a
+            // location patch, and callers cannot override the predecessor ID.
+            if (predecessor.changes) { await this.#writer.put({ ...predecessor.changes, id: from }, { context: null }); }
+            for (const unlink of predecessor.unlink || []) { await this.#membershipWriter.unlink(from, unlink); }
+            for (const unlink of successorUnlinks) { await this.#membershipWriter.unlink(to, unlink); }
+            return to;
+        }, { atomicMemberships: true }));
     }
 
     async listDocumentTreePaths(id, treeNameOrId) {

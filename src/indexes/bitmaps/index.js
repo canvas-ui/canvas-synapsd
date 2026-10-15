@@ -785,12 +785,15 @@ class BitmapIndex {
     // After an aborted storage transaction, restore cached objects in place:
     // callers (including the engine's live/free-ID bitmaps) retain references.
     // This runs only on failure, avoiding a full cache snapshot on every write.
-    restoreCache() {
-        for (const [key, bitmap] of this.cache) {
+    restoreCache(previousEntries = []) {
+        // An in-transaction untick can delete an empty bitmap from the cache.
+        // Restore those objects too: readers may still hold their references.
+        for (const [key, bitmap] of [...this.cache, ...previousEntries]) {
             const stored = this.dataset.get(key);
             bitmap.clear();
             if (stored) {
                 bitmap.orInPlace(RoaringBitmap32.deserialize(stored, true));
+                this.cache.set(key, bitmap);
             } else {
                 this.cache.delete(key);
             }
