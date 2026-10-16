@@ -1207,6 +1207,18 @@ class ContextTree extends EventEmitter {
         return await this.#db.list(this.#scopedSpec(spec));
     }
 
+    /** Exact path membership for exports. Contexts intersect ancestor layers;
+     * canvas nodes are saved views and have no independent membership.
+     * Native bitmaps and their composition remain inside SynapsD.
+     */
+    async memberIds(path = '/') {
+        const nodes = this.#getNodesForPath(this.#normalizePath(path));
+        if (nodes.at(-1).payload?.type === 'canvas') { return []; }
+        const layers = nodes.slice(1).filter(node => node.payload?.type !== 'canvas').map(node => node.id);
+        if (!layers.length) { layers.push(this.rootLayer.id); }
+        return (await this.#bitmapCollection.AND(layers)).toArray();
+    }
+
     /**
      * ============================================================================
      * Utils and Private Methods

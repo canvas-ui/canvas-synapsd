@@ -114,6 +114,13 @@ class DirectoryTree extends EventEmitter {
         return bitmap ? bitmap.clone() : null;
     }
 
+    /** Exact folder membership, excluding descendants and saved canvas views. */
+    async memberIds(path = '/') {
+        const node = this.#getNodeForPath(this.#normalizePath(path));
+        if (!node || node.payload?.type === 'canvas') { return []; }
+        return (await this.#collection.getBitmap(node.id, false))?.toArray() || [];
+    }
+
     async findRecursive(path) {
         const node = this.#getNodeForPath(this.#normalizePath(path));
         if (!node) { return null; }

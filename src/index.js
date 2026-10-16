@@ -1043,6 +1043,43 @@ class SynapsD extends EventEmitter {
      * layers saving data/dataset/* keys in their querySpec features.
      */
 
+    /** Plain-data bitmap API for hosts. Native Roaring objects stay here. */
+    async listBitmaps(prefix = '', { includeData = false, includeInternal = false } = {}) {
+        const keys = await this.bitmapIndex.listBitmaps(prefix, { includeInternal });
+        return (await Promise.all(keys.map(key => this.getBitmap(key, { includeData })))).filter(Boolean);
+    }
+
+    async getBitmap(key, { includeData = false } = {}) {
+        if (!key || typeof key !== 'string') { throw new Error('Bitmap key is required'); }
+        const bitmap = await this.bitmapIndex.getBitmap(key, false);
+        if (!bitmap) { return null; }
+        return { key: bitmap.key, size: bitmap.size, isEmpty: bitmap.isEmpty,
+            min: bitmap.isEmpty ? null : bitmap.minimum(), max: bitmap.isEmpty ? null : bitmap.maximum(),
+            ...(includeData ? { ids: bitmap.toArray() } : {}) };
+    }
+
+    async getBitmapRawBuffer(key) {
+        if (!key || typeof key !== 'string') { throw new Error('Bitmap key is required'); }
+        const bitmap = await this.bitmapIndex.getBitmap(key, false);
+        if (!bitmap) { return null; }
+        return Buffer.from(bitmap.serialize(true));
+    }
+
+    async deleteBitmap(key) {
+        if (!key || typeof key !== 'string') { throw new Error('Bitmap key is required'); }
+        const normalized = BitmapIndex.normalizeKey(key).replace(/^\/+|\/+$/g, '');
+        for (const namespace of ['data', 'internal']) {
+            if (normalized === namespace || normalized.startsWith(`${namespace}/`)) {
+                throw new Error(`Refusing to delete bitmap "${key}": ${namespace}/* bitmaps are protected (engine-managed).`);
+            }
+        }
+        return this.#writes.withWriteLock(async () => {
+            if (!await this.bitmapIndex.getBitmap(normalized, false)) { return false; }
+            await this.bitmapIndex.deleteBitmap(normalized);
+            return true;
+        });
+    }
+
     /** List dataset names with document counts. */
     async listDatasets() {
         const keys = await this.bitmapIndex.listBitmaps('data/dataset/');

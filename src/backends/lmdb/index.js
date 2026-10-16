@@ -138,9 +138,20 @@ class Db {
         };
 
         const db = this.db.openDB(dataset, datasetOptions);
+        if (!db) { return undefined; } // read-only/create:false: never create missing datasets
         const wrapped = new Db(db, dataset);
         this.#datasets.add(wrapped);
         return wrapped;
+    }
+
+    // Compatibility surface for key/value consumers. Always return a SynapsD
+    // dataset wrapper; native handles stay in the database package.
+    openDB(name, options = {}) {
+        if (name && typeof name === 'object') {
+            const { name: dataset, ...settings } = name;
+            return this.createDataset(dataset, settings);
+        }
+        return this.createDataset(name, options);
     }
 
 
@@ -398,7 +409,7 @@ class Db {
     **/
     async close() {
         try {
-            await this.ready;
+            if (this.backupOptions.backupOnOpen) { await this.ready; }
             if (this.backupOptions.backupOnClose) {
                 await new DatabaseBackups(this.#path, { backupPath: this.backupPath }).create('manual');
             }
