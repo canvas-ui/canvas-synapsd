@@ -53,6 +53,9 @@ describe('Atomic document succession', () => {
     });
 
     async function snapshot() {
+        // Search presence is deliberately asynchronous. Settle earlier writes
+        // before comparing the state of the transaction under test.
+        await db.flushSearchIndex();
         const bitmaps = new Map();
         for (const key of await db.bitmapIndex.listBitmaps('', { includeInternal: true })) {
             bitmaps.set(key, [...await db.bitmapIndex.getBitmap(key)]);

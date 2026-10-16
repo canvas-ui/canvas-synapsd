@@ -15,6 +15,7 @@ import { EVENTS, createEvent } from './utils/events.js';
 
 // DB Backend
 import LmdbBackend from './backends/lmdb/index.js';
+import DatabaseBackups from './backups/DatabaseBackups.js';
 
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
@@ -386,7 +387,32 @@ class SynapsD extends EventEmitter {
 
     async start() { return this.#lifecycle.start(); }
 
+    /** Wait for complete document/membership writes, not merely an arbitrary
+     * LMDB commit between a row write and its deferred bitmap flush. */
+    async createBackup(kind = 'manual') {
+        return this.#searchQueue.exclusive(() => this.#writes.withWriteLock(async () => {
+            await this.#db.flush();
+            return new DatabaseBackups(this.#rootPath).create(kind);
+        }));
+    }
+
     async #initializeRuntime() {
+        await this.#db.ready;
+        // LMDB checkpoints include contextual bitmaps, but not derived Lance
+        // files. A durable marker makes this reset repeatable after a crash.
+        const restoreMarker = path.join(this.#rootPath, 'restore-search.json');
+        const restoring = fs.existsSync(restoreMarker);
+        if (restoring) {
+            await fs.promises.rm(path.join(this.#rootPath, 'lance'), { recursive: true, force: true });
+            await this.#db.transaction(async () => {
+                for (const key of [...this.#bitmapStore.getKeys()]) {
+                    if (typeof key === 'string' && (key.startsWith('internal/lance/') || key.startsWith('internal/embed/'))) {
+                        await this.#bitmapStore.remove(key);
+                    }
+                }
+            });
+            this.#bitmapCache.clear();
+        }
         // Schema-version GATE. There is no migration code in this engine any
         // more (2026-08-04) — migrations are one-time operator actions and were
         // living on a hot startup path. What stays is the refusal, because
@@ -465,7 +491,20 @@ class SynapsD extends EventEmitter {
         await this.#lanceIndex.initialize();
         this.#lanceIndex.setReadBarrier(() => this.#searchQueue.settle());
         this.#searchQueue.open();
-        await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
+        if (restoring) {
+            // Normal startup opportunistically backfills 1000 rows. A restore
+            // must finish the whole index, including documents beyond that cap.
+            const total = await this.documents.getCount();
+            let indexed = 0;
+            while (indexed < total) {
+                await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
+                const next = (await this.#lanceIndex.stats()).indexedDocs || 0;
+                if (next <= indexed) { throw new Error('Restored database search rebuild stalled; retry workspace startup'); }
+                indexed = next;
+            }
+        } else {
+            await this.#lanceIndex.backfill(this.bitmapIndex, this.documents, parseInitializeDocument, 1000);
+        }
 
         await this.#vectors.initialize();
 
@@ -485,6 +524,10 @@ class SynapsD extends EventEmitter {
                 debug(`start: asserted-relations backfill patched ${healed.patched}, orphaned ${healed.orphaned}`);
             }
             await this.#internalStore.put(RELATIONS_BACKFILL_KEY, new Date().toISOString());
+        }
+        if (restoring) {
+            await this.#db.flush();
+            await fs.promises.unlink(restoreMarker);
         }
 
     }

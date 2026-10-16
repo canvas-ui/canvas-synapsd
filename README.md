@@ -23,6 +23,35 @@ A photo of a nice kitchen may belong to `ctx:/travel/barcelona` and `ctx:/work/a
 - **[Schemas that publish themselves](#schemas)** - hierarchical ids (`data/schema/message/email` *is a* `data/schema/message`), zod validation, and derived JSON Schema consumers can fetch instead of hand-copying enums.
 
 
+## Database checkpoints
+
+`src/backups/DatabaseBackups.js` provides compact, transaction-consistent LMDB
+checkpoints. It copies and traverses every named dataset in disposable child
+processes, then records per-dataset counts/hashes and the file SHA-256. Native
+faults fail the operation without killing the host. A checkpoint becomes visible
+only after verification, flushing, and an atomic directory rename.
+
+Startup and hourly checkpoints have independent retention (14 and 24).
+Manual and pre-restore checkpoints are retained. Old `YYYYMMDD.N` folders are
+untouched; incomplete `.pending-*` directories are not restore candidates.
+Scheduling belongs to the workspace runtime, not the database engine.
+
+Use `synapsd.createBackup('manual')` on a live engine: it waits for complete
+document/membership writes and pauses the search queue while copying. The lower
+level manager's `create()` guarantees an LMDB transaction snapshot only. Before
+`restore(id)`, the
+caller must stop all writers and close **every** database handle. Restore checks a
+private copy against its manifest, creates a verified pre-restore checkpoint,
+and atomically replaces `data.mdb`. If the current database cannot be backed up,
+restore refuses to replace it; damaged-database recovery remains an offline task.
+A durable marker makes SynapsD discard derived Lance/embedding state and fully
+rebuild lexical search on the next start. Contextual bitmaps and relations are
+restored as stored, rather than reconstructed from document rows.
+
+These are **LMDB-only** backups. They exclude external file/blob content,
+connector state, settings, and encryption keys. Copy completed checkpoint folders
+to another device for protection against loss of the disk itself.
+
 ## Quick start
 
 ```js

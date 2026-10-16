@@ -2,8 +2,7 @@
 
 // Utils
 import path from 'path';
-import fs from 'fs';
-import { mkdirp } from 'mkdirp';
+import DatabaseBackups from '../../backups/DatabaseBackups.js';
 
 import debugInstance from 'debug';
 const debug = debugInstance('canvas:service:synapsd:lmdb');
@@ -35,16 +34,9 @@ class Db {
                 path: options.path,
                 backupPath: options.backupPath ?? path.join(options.path, 'backup'),
 
-                // Backup options. Retention is AGE-based (days, keyed off the
-                // YYYYMMDD folder name) — the old count-based default punished
-                // restart-heavy days, since every open mints a new `.N` folder
-                // and "keep 14 folders" could mean two days of real coverage.
-                // maxBackupRetention (a folder-count cap) is still honored when
-                // set explicitly, as a belt on top of the age rule.
+                // Verified checkpoints; startup and hourly retention are independent.
                 backupOnOpen: options.backupOnOpen ?? true,
                 backupOnClose: options.backupOnClose ?? false,
-                backupRetentionDays: options.backupRetentionDays ?? 7,
-                maxBackupRetention: options.maxBackupRetention ?? null,
 
                 // Internals
                 maxDbs: options.maxDbs ?? 64,
@@ -85,11 +77,12 @@ class Db {
             this.#dataset = dataset;
         }
 
-        // This is even more so
-        if (this.backupOptions.backupOnOpen) {
-            // TODO: Check if the database changed from the last backup
-            this.#backupDatabase( /* we always compact the db */ );
-        }
+        this.ready = this.backupOptions.backupOnOpen
+            ? new DatabaseBackups(this.#path, { backupPath: this.backupPath }).create('startup')
+            : Promise.resolve();
+        // Callers can await ready; never create an unhandled rejection when a
+        // constructor is used without start(). close() still awaits the worker.
+        this.ready.catch(error => debug(`Startup backup failed: ${error.message}`));
 
     }
 
@@ -108,6 +101,7 @@ class Db {
 
     // Returns stats of the underlying database / dataset
     get stats() { return this.db.getStats(); }
+    async flush() { await this.db.flushed; }
 
     listKeys() {
         const keys = [];
@@ -402,109 +396,14 @@ class Db {
     /**
     * Close the current database.
     **/
-    close() { return this.db.close(); }
-
-
-    /**
-     * Internal methods
-     */
-
-    #backupDatabase(compact = true) {
-        const backupPath = this.#generateBackupFolderPath();
-
-        // Create the backup folder
+    async close() {
         try {
-            mkdirp.sync(backupPath);
-            debug(`Created backup folder "${backupPath}"`);
-        } catch (error) {
-            debug(`Error occurred while creating backup folder: ${error.message}`);
-            throw error;
-        }
-
-        debug(`Backing up database "${this.#path}" to "${backupPath}"`);
-
-        const backupPromise = this.db.backup(backupPath, compact);
-
-        // Clean up old backups after successful backup
-        backupPromise.then(() => {
-            this.#cleanupOldBackups();
-        }).catch(error => {
-            debug(`Backup failed: ${error.message}`);
-        });
-
-        return backupPromise;
+            await this.ready;
+            if (this.backupOptions.backupOnClose) {
+                await new DatabaseBackups(this.#path, { backupPath: this.backupPath }).create('manual');
+            }
+        } finally { await this.db.close(); }
     }
-
-    #generateBackupFolderPath() {
-        const dateString = new Date().toISOString().split('T')[0].replace(/-/g, '');
-        let backupFolderName = dateString;
-        let backupFolderPath = path.join(this.backupOptions.backupPath, backupFolderName);
-
-        let counter = 1;
-        while (fs.existsSync(backupFolderPath)) {
-            backupFolderName = `${dateString}.${counter}`;
-            backupFolderPath = path.join(this.backupOptions.backupPath, backupFolderName);
-            counter++;
-        }
-
-        return backupFolderPath;
-    }
-
-    #cleanupOldBackups() {
-        try {
-            if (!fs.existsSync(this.backupOptions.backupPath)) {
-                return; // No backup directory exists yet
-            }
-
-            const backupFolders = fs.readdirSync(this.backupOptions.backupPath)
-                .filter(folder => {
-                    const folderPath = path.join(this.backupOptions.backupPath, folder);
-                    return fs.statSync(folderPath).isDirectory() && /^\d{8}(\.\d+)?$/.test(folder);
-                })
-                .map(folder => ({
-                    name: folder,
-                    path: path.join(this.backupOptions.backupPath, folder),
-                    date: folder.split('.')[0], // Extract YYYYMMDD part
-                }))
-                .sort((a, b) => a.name.localeCompare(b.name)); // Sort chronologically
-
-            // Age rule: drop folders whose date is older than the retention
-            // window. YYYYMMDD compares correctly as a string. The NEWEST folder
-            // is always kept regardless of age — a database untouched for months
-            // must not lose its only backup to the age rule.
-            const days = this.backupOptions.backupRetentionDays;
-            const cutoff = Number.isFinite(days) && days > 0
-                ? new Date(Date.now() - days * 86400000).toISOString().split('T')[0].replace(/-/g, '')
-                : null;
-
-            const deletable = new Set();
-            for (const folder of backupFolders.slice(0, -1)) { // never the newest
-                if (cutoff && folder.date < cutoff) { deletable.add(folder.name); }
-            }
-            // Optional count cap on top of the age rule (explicit opt-in only).
-            const cap = this.backupOptions.maxBackupRetention;
-            if (Number.isFinite(cap) && cap > 0 && backupFolders.length > cap) {
-                for (const folder of backupFolders.slice(0, backupFolders.length - cap)) {
-                    deletable.add(folder.name);
-                }
-            }
-
-            const foldersToDelete = backupFolders.filter(f => deletable.has(f.name));
-
-            foldersToDelete.forEach(folder => {
-                fs.rmSync(folder.path, { recursive: true, force: true });
-                debug(`Removed old backup folder: ${folder.name}`);
-            });
-
-            if (foldersToDelete.length > 0) {
-                debug(`Cleaned up ${foldersToDelete.length} old backup folders, keeping ${backupFolders.length - foldersToDelete.length} most recent`);
-            }
-
-        } catch (error) {
-            debug(`Error during backup cleanup: ${error.message}`);
-        }
-    }
-
 }
 
 export default Db;
