@@ -69,6 +69,70 @@ describe('email/message content timeline + contact edges', () => {
         expect(message.timelines).toEqual([{ timeline: 'content', start: '2026-02-03T04:05:06.000Z' }]);
     });
 
+    test.each([
+        [{ headers: { Date: 'Sun, 10 Mar 2024 10:00:00 +0100' }, date: '2026-10-16T00:00:00Z' }, '2024-03-10T09:00:00.000Z'],
+        [{ headers: { date: 'invalid' }, date: 'invalid', receivedAt: '2023-04-01T12:00:00Z' }, '2023-04-01T12:00:00.000Z'],
+        [{ sentAt: '2022-04-01T12:00:00Z', receivedAt: '2023-04-01T12:00:00Z' }, '2022-04-01T12:00:00.000Z'],
+        [{ date: '2021-04-01T12:00:00Z' }, '2021-04-01T12:00:00.000Z'],
+    ])('content time uses source dates from legacy index objects: %j', (data, start) => {
+        const email = new Email({ data, createdAt: '2026-10-16T12:00:00Z' });
+        expect(email.timelines).toEqual([{ timeline: 'content', start }]);
+    });
+
+    test('IMAP receipt uses INTERNALDATE and never the time of import', () => {
+        const input = parsed({ date: new Date('2020-01-01T00:00:00Z') });
+        const email = Email.fromIMAP(input, { uid: 1, internalDate: new Date('2020-01-02T00:00:00Z') });
+        expect(email.data.receivedAt).toBe('2020-01-02T00:00:00.000Z');
+        expect(email.data.sentAt).toBe('2020-01-01T00:00:00.000Z');
+        expect(email.timelines[0].start).toBe(email.data.sentAt);
+
+        input.date = new Date('invalid');
+        const receiptOnly = Email.fromIMAP(input, { uid: 1, internalDate: '2020-01-02T00:00:00Z' });
+        expect(receiptOnly.timelines[0].start).toBe('2020-01-02T00:00:00.000Z');
+        expect(receiptOnly.data.date).toBe(receiptOnly.data.receivedAt);
+        const unknown = Email.fromIMAP(input, { uid: 1 });
+        expect(unknown.timelines).toEqual([]);
+        expect(unknown.data.date).toBeUndefined();
+        expect(unknown.data.receivedAt).toBeUndefined();
+        expect(Email.fromIMAP(input, { uid: 1 }).getPrimaryChecksum()).toBe(unknown.getPrimaryChecksum());
+    });
+
+    test('Graph content time is sent time, with receipt as a fallback', () => {
+        const email = Email.fromGraph({ id: 'g1', sentDateTime: '2020-01-01T00:00:00Z', receivedDateTime: '2020-01-02T00:00:00Z' });
+        expect(email.timelines[0].start).toBe('2020-01-01T00:00:00.000Z');
+        expect(email.data.receivedAt).toBe('2020-01-02T00:00:00.000Z');
+        expect(Email.fromGraph({ id: 'g2' }).timelines).toEqual([]);
+    });
+
+    test('repair replaces indexed import dates, sorts before pagination and leaves CRUD unchanged', async () => {
+        const ids = [];
+        for (const [i, data] of [
+            { headers: { date: 'Tue, 01 Jul 2025 00:00:00 +0000' } },
+            { receivedAt: '2023-01-01T00:00:00Z' },
+            { sentAt: '2024-01-01T00:00:00Z' },
+        ].entries()) {
+            const email = Email.fromIMAP(parsed({ messageId: `<repair-${i}@example.com>`, date: new Date('2026-10-16T00:00:00Z') }));
+            const id = await db.put(email);
+            const row = await db.documents.get(id);
+            // Simulate legacy rows with a wrong, already-indexed content date.
+            await db.documents.put(id, { ...row, data: { ...row.data, date: undefined, sentAt: undefined, ...data } });
+            ids.push(id);
+        }
+        const before = await db.documents.getMany(ids);
+        const result = await db.rederiveSchemaTimelines({ schemas: [EMAIL], batchSize: 2 });
+        expect(result).toMatchObject({ matched: 3, updated: 3 });
+        expect((await db.list({ features: [EMAIL], sortBy: 'content', order: 'asc', limit: 2 })).map(d => d.id)).toEqual([ids[1], ids[2]]);
+        expect((await db.list({ features: [EMAIL], sortBy: 'content', order: 'desc', limit: 2, offset: 1 })).map(d => d.id)).toEqual([ids[2], ids[1]]);
+        expect(await db.list({ features: [EMAIL], filters: ['t:content:2026-01-01..2026-12-31'], limit: 0 })).toHaveLength(0);
+        for (const row of before) {
+            const repaired = await db.documents.get(row.id);
+            expect(repaired.createdAt).toBe(row.createdAt);
+            expect(repaired.updatedAt).toBe(row.updatedAt);
+            expect(repaired.checksumArray).toEqual(row.checksumArray);
+        }
+        expect(await db.rederiveSchemaTimelines({ schemas: [EMAIL] })).toMatchObject({ updated: 0 });
+    });
+
     test('rederiveSchemaTimelines backfills rows stored before the derivation, once', async () => {
         const email = Email.fromIMAP(parsed({ messageId: '<c2@example.com>', date: new Date('2022-07-01T00:00:00Z') }), { uid: 2 });
         const [id] = await db.putMany([email]);

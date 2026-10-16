@@ -5,7 +5,7 @@ import { generateChecksum } from '../../utils/crypto.js';
 import { z } from 'zod';
 
 const DOCUMENT_SCHEMA_NAME = 'data/schema/message/email';
-const DOCUMENT_SCHEMA_VERSION = '3.1';
+const DOCUMENT_SCHEMA_VERSION = '3.2';
 // Boolean mailbox flags, NOT subtypes — under `feature/` (a derived prefix), never
 // under the schema id: since the hierarchy ticks ancestor segments (Rev B), a key
 // like `data/schema/message/email/sent` would be indistinguishable from a subtype
@@ -62,7 +62,7 @@ const documentDataSchema = z.object({
         ])).optional(),
 
         // Timestamps
-        date: z.string().datetime(),
+        date: z.string().datetime().optional(),
         receivedAt: z.string().datetime().optional(),
         sentAt: z.string().datetime().optional(),
 
@@ -137,6 +137,28 @@ const documentDataSchema = z.object({
     }).passthrough().optional(),
 });
 
+function firstDate(...values) {
+    for (const value of values) {
+        if (!(value instanceof Date) && (typeof value !== 'string' || !value.trim())) { continue; }
+        const date = new Date(value);
+        if (Number.isFinite(date.getTime())) { return date.toISOString(); }
+    }
+    return undefined;
+}
+
+function headerDate(headers) {
+    const entries = headers instanceof Map ? [...headers] : Object.entries(headers || {});
+    return firstDate(...entries.filter(([key]) => key.toLowerCase() === 'date').flatMap(([, value]) => value));
+}
+
+function contentDate(data = {}) {
+    // Prefer source evidence over the legacy importer fallback in data.date.
+    // Receipt is a fallback for mail without a usable sent date; CRUD dates
+    // describe the index row and must never become a message's content time.
+    return firstDate(data.sentAt, headerDate(data.headers), data.date,
+        data.platformMetadata?.internalDate, data.receivedAt);
+}
+
 function normalizeEmailAddress(address) {
     // Whatever the header carried, trimmed — a bare local part or a group
     // like `undisclosed-recipients:;` is kept as-is (the schema no longer
@@ -208,9 +230,7 @@ function normalizeHeaderValue(value) {
         return String(value);
     }
 
-    if (value instanceof Date) {
-        return value.toISOString();
-    }
+    if (value instanceof Date) { return firstDate(value); }
 
     if (Buffer.isBuffer(value)) {
         return value.toString('utf8');
@@ -275,9 +295,9 @@ export default class Email extends Document {
         // Set schema before calling super
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
-        // Content time = when the message was sent (data.date), on the
+        // Content time = when the message was sent (receipt as fallback), on the
         // built-in 'content' timeline — "all mail from this year" filters on it.
-        options.timelines = withDerivedContentTimeline(options.timelines, options.data?.date);
+        options.timelines = withDerivedContentTimeline(options.timelines, contentDate(options.data));
 
         super(options);
     }
@@ -295,7 +315,7 @@ export default class Email extends Document {
     /**
      * Create an Email from IMAP data
      * @param {Object} parsed - Parsed email from mailparser
-     * @param {Object} imapMetadata - IMAP-specific metadata (uid, seqno, flags).
+     * @param {Object} imapMetadata - IMAP metadata (uid, seqno, flags, internalDate).
      *   Pass `checksumArray` (e.g. ['sha1/<hash-of-raw-.eml>']) to content-address
      *   on the raw blob; omit it to fall back to the parsed-data hash.
      * @returns {Email} New Email instance
@@ -313,6 +333,8 @@ export default class Email extends Document {
             .replace(/\s+/g, ' ')
             .trim()
             .slice(0, 200);
+        const sentAt = firstDate(parsed.date, headerDate(parsed.headers));
+        const receivedAt = firstDate(imapMetadata.internalDate, imapMetadata.receivedAt);
 
         // Deterministic identity: the RFC Message-ID when present, else a stable
         // synthetic derived from the mailbox uid or content. NEVER Date.now() —
@@ -321,7 +343,7 @@ export default class Email extends Document {
         const messageId = parsed.messageId
             || (imapMetadata.uid != null
                 ? `imap-uid-${imapMetadata.uid}`
-                : `imap-synthetic-${generateChecksum(`${fromAddress}|${subject}|${parsed.date?.toISOString() || ''}`)}`);
+                : `imap-synthetic-${generateChecksum(`${fromAddress}|${subject}|${sentAt || ''}`)}`);
 
         return new Email({
             schema: DOCUMENT_SCHEMA_NAME,
@@ -339,8 +361,9 @@ export default class Email extends Document {
                 cc: normalizeEmailAddressList(parsed.cc) || undefined,
                 bcc: normalizeEmailAddressList(parsed.bcc) || undefined,
                 replyTo: normalizeEmailAddressList(parsed.replyTo) || undefined,
-                date: parsed.date?.toISOString() || new Date().toISOString(),
-                receivedAt: new Date().toISOString(),
+                date: sentAt || receivedAt,
+                sentAt,
+                receivedAt,
                 messageId,
                 inReplyTo: parsed.inReplyTo,
                 references: normalizeReferences(parsed.references),
@@ -355,6 +378,7 @@ export default class Email extends Document {
                 headers,
                 platform: 'imap',
                 platformMetadata: {
+                    internalDate: receivedAt,
                     uid: imapMetadata.uid,
                     seqno: imapMetadata.seqno,
                     flags: imapMetadata.flags,
@@ -402,9 +426,9 @@ export default class Email extends Document {
                     address: r.emailAddress.address,
                     name: r.emailAddress.name,
                 })) || undefined,
-                date: graphMessage.receivedDateTime || new Date().toISOString(),
-                receivedAt: graphMessage.receivedDateTime,
-                sentAt: graphMessage.sentDateTime,
+                date: firstDate(graphMessage.sentDateTime, graphMessage.receivedDateTime),
+                receivedAt: firstDate(graphMessage.receivedDateTime),
+                sentAt: firstDate(graphMessage.sentDateTime),
                 messageId: graphMessage.internetMessageId || graphMessage.id,
                 conversationId: graphMessage.conversationId,
                 isRead: graphMessage.isRead,

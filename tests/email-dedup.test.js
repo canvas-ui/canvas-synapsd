@@ -54,12 +54,12 @@ describe('Email ingestion dedup', () => {
     });
 
     test('same Message-ID re-ingested with different uid/flags/receivedAt dedups to one doc', async () => {
-        const e1 = Email.fromIMAP(parsed({ messageId: '<m1@example.com>' }), { uid: 1, flags: ['\\Seen'] });
-        const e2 = Email.fromIMAP(parsed({ messageId: '<m1@example.com>' }), { uid: 99, flags: [] });
+        const e1 = Email.fromIMAP(parsed({ messageId: '<m1@example.com>' }), { uid: 1, flags: ['\\Seen'], internalDate: '2024-01-01T00:01:00Z' });
+        const e2 = Email.fromIMAP(parsed({ messageId: '<m1@example.com>' }), { uid: 99, flags: [], internalDate: '2024-01-01T00:02:00Z' });
 
         expect(e1.getPrimaryChecksum()).toBe(e2.getPrimaryChecksum());
-        // receivedAt differs (volatile) but must NOT affect the checksum
-        expect(e1.data.receivedAt).not.toBe(undefined);
+        // Mailbox arrival dates can differ between copies without forking identity.
+        expect(e1.data.receivedAt).not.toBe(e2.data.receivedAt);
 
         const [id1] = await db.putMany([e1]);
         const [id2] = await db.putMany([e2]);
