@@ -14,11 +14,18 @@ import { open } from 'lmdb';
  * Canvas LMDB wrapper, originally LevelDB
  */
 
+// Writes issued once close() has begun would reach LMDB after its environment
+// is gone: they fail inside lmdb's commit timer as an uncaught exception and
+// their promise never settles. The wrapper refuses them up front instead.
+const closedError = () => Object.assign(new Error('Database is closed'), { code: 'DB_CLOSED' });
+
 class Db {
 
     #dataset = 'default';
     #path;
     #datasets = new Set();
+    // Shared by the root handle and every dataset opened from it.
+    #lifecycle = { closing: false };
 
     // TODO: Wrap versioning support
     // TODO: Extend using openAsClass()
@@ -140,6 +147,7 @@ class Db {
         const db = this.db.openDB(dataset, datasetOptions);
         if (!db) { return undefined; } // read-only/create:false: never create missing datasets
         const wrapped = new Db(db, dataset);
+        wrapped.#lifecycle = this.#lifecycle;
         this.#datasets.add(wrapped);
         return wrapped;
     }
@@ -159,9 +167,9 @@ class Db {
      * Map() like (sync) interface
      */
 
-    clear() { return this.db.clearSync(); }
+    clear() { this.#writable(); return this.db.clearSync(); }
 
-    delete(key) { return this.db.removeSync(key); }
+    delete(key) { this.#writable(); return this.db.removeSync(key); }
 
     entries() { return this.db.getRange(); }    // Iterator
 
@@ -175,7 +183,7 @@ class Db {
 
     values() { return this.listValues(); }   // TODO: Fixme
 
-    set(key, value) { return this.db.putSync(key, value); }
+    set(key, value) { this.#writable(); return this.db.putSync(key, value); }
 
 
     /**
@@ -215,13 +223,13 @@ class Db {
     * @param value The value to store
     * @param version The version number to assign to this entry
     **/
-    put(key, value, version) { return this.db.put(key, value, version); }
+    put(key, value, version) { return this.#closed() ?? this.db.put(key, value, version); }
 
     /**
     * (async) Remove the entry with the provided id/key, conditionally based on the provided existing version number
     * @param key The key for the entry to remove
     **/
-    remove(key) { return this.db.remove(key); }
+    remove(key) { return this.#closed() ?? this.db.remove(key); }
 
     /**
     * Remove the entry with the provided id/key, conditionally based on the provided existing version number
@@ -230,7 +238,7 @@ class Db {
     **/
     removeVersion(key, version) {
         if (version === undefined) {throw new Error('Version must be provided');}
-        return this.db.remove(key, version);
+        return this.#closed() ?? this.db.remove(key, version);
     }
 
     /**
@@ -239,7 +247,7 @@ class Db {
     * @param key The key for the entry to remove
     * @param value The value for the entry to remove
     **/
-    removeValue(key, value) { return this.db.remove(key, value); }
+    removeValue(key, value) { return this.#closed() ?? this.db.remove(key, value); }
 
     /**
     * Synchronously store the provided value, using the provided id/key, will return after the data has been written.
@@ -247,7 +255,7 @@ class Db {
     * @param value The value to store
     * @param version The version number to assign to this entry
     **/
-    putSync(key, value, version) { return this.db.putSync(key, value, version); }
+    putSync(key, value, version) { this.#writable(); return this.db.putSync(key, value, version); }
 
     /**
     * Synchronously store the provided value with options
@@ -255,13 +263,14 @@ class Db {
     * @param value The value to store
     * @param options The options for the put operation (including noOverwrite, version, etc.)
     **/
-    putSyncWithOptions(key, value, options = {}) { return this.db.putSync(key, value, options); }
+    putSyncWithOptions(key, value, options = {}) { this.#writable(); return this.db.putSync(key, value, options); }
 
     /**
     * Execute a transaction asynchronously
     * @param action The function to execute within the transaction
     **/
     async transaction(action) {
+        this.#writable();
         // LMDB transaction() batches callbacks but does not roll back their
         // earlier writes on a throw. An abortable child transaction does.
         try {
@@ -274,6 +283,10 @@ class Db {
         }
     }
 
+    #writable() { if (this.#lifecycle.closing) { throw closedError(); } }
+
+    #closed() { return this.#lifecycle.closing ? Promise.reject(closedError()) : null; }
+
     #invalidateCaches() {
         this.db.cache?.clear();
         for (const dataset of this.#datasets) { dataset.#invalidateCaches(); }
@@ -284,21 +297,21 @@ class Db {
     * @param action The function to execute within the transaction
     * @param flags Additional flags specifying transaction behavior
     **/
-    transactionSync(action, flags) { return this.db.transactionSync(action, flags); }
+    transactionSync(action, flags) { this.#writable(); return this.db.transactionSync(action, flags); }
 
     /**
     * Execute writes conditionally if the key doesn't exist
     * @param key Key to check for non-existence
     * @param action Function to execute if key doesn't exist
     **/
-    ifNoExists(key, action) { return this.db.ifNoExists(key, action); }
+    ifNoExists(key, action) { return this.#closed() ?? this.db.ifNoExists(key, action); }
 
     /**
     * Synchronously remove the entry with the provided id/key
     * existing version
     * @param key The key for the entry to remove
     **/
-    removeSync(key) { return this.db.removeSync(key); }
+    removeSync(key) { this.#writable(); return this.db.removeSync(key); }
 
     /**
     * Synchronously remove the entry with the provided id/key and value (mainly used for dupsort databases)
@@ -306,7 +319,7 @@ class Db {
     * @param key The key for the entry to remove
     * @param value The value for the entry to remove
     **/
-    removeValueSync(key, value) { return this.db.removeSync(key, value); }
+    removeValueSync(key, value) { this.#writable(); return this.db.removeSync(key, value); }
 
     /**
     * Get all the values for the given key (for dupsort databases)
@@ -375,12 +388,12 @@ class Db {
     /**
     * Delete this database/store (asynchronously).
     **/
-    drop() { return this.db.drop(); }
+    drop() { return this.#closed() ?? this.db.drop(); }
 
     /**
     * Synchronously delete this database/store.
     **/
-    dropSync() { return this.db.dropSync(); }
+    dropSync() { this.#writable(); return this.db.dropSync(); }
 
     /**
     * Returns statistics about the current database
@@ -390,12 +403,12 @@ class Db {
     /**
     * Asynchronously clear all the entries from this database/store.
     **/
-    clearAsync() { return this.db.clearAsync(); }
+    clearAsync() { return this.#closed() ?? this.db.clearAsync(); }
 
     /**
     * Synchronously clear all the entries from this database/store.
     **/
-    clearSync() { return this.db.clearSync(); }
+    clearSync() { this.#writable(); return this.db.clearSync(); }
 
     /**
     * Make a snapshot copy of the current database at the indicated path
@@ -408,6 +421,7 @@ class Db {
     * Close the current database.
     **/
     async close() {
+        this.#lifecycle.closing = true;
         try {
             if (this.backupOptions.backupOnOpen) { await this.ready; }
             if (this.backupOptions.backupOnClose) {
