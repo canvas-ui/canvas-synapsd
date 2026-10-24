@@ -1238,6 +1238,22 @@ class ContextTree extends EventEmitter {
         }
     }
 
+    /**
+     * Ids of the layers directly under `path`, except canvas leaves (saved
+     * queries, not places). What an `exact` selector subtracts.
+     */
+    childLayerIds(path = '/') {
+        try {
+            const nodes = this.#getNodesForPath(this.#normalizePath(path));
+            return nodes[nodes.length - 1].getSortedChildren()
+                .filter((child) => child.payload?.type !== 'canvas')
+                .map((child) => child.id);
+        } catch (error) {
+            debug(`childLayerIds failed for "${path}": ${error.message}`);
+            return [];
+        }
+    }
+
     pathExists(path) {
         const normalizedPath = this.#normalizePath(path);
         try {
