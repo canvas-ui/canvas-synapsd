@@ -77,8 +77,9 @@ function parsePaths(spec) {
 
 // Tree-qualified selector -> path entry, preserving the tree id when present.
 // `recursive` (directory trees only) widens node-exact folder scoping to the
-// whole subtree — searches want it, folder listings don't. `exact` (context
-// trees only) narrows a path, which lists its whole subtree, to the documents
+// whole subtree — searches want it, folder listings don't. `currentPathOnly`
+// (context trees only): a path also lists what is filed at its deeper paths
+// (/foo shows a document filed at /foo/bar); this keeps only the documents
 // filed at the path itself.
 function treeEntry(type, selector) {
     if (selector && typeof selector === 'object' && !Array.isArray(selector)) {
@@ -87,7 +88,7 @@ function treeEntry(type, selector) {
             path: selector.path ?? selector[type] ?? '/',
             tree: selector.tree ?? selector.treeId ?? null,
             recursive: selector.recursive === true,
-            exact: selector.exact === true,
+            currentPathOnly: selector.currentPathOnly === true,
         };
     }
     return { type, path: selector ?? '/' };

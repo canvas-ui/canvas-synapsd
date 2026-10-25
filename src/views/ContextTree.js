@@ -1239,8 +1239,8 @@ class ContextTree extends EventEmitter {
     }
 
     /**
-     * Ids of the layers directly under `path`, except canvas leaves (saved
-     * queries, not places). What an `exact` selector subtracts.
+     * Ids of the child layers of `path` (one level deeper), except canvas
+     * leaves (saved queries, not places). What `currentPathOnly` subtracts.
      */
     childLayerIds(path = '/') {
         try {

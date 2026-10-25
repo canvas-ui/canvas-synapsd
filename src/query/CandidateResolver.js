@@ -216,9 +216,9 @@ export default class CandidateResolver {
     async #buildPathsBitmap(entries = [], keys = [], collectionKeys = null) {
         if (!Array.isArray(entries) || entries.length === 0) { return null; }
         let result = null;
-        for (const { type, path, tree, recursive, exact } of entries) {
-            keys.push(`${type}:${path}${exact ? ':exact' : ''}`);
-            const selector = { path, ...(tree ? { tree } : {}), ...(recursive ? { recursive: true } : {}), ...(exact ? { exact: true } : {}) };
+        for (const { type, path, tree, recursive, currentPathOnly } of entries) {
+            keys.push(`${type}:${path}${currentPathOnly ? ':current' : ''}`);
+            const selector = { path, ...(tree ? { tree } : {}), ...(recursive ? { recursive: true } : {}), ...(currentPathOnly ? { currentPathOnly: true } : {}) };
             const bm = type === 'directory'
                 ? await this.#buildDirectorySelectorBitmap(selector, collectionKeys)
                 : await this.#buildContextSelectorBitmap(selector, collectionKeys);
@@ -365,7 +365,7 @@ export default class CandidateResolver {
                 sawExplicitPath = true;
                 if (tree.rootLayer) { recordKey(tree.rootLayer.id); }
                 let rootBitmap = await this.#getContextRootBitmap(tree, collection);
-                if (contextSpec.exact) { rootBitmap = await this.#filedAt(tree, collection, '/', rootBitmap, [], recordKey); }
+                if (contextSpec.currentPathOnly) { rootBitmap = await this.#filedAt(tree, collection, '/', rootBitmap, [], recordKey); }
                 if (rootBitmap && !rootBitmap.isEmpty) {
                     if (resultBitmap) {
                         resultBitmap.orInPlace(rootBitmap);
@@ -397,7 +397,7 @@ export default class CandidateResolver {
                 for (const id of layerIds) { recordKey(id); }
                 pathBitmap = await collection.AND(layerIds);
             }
-            if (contextSpec.exact) { pathBitmap = await this.#filedAt(tree, collection, pathString, pathBitmap, layerIds, recordKey); }
+            if (contextSpec.currentPathOnly) { pathBitmap = await this.#filedAt(tree, collection, pathString, pathBitmap, layerIds, recordKey); }
             if (!pathBitmap || pathBitmap.isEmpty) {
                 continue;
             }
@@ -416,11 +416,12 @@ export default class CandidateResolver {
         return sawExistingPath ? (resultBitmap || new RoaringBitmap32()) : new RoaringBitmap32();
     }
 
-    // A context path lists its whole subtree (AND of the layers along it). The
-    // documents filed at the path itself are those in none of its child
-    // layers: within the path, a child layer's bitmap is exactly what is filed
-    // at or below that child. A child that is also one of the path's own layers
-    // cannot separate the two levels and is left out.
+    // `currentPathOnly`: a context path lists what is filed at it and at every
+    // deeper path (AND of the layers along it). The documents filed at the
+    // path itself are those in none of its child layers: within the path, a
+    // child layer's bitmap is exactly what is filed at that child or deeper. A
+    // child that is also one of the path's own layers cannot separate the two
+    // levels and is left out.
     async #filedAt(tree, collection, path, pathBitmap, ownLayerIds, recordKey) {
         if (!pathBitmap || pathBitmap.isEmpty || typeof tree.childLayerIds !== 'function') { return pathBitmap; }
         const own = new Set(ownLayerIds);
