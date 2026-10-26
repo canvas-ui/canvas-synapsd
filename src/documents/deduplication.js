@@ -1,3 +1,4 @@
+import { isAvailableLocation } from '../utils/document-locations.js';
 'use strict';
 
 // Merge schema-declared record fields from the stored document into an incoming
@@ -46,6 +47,11 @@ export function mergeDocumentLocations(target, extraLocations) {
     if (!Array.isArray(target.locations)) { target.locations = []; }
     const seen = new Set(target.locations.map((l) => l && l.url));
     for (const loc of extraLocations) {
+        const previous = target.locations.findIndex(item => item?.url === loc?.url);
+        if (previous >= 0 && isAvailableLocation(loc)) {
+            const { status: _status, statusChangedAt: _changed, ...details } = target.locations[previous];
+            target.locations[previous] = { ...details, ...loc };
+        }
         if (loc && loc.url && !seen.has(loc.url)) {
             target.locations.push(loc);
             seen.add(loc.url);

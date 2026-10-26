@@ -47,6 +47,19 @@ describe('data/backend/* derived from locations', () => {
         if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
     });
 
+    test('historical locations retain URLs without indexing live backend or device presence', async () => {
+        const url = 'file://device-old/photos/a.jpg';
+        const id = await db.put(blob('history-status', [{ url, status: 'deleted', statusChangedAt: '2026-10-26T00:00:00.000Z' }]));
+        const doc = await db.get(id);
+        expect(doc.locations[0]).toMatchObject({ url, status: 'deleted' });
+        expect(await backendKeys(id)).toEqual([]);
+        const devices = await db.bitmapIndex.getBitmap('device/id/device-old', false);
+        expect(devices?.has(id) || false).toBe(false);
+        await db.put({ id, locations: [{ url }] });
+        expect((await db.get(id)).locations).toEqual([{ url }]);
+        expect(await backendKeys(id)).toContain('data/backend/file');
+    });
+
     test('scheme and authority are both ticked, so the scheme is a roll-up', async () => {
         const id = await db.put(blob('aaa', [{ url: 'stored://homenas/k1' }]));
 

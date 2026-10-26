@@ -1,3 +1,4 @@
+import { isAvailableLocation } from '../utils/document-locations.js';
 import { rowFeatureKeys } from './PreparedChange.js';
 import debugInstance from 'debug';
 import { parseLocationUrl } from '../utils/path-helpers.js';
@@ -84,6 +85,7 @@ export default class DerivedIndexes {
     deviceFeaturesFromLocations(locations) {
         const tags = new Set();
         for (const loc of Array.isArray(locations) ? locations : []) {
+            if (!isAvailableLocation(loc)) continue;
             const parsed = parseLocationUrl(loc?.url);
             // file://<deviceId>/<path> — the bytes live at a known path on a device.
             // device://<deviceId>      — present on the device with no portable path
@@ -236,6 +238,7 @@ export default class DerivedIndexes {
         const tags = new Set();
 
         for (const loc of Array.isArray(locations) ? locations : []) {
+            if (!isAvailableLocation(loc)) continue;
             // An explicitly declared backend REPLACES the URL's answer rather than
             // adding to it, because the case it exists for is the URL lying: a NAS
             // mounted at /mnt/nas is addressed `file://<deviceId>/mnt/nas/…` but
@@ -314,7 +317,7 @@ export default class DerivedIndexes {
     // Every feature derived from locations[], in one place — so the stale-diff
     // below can never cover one axis and silently miss another.
     locationDerivedFeatures(doc) {
-        const list = Array.isArray(doc?.locations) ? doc.locations : [];
+        const list = (Array.isArray(doc?.locations) ? doc.locations : []).filter(isAvailableLocation);
         if (list.length === 0) {
             // The empty-locations guard is what unticks on re-bind; orphanedAt alone
             // would leave the key set on a document that regained a copy.

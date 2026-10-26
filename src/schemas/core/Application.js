@@ -264,14 +264,9 @@ export default class Application extends Document {
 
         // One location entry per device where the app is ACTUALLY PRESENT.
         //
-        // A location means "it is here" — the same contract `stored` uses for
-        // bytes, where a vanished file has its location entry removed rather than
-        // flagged (WorkspaceStoredIndex#reconcileRemovedLocations). Keeping that
-        // contract truthful is what makes `device/id/<x>` answer "usable on x"
-        // without a second status axis: an app missing on a device simply has no
-        // location there, so "missing on A" is `noneOf:['device/id/A']` — plain
-        // set algebra, no compound <device>/<status> keys (which would also trip
-        // the namespace-is-also-a-key rule; see index.js listBitmaps notes).
+        // Only available locations tick device presence. Missing application
+        // installs have no location entry; historical unavailable byte locations
+        // likewise do not count as device presence.
         //
         // 'unknown' counts as present, matching stored's present-but-unverified
         // stance: it is the schema default, so a freshly-declared install must

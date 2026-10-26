@@ -144,6 +144,9 @@ const documentDataSchema = z.object({
 // metadata carries protocol-specific hints (auth refs for SMB, region for S3, status).
 const locationSchema = z.object({
     url: z.string(),
+    status: z.enum(['available', 'deleted', 'not-found']).optional(),
+    statusChangedAt: z.string().datetime().optional(),
+    nativeUrl: z.string().optional(),
     metadata: z.record(z.any()).optional(),
 });
 
