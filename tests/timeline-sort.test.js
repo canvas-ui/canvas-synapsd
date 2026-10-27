@@ -18,7 +18,7 @@ const photo = (i, capturedAt) => ({
 
 // Server-side timeline sort: list({ sortBy: 'content' }) orders by the
 // timeline's BSI values BEFORE pagination, so page 1 of a large gallery is
-// already in capture order. Docs with no value on the timeline always trail.
+// already in capture order. Missing content dates use CRUD creation time.
 describe('list() sortBy timeline', () => {
     let rootPath;
     let db;
@@ -52,14 +52,31 @@ describe('list() sortBy timeline', () => {
         if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
     });
 
-    test('asc sorts by capture date, unsortable docs trail', async () => {
+    test('asc sorts by capture date with creation time for missing content', async () => {
         const res = await db.list({ options: { sortBy: 'content', order: 'asc', limit: 0 } });
         expect(res.map((d) => d.id)).toEqual([...byCapture, noExifId]);
     });
 
-    test('desc reverses the keyed order, unsortable docs still trail', async () => {
+    test('desc includes creation-time fallbacks in the keyed order', async () => {
         const res = await db.list({ options: { sortBy: 'content', order: 'desc', limit: 0 } });
-        expect(res.map((d) => d.id)).toEqual([...[...byCapture].reverse(), noExifId]);
+        expect(res.map((d) => d.id)).toEqual([noExifId, ...[...byCapture].reverse()]);
+    });
+
+    test('creation-time fallback is sorted before pagination and does not create content events', async () => {
+        const middle = await db.put({ ...photo(100), createdAt: '2022-12-01T00:00:00.000Z' });
+        const expected = [byCapture[0], byCapture[1], middle, byCapture[2], byCapture[3], noExifId];
+        for (const order of ['asc', 'desc']) {
+            const sorted = order === 'asc' ? expected : [...expected].reverse();
+            for (let offset = 0; offset < sorted.length; offset += 2) {
+                const page = await db.list({ sortBy: 'content', order, limit: 2, offset });
+                expect(page.map(d => d.id)).toEqual(sorted.slice(offset, offset + 2));
+                expect(page.totalCount).toBe(sorted.length);
+                const idsPage = await db.list({ sortBy: 'content', order, limit: 2, offset, idsOnly: true });
+                expect([...idsPage]).toEqual(sorted.slice(offset, offset + 2));
+                const fallback = page.find(d => d.id === middle);
+                if (fallback) expect(fallback.timelines.some(t => t.timeline === 'content')).toBe(false);
+            }
+        }
     });
 
     test('pagination slices the sorted sequence and keeps totalCount', async () => {

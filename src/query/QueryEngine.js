@@ -65,6 +65,15 @@ export default class QueryEngine {
                 const base = bitmap === null ? await this.#candidates.allDocumentsBitmap() : bitmap;
                 if (base.isEmpty) { return this.#emptyResult(); }
                 const keyMap = await this.#getTimelineIndex().getSortKeys(sortTimeline, base);
+                // Content listings use creation time when no content date exists,
+                // without changing the indexed timeline or its filter semantics.
+                if (sortTimeline === 'content') {
+                    const missingContent = new RoaringBitmap32([...base].filter(id => !keyMap.has(id)));
+                    if (!missingContent.isEmpty) {
+                        const createdKeys = await this.#getTimelineIndex().getSortKeys('crud:created', missingContent);
+                        for (const [id, key] of createdKeys) { keyMap.set(id, key); }
+                    }
+                }
                 const keyed = [];
                 const missing = [];
                 for (const id of base) { (keyMap.has(id) ? keyed : missing).push(id); }
