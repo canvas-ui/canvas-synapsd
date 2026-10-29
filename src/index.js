@@ -63,6 +63,7 @@ export {
     facetBitmapKeys as facetBitmapKeysForTest,
     schemaBitmapKeys as schemaBitmapKeysForTest,
 } from './documents/derivation.js';
+export { querySpecSchema, candidateSpecSchema, queryOptionsSchema } from './query/schema.js';
 
 // Constants
 // Row-format version of the database. Bump when a change makes rows written by

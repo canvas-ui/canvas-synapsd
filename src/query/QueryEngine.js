@@ -46,6 +46,10 @@ export default class QueryEngine {
             return result;
         };
 
+        if (match == null && options.countOnly === true) {
+            return idResult([], bitmap === null ? await this.#documents.getCount() : bitmap.size);
+        }
+
         if (match == null) {
             const providedLimit = Number.isFinite(options.limit) ? Number(options.limit) : undefined;
             const providedOffset = Number.isFinite(options.offset) ? Number(options.offset) : undefined;
@@ -142,10 +146,11 @@ export default class QueryEngine {
         if (bitmap !== null && bitmap.isEmpty) { return this.#emptyResult(); }
         const scopedIds = bitmap ? bitmap.toArray() : [];
         const { pageIds, totalCount, error } = await this.#rankIds(scopedIds, desc, options);
+        if (options.countOnly === true) { return idResult([], totalCount, error); }
         if (idsOnly) { return idResult(pageIds, totalCount, error); }
 
         const docs = pageIds.length > 0 ? await this.#documents.getMany(pageIds) : [];
-        const result = safeParseDocuments(docs);
+        const result = parseDocuments ? safeParseDocuments(docs) : docs;
         result.count = result.length;
         result.totalCount = totalCount;
         result.error = error;
@@ -359,21 +364,15 @@ export default class QueryEngine {
         // Ranked lists are capped: fusion only needs the head, membership (counts,
         // set ops) uses the full bitmaps.
         const FUSE_DEPTH = 500;
+        const shared = baseSpec ? (await this.#candidates.resolveParsed(parseSpec(baseSpec))).bitmap : null;
 
         const evaluated = await Promise.all(list.map(async (line) => {
             const texts = (Array.isArray(line.queries) ? line.queries : [])
                 .filter((q) => typeof q === 'string' && q.trim().length > 0);
-            // Per-line structured pieces AND-compose over the shared base spec.
-            const spec = { ...(baseSpec || {}) };
-            for (const key of ['filters', 'features', 'context', 'directory', 'attributes']) {
-                if (line[key] !== undefined) {
-                    spec[key] = Array.isArray(spec[key]) && Array.isArray(line[key])
-                        ? [...spec[key], ...line[key]]
-                        : line[key];
-                }
-            }
-            const hasSpec = Object.keys(spec).length > 0;
-            const base = hasSpec ? (await this.#candidates.resolveParsed(parseSpec(spec))).bitmap : null;
+            // Intersect resolved operands, preserving each spec's independent
+            // OR groups, exclusions, tree scopes and empty ID constraints.
+            const local = (await this.#candidates.resolveParsed(parseSpec(line))).bitmap;
+            const base = shared === null ? local : local === null ? shared : RoaringBitmap32.and(shared, local);
 
             if (texts.length === 0) {
                 // Filters-only line: membership is the structured scope itself.
@@ -407,11 +406,25 @@ export default class QueryEngine {
                 : (op === 'and' ? RoaringBitmap32.and(members, line.bitmap) : RoaringBitmap32.or(members, line.bitmap));
         }
         const lineCounts = evaluated.map((l) => ({ count: l.bitmap.size }));
+        const errors = evaluated.filter(line => line.error).map(line => line.error);
+        if (errors.length) {
+            const empty = this.#emptyResult();
+            empty.error = errors.join('; ');
+            empty.lines = lineCounts;
+            return empty;
+        }
 
         if (!members || members.isEmpty) {
             const empty = this.#emptyResult();
             empty.lines = lineCounts;
             return empty;
+        }
+
+        // Structural queries need no ranking or document fetch for count/IDs.
+        if (options.countOnly || list.every(line => !(line.queries || []).some(q => typeof q === 'string' && q.trim()))) {
+            const result = await this.rank(members, null, options);
+            result.lines = lineCounts;
+            return result;
         }
 
         // Ranking: RRF across the per-line ranked heads (agreement floats up),
@@ -422,14 +435,14 @@ export default class QueryEngine {
         const orderedIds = fused.concat(members.toArray().filter((id) => !inFused.has(id)));
 
         const limit = Number.isFinite(options.limit) ? Math.max(0, Number(options.limit)) : 50;
-        const offset = Math.max(0, Number.isFinite(options.offset) ? Number(options.offset) : 0);
+        const offset = Math.max(0, Number.isFinite(options.offset) ? Number(options.offset) : (options.page > 0 ? (options.page - 1) * (limit || 100) : 0));
         const pageIds = limit === 0 ? orderedIds : orderedIds.slice(offset, offset + limit);
 
-        const docs = pageIds.length > 0 ? await this.#documents.getMany(pageIds) : [];
-        const result = safeParseDocuments(docs);
+        const docs = options.idsOnly ? pageIds : pageIds.length > 0 ? await this.#documents.getMany(pageIds) : [];
+        const result = options.idsOnly || options.parse === false ? docs : safeParseDocuments(docs);
         result.count = result.length;
         result.totalCount = orderedIds.length;
-        result.error = evaluated.every((l) => l.error) ? evaluated.map((l) => l.error).join('; ') : null;
+        result.error = null;
         result.lines = lineCounts;
         return result;
     }

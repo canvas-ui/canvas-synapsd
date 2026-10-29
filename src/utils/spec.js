@@ -261,6 +261,7 @@ export function parseSpec(rawSpec = {}) {
             // parse entirely. For callers that already hold the documents and
             // only need to know whether the result set moved (cache revalidation).
             idsOnly: pick('idsOnly'),
+            countOnly: pick('countOnly'),
             groupBy: pick('groupBy'),
             // Optional cosine-distance floor for the dense side of vector/hybrid
             // search: drop kNN neighbours outside [minDistance, maxDistance] before

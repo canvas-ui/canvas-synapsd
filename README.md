@@ -286,6 +286,18 @@ const drill = await db.searchRefined(
 ```
 
 Zero or one query degrades to a plain list or single search. `searchCompound(lines, options)` is the sibling that fuses per-line rankings instead of chaining them.
+Each line accepts the candidate spec (`paths`, `context`, `directory`, `features`,
+`filters`, `rel`, `ids`) plus optional `queries`. `options.baseSpec` is resolved
+once and intersected with every line's bitmap: independent OR groups and empty
+ID sets remain intact. `options.op` combines the line sets by `or` (default) or
+`and`. Structural lines use ordinary listing order, timeline sorting and paging;
+text lines use relevance fusion. `idsOnly`, `countOnly` and `parse` control
+materialization. Any line error fails the query instead of presenting a partial
+selection as a successful result.
+
+The machine-readable read contract is exported from `src/query/schema.js` as
+`querySpecSchema`, `candidateSpecSchema` and `queryOptionsSchema`. Transports reuse
+it with strict validation; the engine's `parseSpec` remains the semantic parser.
 
 ### Photos on a map
 
@@ -602,7 +614,7 @@ const page = await db.query('quarterly invoice', {
 });
 ```
 
-Any of the read options (`mode`, `limit`, `offset`, `page`, `order`, `sortBy`, `parse`, `groupBy`, `minDistance`, `maxDistance`, `debug`, and `rel`) may also be nested under an `options: { ... }` key. Top-level wins when both are present.
+Any of the read options (`mode`, `limit`, `offset`, `page`, `order`, `sortBy`, `parse`, `groupBy`, `idsOnly`, `countOnly`, `minDistance`, `maxDistance`, `debug`, and `rel`) may also be nested under an `options: { ... }` key. Top-level wins when both are present.
 
 ### Sigil algebra
 
@@ -633,6 +645,8 @@ In the object form of `features`, a `!`-prefixed entry inside `allOf`/`anyOf` is
 | `offset` / `page` | Pagination. `page` is 1-based and derived from `limit` |
 | `order` | `asc` (default) or `desc`. Without `sortBy`, orders by id (insertion order); with `sortBy`, applies to the timeline value |
 | `sortBy` | Timeline name to sort a listing by (`'content'`, `'crud:created'`; a `t:` prefix is tolerated). List only |
+| `idsOnly` | Return IDs without loading document rows; keeps pre-pagination `totalCount` |
+| `countOnly` | Return an empty page and `totalCount`; structural reads use bitmap cardinality without enumerating IDs or loading rows |
 | `parse` | Set `false` to return raw stored data instead of document instances |
 | `debug` | Attaches `result.debug.imageDistances` (unfloored image-kNN cosine distances, best-first) so you can calibrate the `imageMaxDistance` relevance floor from real numbers |
 
