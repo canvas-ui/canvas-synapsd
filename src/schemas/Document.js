@@ -757,12 +757,19 @@ class Document {
      * @param {string} path - The path to the nested value
      * @returns {any} The nested value
      */
+    // Dotted path lookup. A non-numeric segment applied to an array maps over
+    // its elements (`data.attachments.filename` → every attachment's filename),
+    // so index field lists can name a property inside an array of objects.
     getNestedValue(obj, path) {
         if (!obj || !path) {return undefined;}
 
         try {
             return path.split('.').reduce((current, key) => {
                 if (current === null || current === undefined) {return undefined;}
+                if (Array.isArray(current) && !/^\d+$/.test(key)) {
+                    const values = current.map((item) => (item === null || item === undefined) ? undefined : item[key]).filter((v) => v !== undefined);
+                    return values.length ? values : undefined;
+                }
                 return current[key];
             }, obj);
         } catch {

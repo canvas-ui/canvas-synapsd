@@ -39,6 +39,21 @@ describe('Email ingestion dedup', () => {
         if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
     });
 
+    test('attachment filenames and content types are in the FTS text', async () => {
+        const email = Email.fromIMAP({ ...parsed({ messageId: '<att@example.com>' }), attachments: [
+            { filename: 'Faktura-2026-0042.pdf', contentType: 'application/pdf', size: 10, checksum: 'deadbeef', content: Buffer.alloc(0) },
+            { filename: 'logo.png', contentType: 'image/png', size: 5, content: Buffer.alloc(0) },
+        ] });
+        const fts = email.generateFtsData().join('\n');
+        expect(fts).toContain('Faktura-2026-0042.pdf');
+        expect(fts).toContain('application/pdf');
+        expect(fts).toContain('logo.png');
+        expect(fts).not.toContain('deadbeef');
+        const id = await db.put(email);
+        expect([...await db.search({ query: 'faktura 0042', mode: 'fts', idsOnly: true })]).toEqual([id]);
+        expect([...await db.search({ query: '"Faktura-2026-0042.pdf"', idsOnly: true })]).toEqual([id]);
+    });
+
     test('blob-backed email indexes headers and preview without storing a body', async () => {
         const email = Email.fromIMAP(parsed({ messageId: '<preview@example.com>', text: 'Searchable preview' }));
         delete email.data.body;

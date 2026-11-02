@@ -286,7 +286,11 @@ export default class Email extends Document {
     // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = {
-        ftsSearchFields: ['data.subject', 'data.bodyPreview', 'data.body', 'data.from.address', 'data.from', 'data.to'],
+        // Attachment names and types are indexed so "invoice", "pdf" or an
+        // invoice number in a filename finds the mail. Not the url/checksum:
+        // hex and stored:// keys are ngram noise. Existing rows pick this up on
+        // the next search-index rebuild (Maintenance → rebuild search index).
+        ftsSearchFields: ['data.subject', 'data.bodyPreview', 'data.body', 'data.from.address', 'data.from', 'data.to', 'data.attachments.filename', 'data.attachments.contentType'],
         vectorEmbeddingFields: ['data.subject', 'data.bodyPreview', 'data.body'],
         checksumFields: ['data.messageId', 'data.from.address', 'data.subject'],
     };
