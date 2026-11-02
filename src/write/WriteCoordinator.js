@@ -243,12 +243,12 @@ export default class WriteCoordinator {
     async addDocumentMembership(docId, bitmapKeys) {
         const keys = normalizeBitmapKeys(bitmapKeys);
         if (keys.length === 0) {
-            return false;
+            return [];
         }
         // Synapse reverse index stays in-tx (durable truth); bitmap tick is deferred.
-        await this.#getSynapses().createSynapses(docId, keys, { syncBitmaps: false });
+        const added = await this.#getSynapses().createSynapses(docId, keys, { syncBitmaps: false });
         await this.applyMembership('tick', docId, keys);
-        return true;
+        return added;
     }
 
     async removeDocumentMembership(docId, bitmapKeys) {

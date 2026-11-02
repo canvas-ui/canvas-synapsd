@@ -25,12 +25,12 @@ export default class Synapses {
      * @param {number} docId - Document ID
      * @param {string|string[]} layerIds - Single layer ID or array of layer IDs
      * @param {object} options - Sync options
-     * @returns {Promise<boolean>} True on success
+     * @returns {Promise<string[]>} Membership keys added by this write.
      */
     async createSynapses(docId, layerIds, options = {}) {
         if (!docId) { throw new Error('Document ID required'); }
         const layers = Array.isArray(layerIds) ? layerIds : [layerIds];
-        if (layers.length === 0) { return false; }
+        if (layers.length === 0) { return []; }
 
         debug(`createSynapses: Linking doc ${docId} to ${layers.length} layers`);
 
@@ -41,16 +41,23 @@ export default class Synapses {
         const existingLayers = await this.listSynapses(docId);
 
         // Merge new layers with existing ones (Set Union)
-        const uniqueLayers = new Set([...existingLayers, ...layers]);
+        const uniqueLayers = new Set(existingLayers);
+        const added = [];
+        for (const layer of layers) {
+            if (!uniqueLayers.has(layer)) {
+                uniqueLayers.add(layer);
+                added.push(layer);
+            }
+        }
 
         // Only write if there's a change
-        if (uniqueLayers.size > existingLayers.length) {
+        if (added.length) {
             const newLayerList = Array.from(uniqueLayers);
             await this.dataset.put(docId, newLayerList);
             debug(`createSynapses: Updated doc ${docId} reverse index. Total layers: ${newLayerList.length}`);
         }
 
-        return true;
+        return added;
     }
 
     /**

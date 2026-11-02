@@ -89,10 +89,12 @@ export default class MembershipWriter {
         // Single transaction for all index operations
         try {
             await this.#writes.withDeferredMembership(async () => {
-                for (const { id, docFeatures } of toProcess) {
-                    await this.#derived.indexDocument(id, contextSpec, directorySpec, docFeatures);
+                const requestedKeys = new Set(await this.#derived.resolveDocumentMembershipKeys(contextSpec, directorySpec, featureBitmaps));
+                for (const entry of toProcess) {
+                    const added = await this.#derived.indexDocument(entry.id, contextSpec, directorySpec, entry.docFeatures);
+                    entry.alreadyLinked = !added.some(key => requestedKeys.has(key));
                 }
-            });
+            }, { atomicMemberships: true });
         } catch (error) {
             for (const { index, id } of toProcess) {
                 result.failed.push({ index, id, error: error.message || 'Transaction failed' });
@@ -100,8 +102,8 @@ export default class MembershipWriter {
             return result;
         }
 
-        for (const { index, id } of toProcess) {
-            result.successful.push({ index, id });
+        for (const { index, id, alreadyLinked } of toProcess) {
+            result.successful.push({ index, id, alreadyLinked });
         }
 
         // One event per op, not per document: a lone doc gets a single event,

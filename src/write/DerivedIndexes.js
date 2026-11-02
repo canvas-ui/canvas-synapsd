@@ -54,7 +54,7 @@ export default class DerivedIndexes {
         }
 
         const allSynapseKeys = await this.resolveDocumentMembershipKeys(contextSpec, directorySpec, features);
-        await this.#writes.addDocumentMembership(docId, allSynapseKeys);
+        return this.#writes.addDocumentMembership(docId, allSynapseKeys);
     }
 
     /**

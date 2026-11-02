@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -42,6 +42,41 @@ describe('shared document write pipeline', () => {
         const concurrent = (await Promise.all([1, 2].map(() => db.putMany([note('concurrent')], { returnDetails: true })))).flat();
         expect(concurrent.map(result => result.created).sort()).toEqual([false, true]);
         expect(new Set(concurrent.map(result => result.id)).size).toBe(1);
+    });
+
+    test('link outcomes use current memberships for context and directory trees, including retries', async () => {
+        const id = await db.put(note('file me'), { context: { path: '/inbox' } });
+        const before = await db.get(id);
+        const spec = { context: { path: '/music/live' } };
+        const reads = jest.spyOn(db.synapses, 'listSynapses');
+        let first;
+        try {
+            first = await db.linkMany([id, id, 999999], spec);
+            // Each valid input needs only the merge's existing reverse-index read.
+            expect(reads).toHaveBeenCalledTimes(2);
+        } finally { reads.mockRestore(); }
+        expect(first.successful).toEqual([
+            { index: 0, id, alreadyLinked: false }, { index: 1, id, alreadyLinked: true },
+        ]);
+        expect(first.failed).toHaveLength(1);
+        expect((await db.linkMany([id], { context: { path: '/music' } })).successful[0].alreadyLinked).toBe(true);
+        expect((await db.linkMany([id], spec)).successful[0].alreadyLinked).toBe(true);
+        await db.synapses.removeSynapses(id, ['data/schema/note']);
+        // Repairing a derived feature is not a new destination membership.
+        expect((await db.linkMany([id], spec)).successful[0].alreadyLinked).toBe(true);
+        expect(await db.synapses.listSynapses(id)).toContain('data/schema/note');
+        const directory = { context: null, directory: { path: '/music/live' } };
+        expect((await db.linkMany([id], directory)).successful[0].alreadyLinked).toBe(false);
+        expect((await db.linkMany([id], directory)).successful[0].alreadyLinked).toBe(true);
+        expect((await db.linkMany([id], { context: null, directory: { path: '/music' } })).successful[0].alreadyLinked).toBe(false);
+        const concurrent = await Promise.all([1, 2].map(() => db.linkMany([id], { context: { path: '/concurrent' } })));
+        expect(concurrent.map(result => result.successful[0].alreadyLinked).sort()).toEqual([false, true]);
+        await db.unlinkMany([id], spec);
+        expect((await db.linkMany([id], spec)).successful[0].alreadyLinked).toBe(false);
+        const features = { ...spec, features: ['tag/new-link-feature'] };
+        expect((await db.linkMany([id], features)).successful[0].alreadyLinked).toBe(false);
+        expect((await db.linkMany([id], features)).successful[0].alreadyLinked).toBe(true);
+        expect(await db.get(id)).toEqual(before);
     });
 
     test.each(['single', 'batch', 'directory'])('%s inserts derive the same row-owned indexes and survive rebuild', async mode => {
