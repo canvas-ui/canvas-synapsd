@@ -88,6 +88,7 @@ export default class DocumentWriter {
 
         const featureBitmaps = parseBitmapArray(normSpec.features);
         const prepared = [];
+        const inputs = [];
         // In-batch content dedup: two identical files in one batch both miss the
         // checksum lookup (nothing is written until phase 2), so without this they
         // fork into two docs and the checksum index keeps only the last id —
@@ -144,6 +145,7 @@ export default class DocumentWriter {
                         const dup = batchByChecksum.get(primaryChecksum);
                         if (dup) {
                             mergeDocumentLocations(dup.parsed, parsed.locations);
+                            inputs.push({ entry: dup, reused: true });
                             continue;
                         }
                     }
@@ -158,6 +160,7 @@ export default class DocumentWriter {
 
                 const entry = { parsed, existing: !!existing, isUpdate, previous, docFeatures };
                 prepared.push(entry);
+                inputs.push({ entry, reused: false });
                 if (!isUpdate) {
                     const primaryChecksum = parsed.getPrimaryChecksum();
                     if (primaryChecksum) { batchByChecksum.set(primaryChecksum, entry); }
@@ -289,6 +292,12 @@ export default class DocumentWriter {
             }));
         }
 
+        if (spec.returnDetails === true) {
+            return inputs.map(({ entry, reused }) => {
+                const created = !entry.existing && !reused;
+                return { id: entry.parsed.id, created, status: created ? 'created' : entry.isUpdate ? 'updated' : 'existing' };
+            });
+        }
         return storedIds;
     }
 

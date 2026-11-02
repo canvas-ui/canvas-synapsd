@@ -717,6 +717,14 @@ const ids = await db.putMany(
 );
 ```
 
+`putMany(documents, { ...spec, returnDetails: true })` returns one
+`{ id, created, status }` result per input in input order instead of unique IDs.
+`status` is `created` for a new document, `existing` for a checksum match, and
+`updated` for an explicit ID update. Repeated content in one batch shares an ID;
+only the first creation has `created: true`. These outcomes are computed inside
+the serialized write, so concurrent identical inserts report one creation.
+Use `linkMany(ids, spec)` to change membership without rewriting document content.
+
 A schema may declare `static mergeOnDedupe = ['data.links']` for record fields that must merge rather than be replaced when a write resolves to an existing document by checksum.
 
 ### Read

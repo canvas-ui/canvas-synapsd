@@ -28,6 +28,22 @@ describe('shared document write pipeline', () => {
         ], tree.id, [], { skipLance: true }))[0];
     }
 
+    test('detailed batch results identify creations, checksum matches, updates and concurrent retries', async () => {
+        const document = note('outcome');
+        const [first, duplicate] = await db.putMany([document, structuredClone(document)], { returnDetails: true });
+        expect(first).toEqual({ id: expect.any(Number), created: true, status: 'created' });
+        expect(duplicate).toEqual({ id: first.id, created: false, status: 'existing' });
+        expect(await db.putMany([document], { returnDetails: true })).toEqual([duplicate]);
+        const [changed] = await db.putMany([note('changed content')], { returnDetails: true });
+        expect(changed.created).toBe(true);
+        expect(changed.id).not.toBe(first.id);
+        expect(await db.putMany([{ ...note('explicit update'), id: first.id }], { returnDetails: true }))
+            .toEqual([{ id: first.id, created: false, status: 'updated' }]);
+        const concurrent = (await Promise.all([1, 2].map(() => db.putMany([note('concurrent')], { returnDetails: true })))).flat();
+        expect(concurrent.map(result => result.created).sort()).toEqual([false, true]);
+        expect(new Set(concurrent.map(result => result.id)).size).toBe(1);
+    });
+
     test.each(['single', 'batch', 'directory'])('%s inserts derive the same row-owned indexes and survive rebuild', async mode => {
         const target = await db.put(note('target'));
         const document = {

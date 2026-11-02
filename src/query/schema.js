@@ -9,7 +9,7 @@ const selector = {
         tree: { type: 'string', description: 'Tree name or ID; omitted selects the default tree.' },
         path,
         recursive: { type: 'boolean', description: 'Directory subtree membership. Default false (exact folder).' },
-        currentPathOnly: { type: 'boolean', description: 'Context membership at this path only, excluding descendants.' },
+        currentPathOnly: { type: 'boolean', description: 'Subtract descendant matches from context membership. Does not identify explicit filing locations or preserve parent-link history.' },
     },
 };
 const pathEntry = { anyOf: [{ type: 'string' }, { ...selector, properties: { ...selector.properties, type: { enum: ['context', 'directory'] } } }] };
@@ -35,8 +35,8 @@ export const candidateSpecSchema = {
                 { type: 'object', additionalProperties: false, properties: { in: { type: 'array', items: pathEntry }, not: { type: 'array', items: pathEntry } } },
             ],
         },
-        context: { anyOf: [{ type: 'null' }, { type: 'string' }, strings, selector], description: 'Context selector, ORed with other positive paths.' },
-        directory: { anyOf: [{ type: 'null' }, { type: 'string' }, strings, selector], description: 'Directory selector, ORed with other positive paths.' },
+        context: { anyOf: [{ type: 'null' }, { type: 'string' }, strings, selector], description: 'Bitmap context selector: /foo/bar/baz means foo AND bar AND baz. Linking ticks each node; shorter paths widen membership. No explicit filing location is stored. ORed with other positive paths.' },
+        directory: { anyOf: [{ type: 'null' }, { type: 'string' }, strings, selector], description: 'Filesystem-like directory selector: exact folder membership by default; recursive: true ORs this folder and its descendants. ORed with other positive paths.' },
         features: {
             description: 'Bitmap keys: bare = anyOf/OR, + = allOf/required, ! = noneOf/excluded. Examples: feature/email/attachment, data/schema/message/email, data/mime/application/pdf, tag/finance. MIME describes this document, not its relation targets.',
             anyOf: [strings, { type: 'object', additionalProperties: false, properties: { allOf: strings, anyOf: strings, noneOf: strings } }],
