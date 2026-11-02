@@ -8,11 +8,13 @@ import debugInstance from 'debug';
 import { ArgumentError } from '../utils/errors.js';
 import { parseSpec } from '../utils/spec.js';
 import { safeParseDocuments } from '../utils/document.js';
-import { isExactQuery } from '../indexes/lance/index.js';
+import { isExactQuery, isIdentifierQuery } from '../indexes/lance/index.js';
 
 const debug = debugInstance('canvas:synapsd');
 // Unbounded materialization remains an explicit limit:0 opt-in.
 const DEFAULT_LIST_LIMIT = 100;
+// How deep the dense legs rank when a search asks for every match (limit 0).
+const UNBOUNDED_DEPTH = 100_000;
 
 // Ranks resolved candidates and materializes pages; does not initialize storage.
 export default class QueryEngine {
@@ -502,9 +504,10 @@ export default class QueryEngine {
         // fts (BM25) | vector (kNN) | hybrid (RRF); vector/hybrid degrade to fts
         // when the dense stack is unavailable.
         let mode = (options.mode || 'hybrid').toLowerCase();
-        // Verbatim text (quoted phrase or match: 'exact') is a lexical question;
-        // dense neighbours would only dilute it, so it ranks on FTS alone.
-        if (queryString && isExactQuery(queryString, { match: options.match })) { mode = 'fts'; }
+        // Verbatim text (quoted phrase or match: 'exact') and identifier-like
+        // text (an address, a domain, an invoice number) are lexical questions;
+        // dense neighbours would only add unrelated hits, so they rank on FTS alone.
+        if (queryString && (isExactQuery(queryString, { match: options.match }) || isIdentifierQuery(queryString))) { mode = 'fts'; }
         if ((mode === 'vector' || mode === 'hybrid') && (!this.#vectors.primary || !this.#vectors.primary.isReady)) {
             debug(`rank: mode '${mode}' requested but vector index not ready; falling back to fts`);
             mode = 'fts';
@@ -513,9 +516,12 @@ export default class QueryEngine {
             return { pageIds: [], totalCount: 0, error: 'FTS not initialized' };
         }
 
+        // limit 0 = every match: no page end, and the dense legs rank as deep
+        // as UNBOUNDED_DEPTH allows.
         const limit = Number.isFinite(options.limit) ? Math.max(0, Number(options.limit)) : 50;
         const offset = Math.max(0, Number.isFinite(options.offset) ? Number(options.offset) : 0);
-        const depth = Math.max((limit + offset) * 5, 100);
+        const pageEnd = limit > 0 ? offset + limit : undefined;
+        const depth = limit > 0 ? Math.max((limit + offset) * 5, 100) : UNBOUNDED_DEPTH;
 
         // Caller-supplied vector legs rank in their own spaces and fuse into
         // whatever the text side produces. A leg whose space is offline degrades
@@ -537,7 +543,7 @@ export default class QueryEngine {
             }
             const allFailed = legErrors.length === legOperands.length && legErrors.length > 0;
             return {
-                pageIds: ids.slice(offset, offset + limit),
+                pageIds: ids.slice(offset, pageEnd),
                 totalCount: ids.length,
                 error: allFailed ? legErrors.join('; ') : null,
             };
@@ -588,7 +594,7 @@ export default class QueryEngine {
                 for (const o of legOperands) { operands.push({ ids: o.ids, weight: o.weight }); }
                 const fused = this.#rrfMerge(operands);
                 totalCount = fused.length;
-                pageIds = fused.slice(offset, offset + limit);
+                pageIds = fused.slice(offset, pageEnd);
                 // Hybrid degrades, it doesn't fail: a transient dense-side error
                 // (e.g. Lance mid-compaction during ingest) must not blank a
                 // search the lexical side answered. Only surface an error when
@@ -609,11 +615,11 @@ export default class QueryEngine {
                     for (const o of legOperands) { operands.push({ ids: o.ids, weight: o.weight }); }
                     const fused = this.#rrfMerge(operands);
                     totalCount = fused.length;
-                    pageIds = fused.slice(offset, offset + limit);
+                    pageIds = fused.slice(offset, pageEnd);
                     error = vec.error || null;
                 } else {
                     totalCount = (vec.pageIds || []).length;
-                    pageIds = (vec.pageIds || []).slice(offset, offset + limit);
+                    pageIds = (vec.pageIds || []).slice(offset, pageEnd);
                     error = vec.error || null;
                 }
             }
@@ -628,7 +634,7 @@ export default class QueryEngine {
             for (const o of legOperands) { operands.push({ ids: o.ids, weight: o.weight }); }
             const fused = this.#rrfMerge(operands);
             totalCount = fused.length;
-            pageIds = fused.slice(offset, offset + limit);
+            pageIds = fused.slice(offset, pageEnd);
             error = null;
         } else {
             ({ pageIds, totalCount, error } = await this.#getLanceIndex().ftsQuery(queryString, scopedIds, { limit, offset, match: options.match }));

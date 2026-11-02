@@ -882,6 +882,8 @@ A closed, append-only registry (`src/indexes/edges/predicates.js`). Ids are pers
 | `depicts` | 6 | media subject: image → identity (face tags) |
 | `authored-by` | 7 | authorship: message/document → identity |
 | `member-of` | 8 | affiliation: identity → identity (person → organization) |
+| `addressed-to` | 9 | recipient: message → identity (email To/Cc) |
+| `reply-to` | 10 | reply target: message → identity (email Reply-To) |
 
 Every predicate takes the **document** as subject, never the entity it points at ("message authored-by identity", not "identity authors message").
 

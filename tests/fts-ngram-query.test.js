@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import Db from '../src/index.js';
-import LanceIndex from '../src/indexes/lance/index.js';
+import LanceIndex, { isIdentifierQuery } from '../src/indexes/lance/index.js';
 
 // Two Lance behaviours this pins (both bit users as "my note isn't found"):
 // - 0.22: rows not yet folded into the FTS index were MISSED when the term
@@ -93,6 +93,17 @@ describe('FTS ngram queries', () => {
     });
 });
 
+// Identifier-like text ranks on the lexical index alone (QueryEngine forces
+// mode 'fts'): a dense neighbour of "kontakt@vub.sk" is never a real match.
+test('identifier-like queries are told apart from words', () => {
+    for (const q of ['vub.sk', 'kontakt@vub.sk', 'INV-2026-0042', 'Faktura-2026-0042.pdf', '#105862', 'deadbeefdeadbeef01', 'https://vub.sk/x', 'VS 1234567890', 'faktura 0042']) {
+        expect([q, isIdentifierQuery(q)]).toEqual([q, true]);
+    }
+    for (const q of ['invoice from vub.sk', 'summer window', 'pelican migration routes', 'Augmentd s.r.o.', 'meeting notes q3', '']) {
+        expect([q, isIdentifierQuery(q)]).toEqual([q, false]);
+    }
+});
+
 describe('a freshly saved note is findable', () => {
     let rootPath;
     let db;
@@ -110,5 +121,11 @@ describe('a freshly saved note is findable', () => {
         expect([...await db.search({ query: '"pelican migration routes"', idsOnly: true })]).toEqual([id]);
         expect([...await db.search({ query: '"migration pelican"', idsOnly: true })]).toEqual([]);
         expect([...await db.search({ query: 'pelican migration routes', match: 'exact', idsOnly: true })]).toEqual([id]);
+        // limit 0 asks for every match, not for an empty page.
+        const more = await Promise.all([1, 2, 3].map((n) => db.put({ schema: 'data/schema/note', data: { title: `pelican ${n}`, content: 'pelican' } })));
+        const all = await db.search({ query: 'pelican', idsOnly: true, limit: 0 });
+        expect([...all].sort()).toEqual([id, ...more].sort());
+        expect(all.totalCount).toBe(4);
+        expect([...await db.search({ query: '"pelican"', idsOnly: true, limit: 0 })]).toHaveLength(4);
     });
 });

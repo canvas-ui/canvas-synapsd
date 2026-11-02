@@ -89,6 +89,23 @@ export function isExactQuery(queryString, options = {}) {
     return parseSearchText(queryString, options).phrases.length > 0;
 }
 
+// An e-mail address, domain or URL, a file name, a long number, a hex digest,
+// or a code such as INV-2026-0042.
+const IDENTIFIER_TOKEN = /^(?:[^\s@]+@[^\s@]+\.[^\s@]+|(?:https?:\/\/|www\.)\S+|[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)+|#?\d{3,}|[0-9a-f]{16,}|[\p{L}]{1,6}[-_/]?\d{2,}[\p{L}\p{N}-]*)$/iu;
+
+/**
+ * True when the text is made of identifiers rather than words: at least half
+ * of its tokens are addresses, domains, URLs, file names, numbers, digests or
+ * codes. Such a query has no meaning for a dense embedding to approximate and
+ * ranks on the lexical index alone.
+ */
+export function isIdentifierQuery(queryString) {
+    const tokens = String(queryString || '').trim().split(/\s+/).filter(Boolean);
+    if (!tokens.length) { return false; }
+    const identifiers = tokens.filter((token) => IDENTIFIER_TOKEN.test(token.replace(/^["']|["',;:]+$/g, ''))).length;
+    return identifiers * 2 >= tokens.length;
+}
+
 // Case + accent folding for the phrase verification, mirroring the index's
 // lowercase + asciiFolding so "café" and "cafe" meet on both sides.
 function foldText(text) {
@@ -96,6 +113,8 @@ function foldText(text) {
 }
 // Ranked hits are verified in id-batches of this size until the page is full.
 const PHRASE_VERIFY_CHUNK = 200;
+// Row budget for an unpaged (limit 0) FTS query.
+const UNBOUNDED_FETCH = 10_000_000;
 
 /**
  * LanceIndex - FTS and vector search via LanceDB
@@ -328,7 +347,8 @@ class LanceIndex {
             return { pageIds: [], totalCount: 0, error: 'LanceDB not ready' };
         }
 
-        const limit = Math.max(1, Number(opts.limit ?? 50));
+        // limit 0 = every match (the spec's explicit opt-in), paged by nothing.
+        const limit = Math.max(0, Number(opts.limit ?? 50));
         const offset = Math.max(0, Number(opts.offset ?? 0));
         const candidateSet = candidateIds.length > 0 ? new Set(candidateIds) : null;
 
@@ -350,7 +370,7 @@ class LanceIndex {
         // (`?ids=…`, one tree path, a camera frame's kNN survivors) the answer was
         // usually EMPTY, and the tighter you scoped the more likely it vanished.
         // Exactly backwards: narrowing must sharpen a search, not silence it.
-        const fetchLimit = (limit + offset) * 10 + 1000;
+        const fetchLimit = limit > 0 ? (limit + offset) * 10 + 1000 : UNBOUNDED_FETCH;
 
         const run = async (requireAllWords) => {
             const ftsQueryObj = await this.#buildFtsQuery(parsed, { requireAllWords });
@@ -379,7 +399,7 @@ class LanceIndex {
             return { pageIds: [], totalCount: 0, error: e.message };
         }
         if (parsed.phrases.length && rankedIds.length) {
-            rankedIds = await this.#verifyPhrases(rankedIds, parsed.phrases, offset + limit);
+            rankedIds = await this.#verifyPhrases(rankedIds, parsed.phrases, limit > 0 ? offset + limit : Infinity);
         }
 
         const totalCount = rankedIds.length;

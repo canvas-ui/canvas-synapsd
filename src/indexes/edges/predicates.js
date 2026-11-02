@@ -49,6 +49,11 @@
  * the reason given above: role in meta would collide with the asserted-edge
  * convention (no meta row). To vs Cc is NOT split: both answer "was Alice on
  * this", and the message itself still says which header she was in.
+ *
+ * `reply-to` (added 2026-11-02) is the Reply-To header -> identity. It is not
+ * `authored-by`: a newsletter sent from a bulk domain with Reply-To at the
+ * organisation's own domain would otherwise make "mail from vub.sk" return the
+ * bulk sender too. The author stays the From address alone.
  */
 
 export const PREDICATES = {
@@ -61,6 +66,7 @@ export const PREDICATES = {
     'authored-by': { id: 7 },   // authorship: message/document -> identity (sender, author)
     'member-of': { id: 8 },     // affiliation: identity -> identity (person -> organization)
     'addressed-to': { id: 9 },  // recipient: message -> identity (email To/Cc)
+    'reply-to': { id: 10 },     // reply target: message -> identity (email Reply-To)
 };
 
 // id -> name, built once. Used to decode ids read back out of keys.
