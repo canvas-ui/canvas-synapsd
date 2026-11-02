@@ -3,6 +3,7 @@
 import fs from 'fs';
 import path from 'path';
 import debugInstance from 'debug';
+import { ArgumentError } from '../../utils/errors.js';
 const debug = debugInstance('canvas:synapsd:lance-index');
 import * as lancedb from '@lancedb/lancedb';
 const { MatchQuery, BooleanQuery, Operator, Occur } = lancedb;
@@ -65,23 +66,50 @@ function tokenizeWords(text) {
  * The search-text grammar every caller shares (UI, REST, MCP, CLI): a
  * double-quoted segment is a phrase that must occur verbatim (a case- and
  * accent-insensitive substring; an unclosed quote runs to the end), everything
- * else is a bare word. `match: 'exact'` makes the whole string one phrase.
- * @returns {{ phrases: string[], words: string[] }}
+ * else is a bare word. A `-` or `!` in front of a word or phrase excludes
+ * documents containing it. `match: 'exact'` makes the whole string one phrase.
+ * @returns {{ phrases: string[], words: string[], excludedPhrases: string[], excludedWords: string[] }}
  */
 export function parseSearchText(queryString, { match } = {}) {
+    const parsed = { phrases: [], words: [], excludedPhrases: [], excludedWords: [] };
     const text = typeof queryString === 'string' ? queryString.trim() : '';
-    if (!text) { return { phrases: [], words: [] }; }
+    if (!text) { return parsed; }
     if (match === 'exact') {
         const phrase = text.replace(/^"+|"+$/g, '').trim();
-        return { phrases: phrase ? [phrase] : [], words: [] };
+        if (phrase) { parsed.phrases.push(phrase); }
+        return parsed;
     }
-    const phrases = [];
-    const rest = text.replace(/"([^"]*)(?:"|$)/g, (_, inner) => {
-        const phrase = inner.trim();
-        if (phrase) { phrases.push(phrase); }
-        return ' ';
-    });
-    return { phrases, words: tokenizeWords(rest) };
+    const rest = text
+        .replace(/(^|\s)[!-]"([^"]*)(?:"|$)/g, (_, lead, inner) => {
+            const phrase = inner.trim();
+            if (phrase) { parsed.excludedPhrases.push(phrase); }
+            return lead;
+        })
+        .replace(/"([^"]*)(?:"|$)/g, (_, inner) => {
+            const phrase = inner.trim();
+            if (phrase) { parsed.phrases.push(phrase); }
+            return ' ';
+        });
+    for (const token of rest.split(/\s+/)) {
+        if (!token) { continue; }
+        const excluded = /^[!-]/.test(token);
+        const words = tokenizeWords(excluded ? token.slice(1) : token);
+        (excluded ? parsed.excludedWords : parsed.words).push(...words);
+    }
+    return parsed;
+}
+
+/**
+ * A query made of exclusions alone has nothing to rank; it is a caller
+ * mistake, not an empty result.
+ * @throws {ArgumentError}
+ */
+export function assertSearchable(queryString, options = {}) {
+    const parsed = parseSearchText(queryString, options);
+    if (parsed.phrases.length || parsed.words.length) { return; }
+    if (parsed.excludedPhrases.length || parsed.excludedWords.length) {
+        throw new ArgumentError(`Exclusions need at least one search term: "${String(queryString).trim()}"`, 'query');
+    }
 }
 
 /** True when the query asks for verbatim matching (quoted text or match: 'exact'). */
@@ -354,6 +382,7 @@ class LanceIndex {
 
         const parsed = parseSearchText(queryString, { match: opts.match });
         if (parsed.phrases.length === 0 && parsed.words.length === 0) {
+            assertSearchable(queryString, { match: opts.match });
             // Nothing searchable (e.g. all punctuation) — empty, not error.
             return { pageIds: [], totalCount: 0, error: null };
         }
@@ -398,8 +427,8 @@ class LanceIndex {
             debug(`ftsQuery: BM25 search failed: ${e.message}`);
             return { pageIds: [], totalCount: 0, error: e.message };
         }
-        if (parsed.phrases.length && rankedIds.length) {
-            rankedIds = await this.#verifyPhrases(rankedIds, parsed.phrases, limit > 0 ? offset + limit : Infinity);
+        if ((parsed.phrases.length || parsed.excludedPhrases.length || parsed.excludedWords.length) && rankedIds.length) {
+            rankedIds = await this.#verifyText(rankedIds, parsed, limit > 0 ? offset + limit : Infinity);
         }
 
         const totalCount = rankedIds.length;
@@ -556,14 +585,16 @@ class LanceIndex {
     }
 
     /**
-     * Drop gram-level phrase hits whose text does not actually contain every
-     * phrase. Hits are checked best-first in batches until `need` survivors are
-     * found; hits past that window keep the gram verdict (a full-gram match is
-     * already a near-certain substring match), so a page costs a bounded
-     * number of row reads however many hits there are. Order is preserved.
+     * Drop gram-level hits whose text does not actually contain every phrase,
+     * or does contain an excluded word or phrase. Hits are checked best-first
+     * in batches until `need` survivors are found; hits past that window keep
+     * the gram verdict (a full-gram match is already a near-certain substring
+     * match), so a page costs a bounded number of row reads however many hits
+     * there are. Order is preserved.
      */
-    async #verifyPhrases(rankedIds, phrases, need) {
+    async #verifyText(rankedIds, { phrases, excludedPhrases, excludedWords }, need) {
         const needles = phrases.map(foldText);
+        const forbidden = [...excludedPhrases, ...excludedWords].map(foldText);
         const survivors = [];
         let i = 0;
         while (i < rankedIds.length && survivors.length < need) {
@@ -573,13 +604,13 @@ class LanceIndex {
             try {
                 rows = await this.#table.query().where(`id IN (${chunk.join(',')})`).select(['id', this.#ftsColumn]).toArray();
             } catch (e) {
-                debug(`verifyPhrases: row read failed, keeping gram verdict: ${e.message}`);
+                debug(`verifyText: row read failed, keeping gram verdict: ${e.message}`);
                 return survivors.concat(rankedIds.slice(i - chunk.length));
             }
             const texts = new Map(rows.map((r) => [Number(r.id), foldText(r[this.#ftsColumn] || '')]));
             for (const id of chunk) {
                 const text = texts.get(id);
-                if (text !== undefined && needles.every((n) => text.includes(n))) { survivors.push(id); }
+                if (text !== undefined && needles.every((n) => text.includes(n)) && !forbidden.some((n) => text.includes(n))) { survivors.push(id); }
             }
         }
         return survivors.concat(rankedIds.slice(i));

@@ -8,7 +8,7 @@ import debugInstance from 'debug';
 import { ArgumentError } from '../utils/errors.js';
 import { parseSpec } from '../utils/spec.js';
 import { safeParseDocuments } from '../utils/document.js';
-import { isExactQuery, isIdentifierQuery } from '../indexes/lance/index.js';
+import { assertSearchable, isExactQuery, isIdentifierQuery } from '../indexes/lance/index.js';
 
 const debug = debugInstance('canvas:synapsd');
 // Unbounded materialization remains an explicit limit:0 opt-in.
@@ -507,6 +507,7 @@ export default class QueryEngine {
         // Verbatim text (quoted phrase or match: 'exact') and identifier-like
         // text (an address, a domain, an invoice number) are lexical questions;
         // dense neighbours would only add unrelated hits, so they rank on FTS alone.
+        if (queryString) { assertSearchable(queryString, { match: options.match }); }
         if (queryString && (isExactQuery(queryString, { match: options.match }) || isIdentifierQuery(queryString))) { mode = 'fts'; }
         if ((mode === 'vector' || mode === 'hybrid') && (!this.#vectors.primary || !this.#vectors.primary.isReady)) {
             debug(`rank: mode '${mode}' requested but vector index not ready; falling back to fts`);

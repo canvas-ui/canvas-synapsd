@@ -10,17 +10,17 @@ import { parseFilters as categorizeFilterTokens } from './filters.js';
 // Sigil algebra (uniform across buckets):
 //   default -> anyOf (OR)
 //   '+'     -> allOf (required gate)
-//   '!'     -> noneOf (exclude)
+//   '!'/'-' -> noneOf (exclude)
 //
 // Path grammar: 'ctx:/a/b' (context tree) and 'dir:/a/b' (directory tree).
 // Bare paths default to context.
 
-const SIGIL = { PLUS: '+', BANG: '!' };
+const SIGIL = { PLUS: '+', BANG: '!', MINUS: '-' };
 
 function splitSigil(token) {
     const t = String(token).trim();
     if (t.startsWith(SIGIL.PLUS)) { return { sigil: 'allOf', body: t.slice(1).trim() }; }
-    if (t.startsWith(SIGIL.BANG)) { return { sigil: 'noneOf', body: t.slice(1).trim() }; }
+    if (t.startsWith(SIGIL.BANG) || t.startsWith(SIGIL.MINUS)) { return { sigil: 'noneOf', body: t.slice(1).trim() }; }
     return { sigil: 'anyOf', body: t };
 }
 
@@ -118,10 +118,10 @@ function parseFeatures(spec) {
     out.allOf = [...(source.allOf ?? [])];
     out.anyOf = [...(source.anyOf ?? [])];
     out.noneOf = [...(source.noneOf ?? [])];
-    // '!'-prefixed entries inside allOf/anyOf are sugar for noneOf.
+    // '!'/'-'-prefixed entries inside allOf/anyOf are sugar for noneOf.
     for (const bucket of ['allOf', 'anyOf']) {
         out[bucket] = out[bucket].filter((k) => {
-            if (typeof k === 'string' && k.startsWith('!')) { out.noneOf.push(k.slice(1)); return false; }
+            if (typeof k === 'string' && /^[!-]/.test(k)) { out.noneOf.push(k.slice(1)); return false; }
             return true;
         });
     }
@@ -134,7 +134,7 @@ function parseFilters(spec) {
     if (Array.isArray(spec.filters)) {
         for (const token of spec.filters.filter(Boolean)) {
             // g:/re: are recognised but not yet implemented; reject at parse time.
-            const body = typeof token === 'string' ? token.replace(/^[+!]/, '').trim() : '';
+            const body = typeof token === 'string' ? token.replace(/^[+!-]/, '').trim() : '';
             if (body.startsWith('g:')) { throw new Error('list(): unsupported filter "glob" (not yet implemented)'); }
             if (body.startsWith('re:')) { throw new Error('list(): unsupported filter "regexp" (not yet implemented)'); }
             tokens.push(token);

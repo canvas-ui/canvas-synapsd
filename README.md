@@ -632,13 +632,13 @@ Any of the read options (`mode`, `match`, `limit`, `offset`, `page`, `order`, `s
 |-------|--------|---------|
 | *(none)* | `anyOf` | OR within the bucket (default) |
 | `+` | `allOf` | Required gate |
-| `!` | `noneOf` | Exclude |
+| `!` or `-` | `noneOf` | Exclude |
 
 The buckets intersect with each other, and within `features`, `filters` and `rel` the algebra above applies in full. (`rel` spells its sigil as an `op` field rather than a prefix, since its entries are objects.)
 
 **`paths` is the exception**: its positive entries always OR together, and `+` is accepted but has no effect. Only `!` is meaningful there. Intersection is what a *path* already expresses (a context path ANDs the layers along it), so ANDing two separate paths is not a thing you ask for. To require membership in two independent places, use a feature gate or nest the path.
 
-In the object form of `features`, a `!`-prefixed entry inside `allOf`/`anyOf` is sugar for `noneOf`.
+In the object form of `features`, a `!`- or `-`-prefixed entry inside `allOf`/`anyOf` is sugar for `noneOf`.
 
 ### Field reference
 
@@ -667,6 +667,7 @@ The query text is parsed the same way for every caller:
 
 - Bare words match in any order, as substrings (ngram index): `augmentd invoice`. All words are required; when nothing matches every word, the search widens to any word so a typo in one word never blanks it. Words shorter than a gram (3 chars) are ignored.
 - A double-quoted segment is a **phrase**: a verbatim, case- and accent-insensitive substring of the indexed text. `"Augmentd s.r.o." invoice` requires the phrase and the word. An unclosed quote runs to the end of the text.
+- A leading `-` or `!` **excludes**: `invoice -draft` drops documents containing `draft`, `augmentd -"s.r.o."` drops those containing the phrase. Exclusions are verified against the row text like phrases. A query made only of exclusions throws (`ArgumentError`): there is nothing to rank.
 - `match: 'exact'` treats the whole text as one phrase, quotes or not.
 
 A query with a phrase ranks on FTS alone (`mode` is ignored): verbatim text is a lexical question, and dense or image neighbours would only dilute it. Phrases need no positional index — ngrams span spaces and punctuation, so requiring every gram of the phrase is already a substring match; hits are then verified against the row text in ranked order. The indexed text of a document is its FTS fields joined by newlines, with object fields JSON-serialized, so a phrase cannot cross a field boundary.

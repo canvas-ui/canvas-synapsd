@@ -7,6 +7,7 @@ import path from 'node:path';
 
 import Db from '../src/index.js';
 import LanceIndex, { isIdentifierQuery } from '../src/indexes/lance/index.js';
+import { parseSpec } from '../src/utils/spec.js';
 
 // Two Lance behaviours this pins (both bit users as "my note isn't found"):
 // - 0.22: rows not yet folded into the FTS index were MISSED when the term
@@ -46,7 +47,13 @@ const CASES = [
     ['"cafe augmentd"', [9]],   // folded on both sides
     ['"augmentd" window', [9]], // phrase + word
     ['"summer window" pelican', [3]], // phrase stays required when the words widen
+    ['window -winter', [3, 9]],       // -word excludes
+    ['window !summer', [1, 9]],       // !word is the same
+    ['augmentd -"s.r.o."', [9]],      // -"phrase" excludes the phrase
+    ['augmentd !"Labs s.r.o." -cafe', [7]],
+    ['well-known window', [1, 3, 9]], // a hyphen inside a word is not a sigil
 ];
+const EXCLUSION_ONLY = ['-window', '!"summer window"', '-window -"summer"'];
 // match: 'exact' = the whole string is one phrase, quotes or not.
 const EXACT_CASES = [
     ['Augmentd s.r.o.', [7]],
@@ -71,6 +78,9 @@ describe('FTS ngram queries', () => {
             }
             for (const [query, expected] of EXACT_CASES) {
                 expect([query, 'exact', state, await ask(query, { match: 'exact' })]).toEqual([query, 'exact', state, expected]);
+            }
+            for (const query of EXCLUSION_ONLY) {
+                await expect(ask(query)).rejects.toThrow(/Exclusions need at least one search term/);
             }
         };
         await check('unindexed');
@@ -104,6 +114,15 @@ test('identifier-like queries are told apart from words', () => {
     }
 });
 
+test('- and ! both spell noneOf in spec sigils', () => {
+    const spec = parseSpec({ features: ['+tag/a', '-tag/b', '!tag/c', 'tag/d'], paths: ['ctx:/x', '-ctx:/y'], filters: ['-t:crud:created:today'] });
+    expect(spec.features).toEqual({ allOf: ['tag/a'], anyOf: ['tag/d'], noneOf: ['tag/b', 'tag/c'] });
+    expect(parseSpec({ features: { anyOf: ['tag/a', '-tag/b'] } }).features.noneOf).toEqual(['tag/b']);
+    expect(spec.paths.not ?? spec.paths.noneOf ?? spec.paths).toBeTruthy();
+    expect(JSON.stringify(spec.paths)).toContain('/y');
+    expect(spec.filters).toEqual(['-t:crud:created:today']);
+});
+
 describe('a freshly saved note is findable', () => {
     let rootPath;
     let db;
@@ -127,5 +146,7 @@ describe('a freshly saved note is findable', () => {
         expect([...all].sort()).toEqual([id, ...more].sort());
         expect(all.totalCount).toBe(4);
         expect([...await db.search({ query: '"pelican"', idsOnly: true, limit: 0 })]).toHaveLength(4);
+        expect([...await db.search({ query: 'pelican -routes', idsOnly: true, limit: 0 })].sort()).toEqual(more.sort());
+        await expect(db.search({ query: '-pelican', idsOnly: true })).rejects.toThrow(/Exclusions need/);
     });
 });
