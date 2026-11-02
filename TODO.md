@@ -361,3 +361,6 @@ existing table in place.
 - [ ] Measure before adding per-identity bitmaps.
 - [ ] Add coarse relation-presence bitmaps only with a measured query need.
 - [ ] Keep traversal one-hop until a concrete multi-hop workload exists.
+
+
+## Add a (STM-like) memory-bound reranker 
