@@ -273,11 +273,21 @@ class SchemaRegistry {
      */
     getSchemaDescriptor(schemaId) {
         const entry = this.getSchemaEntry(schemaId);
+        const jsonSchema = this.getJsonSchema(schemaId);
+        const data = jsonSchema?.properties?.data;
+        const required = data?.required || [];
         return {
             id: schemaId,
             tier: entry.tier,
             indexOptions: entry.indexOptions ?? null,
-            jsonSchema: this.getJsonSchema(schemaId),
+            jsonSchema,
+            fields: data?.properties ? {
+                required,
+                optional: Object.keys(data.properties).filter(name => !required.includes(name)),
+                properties: data.properties,
+            } : null,
+            example: entry.SchemaClass.exampleData ? { schema: schemaId, data: structuredClone(entry.SchemaClass.exampleData) } : null,
+            notes: entry.SchemaClass.inputNotes || null,
         };
     }
 

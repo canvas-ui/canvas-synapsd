@@ -622,6 +622,7 @@ export default class DocumentWriter {
             updateData = parseInitializeDocument(updateData);
         }
         const parsed = storedDocument.update(updateData);
+        parsed.validateData();
         if (canonicalId !== null) { parsed.id = canonicalId; }
         return { parsed, previous };
     }

@@ -18,6 +18,8 @@ const documentDataSchema = z.object({
 
 export default class Tab extends Document {
 
+    static exampleData = { url: 'https://example.com', title: 'Example' };
+
     // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = {

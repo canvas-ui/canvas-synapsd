@@ -997,7 +997,33 @@ A facet field may hold **one value or an array**, in which case it emits one key
 
 Internal layer types are not documents and have no `dataSchema`; `getJsonSchema()` returns `null` for them rather than throwing, so iterating `listSchemas()` is safe.
 
+`schemaRegistry.getSchemaDescriptor(id)` adds `fields: { required, optional, properties }`
+derived from the payload validator, plus `example: { schema, data }` and `notes`
+when a schema defines `static exampleData` and `static inputNotes`. Links use
+`uri` (required), `label`, `tags`, and a derived `scheme`; tabs use `url` and `title`.
+The descriptor and validation share the same field definitions.
+
+Task `dueDate` accepts a timezone-qualified ISO timestamp or `YYYY-MM-DD`.
+Calendar dates normalize to 23:59:59.999 in the executing runtime's timezone
+(`TZ`/system timezone), then serialize to UTC. Invalid calendar dates are rejected.
+The task's `tasks` timeline is derived from this normalized value on insert and
+update; omitting the due date in replacement data removes that timeline entry.
+Status defaults to `pending`, explicit status wins over `completed`, and priority
+uses 1 (highest) through 9 (lowest). Validation errors carry
+`code: "INVALID_DOCUMENT"`, `statusCode: 400`, and `details: { schema, issues }`
+with structured field paths. Batch preparation preserves the cause and adds a
+zero-based `failedIndex` for the transport to report.
+
+Document input requires a non-empty `schema` and an object `data` payload.
+The common input parser also accepts a JSON-encoded object in `data`, decoding
+it once before schema validation and derivation. Malformed JSON, arrays, null,
+and scalar values fail with a structured `INVALID_DOCUMENT` error at `data`.
+
 Introspection: `db.listSchemas(prefix?)`, `db.getSchema(id)`, `db.hasSchema(id)`, `db.getDataSchema(id)`, `db.getJsonSchema(id)`. On the registry itself: `getSchemaEntry(id)`, `resolveSchemaId(key)`, `unregisterSchema(id)`.
+
+`db.listPredicates()` returns every registered relation predicate in persisted-id
+order. The same discovery function is exported by `src/indexes/edges/predicates.js`;
+transports and applications use it to populate relation pickers and search suggestions.
 
 ## Querying
 

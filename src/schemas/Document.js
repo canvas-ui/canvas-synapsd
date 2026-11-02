@@ -14,6 +14,7 @@ import {
 } from 'date-fns';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { generateChecksum } from '../utils/crypto.js';
+import { ValidationError } from '../utils/errors.js';
 
 // Derived JSON Schemas, memoized per class. WeakMap so an unregistered consumer
 // class does not pin its conversion for the process lifetime.
@@ -574,7 +575,10 @@ class Document {
 
             return true;
         } catch (error) {
-            throw new Error(`Document validation failed: ${error.message}`);
+            throw new ValidationError(`Document validation failed: ${error.message}`, {
+                schema: this.schema,
+                issues: error.issues?.map(({ path, message, code }) => ({ path, message, code })) || [{ path: [], message: error.message }],
+            });
         }
     }
 
@@ -589,11 +593,18 @@ class Document {
     }
 
     validateData() {
-        return this.constructor.dataSchema.parse({
-            schema: this.schema,
-            schemaVersion: this.schemaVersion,
-            data: this.data,
-        });
+        try {
+            return this.constructor.dataSchema.parse({
+                schema: this.schema,
+                schemaVersion: this.schemaVersion,
+                data: this.data,
+            });
+        } catch (error) {
+            throw new ValidationError(`Invalid ${this.schema}: ${error.issues?.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ') || error.message}`, {
+                schema: this.schema,
+                issues: error.issues?.map(({ path, message, code }) => ({ path, message, code })) || [],
+            });
+        }
     }
 
     /**

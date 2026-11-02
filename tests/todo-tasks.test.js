@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from '@jest/globals';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 import Db from '../src/index.js';
 import Task from '../src/schemas/core/Task.js';
@@ -11,6 +12,33 @@ const TODO_SCHEMA = 'data/schema/task';
 const iso = (d) => d.toISOString();
 const today = () => { const d = new Date(); d.setHours(18, 0, 0, 0); return d; };
 const inDays = (n) => { const d = today(); d.setDate(d.getDate() + n); return d; };
+
+test('date-only task deadlines use runtime end of day across DST and validate calendar dates', () => {
+    const script = `
+        import assert from 'node:assert/strict';
+        import Task from ${JSON.stringify(new URL('../src/schemas/core/Task.js', import.meta.url).href)};
+        for (const [input, expected] of [
+            ['2026-11-07', '2026-11-07T22:59:59.999Z'],
+            ['2026-03-29', '2026-03-29T21:59:59.999Z'],
+            ['2026-10-25', '2026-10-25T22:59:59.999Z'],
+            ['2028-02-29', '2028-02-29T22:59:59.999Z'],
+            ['2026-11-07T14:00:00+02:00', '2026-11-07T12:00:00.000Z'],
+        ]) {
+            const task = Task.fromData({data: {title: 'Deadline', dueDate: input}});
+            assert.equal(task.data.dueDate, expected);
+            assert.deepEqual(task.timelines, [{timeline: 'tasks', start: expected}]);
+        }
+        for (const dueDate of ['2026-02-29', '2026-11-31', 'tomorrow', '2026-11-07T10:00:00']) {
+            assert.throws(() => Task.fromData({data: {title: 'Invalid', dueDate}}));
+        }
+        const task = Task.fromData({data: {title: 'Move', dueDate: '2026-11-07'}});
+        task.update({data: {title: 'Move', dueDate: '2026-11-08'}});
+        assert.equal(task.timelines[0].start, '2026-11-08T22:59:59.999Z');
+        task.update({data: {title: 'Undated'}});
+        assert.deepEqual(task.timelines, []);
+    `;
+    execFileSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, TZ: 'Europe/Bratislava' } });
+});
 
 // Todo v2.1: VTODO/JSCalendar-aligned status, dueDate derived onto the 'tasks'
 // point timeline (doc declares, index derives), dueDate in the checksum so

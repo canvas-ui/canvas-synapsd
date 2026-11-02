@@ -15,6 +15,21 @@ const TASK_STATUSES = ['pending', 'in-progress', 'completed', 'cancelled'];
 // future-oriented axis. Registered as a point timeline in the Db constructor.
 const TASKS_TIMELINE = 'tasks';
 
+const calendarDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
+    const date = new Date(`${value}T00:00:00Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}, 'Invalid calendar date');
+const dueDateSchema = z.union([z.string().datetime({ offset: true }), calendarDate])
+    .describe('ISO timestamp with timezone, or YYYY-MM-DD. Date-only input becomes 23:59:59.999 in the workspace runtime timezone (TZ/system timezone), stored as UTC. The tasks timeline is derived automatically.')
+    .transform(value => {
+        if (value.length !== 10) { return new Date(value).toISOString(); }
+        const [year, month, day] = value.split('-').map(Number);
+        const date = new Date(0);
+        date.setFullYear(year, month - 1, day);
+        date.setHours(23, 59, 59, 999);
+        return date.toISOString();
+    });
+
 const documentDataSchema = z.object({
     schema: z.string(),
     schemaVersion: z.string().optional(),
@@ -22,11 +37,10 @@ const documentDataSchema = z.object({
         title: z.string(),
         description: z.string().optional(),
         status: z.enum(TASK_STATUSES).optional(),
-        // Legacy boolean kept as accepted input + always emitted in sync with
-        // status, so old clients keep working (completed === status 'completed').
+        // Completion is emitted in sync with the canonical status.
         completed: z.boolean().optional(),
         completedAt: z.string().datetime().optional(),
-        dueDate: z.string().datetime().optional(),
+        dueDate: dueDateSchema.optional(),
         // RFC 5545 PRIORITY scale: 1 = highest, 9 = lowest.
         priority: z.number().int().min(1).max(9).optional(),
     }).passthrough(),
@@ -34,6 +48,9 @@ const documentDataSchema = z.object({
 });
 
 export default class Task extends Document {
+
+    static exampleData = { title: 'Review migration plan', dueDate: '2026-11-07', priority: 3, status: 'pending' };
+    static inputNotes = 'status defaults to pending; completed is synchronized with status. priority is 1 (highest) to 9 (lowest). Do not supply the tasks timeline: it is derived from dueDate.';
 
     // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
@@ -53,13 +70,30 @@ export default class Task extends Document {
         options.schema = options.schema || DOCUMENT_SCHEMA_NAME;
         options.schemaVersion = DOCUMENT_SCHEMA_VERSION;
 
+        if (options.data?.dueDate !== undefined) {
+            options.data.dueDate = z.object({ data: z.object({ dueDate: dueDateSchema }) }).parse(options).data.dueDate;
+        }
         Task.#normalizeStatus(options.data);
         options.timelines = Task.#deriveTimelines(options);
 
         super(options);
     }
 
-    // Keep status (canonical) and the legacy completed boolean in sync, both
+    update(changes) {
+        if (!changes) { return this; }
+        const next = { ...changes };
+        if (changes.data) {
+            next.data = { ...changes.data };
+            if (next.data.dueDate !== undefined) {
+                next.data.dueDate = z.object({ data: z.object({ dueDate: dueDateSchema }) }).parse(next).data.dueDate;
+            }
+            Task.#normalizeStatus(next.data);
+        }
+        next.timelines = Task.#deriveTimelines({ data: next.data || this.data, timelines: next.timelines || this.timelines });
+        return super.update(next);
+    }
+
+    // Keep status (canonical) and the completed boolean in sync, both
     // directions, deterministically — this runs on every parse, so it must
     // never invent timestamps or otherwise produce different output per run.
     static #normalizeStatus(data) {

@@ -18,6 +18,8 @@ class ValidationError extends SynapsDError {
     constructor(message, details = null) {
         super(message);
         this.details = details;
+        this.code = 'INVALID_DOCUMENT';
+        this.statusCode = 400;
     }
 }
 

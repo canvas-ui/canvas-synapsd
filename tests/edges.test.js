@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import Db from '../src/index.js';
+import { PREDICATES, listPredicates, predicateId } from '../src/indexes/edges/predicates.js';
 
 /**
  * EdgeIndex — the dupsort storage primitive, exercised directly on node ids.
@@ -25,6 +26,15 @@ describe('EdgeIndex', () => {
     afterEach(async () => {
         if (db) { await db.shutdown().catch(() => {}); db = null; }
         if (rootPath) { await fs.rm(rootPath, { recursive: true, force: true }); rootPath = null; }
+    });
+
+    test('predicate discovery returns every registered name in persisted-id order', () => {
+        const names = db.listPredicates();
+        expect(names).toEqual(Object.keys(PREDICATES).sort((a, b) => predicateId(a) - predicateId(b)));
+        expect(names).toEqual(listPredicates());
+        expect(names).toContain('addressed-to');
+        names.pop();
+        expect(db.listPredicates()).toHaveLength(Object.keys(PREDICATES).length);
     });
 
     test('link is idempotent — dupsort dedups the pair', () => {

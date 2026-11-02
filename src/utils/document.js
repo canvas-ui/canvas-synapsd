@@ -5,7 +5,17 @@ const debug = debugInstance('canvas:synapsd');
 
 
 import schemaRegistry from '../schemas/SchemaRegistry.js';
+import { ValidationError } from './errors.js';
 import { isDocumentData, isDocumentInstance } from '../schemas/SchemaRegistry.js';
+
+function invalidField(field, expected, value, schema) {
+    const received = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+    const message = `${field} must be ${expected} (got ${received})`;
+    return new ValidationError(message, {
+        schema,
+        issues: [{ path: [field], message, code: 'invalid_type', received }],
+    });
+}
 
 /**
  * Parse a document data object (string or object) into a plain JS object
@@ -28,8 +38,27 @@ export function parseDocumentData(documentData) {
         throw new Error(`Invalid document data type: Expected string or object, got ${typeof documentData}`);
     }
 
-    if (!parsedData.schema || parsedData.data == null || typeof parsedData.data !== 'object') {
-        throw new Error('Parsed document data must have a schema and a non-null data object.');
+    if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) {
+        throw invalidField('document', 'a non-null object', parsedData);
+    }
+    if (typeof parsedData.schema !== 'string' || !parsedData.schema.trim()) {
+        throw invalidField('schema', 'a non-empty string', parsedData.schema);
+    }
+    // Normalize JSON-encoded payloads at the common write boundary, before any
+    // schema-specific constructor, checksum, or timeline derivation runs.
+    if (typeof parsedData.data === 'string') {
+        try {
+            parsedData = { ...parsedData, data: JSON.parse(parsedData.data) };
+        } catch {
+            const message = 'data contains invalid JSON; expected a non-null object';
+            throw new ValidationError(message, {
+                schema: parsedData.schema,
+                issues: [{ path: ['data'], message, code: 'invalid_json', received: 'string' }],
+            });
+        }
+    }
+    if (parsedData.data === null || typeof parsedData.data !== 'object' || Array.isArray(parsedData.data)) {
+        throw invalidField('data', 'a non-null object', parsedData.data, parsedData.schema);
     }
 
     return parsedData;
@@ -61,12 +90,17 @@ export function initializeDocument(documentData) {
  * @returns {Document} Initialized document instance
  */
 export function parseInitializeDocument(documentData) {
-    if (!documentData) { throw new Error('Document data required'); }
     try {
         const parsedData = parseDocumentData(documentData);
         return initializeDocument(parsedData);
     } catch (error) {
-        throw new Error(`Failed to parse and initialize document: ${error.message}`);
+        if (error instanceof ValidationError) { throw error; }
+        const wrapped = new ValidationError(`Invalid document: ${error.message}`, {
+            schema: documentData?.schema,
+            issues: error.issues?.map(({ path, message, code }) => ({ path, message, code })) || [{ path: [], message: error.message }],
+        });
+        wrapped.cause = error;
+        throw wrapped;
     }
 }
 

@@ -19,7 +19,7 @@ import DatabaseBackups from './backups/DatabaseBackups.js';
 
 // Schemas
 import schemaRegistry from './schemas/SchemaRegistry.js';
-import { predicateId } from './indexes/edges/predicates.js';
+import { predicateId, listPredicates } from './indexes/edges/predicates.js';
 import { isDocumentData, isDocumentInstance } from './schemas/SchemaRegistry.js';
 
 // Indexes
@@ -592,6 +592,7 @@ class SynapsD extends EventEmitter {
     getJsonSchema(schemaId) { return schemaRegistry.getJsonSchema(schemaId); }
     hasSchema(schemaId) { return schemaRegistry.hasSchema(schemaId); }
     listSchemas(prefix = null) { return schemaRegistry.listSchemas(prefix); }
+    listPredicates() { return listPredicates(); }
 
     /**
      * Validation methods

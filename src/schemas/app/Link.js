@@ -6,10 +6,11 @@ import { z } from 'zod';
 const DOCUMENT_SCHEMA_NAME = 'data/schema/link';
 const DOCUMENT_SCHEMA_VERSION = '3.0';
 const URI_SCHEME_REGEX = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+const uriSchema = z.string().min(1).refine((value) => URI_SCHEME_REGEX.test(value.trim()), 'Invalid URI: missing scheme');
 
 const linkPayloadSchema = Document.extendDataSchema(
     z.object({
-        uri: z.string().min(1).refine((value) => URI_SCHEME_REGEX.test(value.trim()), 'Invalid URI: missing scheme'),
+        uri: uriSchema,
         label: z.string().optional(),
         description: z.string().optional(),
         type: z.string().optional(),
@@ -29,6 +30,9 @@ const defaultIndexOptions = {
 
 export default class Link extends Document {
 
+    static exampleData = { uri: 'https://example.com/music', label: 'Music', tags: ['music'] };
+    static inputNotes = 'uri is required and includes a scheme. scheme is derived from uri; tags default to an empty array. Browser tabs use a different schema (url/title).';
+
     // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = defaultIndexOptions;
@@ -40,7 +44,7 @@ export default class Link extends Document {
         super(options);
 
         this.#ensureArray('tags');
-        this.#applyUriNormalization();
+        this.#setUri(this.data.uri);
     }
 
     // ----- Getters / Setters -----
@@ -114,21 +118,8 @@ export default class Link extends Document {
         }
     }
 
-    #applyUriNormalization() {
-        if (!this.data.uri) {
-            throw new Error('Link data requires a uri');
-        }
-        this.#setUri(this.data.uri);
-    }
-
     #setUri(value) {
-        if (!value) {
-            throw new Error('Link uri cannot be empty');
-        }
-        const normalized = value.trim();
-        if (!URI_SCHEME_REGEX.test(normalized)) {
-            throw new Error('Invalid URI: missing scheme');
-        }
+        const normalized = z.object({ data: z.object({ uri: uriSchema }) }).parse({ data: { uri: value } }).data.uri.trim();
         this.data.uri = normalized;
         this.data.scheme = this.#extractScheme(normalized);
     }

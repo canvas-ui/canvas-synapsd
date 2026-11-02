@@ -370,6 +370,18 @@ describe('facetFields', () => {
 // instead (the web ui still mirrors the task status list by hand). It is now
 // DERIVED from the same zod `dataSchema` validation uses, so the two cannot drift.
 describe('jsonSchema derivation', () => {
+    test('discovery field lists and examples come from each schema', () => {
+        for (const [name, required] of [['link', 'uri'], ['tab', 'url'], ['task', 'title'], ['note', 'content']]) {
+            const id = `data/schema/${name}`;
+            const descriptor = schemaRegistry.getSchemaDescriptor(id);
+            expect(descriptor.fields.required).toContain(required);
+            expect(descriptor.fields.optional).not.toContain(required);
+            expect(() => schemaRegistry.getSchema(id).validateData(descriptor.example)).not.toThrow();
+        }
+        const task = schemaRegistry.getSchemaDescriptor('data/schema/task');
+        expect(task.fields.properties.dueDate.description).toMatch(/23:59:59.999/);
+        expect(task.notes).toMatch(/derived from dueDate/);
+    });
     test('carries the enum a consumer would otherwise hand-copy', () => {
         const data = Task.jsonSchema.properties.data;
 

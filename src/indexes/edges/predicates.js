@@ -129,4 +129,9 @@ export function allPredicateIds() {
     return [...NAME_BY_ID.keys()].sort((a, b) => a - b);
 }
 
+/** Registered wire names in persisted-id order, for discovery and pickers. */
+export function listPredicates() {
+    return Object.entries(PREDICATES).sort(([, a], [, b]) => a.id - b.id).map(([name]) => name);
+}
+
 export default PREDICATES;

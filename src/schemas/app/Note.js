@@ -18,6 +18,8 @@ const documentDataSchema = z.object({
 
 export default class Note extends Document {
 
+    static exampleData = { title: 'Meeting notes', content: 'Discuss the migration plan.' };
+
     // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
     static indexOptions = {
