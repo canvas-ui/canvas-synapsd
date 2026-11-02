@@ -24,15 +24,34 @@ const ROWS = [
     row(4, 'pelican note', 'pelican note body'),
     row(5, 'JobsIreland.ie listing'),
     row(6, 'Café opening hours'),
+    row(7, 'Invoice from Augmentd s.r.o. for consulting'),
+    row(8, 'Augmentd Labs s.r.o. roadmap'),
+    row(9, 'Café Augmentd window'),
 ];
 
 const CASES = [
     ['winter', [1]],            // not "summer window"
-    ['window', [1, 3]],
+    ['window', [1, 3, 9]],
     ['pelican', [4]],           // repeated term
     ['ireland', [5]],           // substring of a concatenated word
-    ['cafe', [6]],              // accent folding
-    ['pelican winter', [1, 4]], // multi-word: any word (Should)
+    ['cafe', [6, 9]],           // accent folding
+    ['summer window', [3]],     // multi-word: every word (AND)…
+    ['pelican winter', [1, 4]], // …widening to any word when AND finds nothing
+    ['augmentd window', [9]],   // words shorter than a gram are dropped, not required
+    ['augmentd s.r.o.', [7, 8, 9]],
+    ['"Augmentd s.r.o."', [7]], // quoted: verbatim phrase, not "Augmentd Labs s.r.o."
+    ['"augmentd s.r.o', [7]],   // unclosed quote runs to the end
+    ['"winter window"', [1]],
+    ['"window winter"', []],    // order matters
+    ['"cafe augmentd"', [9]],   // folded on both sides
+    ['"augmentd" window', [9]], // phrase + word
+    ['"summer window" pelican', [3]], // phrase stays required when the words widen
+];
+// match: 'exact' = the whole string is one phrase, quotes or not.
+const EXACT_CASES = [
+    ['Augmentd s.r.o.', [7]],
+    ['augmentd window', [9]],
+    ['window augmentd', []],
 ];
 
 describe('FTS ngram queries', () => {
@@ -45,14 +64,32 @@ describe('FTS ngram queries', () => {
         await index.initialize();
         await index.writeBatch({ upserts: ROWS });
 
-        const ask = async (q) => (await index.ftsQuery(q)).pageIds.sort((a, b) => a - b);
-        for (const [query, expected] of CASES) {
-            expect([query, 'unindexed', await ask(query)]).toEqual([query, 'unindexed', expected]);
-        }
+        const ask = async (q, opts) => (await index.ftsQuery(q, [], opts)).pageIds.sort((a, b) => a - b);
+        const check = async (state) => {
+            for (const [query, expected] of CASES) {
+                expect([query, state, await ask(query)]).toEqual([query, state, expected]);
+            }
+            for (const [query, expected] of EXACT_CASES) {
+                expect([query, 'exact', state, await ask(query, { match: 'exact' })]).toEqual([query, 'exact', state, expected]);
+            }
+        };
+        await check('unindexed');
         await index.optimize();
-        for (const [query, expected] of CASES) {
-            expect([query, 'indexed', await ask(query)]).toEqual([query, 'indexed', expected]);
-        }
+        await check('indexed');
+    });
+
+    test('phrase hits are verified against the row text and paginate in order', async () => {
+        dir = await fs.mkdtemp(path.join(os.tmpdir(), 'synapsd-fts-phrase-'));
+        const index = new LanceIndex({ rootPath: dir });
+        await index.initialize();
+        await index.writeBatch({ upserts: ROWS });
+        const all = await index.ftsQuery('"augmentd"', [], { limit: 10 });
+        expect(all.totalCount).toBe(3);
+        const page = await index.ftsQuery('"augmentd"', [], { limit: 2, offset: 1 });
+        expect(page.totalCount).toBe(3);
+        expect(page.pageIds).toEqual(all.pageIds.slice(1, 3));
+        // Candidate scoping applies before verification.
+        expect((await index.ftsQuery('"augmentd"', [8, 9])).pageIds.sort()).toEqual([8, 9]);
     });
 });
 
@@ -70,5 +107,8 @@ describe('a freshly saved note is findable', () => {
         await db.start();
         const id = await db.put({ schema: 'data/schema/note', data: { title: 'pelican migration', content: 'pelican migration routes' } });
         expect([...await db.search({ query: 'pelican', mode: 'fts', idsOnly: true })]).toContain(id);
+        expect([...await db.search({ query: '"pelican migration routes"', idsOnly: true })]).toEqual([id]);
+        expect([...await db.search({ query: '"migration pelican"', idsOnly: true })]).toEqual([]);
+        expect([...await db.search({ query: 'pelican migration routes', match: 'exact', idsOnly: true })]).toEqual([id]);
     });
 });

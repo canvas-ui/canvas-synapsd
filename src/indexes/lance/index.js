@@ -32,7 +32,7 @@ function defaultCleanupCutoff() {
  * `#buildFtsQuery` uses exact (fuzziness 0) MatchQueries when IS_NGRAM.
  */
 const FTS_INDEX_CONFIG = {
-    withPosition: false,   // phrase queries are meaningless on ngrams; saves index size
+    withPosition: false,   // phrases match through cross-word ngrams instead; saves index size
     baseTokenizer: 'ngram',
     lowercase: true,
     stem: false,
@@ -45,6 +45,57 @@ const FTS_INDEX_CONFIG = {
 };
 const FTS_CONFIG_SIGNATURE = JSON.stringify(FTS_INDEX_CONFIG);
 const IS_NGRAM = FTS_INDEX_CONFIG.baseTokenizer === 'ngram';
+
+/**
+ * Split free text into normalized alphanumeric words. A pasted URL/path like
+ * `file:///docs/report.pdf` becomes [file, docs, report, pdf]. On the ngram
+ * index a word shorter than the smallest gram cannot match anything, so it is
+ * dropped here rather than poisoning an all-words query.
+ */
+function tokenizeWords(text) {
+    if (typeof text !== 'string') { return []; }
+    const min = IS_NGRAM ? FTS_INDEX_CONFIG.ngramMinLength : 1;
+    return text
+        .toLowerCase()
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter(t => t.length >= min && t.length <= FTS_INDEX_CONFIG.maxTokenLength);
+}
+
+/**
+ * The search-text grammar every caller shares (UI, REST, MCP, CLI): a
+ * double-quoted segment is a phrase that must occur verbatim (a case- and
+ * accent-insensitive substring; an unclosed quote runs to the end), everything
+ * else is a bare word. `match: 'exact'` makes the whole string one phrase.
+ * @returns {{ phrases: string[], words: string[] }}
+ */
+export function parseSearchText(queryString, { match } = {}) {
+    const text = typeof queryString === 'string' ? queryString.trim() : '';
+    if (!text) { return { phrases: [], words: [] }; }
+    if (match === 'exact') {
+        const phrase = text.replace(/^"+|"+$/g, '').trim();
+        return { phrases: phrase ? [phrase] : [], words: [] };
+    }
+    const phrases = [];
+    const rest = text.replace(/"([^"]*)(?:"|$)/g, (_, inner) => {
+        const phrase = inner.trim();
+        if (phrase) { phrases.push(phrase); }
+        return ' ';
+    });
+    return { phrases, words: tokenizeWords(rest) };
+}
+
+/** True when the query asks for verbatim matching (quoted text or match: 'exact'). */
+export function isExactQuery(queryString, options = {}) {
+    return parseSearchText(queryString, options).phrases.length > 0;
+}
+
+// Case + accent folding for the phrase verification, mirroring the index's
+// lowercase + asciiFolding so "café" and "cafe" meet on both sides.
+function foldText(text) {
+    return String(text).normalize('NFD').replace(/\p{M}+/gu, '').toLowerCase();
+}
+// Ranked hits are verified in id-batches of this size until the page is full.
+const PHRASE_VERIFY_CHUNK = 200;
 
 /**
  * LanceIndex - FTS and vector search via LanceDB
@@ -281,9 +332,9 @@ class LanceIndex {
         const offset = Math.max(0, Number(opts.offset ?? 0));
         const candidateSet = candidateIds.length > 0 ? new Set(candidateIds) : null;
 
-        const ftsQueryObj = await this.#buildFtsQuery(queryString);
-        if (!ftsQueryObj) {
-            // Query had no usable tokens (e.g. all punctuation) — empty, not error.
+        const parsed = parseSearchText(queryString, { match: opts.match });
+        if (parsed.phrases.length === 0 && parsed.words.length === 0) {
+            // Nothing searchable (e.g. all punctuation) — empty, not error.
             return { pageIds: [], totalCount: 0, error: null };
         }
 
@@ -301,23 +352,34 @@ class LanceIndex {
         // Exactly backwards: narrowing must sharpen a search, not silence it.
         const fetchLimit = (limit + offset) * 10 + 1000;
 
-        let rows;
-        try {
-            rows = await this.#table
+        const run = async (requireAllWords) => {
+            const ftsQueryObj = await this.#buildFtsQuery(parsed, { requireAllWords });
+            const rows = await this.#table
                 .search(ftsQueryObj)
                 // _score is BM25-ordered; selecting it explicitly silences Lance's
                 // scoring-autoprojection deprecation warning. Rows come back ranked.
                 .select(['id', '_score'])
                 .limit(fetchLimit)
                 .toArray();
+            let ranked = Array.from(new Set(rows.map(r => Number(r.id))));
+            if (candidateSet) { ranked = ranked.filter(id => candidateSet.has(id)); }
+            return ranked;
+        };
+
+        let rankedIds;
+        try {
+            // Several clauses: every word must match. Only when that finds
+            // nothing (one word typo'd or absent) widen to any word, so the
+            // search narrows by default but never blanks. Phrases stay required.
+            const strict = parsed.words.length + parsed.phrases.length > 1;
+            rankedIds = await run(strict);
+            if (rankedIds.length === 0 && strict && parsed.words.length > 0) { rankedIds = await run(false); }
         } catch (e) {
             debug(`ftsQuery: BM25 search failed: ${e.message}`);
             return { pageIds: [], totalCount: 0, error: e.message };
         }
-
-        let rankedIds = Array.from(new Set(rows.map(r => Number(r.id))));
-        if (candidateSet) {
-            rankedIds = rankedIds.filter(id => candidateSet.has(id));
+        if (parsed.phrases.length && rankedIds.length) {
+            rankedIds = await this.#verifyPhrases(rankedIds, parsed.phrases, offset + limit);
         }
 
         const totalCount = rankedIds.length;
@@ -415,68 +477,92 @@ class LanceIndex {
     }
 
     /**
-     * Split a free-text query into normalized alphanumeric tokens, matching how
-     * the `simple` tokenizer indexes content (splits on punctuation). This means
-     * a pasted URL/path query like `file:///docs/report.pdf` becomes
-     * [file, docs, report, pdf] and matches the indexed location URLs.
-     */
-    #tokenizeQuery(queryString) {
-        if (typeof queryString !== 'string') { return []; }
-        return queryString
-            .toLowerCase()
-            .split(/[^\p{L}\p{N}]+/u)
-            .filter(t => t.length > 0 && t.length <= FTS_INDEX_CONFIG.maxTokenLength);
-    }
-
-    /**
-     * Build a fuzzy, high-recall FTS query from a raw user string.
+     * Build the FTS query for a parsed search text.
      *
      * Naive BM25 (`table.search(rawString, 'fts')`) routed the string through
      * Lance's query parser, so `:` `/` `"` in URLs broke parsing and a single
-     * typo returned nothing. Instead we tokenize ourselves and OR together one
-     * fuzzy MatchQuery per token (Should), so any term contributes to the score
-     * — close to fuse.js fuzzy matching, with BM25 doing the ranking.
+     * typo returned nothing. Instead the text is parsed here (parseSearchText)
+     * and assembled from MatchQuery clauses:
      *
-     * Fuzziness scales with token length (short tokens tolerate no edits to
-     * avoid noise; longer ones tolerate up to 2), mirroring Elasticsearch AUTO.
+     * - A phrase is one Must clause requiring every ngram Lance produces for
+     *   the WHOLE phrase. The ngram tokenizer does not split on spaces or
+     *   punctuation, so grams like `td s` and `s.r.` encode word adjacency and
+     *   the clause is a near-exact substring match on the existing index — no
+     *   positions needed (a PhraseQuery is meaningless on ngrams anyway). The
+     *   rare gram collision is removed by #verifyPhrases.
+     * - A word is one clause: Must when `requireAllWords`, else Should.
      *
-     * @returns {FullTextQuery|null} null when the string has no usable tokens
+     * Lance's `Operator.And` on an ngram MatchQuery does not require every
+     * ngram (0.39: "winter" matched "summer window" via a shared "win"), so
+     * every AND is spelled out as one Must clause per ngram. The ngrams come
+     * from Lance's own tokenizer with the index config, so folding/lowercasing
+     * match the index exactly and the answer is identical on indexed and
+     * not-yet-indexed rows.
+     *
+     * @returns {Promise<FullTextQuery|null>} null when nothing is searchable
      */
-    async #buildFtsQuery(queryString) {
-        const tokens = this.#tokenizeQuery(queryString);
-        if (tokens.length === 0) { return null; }
-
-        // Lance's `Operator.And` on an ngram MatchQuery does not require every
-        // ngram (0.39: "winter" matched "summer window" via a shared "win"), so
-        // the AND is spelled out: one Must clause per ngram of the word — a
-        // substring match, identical on indexed and not-yet-indexed rows. The
-        // ngrams come from Lance's own tokenizer with the index config, so
-        // folding/lowercasing match the index exactly.
+    async #buildFtsQuery({ phrases, words }, { requireAllWords }) {
         const exact = (text) => new MatchQuery(text, this.#ftsColumn, { fuzziness: 0, operator: Operator.Or });
-        const ngrams = IS_NGRAM
-            ? await Promise.all(tokens.map(async (token) => [...new Set((await lancedb.tokenize(token, FTS_INDEX_CONFIG)).map((t) => t.text))]))
-            : [];
+        const gramsOf = async (text) => [...new Set((await lancedb.tokenize(text, FTS_INDEX_CONFIG)).map((t) => t.text))];
+        const allOf = (grams, fallback) => grams.length <= 1
+            ? exact(grams[0] || fallback)
+            : new BooleanQuery(grams.map((gram) => [Occur.Must, exact(gram)]));
 
-        const toMatch = (token, index) => {
-            if (IS_NGRAM) {
-                const grams = ngrams[index];
-                if (grams.length <= 1) { return exact(grams[0] || token); }
-                return new BooleanQuery(grams.map((gram) => [Occur.Must, exact(gram)]));
-            }
+        const toWord = async (word) => {
+            if (IS_NGRAM) { return allOf(await gramsOf(word), word); }
             // Word tokenizers: each token is a whole word, so length-scaled
-            // fuzziness gives typo tolerance (ngram fields above match exactly —
-            // fuzzy on top of ngrams over-expands wildly).
-            const fuzziness = token.length <= 3 ? 0 : token.length <= 6 ? 1 : 2;
-            return new MatchQuery(token, this.#ftsColumn, {
-                fuzziness,
-                prefixLength: 1,
-                maxExpansions: 50,
-                operator: Operator.Or,
-            });
+            // fuzziness gives typo tolerance (fuzzy on top of ngrams would
+            // over-expand wildly).
+            const fuzziness = word.length <= 3 ? 0 : word.length <= 6 ? 1 : 2;
+            return new MatchQuery(word, this.#ftsColumn, { fuzziness, prefixLength: 1, maxExpansions: 50, operator: Operator.Or });
+        };
+        const toPhrase = async (phrase) => {
+            if (IS_NGRAM) { return allOf(await gramsOf(phrase), phrase); }
+            // Word tokenizers carry no positions here either: require every
+            // word and let #verifyPhrases enforce adjacency.
+            const parts = tokenizeWords(phrase);
+            if (parts.length === 0) { return exact(phrase); }
+            return new BooleanQuery(parts.map((w) => [Occur.Must, exact(w)]));
         };
 
-        if (tokens.length === 1) { return toMatch(tokens[0], 0); }
-        return new BooleanQuery(tokens.map((t, i) => [Occur.Should, toMatch(t, i)]));
+        const clauses = [];
+        for (const phrase of phrases) { clauses.push([Occur.Must, await toPhrase(phrase)]); }
+        const wordOccur = requireAllWords ? Occur.Must : Occur.Should;
+        for (const word of words) { clauses.push([wordOccur, await toWord(word)]); }
+
+        if (clauses.length === 0) { return null; }
+        if (clauses.length === 1) { return clauses[0][1]; }
+        return new BooleanQuery(clauses);
+    }
+
+    /**
+     * Drop gram-level phrase hits whose text does not actually contain every
+     * phrase. Hits are checked best-first in batches until `need` survivors are
+     * found; hits past that window keep the gram verdict (a full-gram match is
+     * already a near-certain substring match), so a page costs a bounded
+     * number of row reads however many hits there are. Order is preserved.
+     */
+    async #verifyPhrases(rankedIds, phrases, need) {
+        const needles = phrases.map(foldText);
+        const survivors = [];
+        let i = 0;
+        while (i < rankedIds.length && survivors.length < need) {
+            const chunk = rankedIds.slice(i, i + PHRASE_VERIFY_CHUNK);
+            i += chunk.length;
+            let rows;
+            try {
+                rows = await this.#table.query().where(`id IN (${chunk.join(',')})`).select(['id', this.#ftsColumn]).toArray();
+            } catch (e) {
+                debug(`verifyPhrases: row read failed, keeping gram verdict: ${e.message}`);
+                return survivors.concat(rankedIds.slice(i - chunk.length));
+            }
+            const texts = new Map(rows.map((r) => [Number(r.id), foldText(r[this.#ftsColumn] || '')]));
+            for (const id of chunk) {
+                const text = texts.get(id);
+                if (text !== undefined && needles.every((n) => text.includes(n))) { survivors.push(id); }
+            }
+        }
+        return survivors.concat(rankedIds.slice(i));
     }
 
     async #ensureFtsIndex() {

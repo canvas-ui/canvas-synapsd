@@ -8,6 +8,7 @@ import debugInstance from 'debug';
 import { ArgumentError } from '../utils/errors.js';
 import { parseSpec } from '../utils/spec.js';
 import { safeParseDocuments } from '../utils/document.js';
+import { isExactQuery } from '../indexes/lance/index.js';
 
 const debug = debugInstance('canvas:synapsd');
 // Unbounded materialization remains an explicit limit:0 opt-in.
@@ -391,8 +392,8 @@ export default class QueryEngine {
                 // Same rule as the fold: FTS may return everything it matches, the
                 // kNN side must stay bounded or a line's membership becomes the
                 // whole photo library.
-                this.#queryMatchSet(last, scopeIds, 1_000_000, { relativeImageFloor: relative, imageDepth: FUSE_DEPTH }),
-                this.#rankIds(scopeIds, last, { mode: options.mode, minDistance: options.minDistance, maxDistance: options.maxDistance, limit: FUSE_DEPTH, offset: 0, imageRelativeFloor: relative }),
+                this.#queryMatchSet(last, scopeIds, 1_000_000, { relativeImageFloor: relative, imageDepth: FUSE_DEPTH, match: options.match }),
+                this.#rankIds(scopeIds, last, { mode: options.mode, match: options.match, minDistance: options.minDistance, maxDistance: options.maxDistance, limit: FUSE_DEPTH, offset: 0, imageRelativeFloor: relative }),
             ]);
             const bitmap = new RoaringBitmap32(memberIds);
             return { bitmap, rankedIds: (ranked.pageIds || []).filter((id) => bitmap.has(id)), error: ranked.error };
@@ -496,6 +497,9 @@ export default class QueryEngine {
         // fts (BM25) | vector (kNN) | hybrid (RRF); vector/hybrid degrade to fts
         // when the dense stack is unavailable.
         let mode = (options.mode || 'hybrid').toLowerCase();
+        // Verbatim text (quoted phrase or match: 'exact') is a lexical question;
+        // dense neighbours would only dilute it, so it ranks on FTS alone.
+        if (queryString && isExactQuery(queryString, { match: options.match })) { mode = 'fts'; }
         if ((mode === 'vector' || mode === 'hybrid') && (!this.#vectors.primary || !this.#vectors.primary.isReady)) {
             debug(`rank: mode '${mode}' requested but vector index not ready; falling back to fts`);
             mode = 'fts';
@@ -554,7 +558,7 @@ export default class QueryEngine {
                 console.warn(`synapsd: rank image kNN failed, continuing without image results: ${e.message}`);
             }
             if (!queryVector && imgIds.length === 0 && legOperands.length === 0) {
-                ({ pageIds, totalCount, error } = await this.#getLanceIndex().ftsQuery(queryString, scopedIds, { limit, offset }));
+                ({ pageIds, totalCount, error } = await this.#getLanceIndex().ftsQuery(queryString, scopedIds, { limit, offset, match: options.match }));
             } else if (mode === 'hybrid') {
                 // Fuse DOCUMENT-level FTS (every doc — tabs included) with dense
                 // kNN (embedded docs only) and image kNN via RRF. The VectorIndex's
@@ -564,7 +568,7 @@ export default class QueryEngine {
                     queryVector
                         ? this.#vectors.primary.vectorSearch(queryVector, scopedIds, { limit: depth, offset: 0, minDistance: options.minDistance, maxDistance: options.maxDistance })
                         : Promise.resolve({ pageIds: [], error: null }),
-                    this.#getLanceIndex().ftsQuery(queryString, scopedIds, { limit: depth, offset: 0 }),
+                    this.#getLanceIndex().ftsQuery(queryString, scopedIds, { limit: depth, offset: 0, match: options.match }),
                 ]);
                 // Weights: see semanticConfig.searchWeights — fts outranks the
                 // floor-less text kNN, while floored image kNN fuses at parity
@@ -612,7 +616,7 @@ export default class QueryEngine {
             // fts mode + explicit vector legs: lexical ranks, legs still fuse —
             // the caller supplied them on purpose.
             const fts = (this.#getLanceIndex() && this.#getLanceIndex().isReady)
-                ? await this.#getLanceIndex().ftsQuery(queryString, scopedIds, { limit: depth, offset: 0 })
+                ? await this.#getLanceIndex().ftsQuery(queryString, scopedIds, { limit: depth, offset: 0, match: options.match })
                 : { pageIds: [], error: 'FTS not initialized' };
             const w = this.#vectors.config.searchWeights;
             const operands = [{ ids: fts.pageIds || [], weight: w.fts }];
@@ -622,7 +626,7 @@ export default class QueryEngine {
             pageIds = fused.slice(offset, offset + limit);
             error = null;
         } else {
-            ({ pageIds, totalCount, error } = await this.#getLanceIndex().ftsQuery(queryString, scopedIds, { limit, offset }));
+            ({ pageIds, totalCount, error } = await this.#getLanceIndex().ftsQuery(queryString, scopedIds, { limit, offset, match: options.match }));
         }
 
         return { pageIds: pageIds || [], totalCount: totalCount ?? 0, error: error ?? null };
@@ -713,7 +717,7 @@ export default class QueryEngine {
         for (let i = 0; i < texts.length; i++) {
             if (scope && scope.isEmpty) { return scope; }
             const scopeIds = scope ? scope.toArray() : [];
-            const matchedIds = await this.#queryMatchSet(texts[i], scopeIds, FOLD_LIMIT, { relativeImageFloor: i > 0, imageDepth });
+            const matchedIds = await this.#queryMatchSet(texts[i], scopeIds, FOLD_LIMIT, { relativeImageFloor: i > 0, imageDepth, match: options.match });
             const matched = new RoaringBitmap32(matchedIds);
             scope = scope ? RoaringBitmap32.and(scope, matched) : matched;
         }
@@ -809,15 +813,18 @@ export default class QueryEngine {
      * `opts.relativeImageFloor` switches the image side to the scope-adaptive
      * cutoff (see #imageVectorSearch) — used for refinement stages, where the
      * scope already established relevance and the absolute floor would empty out.
+     * `opts.match` ('exact') skips the image side entirely, as does quoted text.
      * `opts.imageDepth` bounds the kNN side separately: `limit` means "all
      * matches" to FTS, but a kNN has no such notion and would happily return the
      * whole library (see #foldQueryScope).
      * @returns {Promise<number[]>}
      */
     async #queryMatchSet(queryString, scopeIds, limit, opts = {}) {
+        // Verbatim text has no image side: a phrase is a lexical fact.
+        const exact = isExactQuery(queryString, { match: opts.match });
         const [fts, img] = await Promise.all([
-            this.#getLanceIndex().ftsQuery(queryString, scopeIds, { limit, offset: 0 }).catch(() => ({ pageIds: [] })),
-            this.#imageVectorSearch(queryString, scopeIds, opts.imageDepth ?? limit, { relativeFloor: !!opts.relativeImageFloor }).catch(() => []),
+            this.#getLanceIndex().ftsQuery(queryString, scopeIds, { limit, offset: 0, match: opts.match }).catch(() => ({ pageIds: [] })),
+            exact ? Promise.resolve([]) : this.#imageVectorSearch(queryString, scopeIds, opts.imageDepth ?? limit, { relativeFloor: !!opts.relativeImageFloor }).catch(() => []),
         ]);
         const ids = new Set(fts.pageIds || []);
         for (const id of img) { ids.add(id); }

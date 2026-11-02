@@ -246,6 +246,10 @@ export function parseSpec(rawSpec = {}) {
         ids: parseIds(rawSpec),
         options: {
             mode: (pick('mode') || 'hybrid').toLowerCase(),
+            // 'exact' treats the whole query text as one verbatim phrase (same
+            // as quoting it) and ranks on FTS alone; 'any' (default) is the
+            // word grammar where only quoted segments are verbatim.
+            match: pick('match') === 'exact' ? 'exact' : 'any',
             // Listing order (no-match path only): 'asc' (id/insertion order,
             // default) or 'desc' (newest ids first). With sortBy, order applies
             // to the timeline sort key instead of the id.

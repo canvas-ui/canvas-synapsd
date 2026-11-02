@@ -16,7 +16,7 @@ A photo of a nice kitchen may belong to `ctx:/travel/barcelona` and `ctx:/work/a
 - **[Context trees](#trees)** - virtual, filesystem-like trees over your data. A path is a logical AND of the layers along it: `ctx:/work/customer-foo/project-bar/task-baz` is "everything linked to all four", and shortening the path *widens* the result. One document can live in many trees; placement is cheap and reversible.
 - **[Bitmap-powered search](#the-query-spec)** - membership, tags, facets, mime types, device presence and schema identity are roaring bitmaps, so "files in `/work/customer-foo`, tagged `finance`, not in staging" is a set intersection. Counts, existence checks and live standing views come off the bitmaps without loading a single document.
 - **[Multi-timeline support](#timelines-and-intervals)** - any number of named time axes per document, from nanoseconds to gigayears on one grammar: "updated today", "due this week", "Roman Empire, 27 BCE–476 CE", open-ended "still alive" intervals, and [zeitgeist queries](#the-zeitgeist-of-a-birthday) (`grouped` by source, `layers` by scale) that answer "what does this date mean across wikipedia AND my life" in one call.
-- **[Vector search](#semantic-search-vectors)** - BM25 full-text and dense-vector kNN fused with RRF, running only on documents that already survived the structural filter. SynapsD stores and namespaces vectors but owns no model: a three-call contract fills the spaces, and without an embedder everything degrades to FTS.
+- **[Vector search](#semantic-search-vectors)** - ngram BM25 full-text (substring and `"verbatim phrase"` matching) and dense-vector kNN fused with RRF, running only on documents that already survived the structural filter. SynapsD stores and namespaces vectors but owns no model: a three-call contract fills the spaces, and without an embedder everything degrades to FTS.
 - **[Datasets](#datasets)** - named ingest partitions (`data/dataset/wikipedia`, `data/dataset/personal`) you toggle in and out of *every* query like lenses, and drop wholesale without touching your own documents.
 - **[Typed edges](#relations-and-edges)** - a directed document graph (`mentions`, `replies-to`, `authored-by`, …) that composes into the same pipeline: "everything mentioning Alice, in this context, tagged important" is a one-hop scan ANDed into the candidate bitmap.
 - **[Spatial index](#spatial-index-s2)** - "photos in this map viewport", "everything within 500 m of me" as a single range query over S2 cells.
@@ -601,6 +601,7 @@ const page = await db.query('quarterly invoice', {
 
     // ---- HOW: ranking (ranked queries only) -------------------------------
     mode: 'hybrid',        // 'hybrid' (default) | 'fts' | 'vector'
+    match: 'any',          // 'any' (default; "quoted" segments are verbatim) | 'exact' (whole text verbatim)
     minDistance: 0,        // cosine floor for the dense leg (0 = identical)
     maxDistance: 0.9,      // cosine ceiling (2 = opposite); omit for no ceiling
     debug: false,          // attach result.debug.imageDistances for calibration
@@ -614,7 +615,7 @@ const page = await db.query('quarterly invoice', {
 });
 ```
 
-Any of the read options (`mode`, `limit`, `offset`, `page`, `order`, `sortBy`, `parse`, `groupBy`, `idsOnly`, `countOnly`, `minDistance`, `maxDistance`, `debug`, and `rel`) may also be nested under an `options: { ... }` key. Top-level wins when both are present.
+Any of the read options (`mode`, `match`, `limit`, `offset`, `page`, `order`, `sortBy`, `parse`, `groupBy`, `idsOnly`, `countOnly`, `minDistance`, `maxDistance`, `debug`, and `rel`) may also be nested under an `options: { ... }` key. Top-level wins when both are present.
 
 ### Sigil algebra
 
@@ -640,6 +641,7 @@ In the object form of `features`, a `!`-prefixed entry inside `allOf`/`anyOf` is
 | `filters` | `['t:crud:updated:thisWeek', '+geo:bbox:...', '!t:crud:created:today']` (see filter grammar) |
 | `rel` | `{ p, of, dir?, op? }` or an array of them. See **Relations and edges** |
 | `mode` | `hybrid` (default), `fts`, or `vector`. Ranked queries only |
+| `match` | `any` (default) or `exact`. See **Search text grammar** |
 | `minDistance` / `maxDistance` | Cosine-distance window for the dense leg of `vector`/`hybrid`. Drops kNN neighbours outside `[min, max]` before fusion (`0` = identical, `2` = opposite) |
 | `limit` | Max documents (`list`: 100, `query`: 50; `0` = all matches) |
 | `offset` / `page` | Pagination. `page` is 1-based and derived from `limit` |
@@ -649,6 +651,16 @@ In the object form of `features`, a `!`-prefixed entry inside `allOf`/`anyOf` is
 | `countOnly` | Return an empty page and `totalCount`; structural reads use bitmap cardinality without enumerating IDs or loading rows |
 | `parse` | Set `false` to return raw stored data instead of document instances |
 | `debug` | Attaches `result.debug.imageDistances` (unfloored image-kNN cosine distances, best-first) so you can calibrate the `imageMaxDistance` relevance floor from real numbers |
+
+### Search text grammar
+
+The query text is parsed the same way for every caller:
+
+- Bare words match in any order, as substrings (ngram index): `augmentd invoice`. All words are required; when nothing matches every word, the search widens to any word so a typo in one word never blanks it. Words shorter than a gram (3 chars) are ignored.
+- A double-quoted segment is a **phrase**: a verbatim, case- and accent-insensitive substring of the indexed text. `"Augmentd s.r.o." invoice` requires the phrase and the word. An unclosed quote runs to the end of the text.
+- `match: 'exact'` treats the whole text as one phrase, quotes or not.
+
+A query with a phrase ranks on FTS alone (`mode` is ignored): verbatim text is a lexical question, and dense or image neighbours would only dilute it. Phrases need no positional index — ngrams span spaces and punctuation, so requiring every gram of the phrase is already a substring match; hits are then verified against the row text in ranked order. The indexed text of a document is its FTS fields joined by newlines, with object fields JSON-serialized, so a phrase cannot cross a field boundary.
 
 ### Filter grammar
 
@@ -1108,6 +1120,8 @@ See **[Agentic search that refines as it thinks](#agentic-search-that-refines-as
 ## Semantic search (vectors)
 
 `query()` defaults to `mode: 'hybrid'`: dense-vector kNN fused with BM25 via RRF. The candidate bitmap still scopes retrieval first, and ranking runs only on survivors. `vector` and `hybrid` degrade to `fts` when the dense stack is unavailable, and `list()` (`match = null`) never embeds.
+
+The lexical leg is an ngram (3–4 char) BM25 index, so bare words match as substrings and across concatenated or camelCase tokens (`ireland` finds `JobsIreland.ie`). Double-quoted text is a verbatim phrase and `match: 'exact'` makes the whole query one; either ranks on FTS alone. The full rules are in **Search text grammar**.
 
 ### SynapsD stores vectors, it does not produce them
 

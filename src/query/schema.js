@@ -51,6 +51,7 @@ export const queryOptionsSchema = {
     type: 'object', additionalProperties: false,
     properties: {
         mode: { enum: ['hybrid', 'fts', 'vector'] },
+        match: { enum: ['any', 'exact'], description: "'exact' treats the whole query text as one verbatim phrase (case/accent-insensitive substring) and ranks on FTS alone. Default 'any': bare words match in any order (all words required, widening to any word when nothing matches); double-quoted segments are verbatim phrases." },
         limit: { type: 'integer', minimum: 0, description: 'Page size; 0 explicitly requests all matches.' },
         offset: { type: 'integer', minimum: 0 },
         page: { type: 'integer', minimum: 1, description: 'One-based page; offset takes precedence.' },
