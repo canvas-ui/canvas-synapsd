@@ -170,16 +170,23 @@ export default class QueryEngine {
         return result;
     }
 
-    async query(match = null, spec = {}) {
+    async #scopedCandidates(parsed, scope) {
+        const { bitmap } = parsed ? await this.#candidates.resolveParsed(parsed) : { bitmap: null };
+        if (!scope) { return bitmap; }
+        const { bitmap: allowed } = await this.#candidates.resolveParsed(parseSpec(scope), { includeAllDatasets: true });
+        return allowed === null ? bitmap : bitmap === null ? allowed : RoaringBitmap32.and(bitmap, allowed);
+    }
+
+    async query(match = null, spec = {}, { scope } = {}) {
         const parsed = parseSpec(spec);
-        const { bitmap } = await this.#candidates.resolveParsed(parsed);
+        const bitmap = await this.#scopedCandidates(parsed, scope);
         return await this.rank(bitmap, match, parsed.options);
     }
 
-    async list(spec = {}) {
+    async list(spec = {}, { scope } = {}) {
         const parsed = parseSpec(spec);
         try {
-            const { bitmap } = await this.#candidates.resolveParsed(parsed);
+            const bitmap = await this.#scopedCandidates(parsed, scope);
             return await this.rank(bitmap, null, parsed.options);
         } catch (error) {
             debug(`Error in list: ${error.message}`);
@@ -191,7 +198,7 @@ export default class QueryEngine {
         }
     }
 
-    async search(spec = {}) {
+    async search(spec = {}, options = {}) {
         if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
             throw new Error('search() expects a query spec object');
         }
@@ -202,7 +209,7 @@ export default class QueryEngine {
         if (typeof match !== 'string' && (match === null || typeof match !== 'object' || Array.isArray(match))) {
             throw new ArgumentError('Query must be a string or a { text?, vectors? } descriptor', 'query');
         }
-        return await this.query(match, spec);
+        return await this.query(match, spec, options);
     }
 
     /**
@@ -241,9 +248,7 @@ export default class QueryEngine {
         }
 
         // Structured scope → candidate ids pushed down into the Lance scan.
-        const scope = (spec && Object.keys(spec).length > 0)
-            ? (await this.#candidates.resolveParsed(parseSpec(spec))).bitmap
-            : null;
+        const scope = await this.#scopedCandidates(spec && Object.keys(spec).length ? parseSpec(spec) : null, options.scope);
         if (scope && scope.isEmpty) { return this.#emptyResult(); }
         const scopedIds = scope ? scope.toArray() : [];
 
@@ -308,7 +313,7 @@ export default class QueryEngine {
             .filter((q) => typeof q === 'string' && q.trim().length > 0);
 
         // Structured base scope (null = unconstrained / all docs).
-        const base = baseSpec ? (await this.#candidates.resolveParsed(parseSpec(baseSpec))).bitmap : null;
+        const base = await this.#scopedCandidates(baseSpec ? parseSpec(baseSpec) : null, options.scope);
 
         // No text → plain structured listing (slice path, no Lance needed).
         if (texts.length === 0) {
@@ -365,7 +370,7 @@ export default class QueryEngine {
         // Ranked lists are capped: fusion only needs the head, membership (counts,
         // set ops) uses the full bitmaps.
         const FUSE_DEPTH = 500;
-        const shared = baseSpec ? (await this.#candidates.resolveParsed(parseSpec(baseSpec))).bitmap : null;
+        const shared = await this.#scopedCandidates(baseSpec ? parseSpec(baseSpec) : null, options.scope);
 
         const evaluated = await Promise.all(list.map(async (line) => {
             const texts = (Array.isArray(line.queries) ? line.queries : [])

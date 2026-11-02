@@ -411,6 +411,15 @@ list(spec)         = query(null, spec)
 
 `list`, `query`, `search`, `searchRefined`, `searchCompound`, and `QuerySession` are all entry points onto that same seam, which is why any filter documented below works in all of them.
 
+Server-side callers can supply an independent mandatory candidate constraint:
+`db.list(spec, { scope })`, `db.search(spec, { scope })`, and `scope` in the
+options of `searchRefined`, `searchCompound`, `searchByVector` and `listBitmaps`.
+The scope intersects candidate bitmaps before ranking, pagination and counts;
+it does not add another OR path or impose a second dataset selection. The
+provider advertises `queryScopeVersion === 1`. Transports derive this scope from
+the authenticated binding, never from caller-controlled query fields. Ordinary
+callers continue using the complete `spec` contract.
+
 `collectionKeys` are the actual bitmap keys consulted, so a live session can intersect them against `membership.changed` for precise invalidation. `coarse` marks a dependency with no stable key (temporal, spatial, or `rel`), which consumers must re-resolve rather than key-intersect.
 
 ## Core concepts

@@ -47,7 +47,7 @@ export default class CandidateResolver {
         return await this.resolveParsed(parseSpec(rawSpec));
     }
 
-    async resolveParsed(parsed) {
+    async resolveParsed(parsed, { includeAllDatasets = false } = {}) {
         const { paths, features, filters, rel = [], ids = null } = parsed;
         const keys = [];
         // collectionKeys: the actual bitmap keys (collection vocabulary) consulted,
@@ -179,10 +179,10 @@ export default class CandidateResolver {
         // 'default' is virtual — candidate \ OR(all named dataset bitmaps). Until
         // the first dataset exists this is a no-op, preserving the bitmap:null
         // fast path for unconstrained listings.
-        const allDatasetKeys = await this.#bitmapIndex.listBitmaps(DATASET_PREFIX);
+        const allDatasetKeys = includeAllDatasets ? [] : await this.#bitmapIndex.listBitmaps(DATASET_PREFIX);
         const defaultSelected = selectedDatasets.has(`${DATASET_PREFIX}default`);
         const namedSelected = [...selectedDatasets].filter((key) => key !== `${DATASET_PREFIX}default` && allDatasetKeys.includes(key));
-        if (allDatasetKeys.length > 0 && !(defaultSelected && namedSelected.length === allDatasetKeys.length)) {
+        if (!includeAllDatasets && allDatasetKeys.length > 0 && !(defaultSelected && namedSelected.length === allDatasetKeys.length)) {
             collectionKeys.push(...allDatasetKeys);
             const base = bitmap || await this.allDocumentsBitmap();
             const selectedUnion = namedSelected.length > 0 ? await this.#bitmapIndex.OR(namedSelected) : null;

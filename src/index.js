@@ -5,6 +5,7 @@ import EventEmitter from 'eventemitter2';
 import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
+import { parseSpec } from './utils/spec.js';
 import debugInstance from 'debug';
 const debug = debugInstance('canvas:synapsd');
 const require = createRequire(import.meta.url);
@@ -379,6 +380,7 @@ class SynapsD extends EventEmitter {
     get timeline() { return this.#timelineIndex; }
     get geo() { return this.#geoIndex; }
     get synapses() { return this.#synapses; }
+    get queryScopeVersion() { return 1; }
     get edges() { return this.#edges; }
     /** The `internal` dataset (schema version marker, id counter). Exposed for
      *  migration tooling and tests — not part of the document API. */
@@ -1046,16 +1048,19 @@ class SynapsD extends EventEmitter {
      */
 
     /** Plain-data bitmap API for hosts. Native Roaring objects stay here. */
-    async listBitmaps(prefix = '', { includeData = false, includeInternal = false } = {}) {
+    async listBitmaps(prefix = '', { includeData = false, includeInternal = false, scope } = {}) {
         const keys = await this.bitmapIndex.listBitmaps(prefix, { includeInternal });
-        return (await Promise.all(keys.map(key => this.getBitmap(key, { includeData })))).filter(Boolean);
+        const scopeBitmap = scope ? (await this.#candidates.resolveParsed(parseSpec(scope), { includeAllDatasets: true })).bitmap : null;
+        const rows = await Promise.all(keys.map(key => this.getBitmap(key, { includeData, scopeBitmap })));
+        return rows.filter(row => row && (!scope || row.size > 0));
     }
 
-    async getBitmap(key, { includeData = false } = {}) {
+    async getBitmap(key, { includeData = false, scopeBitmap = null } = {}) {
         if (!key || typeof key !== 'string') { throw new Error('Bitmap key is required'); }
-        const bitmap = await this.bitmapIndex.getBitmap(key, false);
-        if (!bitmap) { return null; }
-        return { key: bitmap.key, size: bitmap.size, isEmpty: bitmap.isEmpty,
+        const storedBitmap = await this.bitmapIndex.getBitmap(key, false);
+        if (!storedBitmap) { return null; }
+        const bitmap = scopeBitmap ? RoaringBitmap32.and(storedBitmap, scopeBitmap) : storedBitmap;
+        return { key: storedBitmap.key, size: bitmap.size, isEmpty: bitmap.isEmpty,
             min: bitmap.isEmpty ? null : bitmap.minimum(), max: bitmap.isEmpty ? null : bitmap.maximum(),
             ...(includeData ? { ids: bitmap.toArray() } : {}) };
     }
@@ -1367,6 +1372,11 @@ class SynapsD extends EventEmitter {
         else { tree = this.getDefaultContextTree(); }
         if (!tree) { return null; }
 
+        // A context path is the AND of its layers, which already covers
+        // everything filed deeper; a directory path needs its subtree union.
+        if (tree.type === 'context') {
+            return tree.pathExists(path) ? await tree.memberIds(path) : [];
+        }
         const bitmap = await tree.findRecursive(path);
         return bitmap ? bitmap.toArray() : [];
     }
@@ -1477,14 +1487,14 @@ class SynapsD extends EventEmitter {
         return this.#searchQueue.read(() => this.#queries.query(match, spec));
     }
 
-    async list(spec = {}) {
-        return this.#queries.list(spec);
+    async list(spec = {}, options = {}) {
+        return this.#queries.list(spec, options);
     }
 
-    async search(spec = {}) {
+    async search(spec = {}, options = {}) {
         // Candidate scoping reads the FTS/vector presence bitmaps, so queued
         // index writes must land first (read-your-writes, capped wait).
-        return this.#searchQueue.read(() => this.#queries.search(spec));
+        return this.#searchQueue.read(() => this.#queries.search(spec, options));
     }
 
     /**
