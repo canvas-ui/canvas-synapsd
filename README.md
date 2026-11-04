@@ -1329,6 +1329,7 @@ const recentDocs = await db.list({
 - **`content`**: when the content itself came into existence (EXIF capture date for photos).
 - **`tasks`**: due dates (point-mode, derived from `data.dueDate` by the Task schema). `t:tasks:today` means "due today"; `sortBy: 'tasks'` orders by due date.
 - **`events`**: `Event` documents (`calendar` / `alert` / `activity`), derived from `data.start` / `data.end`. One timeline for all three leaves; the schema id discriminates (`data/schema/event/calendar`), because the founding query is "show me everything happening under /work/customer-foo".
+- **`<calendar name>`**: an `Event` with `data.calendar` (the user-chosen name of a synced or local calendar — "Work", "Family") derives the same entries onto a timeline of that name as well, so each calendar is its own axis (`t:Work:thisWeek`, per-calendar density) while `events` keeps the union. The name is also a facet, `data/calendar/<name>` (lower-cased), which is how a client lists calendars. Names cannot contain `:` or shadow `events`, `tasks`, `content`.
 
 #### Event recurrence: expansion, with the envelope as fallback
 

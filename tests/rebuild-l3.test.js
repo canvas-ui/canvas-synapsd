@@ -124,6 +124,8 @@ describe('rebuildL3', () => {
             // data/status/* — a per-schema facet namespace, which the drop list has
             // to compute from the registry rather than hardcode.
             task: await db.put({ schema: TASK, data: { title: 'ship it', status: 'pending' } }),
+            // data/calendar/* — the Event facet (a named calendar).
+            event: await db.put({ schema: 'data/schema/event/calendar', data: { title: 'standup', calendar: 'Work', start: '2026-01-06T09:00:00.000Z' } }),
             // data/platform/* — the same, from an ARRAY field, so the sweep covers
             // a namespace where one row contributes several keys.
             app: await db.put({

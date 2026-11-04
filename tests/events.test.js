@@ -116,6 +116,75 @@ describe('event schema + events timeline', () => {
     // primary sortable interval, the rest live in the membership plane); anything
     // else keeps the envelope superset and the client expands the RRULE — the
     // CalDAV contract.
+    describe('named calendars', () => {
+        test('data.calendar derives a second timeline of that name plus a facet', async () => {
+            const id = await db.put({
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: {
+                    title: 'Standup', calendar: 'Work',
+                    start: '2026-01-06T09:00:00.000Z', end: '2026-01-06T09:15:00.000Z',
+                    recurrence: 'FREQ=WEEKLY;COUNT=3',
+                },
+            });
+            const doc = await db.get(id);
+            const events = doc.timelines.filter((t) => t.timeline === 'events');
+            const work = doc.timelines.filter((t) => t.timeline === 'Work');
+            expect(events.length).toBe(3);
+            expect(work.map(({ timeline: _timeline, ...rest }) => rest)).toEqual(events.map(({ timeline: _timeline, ...rest }) => rest));
+
+            const onWork = await db.list({ features: [EVENT_SCHEMA], filters: ['t:Work:2026-01-13'], limit: 0 });
+            expect(onWork.map((d) => d.id)).toEqual([id]);
+            const byFacet = await db.list({ features: ['data/calendar/work'], limit: 0 });
+            expect(byFacet.map((d) => d.id)).toEqual([id]);
+            expect((await db.listBitmaps('data/calendar/')).map((row) => row.key)).toEqual(['data/calendar/work']);
+        });
+
+        test('moving an event to another calendar moves its timeline and facet', async () => {
+            const id = await db.put({
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Dentist', calendar: 'Family', start: '2026-03-02T10:00:00.000Z' },
+            });
+            await db.put({
+                id,
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Dentist', calendar: 'Health', start: '2026-03-02T10:00:00.000Z' },
+            });
+            const doc = await db.get(id);
+            expect(doc.timelines.map((t) => t.timeline).sort()).toEqual(['Health', 'events']);
+            expect((await db.list({ features: [EVENT_SCHEMA], filters: ['t:Family:2026-03-02'], limit: 0 })).length).toBe(0);
+            expect((await db.list({ features: [EVENT_SCHEMA], filters: ['t:Health:2026-03-02'], limit: 0 })).map((d) => d.id)).toEqual([id]);
+            expect((await db.list({ features: ['data/calendar/family'], limit: 0 })).length).toBe(0);
+        });
+
+        test('a batch update (putMany with id) re-derives timelines too', async () => {
+            const [id] = await db.putMany([{
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Dentist', calendar: 'Family', start: '2026-03-02T10:00:00.000Z' },
+            }]);
+            await db.putMany([{
+                id,
+                schema: `${EVENT_SCHEMA}/calendar`,
+                data: { title: 'Dentist', calendar: 'Health', start: '2026-03-09T10:00:00.000Z' },
+            }]);
+            const doc = await db.get(id);
+            expect(doc.timelines.map((t) => `${t.timeline}:${t.start}`).sort()).toEqual([
+                'Health:2026-03-09T10:00:00.000Z', 'events:2026-03-09T10:00:00.000Z',
+            ]);
+            expect((await db.list({ features: [EVENT_SCHEMA], filters: ['t:Family:2026-03-01..2026-03-31'], limit: 0 })).length).toBe(0);
+            expect((await db.list({ features: [EVENT_SCHEMA], filters: ['t:events:2026-03-02'], limit: 0 })).length).toBe(0);
+            expect((await db.list({ features: [EVENT_SCHEMA], filters: ['t:Health:2026-03-09'], limit: 0 })).map((d) => d.id)).toEqual([id]);
+        });
+
+        test('built-in timeline names and colons are refused as calendar names', async () => {
+            for (const calendar of ['events', 'tasks', 'crud:created']) {
+                await expect(db.put({
+                    schema: `${EVENT_SCHEMA}/calendar`,
+                    data: { title: 'Bad', calendar, start: '2026-01-06T09:00:00.000Z' },
+                })).rejects.toThrow();
+            }
+        });
+    });
+
     describe('recurrence', () => {
         const RULE_UNTIL = 'FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T235959Z';
 

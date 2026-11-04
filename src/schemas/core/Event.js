@@ -15,6 +15,19 @@ export const EVENT_TYPES = ['calendar', 'alert', 'activity'];
 // entry on an interval timeline is already stored as an instant.
 const EVENTS_TIMELINE = 'events';
 
+// A calendar entry may also belong to a named calendar (`data.calendar`: the
+// user-chosen name of a synced or local calendar — "Work", "Family"). The same
+// occurrence entries are then derived onto a timeline OF THAT NAME as well, so
+// each calendar is its own axis (toolbox density rail, t:Work:thisWeek) while
+// `events` keeps answering "everything happening". The name doubles as a
+// facet (`data/calendar/<name>`), which is how a client enumerates calendars
+// without scanning documents. ':' is excluded because the filter grammar
+// splits `t:<name>:<spec>` on it.
+const RESERVED_CALENDAR_NAMES = new Set(['events', 'tasks', 'content']);
+const calendarName = z.string().trim().min(1).max(120)
+    .refine((value) => !value.includes(':'), 'calendar name cannot contain ":"')
+    .refine((value) => !RESERVED_CALENDAR_NAMES.has(value.toLowerCase()), 'calendar name is a built-in timeline');
+
 function eventLeaf(schema) {
     if (typeof schema !== 'string' || !schema.startsWith(`${EVENT_SCHEMA}/`)) { return null; }
     const leaf = schema.slice(EVENT_SCHEMA.length + 1);
@@ -43,6 +56,8 @@ const documentDataSchema = Document.extendDataSchema(
         // edits the series, it does not create a new event (CalDAV keeps the
         // same UID).
         recurrence: z.string().regex(/FREQ=/i, 'recurrence must be an RFC 5545 RRULE value containing FREQ=').optional(),
+
+        calendar: calendarName.optional(),
     }).passthrough(),
 );
 
@@ -53,6 +68,9 @@ export default class Event extends Document {
 
     // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).
+    // `data/calendar/<name>` membership — see calendarName above.
+    static facetFields = ['data.calendar'];
+
     static indexOptions = {
         ftsSearchFields: ['data.title', 'data.description', 'data.location'],
         vectorEmbeddingFields: ['data.title', 'data.description'],
@@ -69,6 +87,20 @@ export default class Event extends Document {
     }
 
     get type() { return eventLeaf(this.schema); }
+
+    // Edits re-derive the timeline entries from the new data, whichever write
+    // path delivered them (a batch update patches the stored instance in
+    // place and never runs the constructor). The previous calendar's entries
+    // go too, or moving an event between calendars would leave it on both.
+    update(changes) {
+        if (!changes) { return this; }
+        const next = { ...changes };
+        next.timelines = Event.#deriveTimelines(
+            { data: next.data || this.data, timelines: next.timelines || this.timelines },
+            this.data?.calendar,
+        );
+        return super.update(next);
+    }
 
     // start/end → 'events' timeline entries, derived (doc declares, index derives).
     // Caller-provided non-events entries are preserved; the events entries are
@@ -106,25 +138,26 @@ export default class Event extends Document {
     // Expansion is bounded by the rule and the cap, never by "now": deriving
     // from wall-clock time would make index content time-dependent and rebuilds
     // drift. Exact occurrence rendering stays the client's job either way.
-    static #deriveTimelines(options) {
-        const prior = (Array.isArray(options.timelines) ? options.timelines : [])
-            .filter((t) => (t?.timeline || t?.name) !== EVENTS_TIMELINE);
-
+    static #deriveTimelines(options, previousCalendar = null) {
         const data = options.data ?? {};
+        const calendar = typeof data.calendar === 'string' && data.calendar.trim() ? data.calendar.trim() : null;
+        // The calendar timeline is derived exactly like `events`: anything a
+        // caller hands us under either name is regenerated, never kept.
+        const derived = new Set([EVENTS_TIMELINE, calendar, previousCalendar].filter(Boolean));
+        const prior = (Array.isArray(options.timelines) ? options.timelines : [])
+            .filter((t) => !derived.has(t?.timeline || t?.name));
+
         const start = data.start;
         if (typeof start === 'string' && start.length > 0) {
             const recurrence = data.recurrence;
+            let entries;
 
             if (typeof recurrence === 'string' && recurrence.length > 0) {
-                const occurrences = Event.#expandRecurrence(recurrence, data);
-                if (occurrences) {
-                    prior.push(...occurrences);
-                } else {
+                entries = Event.#expandRecurrence(recurrence, data)
                     // Envelope fallback. `data.end` still describes ONE
                     // occurrence's duration, so it must not become the envelope
                     // end — the envelope comes from the rule.
-                    prior.push({ timeline: EVENTS_TIMELINE, start, end: Event.#recurrenceEnvelopeEnd(recurrence) });
-                }
+                    ?? [{ timeline: EVENTS_TIMELINE, start, end: Event.#recurrenceEnvelopeEnd(recurrence) }];
             } else {
                 const entry = { timeline: EVENTS_TIMELINE, start };
                 if ('end' in data) {
@@ -134,8 +167,11 @@ export default class Event extends Document {
                     // `end: undefined`.
                     entry.end = data.end;
                 }
-                prior.push(entry);
+                entries = [entry];
             }
+
+            prior.push(...entries);
+            if (calendar) { prior.push(...entries.map((entry) => ({ ...entry, timeline: calendar }))); }
         }
 
         return prior;
