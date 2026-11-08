@@ -73,8 +73,8 @@
     "node": ">=22.0.0"
   },
   "allowScripts": {
-    "roaring@2.7.0": true,
-    "lmdb@3.5.7": true,
-    "msgpackr-extract@3.0.4": true
+    "roaring": true,
+    "lmdb": true,
+    "msgpackr-extract": true
   }
 }
