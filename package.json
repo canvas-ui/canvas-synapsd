@@ -57,6 +57,7 @@
     "@types/node": "^24.19.2",
     "eslint": "^9.39.5",
     "eslint-config-prettier": "^10.1.8",
+    "globals": "^14.0.0",
     "jest": "^30.5.2",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.71.2"
@@ -70,5 +71,10 @@
   "license": "AGPL-3.0-or-later",
   "engines": {
     "node": ">=22.0.0"
+  },
+  "allowScripts": {
+    "roaring@2.7.0": true,
+    "lmdb@3.5.7": true,
+    "msgpackr-extract@3.0.4": true
   }
 }
