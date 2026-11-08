@@ -6,7 +6,7 @@ name: housekeeping
 # Add new workflow names below for immediate cleanup; the daily sweep covers all.
 on:
   workflow_run:
-    workflows: ["CodeQL", "cla"]
+    workflows: ["CodeQL", "cla", "release"]
     types: [completed]
   release:
     types: [published]

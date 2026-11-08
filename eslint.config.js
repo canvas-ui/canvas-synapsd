@@ -10,6 +10,7 @@ const IGNORE_PATTERNS = [
     'node_modules/**',
     'coverage/**',
     'models/**',
+    '_SCRATCH_/**',
 ];
 
 // Style rules are WARN, correctness rules are ERROR (via js.configs.recommended).
@@ -35,7 +36,7 @@ export default [
     { ignores: IGNORE_PATTERNS },
     js.configs.recommended,
     {
-        files: ['**/*.js'],
+        files: ['**/*.js', '**/*.mjs'],
         languageOptions: {
             ecmaVersion: 'latest',
             sourceType: 'module',

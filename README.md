@@ -54,8 +54,12 @@ to another device for protection against loss of the disk itself.
 
 ## Quick start
 
+```sh
+npm install @augmentd-labs/canvas-synapsd
+```
+
 ```js
-import SynapsD from '@canvas/synapsd';
+import SynapsD from '@augmentd-labs/canvas-synapsd';
 
 const db = new SynapsD({ path: '/path/to/db' });
 await db.start();
@@ -221,7 +225,7 @@ const mixed = await db.list({
 An agent (or a human, or both) opens a session, then adds, patches, and drops cues while the candidate set stays live. Cheap to probe (`count()` / `ids()` load no documents). Cheap to refine (each cue is resolved once and cached). Hand the session to another channel, or serialize it across a restart.
 
 ```js
-import QuerySession from '@canvas/synapsd/src/session/QuerySession.js';
+import QuerySession from '@augmentd-labs/canvas-synapsd/src/session/QuerySession.js';
 
 const hunt = await db.openSession([], { mode: 'frozen', emit: 'delta' });
 
@@ -978,8 +982,8 @@ Ids are hierarchical `data/schema/*`. The old flat `data/abstraction/*` namespac
 ### Registering your own
 
 ```js
-import schemaRegistry from '@canvas/synapsd/src/schemas/SchemaRegistry.js';
-import Document from '@canvas/synapsd/src/schemas/Document.js';
+import schemaRegistry from '@augmentd-labs/canvas-synapsd/src/schemas/SchemaRegistry.js';
+import Document from '@augmentd-labs/canvas-synapsd/src/schemas/Document.js';
 
 class Widget extends Document {
     static indexOptions = {

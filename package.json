@@ -1,9 +1,41 @@
 {
-  "name": "canvas-synapsd",
+  "name": "@augmentd-labs/canvas-synapsd",
   "version": "3.25.2",
-  "description": "Canvas SynapsD - Context-based document indexing engine",
+  "description": "SynapsD: context-tree document store on LMDB and roaring bitmaps, with timelines, spatial and vector indexes",
   "type": "module",
   "main": "src/index.js",
+  "files": [
+    "src",
+    "models",
+    "LICENSE",
+    "NOTICE",
+    "COMMERCIAL.md",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/canvas-ui/canvas-synapsd.git"
+  },
+  "homepage": "https://github.com/canvas-ui/canvas-synapsd#readme",
+  "bugs": {
+    "url": "https://github.com/canvas-ui/canvas-synapsd/issues"
+  },
+  "keywords": [
+    "lmdb",
+    "roaring-bitmap",
+    "document-store",
+    "context",
+    "timeline",
+    "bsi",
+    "s2",
+    "vector-search",
+    "lancedb",
+    "canvas"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "dependencies": {
     "@lancedb/lancedb": "^0.40.0",
     "apache-arrow": "^18.1.0",
@@ -38,6 +70,5 @@
   "license": "AGPL-3.0-or-later",
   "engines": {
     "node": ">=22.0.0"
-  },
-  "private": true
+  }
 }

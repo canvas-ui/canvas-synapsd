@@ -1,0 +1,63 @@
+name: release
+
+# On every push to main: if npm does not have this version yet, publish
+# @augmentd-labs/canvas-synapsd and create the v<version> tag + GitHub Release.
+# An unbumped push publishes nothing. Release = bump package.json + push.
+#
+# Auth is npm trusted publishing: the package on npmjs.com names this repo
+# and THIS workflow file; GitHub OIDC replaces any token and provenance is
+# attached. Renaming this file breaks publishing until npm is updated too.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # tag + GitHub Release
+  id-token: write   # npm trusted publishing
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm >= 11.5.1; node 22 ships npm 10.
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - id: npm
+        shell: bash
+        run: |
+          set -eo pipefail
+          NAME=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          if [ "$(npm view "$NAME@$VER" version 2>/dev/null || true)" = "$VER" ]; then
+            echo "$NAME@$VER already on npm, skipping"
+            echo "published=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p artifacts
+          npm pack --pack-destination artifacts
+          npm publish --access public --provenance
+          echo "published=$VER" >> "$GITHUB_OUTPUT"
+      - name: Tag + GitHub Release
+        if: steps.npm.outputs.published != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.npm.outputs.published }}
+        run: |
+          cd artifacts
+          sha256sum *.tgz > SHA256SUMS
+          gh release create "v$VER" --latest --target "$GITHUB_SHA" --title "canvas-synapsd v$VER" \
+            --notes "npm: \`@augmentd-labs/canvas-synapsd@$VER\`." \
+            ./*.tgz SHA256SUMS
