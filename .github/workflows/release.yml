@@ -1,8 +1,10 @@
 name: release
 
-# On every push to main: if npm does not have this version yet, publish
-# @augmentd-labs/canvas-synapsd and create the v<version> tag + GitHub Release.
-# An unbumped push publishes nothing. Release = bump package.json + push.
+# Every push to main runs lint + tests. Publishing @augmentd-labs/canvas-synapsd
+# (plus the v<version> tag and GitHub Release) runs only on a manual dispatch,
+# and only if npm does not have this version yet: the Canvas stack installs
+# synapsd from git for now, so npm is opt-in. Switch the `if:` on the publish
+# steps to always-on once trusted publishing is configured on npmjs.com.
 #
 # Auth is npm trusted publishing: the package on npmjs.com names this repo
 # and THIS workflow file; GitHub OIDC replaces any token and provenance is
@@ -32,10 +34,12 @@ jobs:
           registry-url: https://registry.npmjs.org
       # Trusted publishing needs npm >= 11.5.1; node 22 ships npm 10.
       - run: npm install -g npm@latest
-      - run: npm ci
+      # package-lock.json is not tracked (.gitignore), so no `npm ci`.
+      - run: npm install --no-audit --no-fund
       - run: npm run lint
       - run: npm test
       - id: npm
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           set -eo pipefail
