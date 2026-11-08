@@ -41,7 +41,7 @@ describe('slow write reports', () => {
         expect(linkReport.ahead.some((op) => /putMany/.test(op.method || ''))).toBe(true);
         // The caller outside synapsd (this test file) is named too.
         expect(linkReport.caller).toBeTruthy();
-    });
+    }, 30_000);   // 200 documents through Lance FTS: well over 5 s on a CI runner
 
     test('fast writes stay silent under the default threshold', async () => {
         const reports = [];

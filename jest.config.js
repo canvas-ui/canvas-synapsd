@@ -12,4 +12,8 @@ export default {
     // download / concurrent lance handles into a native (Napi) abort + core dump.
     // One worker is plenty for this suite size and keeps `npm test` stable.
     maxWorkers: 1,
+    // 82 suites in one long-lived worker accumulate heap (native handles +
+    // module registries) and OOM near the end on a 2-vCPU CI runner. Recycle
+    // the worker once its idle heap crosses the limit; suites are independent.
+    workerIdleMemoryLimit: '1GB',
 };
