@@ -13,8 +13,11 @@ const linkPayloadSchema = Document.extendDataSchema(
         uri: uriSchema,
         label: z.string().optional(),
         description: z.string().optional(),
+        // What the link points at, e.g. 'webapp' for a launchable web application.
+        // Optional; an untyped link is a plain bookmark.
         type: z.string().optional(),
         scheme: z.string().optional(),
+        // Free-form grouping, e.g. 'games', 'productivity'. Optional.
         category: z.string().optional(),
         tags: z.array(z.string()).optional(),
         properties: z.record(z.any()).optional(),
@@ -31,7 +34,18 @@ const defaultIndexOptions = {
 export default class Link extends Document {
 
     static exampleData = { uri: 'https://example.com/music', label: 'Music', tags: ['music'] };
-    static inputNotes = 'uri is required and includes a scheme. scheme is derived from uri; tags default to an empty array. Browser tabs use a different schema (url/title).';
+    static inputNotes = 'uri is required and includes a scheme. scheme is derived from uri; tags default to an empty array. type (e.g. "webapp") and category (e.g. "games") are optional facets. Browser tabs use a different schema (url/title).';
+
+    /**
+     * `data/type/<type>` and `data/category/<category>`, one key each when set.
+     *
+     * A web application is a link with `type: 'webapp'`, not an Application
+     * document: it has a URL rather than per-device installs. "Games linked into
+     * this context" is then `data/schema/link AND data/type/webapp AND
+     * data/category/games` intersected with the context, with no per-row scan.
+     * Both fields are optional; an unset or blank value ticks nothing.
+     */
+    static facetFields = ['data.type', 'data.category'];
 
     // Index configuration is SCHEMA-level, resolved by Document from this
     // static. Never stored on the row (see documentSchema).

@@ -137,6 +137,8 @@ describe('rebuildL3', () => {
                     installs: { laptop1: { status: 'available' } },
                 },
             }),
+            // data/type/* + data/category/* — the Link facets (web apps).
+            webapp: await db.put({ schema: 'data/schema/link', data: { uri: 'https://lichess.org', type: 'webapp', category: 'games' } }),
         };
     };
 
