@@ -55,7 +55,7 @@ to another device for protection against loss of the disk itself.
 ## Quick start
 
 ```sh
-npm install @augmentd-labs/canvas-synapsd
+npm install github:canvas-ui/canvas-synapsd   # not on npm yet; installs as @augmentd-labs/canvas-synapsd
 ```
 
 ```js
