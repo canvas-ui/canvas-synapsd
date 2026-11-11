@@ -10,6 +10,32 @@ Use-case:
 - Mount foreign workspace paths into Universe
   - Fan-out queries across multiple workspaces
 
+## Location-only updates
+
+A file rename or folder move changes a document's location URLs and nothing
+else, but it goes through `DocumentWriter.updateOne`, which treats every
+update as a content change. Counted over 600 such updates (a 300-file folder
+renamed twice through canvas-server):
+
+- 39,000 bitmap operations on the `crud:updated` timeline, about 64 per
+  document, because `updatedAt` moves and the bit-sliced index rewrites its
+  slices;
+- per document: a tick of `internal/docs/all`, the feature bitmaps re-applied
+  (`data/mime/*` ticked, `feature/has-comment` unticked), tree membership
+  re-ticked, the checksum index rewritten;
+- the FTS row re-queued and the document dropped from every
+  `internal/embed/seen/*` ledger, so a moved folder is re-embedded;
+- `DOCUMENT_UPDATED` emitted with `reason: 'content'`.
+
+- [ ] Give the writer a location-only path: store the row, mint the version,
+      emit an event with its own reason, and skip the timeline, feature,
+      checksum, FTS and embedding work when checksums, features and FTS text
+      are unchanged.
+- [ ] Decide whether a move bumps `updatedAt`. Leaving it alone removes the
+      timeline work and keeps a reorganised folder out of "recently updated".
+- [ ] Accept a batch of such updates in one transaction, so a folder move is
+      one commit.
+
 ## Trees and membership
 
 - [ ] Design context/directory subtree mountpoints:
