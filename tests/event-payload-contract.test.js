@@ -145,6 +145,9 @@ describe('document event payload contract', () => {
         expect(after.updatedAt).toBe(before.updatedAt);
         expect(after.version).toBe(before.version + 1);
         expect(after.locations.map((l) => l.url)).toEqual(['stored://home/Archive/Docs/a.txt']);
+        // The address is searchable text and no part of the embedding input.
+        expect(after.generateFtsData().join(' ')).toContain('Archive/Docs/a.txt');
+        expect(after.generateEmbeddingsData()).toBeNull();
     });
 
     test('a rename that also changes the filename is still a move', async () => {

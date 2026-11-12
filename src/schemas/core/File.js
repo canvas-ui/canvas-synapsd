@@ -47,7 +47,9 @@ export default class File extends Document {
         // file, a config, a source file) matched nothing you could remember
         // about what it SAYS. Additive: files without it index as before.
         ftsSearchFields: ['locationUrls', 'metadata.filename', 'metadata.text.content'],
-        vectorEmbeddingFields: ['locationUrls'],
+        // A file is embedded from its bytes by the host, never from its
+        // address, so a move changes nothing an embedding depends on.
+        vectorEmbeddingFields: [],
         // File relies on external checksumArray, so we don't modify checksumFields here
     };
 

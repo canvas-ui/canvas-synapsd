@@ -1,6 +1,6 @@
 {
   "name": "@augmentd-labs/canvas-synapsd",
-  "version": "3.28.0",
+  "version": "3.28.1",
   "description": "SynapsD: context-tree document store on LMDB and roaring bitmaps, with timelines, spatial and vector indexes",
   "type": "module",
   "main": "src/index.js",
