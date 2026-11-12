@@ -1518,7 +1518,11 @@ Every `document.*` event carries a `reason` from a closed set (exported as `DOCU
 
 ### Moves
 
-An update that changes a document's location URLs and nothing else (same bytes, schema, data, features, relations, timelines, comment and extracted text) is a move. It emits `document.moved` with the document plus `from` and `to`, the URLs it left and gained, and no `document.updated`. `updatedAt` stays as it was, the way a file moved on disk keeps its mtime; the row version still increases. The `crud:updated` timeline, the checksum index and the embedding ledgers are not touched. The FTS row is rewritten only when the text of the schema's `ftsSearchFields` changed, which for files includes the location URLs.
+An update that changes a document's location URLs and nothing else (same bytes, schema, data, features, relations, timelines, comment and extracted text) is a move. It emits `document.moved` with the document plus `from` and `to`, the URLs it left and gained, and no `document.updated`. `putMany` reports the moved rows of a batch once, as `document.moved.batch` with `{ ids, count, moves: [{ id, from, to }] }`, apart from the rows it reports as updated. `updatedAt` stays as it was, the way a file moved on disk keeps its mtime; the row version still increases. The `crud:updated` timeline, the checksum index and the embedding ledgers are not touched. The FTS row is rewritten only when the text of the schema's `ftsSearchFields` changed, which for files includes the location URLs.
+
+### Batches
+
+`db.batch(async () => { ... })` runs the public writes awaited inside it (`put`, `link`, `unlink`, `putMany`, ...) under one write lock and one LMDB transaction. Their events and search work are published after the commit, in order, and a callback that throws rolls every one of them back. A write started from an event listener runs afterwards as an operation of its own. After a commit each touched bitmap is loaded and saved once, however many documents of the batch are in it.
 
 ### Membership events
 

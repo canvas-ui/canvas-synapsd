@@ -10,21 +10,6 @@ Use-case:
 - Mount foreign workspace paths into Universe
   - Fan-out queries across multiple workspaces
 
-## Location-only updates
-
-An update that changes only a document's location URLs is a move: it emits
-`document.moved`, keeps `updatedAt`, skips the `crud:updated` timeline and the
-checksum index, rewrites the FTS row only when the schema's search fields
-changed, and leaves the embedding ledgers alone. Remaining per moved document:
-one tick of `internal/docs/all`, the feature and tree membership re-applied
-(two `tickMany`), `feature/has-comment` unticked.
-
-- [ ] Skip the membership work that cannot have changed on a move, keeping
-      the location-derived keys (`data/backend/*`, `device/id/*`) and the
-      directory placement.
-- [ ] Accept a batch of moves in one transaction, so a folder move is one
-      commit. `putMany` still treats every update as a content change.
-
 ## Trees and membership
 
 - [ ] Design context/directory subtree mountpoints:

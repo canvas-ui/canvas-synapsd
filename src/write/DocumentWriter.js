@@ -109,6 +109,8 @@ export default class DocumentWriter {
                 let existing = null;
                 let isUpdate = false;
                 let previous = null;
+                let moved = null;
+                let textChanged = null;
 
                 // Dedup priority: a supplied id is an UPDATE of exactly that
                 // document — the id is the stable key every bitmap/timeline/
@@ -130,7 +132,7 @@ export default class DocumentWriter {
                         isUpdate = true;
                         // Snapshot previous state BEFORE update() mutates in place,
                         // so stale checksums/timelines/device tags can be cleaned.
-                        ({ parsed, previous } = this.#prepareUpdate(existing, doc, { canonicalId: suppliedId }));
+                        ({ parsed, previous, moved, textChanged } = this.#prepareUpdate(existing, doc, { canonicalId: suppliedId, asserted: featureBitmaps }));
                     } else {
                         // Same rule as put(): a named id that is not here is an
                         // error, never a silent insert under a fresh id.
@@ -164,7 +166,7 @@ export default class DocumentWriter {
 
                 validateDocumentRelations(parsed);
 
-                const entry = { parsed, existing: !!existing, isUpdate, previous, docFeatures };
+                const entry = { parsed, existing: !!existing, isUpdate, previous, docFeatures, moved, textChanged };
                 prepared.push(entry);
                 inputs.push({ entry, reused: false });
                 if (!isUpdate) {
@@ -203,10 +205,16 @@ export default class DocumentWriter {
 
         // ── Phase 2: Batch write ─────────────────────────────────────────
 
-        const changes = prepared.map(({ parsed, isUpdate, previous, docFeatures }) => preparedChange({
-            after: parsed, before: previous, features: docFeatures, context: contextSpec,
-            directories: [directorySpec], operation: isUpdate ? 'update' : 'insert',
-        }));
+        // An update by id rewrites its FTS row when the schema's search fields
+        // produce different text (a moved file is found by its new path); a
+        // content-addressed write when its searchable content changed.
+        const changes = prepared.map(({ parsed, isUpdate, previous, docFeatures, textChanged }) => {
+            const change = preparedChange({
+                after: parsed, before: previous, features: docFeatures, context: contextSpec,
+                directories: [directorySpec], operation: isUpdate ? 'update' : 'insert',
+            });
+            return isUpdate ? { ...change, searchChanged: change.searchChanged || textChanged } : change;
+        });
         try {
             await this.#commitChanges(changes, { batchTick: true });
 
@@ -256,7 +264,9 @@ export default class DocumentWriter {
         // Split inserts from updates so consumers (ws bridge, UIs) can tell an
         // edit from a new document — an in-place update keeps the same id.
         const insertedIds = prepared.filter(p => !p.isUpdate).map(p => p.parsed.id);
-        const updatedIds = prepared.filter(p => p.isUpdate).map(p => p.parsed.id);
+        const updatedIds = prepared.filter(p => p.isUpdate && !p.moved).map(p => p.parsed.id);
+        // A row whose location URLs alone changed is a move, not an update.
+        const moves = prepared.filter(p => p.isUpdate && p.moved).map(p => ({ id: p.parsed.id, from: p.moved.from, to: p.moved.to }));
 
         if (insertedIds.length > 0) {
             // Singular event with `batch: true` kept for pre-batch consumers
@@ -294,6 +304,16 @@ export default class DocumentWriter {
                 context: contextSpec,
                 directory: directorySpec,
                 reason: 'content',
+                ...(normSpec.provenance || {}),
+            }));
+        }
+
+        if (moves.length > 0) {
+            this.#writes.emit(EVENTS.DOCUMENT_MOVED_BATCH, createEvent(EVENTS.DOCUMENT_MOVED_BATCH, {
+                ids: moves.map(move => move.id),
+                count: moves.length,
+                moves,
+                reason: 'moved',
                 ...(normSpec.provenance || {}),
             }));
         }
@@ -397,18 +417,10 @@ export default class DocumentWriter {
 
         const storedDocument = await this.#getById(docId);
         if (!storedDocument) { throw new Error(`Document with ID "${docId}" not found`); }
-        // Captured before the update mutates the stored row in place.
-        const dataBefore = storedDocument.data;
-        const searchTextBefore = searchText(storedDocument);
-        const { parsed: updatedDocument, previous } = this.#prepareUpdate(storedDocument, updateData, { parseSchema: true });
+        const { parsed: updatedDocument, previous, moved, dataChanged, textChanged } = this.#prepareUpdate(
+            storedDocument, updateData, { parseSchema: true, asserted: featureBitmaps });
         validateDocumentRelations(updatedDocument);
         updatedDocument.validate();
-        const dataChanged = dataBefore !== updatedDocument.data && JSON.stringify(dataBefore) !== JSON.stringify(updatedDocument.data);
-        // A rename or move of the file behind the document: only its location
-        // URLs changed. Like a file moved on disk it keeps its modification
-        // time, and it is announced as document.moved, not as an update.
-        const moved = dataChanged || featureBitmaps.length ? null : relocation(previous, updatedDocument);
-        if (moved && updateData?.updatedAt === undefined && previous.updatedAt) { updatedDocument.updatedAt = previous.updatedAt; }
 
         // Bitmaps follow the document's features — union the updated document's
         // own array with any caller-supplied keys.
@@ -434,7 +446,7 @@ export default class DocumentWriter {
 
             // FTS row: queued (write-behind), see SearchWriteQueue. Only the
             // schema's declared search fields decide whether it is rewritten.
-            if (searchText(updatedDocument) !== searchTextBefore) {
+            if (textChanged || change.searchChanged) {
                 this.#writes.afterCommit(() => this.#searchQueue.upsertText([parseInitializeDocument(updatedDocument)]));
             }
             // Content changed → the doc must be re-embedded. The external embedd
@@ -652,8 +664,20 @@ export default class DocumentWriter {
         return { parsed, existing, previous };
     }
 
-    #prepareUpdate(storedDocument, updateData, { parseSchema = false, canonicalId = null } = {}) {
+    /**
+     * Apply `updateData` to the stored row and say what kind of change it is.
+     * `moved` is `{ from, to }` when only the location URLs changed (a rename
+     * or move of the file behind the document): such a row keeps its
+     * `updatedAt`, like a file moved on disk, and is announced as
+     * document.moved. `textChanged` says whether the schema's declared search
+     * fields produce different text, which is what decides an FTS rewrite.
+     */
+    #prepareUpdate(storedDocument, updateData, { parseSchema = false, canonicalId = null, asserted = [] } = {}) {
         const previous = snapshotDocument(storedDocument);
+        // Captured before update() mutates the stored row in place.
+        const dataBefore = storedDocument.data;
+        const textBefore = searchText(storedDocument);
+        const keepsTimestamp = updateData === null || updateData?.updatedAt === undefined;
         if (updateData === null) { updateData = storedDocument; }
         else if (parseSchema && typeof updateData === 'object' && !isDocumentInstance(updateData) && updateData.schema) {
             updateData = parseInitializeDocument(updateData);
@@ -661,7 +685,10 @@ export default class DocumentWriter {
         const parsed = storedDocument.update(updateData);
         parsed.validateData();
         if (canonicalId !== null) { parsed.id = canonicalId; }
-        return { parsed, previous };
+        const dataChanged = dataBefore !== parsed.data && JSON.stringify(dataBefore) !== JSON.stringify(parsed.data);
+        const moved = dataChanged || asserted.length ? null : relocation(previous, parsed);
+        if (moved && keepsTimestamp && previous.updatedAt) { parsed.updatedAt = previous.updatedAt; }
+        return { parsed, previous, moved, dataChanged, textChanged: searchText(parsed) !== textBefore };
     }
 
 }

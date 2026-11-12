@@ -81,6 +81,9 @@ const EVENTS = Object.freeze({
     // `{ ids, batch: true }` for consumers that predate the batch names.
     DOCUMENT_INSERTED_BATCH: 'document.inserted.batch',
     DOCUMENT_UPDATED_BATCH: 'document.updated.batch',
+    // `moves` lists `{ id, from, to }` per document. There is no singular
+    // `batch: true` form: document.moved has no pre-batch consumers.
+    DOCUMENT_MOVED_BATCH: 'document.moved.batch',
     DOCUMENT_REMOVED_BATCH: 'document.removed.batch',
     DOCUMENT_DELETED_BATCH: 'document.deleted.batch',
     // Low-level bitmap-membership change, emitted post-commit with the exact

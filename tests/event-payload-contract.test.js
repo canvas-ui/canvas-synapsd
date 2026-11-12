@@ -184,6 +184,36 @@ describe('document event payload contract', () => {
         expect(only('document.updated').filter((e) => e.reason === 'content').length).toBe(1);
     });
 
+    test('putMany() splits moved rows from updated rows', async () => {
+        const blob = (name, checksum) => ({
+            schema: 'data/schema/file', data: {}, checksumArray: [`sha256/${checksum}`],
+            locations: [{ url: `stored://home/Docs/${name}` }], metadata: { filename: name },
+        });
+        const [a, b] = await db.putMany([blob('a.txt', 'batch-a'), blob('b.txt', 'batch-b')]);
+        const before = { a: await db.get(a), b: await db.get(b) };
+        seen = [];
+        await new Promise((resolve) => setTimeout(resolve, 5));
+
+        await db.putMany([
+            { id: a, ...blob('a.txt', 'batch-a'), locations: [{ url: 'stored://home/Archive/a.txt' }] },
+            { id: b, ...blob('b.txt', 'batch-b-edited') },
+        ]);
+
+        const moved = only('document.moved.batch');
+        expect(moved.length).toBe(1);
+        expect(moved[0].reason).toBe('moved');
+        expect(moved[0].payload.ids).toEqual([a]);
+        expect(moved[0].payload.moves).toEqual([{ id: a, from: ['stored://home/Docs/a.txt'], to: ['stored://home/Archive/a.txt'] }]);
+        const updated = only('document.updated.batch');
+        expect(updated.length).toBe(1);
+        expect(updated[0].payload.ids).toEqual([b]);
+        expect(only('document.updated').every((e) => !e.payload.ids || !e.payload.ids.includes(a))).toBe(true);
+        const after = { a: await db.get(a), b: await db.get(b) };
+        expect(after.a.updatedAt).toBe(before.a.updatedAt);
+        expect(after.a.version).toBe(before.a.version + 1);
+        expect(after.b.updatedAt).not.toBe(before.b.updatedAt);
+    });
+
     test('put() over an existing id: reason content, document carried', async () => {
         const id = await db.put(note('Edit me', 'v1'), { context: { path: '/inbox' } });
         seen = [];

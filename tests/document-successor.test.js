@@ -119,7 +119,7 @@ describe('Atomic document succession', () => {
             const inject = jest.spyOn(...method).mockImplementation((...args) => {
                 const fail = stage === 'relation' ? args[1] === 'derived-from'
                     : stage === 'predecessor' ? args[0] === from
-                        : stage === 'untick' ? args[1] === from && args[0].some(key => key.startsWith('vfs/')) : args[0].includes('tag/draft');
+                        : stage === 'untick' ? [].concat(args[1]).includes(from) && args[0].some(key => key.startsWith('vfs/')) : args[0].includes('tag/draft');
                 const result = original(...args);
                 if (stage === 'relation') {
                     if (fail) {throw new Error('injected succession failure');}

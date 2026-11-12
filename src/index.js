@@ -905,6 +905,16 @@ class SynapsD extends EventEmitter {
         return this.#writes.withWriteLock(() => this.#writer.putMany(documents, spec));
     }
 
+    /**
+     * Run several writes as one transaction: `await db.batch(async () => {
+     * await db.put(a); await db.put(b); })`. One commit, events after it,
+     * everything rolled back if the callback throws.
+     */
+    async batch(action) {
+        if (typeof action !== 'function') { throw new Error('batch requires a function'); }
+        return this.#writes.batch(action);
+    }
+
     /** Append parsed documents to the Lance FTS table (same payload as putMany phase 3). */
     async indexDocumentsInLance(documents) {
         if (documents?.length) { this.#searchQueue.upsertText(documents); }

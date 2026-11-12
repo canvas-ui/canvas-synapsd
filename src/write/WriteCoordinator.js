@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
 import debugInstance from 'debug';
 import { EVENTS, createEvent } from '../utils/events.js';
-import { normalizeBitmapKeys } from '../indexes/bitmaps/lib/keys.js';
+import { normalizeBitmapKey, normalizeBitmapKeys } from '../indexes/bitmaps/lib/keys.js';
 const debug = debugInstance('canvas:synapsd');
 
 // Every public write queues on ONE lock, so a quick write (a paste = linkMany)
@@ -71,7 +71,25 @@ export default class WriteCoordinator {
     // Public document mutations queue before reads, ID allocation, or writes.
     async withWriteLock(action) {
         if (!this.#accepting) { throw new Error('Database is shutting down or closed'); }
+        // Inside batch() the lock is already held by the enclosing operation.
+        if (this.#writeContext.getStore()?.batch) { return action(); }
         return this.#enqueue(action);
+    }
+
+    /**
+     * Run `action` under one write lock and one transaction. Public writes it
+     * awaits join that transaction, so N puts are one commit; their events and
+     * search work are published after it, in order. If `action` throws, every
+     * write it made is rolled back. Writes started by event listeners run
+     * afterwards as operations of their own.
+     */
+    async batch(action) {
+        if (!this.#accepting) { throw new Error('Database is shutting down or closed'); }
+        if (this.#writeContext.getStore()?.batch) { return action(); }
+        return this.#enqueue(() => {
+            this.#writeContext.getStore().batch = true;
+            return this.withDeferredMembership(action);
+        });
     }
 
     closeAndDrain(action) {
@@ -189,6 +207,7 @@ export default class WriteCoordinator {
                 throw error;
             } finally {
                 context.active = false;
+                context.batch = false;
             }
             const events = context.events;
             if (!atomicMemberships) { await this.flushMembershipBuffer(context.memberships); }
@@ -198,22 +217,52 @@ export default class WriteCoordinator {
         return this.#writeContext.getStore()?.locked ? transact() : this.withWriteLock(transact);
     }
 
+    // Each bitmap is loaded and saved once per flush, however many documents
+    // touched it: a batch of N writes into one folder is one save of that
+    // folder's bitmap, not N. Membership is a set, so per (key, document) only
+    // the last buffered op matters.
     async flushMembershipBuffer(buffer, { strict = false } = {}) {
-        const changes = [];
+        const final = new Map();
         for (const { op, docId, keys } of buffer) {
-            try {
-                const affected = op === 'tick'
-                    ? await this.#bitmapIndex.tickMany(keys, docId)
-                    : await this.#bitmapIndex.untickMany(keys, docId);
-                if (affected && affected.length) { changes.push({ docId, op, keys: affected }); }
-            } catch (error) {
-                if (strict) { throw error; }
-                // Committed doc may now lack/keep a bitmap membership it should
-                // not — recoverable by reindexing from the synapse reverse index.
-                debug(`Post-commit bitmap ${op} failed for doc ${docId}: ${error.message}`);
+            const ids = Array.isArray(docId) ? docId : [docId];
+            for (const key of Array.isArray(keys) ? keys : [keys]) {
+                const normalized = normalizeBitmapKey(key);
+                if (!final.has(normalized)) { final.set(normalized, new Map()); }
+                const ops = final.get(normalized);
+                for (const id of ids) { ops.delete(id); ops.set(id, op); }
             }
         }
-        this.emitMembershipChanged(changes);
+        const changes = new Map();
+        const changed = (op, id, key) => {
+            const slot = `${op}:${id}`;
+            if (!changes.has(slot)) { changes.set(slot, { docId: id, op, keys: [] }); }
+            changes.get(slot).keys.push(key);
+        };
+        for (const [key, ops] of final) {
+            const ticks = [];
+            const unticks = [];
+            for (const [id, op] of ops) { (op === 'tick' ? ticks : unticks).push(id); }
+            try {
+                if (ticks.length) {
+                    const affected = await this.#bitmapIndex.tickMany([key], ticks);
+                    if (affected?.length) { for (const id of ticks) { changed('tick', id, key); } }
+                }
+                if (unticks.length) {
+                    const bitmap = await this.#bitmapIndex.getBitmap(key, false);
+                    const present = bitmap ? unticks.filter(id => bitmap.has(Number(id))) : [];
+                    if (present.length) {
+                        const affected = await this.#bitmapIndex.untickMany([key], present);
+                        if (affected?.length) { for (const id of present) { changed('untick', id, key); } }
+                    }
+                }
+            } catch (error) {
+                if (strict) { throw error; }
+                // Committed docs may now lack/keep a bitmap membership they should
+                // not — recoverable by reindexing from the synapse reverse index.
+                debug(`Post-commit bitmap flush failed for key ${key}: ${error.message}`);
+            }
+        }
+        this.emitMembershipChanged([...changes.values()]);
     }
 
     /** Buffer a bitmap membership op if a deferred-membership tx is active, else apply now. */
