@@ -29,6 +29,7 @@ const EVENTS = Object.freeze({
     //   'membership'  only its tree placement changed       (updated/linked/
     //                                                        removed/unlinked)
     //   'deleted'     it was removed from the index         (deleted)
+    //   'moved'       only its location URLs changed        (moved)
     //
     // Two things follow from this that consumers get wrong otherwise:
     //
@@ -52,6 +53,11 @@ const EVENTS = Object.freeze({
     DOCUMENT_UPDATED:  'document.updated',
     DOCUMENT_REMOVED:  'document.removed',
     DOCUMENT_DELETED:  'document.deleted',
+    // A rename or move of the underlying file: the location URLs changed and
+    // nothing else did. Carries the document plus `from` / `to`, the URLs it
+    // left and the URLs it gained. `updatedAt` is not touched, as a moved file
+    // keeps its mtime, and no document.updated is emitted.
+    DOCUMENT_MOVED:    'document.moved',
     // Membership changes as first-class events. linked/unlinked carry the full
     // document so automation (workspace hooks/rules) can match on content.
     //
@@ -225,7 +231,7 @@ function createTreeEvent(event, tree, detail = {}) {
 
 // The closed `reason` vocabulary, exported so consumers (and the contract
 // test) validate against the same list the emitter uses.
-const DOCUMENT_EVENT_REASONS = Object.freeze(['created', 'content', 'membership', 'deleted']);
+const DOCUMENT_EVENT_REASONS = Object.freeze(['created', 'content', 'membership', 'deleted', 'moved']);
 
 /**
  * Tree paths named by a context/directory selector, as a flat array.

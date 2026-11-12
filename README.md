@@ -1498,7 +1498,7 @@ Event names live in the frozen `EVENTS` map. Rename a constant there to rename t
 
 **Lifecycle**: `started`, `beforeShutdown`, `shutdown`
 
-**Document CRUD**: `document.inserted`, `document.updated`, `document.removed`, `document.deleted`
+**Document CRUD**: `document.inserted`, `document.updated`, `document.moved`, `document.removed`, `document.deleted`
 
 **Batch variants** - one event per bulk op, so a 1000-doc insert does not fan out into 1000 socket emits: `document.inserted.batch` (`{ ids, count, context, directory }`), `document.updated.batch`, `document.removed.batch`, `document.deleted.batch`. Insert/update batches *also* emit the singular event once with `{ ids, batch: true }`. Batch-aware consumers should match on the `.batch` names.
 
@@ -1512,8 +1512,13 @@ Every `document.*` event carries a `reason` from a closed set (exported as `DOCU
 | `content` | `document.updated[.batch]`: the document itself changed | yes (singular) |
 | `membership` | `document.linked`/`unlinked`, and the deprecated membership forms | first-class events only |
 | `deleted` | `document.deleted[.batch]` | no |
+| `moved` | `document.moved`: only the location URLs changed | yes |
 
 `document.updated` fires for both `content` and `membership`, and only the content form carries the document. `batch` is independent of `reason`: it describes the payload shape (`ids` vs a document).
+
+### Moves
+
+An update that changes a document's location URLs and nothing else (same bytes, schema, data, features, relations, timelines, comment and extracted text) is a move. It emits `document.moved` with the document plus `from` and `to`, the URLs it left and gained, and no `document.updated`. `updatedAt` stays as it was, the way a file moved on disk keeps its mtime; the row version still increases. The `crud:updated` timeline, the checksum index and the embedding ledgers are not touched. The FTS row is rewritten only when the text of the schema's `ftsSearchFields` changed, which for files includes the location URLs.
 
 ### Membership events
 

@@ -7,10 +7,16 @@ import { parseBitmapArray } from '../utils/parsing.js';
 import { isDocumentInstance } from '../schemas/SchemaRegistry.js';
 import { validateDocumentRelations } from '../documents/derivation.js';
 import { mergeDedupePreservedFields, mergeDocumentLocations } from '../documents/deduplication.js';
-import { snapshotDocument } from '../documents/snapshot.js';
+import { snapshotDocument, relocation } from '../documents/snapshot.js';
 import { isDocumentOperationOptions, normalizeDocumentOperationSpec, normalizeProvenance, documentNotFound } from './options.js';
 const debug = debugInstance('canvas:synapsd');
 const INTERNAL_BITMAP_ID_MAX = 100000;
+// The text a document contributes to full-text search, from its schema's
+// declared search fields.
+const searchText = (document) => {
+    const fields = typeof document?.generateFtsData === 'function' ? document.generateFtsData() : null;
+    return Array.isArray(fields) ? fields.join('\n') : '';
+};
 
 export default class DocumentWriter {
     #documents;
@@ -391,9 +397,18 @@ export default class DocumentWriter {
 
         const storedDocument = await this.#getById(docId);
         if (!storedDocument) { throw new Error(`Document with ID "${docId}" not found`); }
+        // Captured before the update mutates the stored row in place.
+        const dataBefore = storedDocument.data;
+        const searchTextBefore = searchText(storedDocument);
         const { parsed: updatedDocument, previous } = this.#prepareUpdate(storedDocument, updateData, { parseSchema: true });
         validateDocumentRelations(updatedDocument);
         updatedDocument.validate();
+        const dataChanged = dataBefore !== updatedDocument.data && JSON.stringify(dataBefore) !== JSON.stringify(updatedDocument.data);
+        // A rename or move of the file behind the document: only its location
+        // URLs changed. Like a file moved on disk it keeps its modification
+        // time, and it is announced as document.moved, not as an update.
+        const moved = dataChanged || featureBitmaps.length ? null : relocation(previous, updatedDocument);
+        if (moved && updateData?.updatedAt === undefined && previous.updatedAt) { updatedDocument.updatedAt = previous.updatedAt; }
 
         // Bitmaps follow the document's features — union the updated document's
         // own array with any caller-supplied keys.
@@ -409,16 +424,26 @@ export default class DocumentWriter {
             await this.#commitChanges([change]);
 
             if (emitEvent) {
-                this.#writes.emit(EVENTS.DOCUMENT_UPDATED, createEvent(EVENTS.DOCUMENT_UPDATED, { id: updatedDocument.id, document: updatedDocument, reason: 'content', ...(provenance || {}) }));
+                const event = moved ? EVENTS.DOCUMENT_MOVED : EVENTS.DOCUMENT_UPDATED;
+                this.#writes.emit(event, createEvent(event, {
+                    id: updatedDocument.id, document: updatedDocument,
+                    ...(moved ? { reason: 'moved', from: moved.from, to: moved.to } : { reason: 'content' }),
+                    ...(provenance || {}),
+                }));
             }
 
-            // FTS row: queued (write-behind), see SearchWriteQueue.
-            this.#writes.afterCommit(() => this.#searchQueue.upsertText([parseInitializeDocument(updatedDocument)]));
+            // FTS row: queued (write-behind), see SearchWriteQueue. Only the
+            // schema's declared search fields decide whether it is rewritten.
+            if (searchText(updatedDocument) !== searchTextBefore) {
+                this.#writes.afterCommit(() => this.#searchQueue.upsertText([parseInitializeDocument(updatedDocument)]));
+            }
             // Content changed → the doc must be re-embedded. The external embedd
             // service reacts to DOCUMENT_UPDATED; here we drop it from the seen
             // ledger so a reconcile re-embeds it even if the live event is missed.
-            for (const space of this.#vectors.openedNames()) {
-                try { await this.#bitmapIndex.untick(this.#vectors.seenKey(space), Number(updatedDocument.id)); } catch (_) { }
+            if (change.searchChanged || dataChanged) {
+                for (const space of this.#vectors.openedNames()) {
+                    try { await this.#bitmapIndex.untick(this.#vectors.seenKey(space), Number(updatedDocument.id)); } catch (_) { }
+                }
             }
 
             return updatedDocument.id;
@@ -596,13 +621,16 @@ export default class DocumentWriter {
                 minted.set(id, after.version);
                 await this.#documents.put(id, after);
                 if (!batchTick) { await this.#bitmapIndex.tick(this.#getAllBitmap().key, id); }
-                const drop = change.replaceChecksums ? before.checksums : change.staleChecksums;
-                if (drop.length) { await this.#checksumIndex.deleteArray(drop); }
-                await this.#checksumIndex.insertArray(after.checksumArray, id);
+                const sameChecksums = before && !change.staleChecksums.length && before.checksums.length === after.checksumArray.length;
+                if (!sameChecksums) {
+                    const drop = change.replaceChecksums ? before.checksums : change.staleChecksums;
+                    if (drop.length) { await this.#checksumIndex.deleteArray(drop); }
+                    await this.#checksumIndex.insertArray(after.checksumArray, id);
+                }
                 if (operation === 'insert') {
                     await this.#getTimeline().insert('crud:created', id, after.createdAt || new Date());
                 }
-                if (after.updatedAt) { await this.#getTimeline().insert('crud:updated', id, after.updatedAt); }
+                if (after.updatedAt && after.updatedAt !== before?.updatedAt) { await this.#getTimeline().insert('crud:updated', id, after.updatedAt); }
                 await this.#derived.applyChange(change);
             }
         });

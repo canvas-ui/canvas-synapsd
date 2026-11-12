@@ -120,6 +120,70 @@ describe('document event payload contract', () => {
         expect((await db.get(second)).data.title).toBe('Followup');
     });
 
+    // ── A move is not an update ─────────────────────────────────────────────
+
+    const file = (locations, filename) => ({
+        schema: 'data/schema/file', data: {}, checksumArray: ['sha256/moved-file'], locations, metadata: { filename },
+    });
+
+    test('put() that only changes location URLs: document.moved, same updatedAt, new version', async () => {
+        const id = await db.put(file([{ url: 'stored://home/Docs/a.txt' }], 'a.txt'));
+        const before = await db.get(id);
+        seen = [];
+        await new Promise((resolve) => setTimeout(resolve, 5));
+
+        await db.put({ id, ...file([{ url: 'stored://home/Archive/Docs/a.txt' }], 'a.txt') });
+
+        expect(only('document.updated')).toEqual([]);
+        const moved = only('document.moved');
+        expect(moved.length).toBe(1);
+        expect(moved[0].reason).toBe('moved');
+        expect(moved[0].hasDocument).toBe(true);
+        expect(moved[0].payload.from).toEqual(['stored://home/Docs/a.txt']);
+        expect(moved[0].payload.to).toEqual(['stored://home/Archive/Docs/a.txt']);
+        const after = await db.get(id);
+        expect(after.updatedAt).toBe(before.updatedAt);
+        expect(after.version).toBe(before.version + 1);
+        expect(after.locations.map((l) => l.url)).toEqual(['stored://home/Archive/Docs/a.txt']);
+    });
+
+    test('a rename that also changes the filename is still a move', async () => {
+        const id = await db.put(file([{ url: 'stored://home/Docs/a.txt' }], 'a.txt'));
+        const before = await db.get(id);
+        seen = [];
+
+        await db.put({ id, ...file([{ url: 'stored://home/Docs/b.txt' }], 'b.txt') });
+
+        expect(only('document.moved').length).toBe(1);
+        expect(only('document.updated')).toEqual([]);
+        const after = await db.get(id);
+        expect(after.updatedAt).toBe(before.updatedAt);
+        expect(after.metadata.filename).toBe('b.txt');
+    });
+
+    test('new bytes at a new location are an update, not a move', async () => {
+        const id = await db.put(file([{ url: 'stored://home/Docs/a.txt' }], 'a.txt'));
+        const before = await db.get(id);
+        seen = [];
+        await new Promise((resolve) => setTimeout(resolve, 5));
+
+        await db.put({ id, ...file([{ url: 'stored://home/Docs/b.txt' }], 'b.txt'), checksumArray: ['sha256/other-bytes'] });
+
+        expect(only('document.moved')).toEqual([]);
+        expect(only('document.updated').filter((e) => e.reason === 'content').length).toBe(1);
+        expect((await db.get(id)).updatedAt).not.toBe(before.updatedAt);
+    });
+
+    test('a tag added along with a new location is an update', async () => {
+        const id = await db.put(file([{ url: 'stored://home/Docs/a.txt' }], 'a.txt'));
+        seen = [];
+
+        await db.put({ id, ...file([{ url: 'stored://home/Docs/b.txt' }], 'b.txt'), features: ['tag/urgent'] });
+
+        expect(only('document.moved')).toEqual([]);
+        expect(only('document.updated').filter((e) => e.reason === 'content').length).toBe(1);
+    });
+
     test('put() over an existing id: reason content, document carried', async () => {
         const id = await db.put(note('Edit me', 'v1'), { context: { path: '/inbox' } });
         seen = [];
