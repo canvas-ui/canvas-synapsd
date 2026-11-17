@@ -7,6 +7,7 @@
   "files": [
     "src",
     "models",
+    "scripts/diagnose-database.mjs",
     "LICENSE",
     "NOTICE",
     "COMMERCIAL.md",
