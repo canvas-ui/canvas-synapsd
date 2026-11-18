@@ -181,6 +181,34 @@ class ContextTree extends EventEmitter {
         return findPath(this.root, '');
     }
 
+    /**
+     * Paths whose every layer is in `layerIds`: the paths a document holding
+     * exactly those layers is filed under. A layer shared by several paths
+     * (`2026` under `/Fotky` and `/Cestovanie`) only counts where the rest of
+     * the path is held too. Layer ids compare case-insensitively because
+     * bitmap keys are stored normalized.
+     *
+     * @param {Iterable<string>} layerIds
+     * @returns {Array<string>} paths in tree order, ancestors before descendants
+     */
+    pathsCoveredByLayers(layerIds) {
+        if (!this.#initialized) { throw new Error('ContextTree not initialized'); }
+        const held = new Set(Array.from(layerIds ?? [], (id) => String(id).toLowerCase()));
+        const paths = [];
+        if (this.rootLayer?.id && held.has(String(this.rootLayer.id).toLowerCase())) { paths.push('/'); }
+
+        const descend = (node, parentPath) => {
+            for (const child of node.getSortedChildren()) {
+                if (!held.has(String(child.id).toLowerCase())) { continue; }
+                const path = `${parentPath}/${child.payload.name}`;
+                paths.push(path);
+                descend(child, path);
+            }
+        };
+        descend(this.root, '');
+        return paths;
+    }
+
     getLayerForPath(path) {
         const normalizedPath = this.#normalizePath(path);
         debug(`Getting layer for normalized path "${normalizedPath}"`);

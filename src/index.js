@@ -1342,21 +1342,37 @@ class SynapsD extends EventEmitter {
 
         const collection = this.#trees.contextCollection(tree.id);
         const prefix = BitmapIndex.normalizeKey(collection.prefix);
-        const paths = [];
+        const layerIds = layerKeys
+            .filter((layerKey) => layerKey.startsWith(prefix))
+            .map((layerKey) => layerKey.slice(prefix.length));
+        return tree.pathsCoveredByLayers(layerIds);
+    }
 
-        for (const layerKey of layerKeys) {
-            if (!layerKey.startsWith(prefix)) {
-                continue;
-            }
-            const layerId = layerKey.slice(prefix.length);
-            const path = tree.getPathByLayerId(layerId)
-                ?? tree.getPathByLayerId(layerId.toUpperCase());
-            if (path) {
-                paths.push(path);
-            }
+    /**
+     * Ids of the layers a document holds in a context tree, root excluded.
+     * This is the document's whole membership in that tree: pass it to
+     * `linkContextLayers` to give another document the same membership or to
+     * put this one back.
+     */
+    async listDocumentContextLayers(id, treeNameOrId) {
+        if (!id) { throw new Error('Document ID required'); }
+        const tree = this.getTree(treeNameOrId);
+        if (!tree) { throw new Error(`Tree not found: ${treeNameOrId}`); }
+        if (tree.type !== 'context') { throw new Error(`Tree "${tree.name}" is not a context tree`); }
+
+        const prefix = BitmapIndex.normalizeKey(this.#trees.contextCollection(tree.id).prefix);
+        const ids = [];
+        for (const key of await this.#synapses.listSynapses(id)) {
+            if (!key.startsWith(prefix)) { continue; }
+            const raw = key.slice(prefix.length);
+            const layer = tree.getLayerById(raw) ?? tree.getLayerById(raw.toUpperCase());
+            if (layer && layer.id !== tree.rootLayer?.id) { ids.push(layer.id); }
         }
+        return ids;
+    }
 
-        return Array.from(new Set(paths));
+    async linkContextLayers(id, treeNameOrId, layerIds, options = {}) {
+        return this.#writes.withWriteLock(() => this.#membershipWriter.linkContextLayers(id, treeNameOrId, layerIds, options));
     }
 
     /**

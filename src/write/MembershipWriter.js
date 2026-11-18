@@ -232,6 +232,54 @@ export default class MembershipWriter {
         return numericId;
     }
 
+    /**
+     * Tick context layers on a document by layer id. A context tree stores
+     * which layers a document holds, not where it was filed, so copying or
+     * restoring a document's context membership means ticking the same layers;
+     * going through paths would tick whatever else shares a folder name.
+     * Layers that no longer exist in the tree are skipped. Events report the
+     * deepest paths the given layers cover.
+     *
+     * @returns {Array<string>} ids of the layers that were ticked
+     */
+    async linkContextLayers(docId, treeNameOrId, layerIds, { emitEvent = true } = {}) {
+        const numericId = typeof docId === 'string' ? parseInt(docId, 10) : docId;
+        if (!Number.isInteger(numericId)) { throw new Error('Document identifier must be a numeric ID'); }
+        const { tree, collection } = this.#trees.resolveSelection('context', { tree: treeNameOrId }, '/');
+
+        const storedDocument = await this.#getById(numericId);
+        if (!storedDocument) { throw new Error(`Document with ID "${numericId}" not found`); }
+
+        const ticked = [];
+        for (const layerId of layerIds ?? []) {
+            const layer = tree.getLayerById(layerId) ?? tree.getLayerById(String(layerId).toUpperCase());
+            if (layer && layer.id !== tree.rootLayer?.id && !ticked.includes(layer.id)) { ticked.push(layer.id); }
+        }
+        if (ticked.length === 0) { return ticked; }
+
+        const keys = [tree.rootLayer?.id, ...ticked].filter(Boolean).map((id) => collection.makeKey(id));
+        await this.#writes.withDeferredMembership(() => this.#writes.addDocumentMembership(numericId, keys));
+
+        if (emitEvent) {
+            const covered = tree.pathsCoveredByLayers(ticked);
+            const leaves = covered.filter((p) => !covered.some((q) => q.startsWith(`${p}/`)));
+            const contextSpec = { tree: tree.id, path: leaves };
+            this.#writes.emitTreeEvent(tree, EVENTS.TREE_DOCUMENT_INSERTED, createEvent(EVENTS.TREE_DOCUMENT_INSERTED, {
+                documentId: numericId,
+                contextSpec,
+                directorySpec: null,
+                source: 'tree',
+            }));
+            this.#writes.emit(EVENTS.DOCUMENT_LINKED, createEvent(EVENTS.DOCUMENT_LINKED, {
+                id: numericId,
+                document: storedDocument,
+                ...membershipDelta({ context: contextSpec, directory: null, features: [] }),
+                reason: 'membership',
+            }));
+        }
+        return ticked;
+    }
+
     async unlink(idOrIds, spec = {}) {
         if (Array.isArray(idOrIds)) {
             return await this.unlinkMany(idOrIds, spec);
