@@ -280,6 +280,46 @@ export default class MembershipWriter {
         return ticked;
     }
 
+    /**
+     * Untick context layers on a document by layer id: the inverse of
+     * `linkContextLayers`. The root layer is never removed, and layers that no
+     * longer exist in the tree are skipped. Events report the deepest paths
+     * the given layers covered.
+     *
+     * @returns {Array<string>} ids of the layers that were unticked
+     */
+    async unlinkContextLayers(docId, treeNameOrId, layerIds, { emitEvent = true } = {}) {
+        const numericId = typeof docId === 'string' ? parseInt(docId, 10) : docId;
+        if (!Number.isInteger(numericId)) { throw new Error('Document identifier must be a numeric ID'); }
+        const { tree, collection } = this.#trees.resolveSelection('context', { tree: treeNameOrId }, '/');
+
+        const storedDocument = await this.#getById(numericId);
+        if (!storedDocument) { throw new Error(`Document with ID "${numericId}" not found`); }
+
+        const unticked = [];
+        for (const layerId of layerIds ?? []) {
+            const layer = tree.getLayerById(layerId) ?? tree.getLayerById(String(layerId).toUpperCase());
+            if (layer && layer.id !== tree.rootLayer?.id && !unticked.includes(layer.id)) { unticked.push(layer.id); }
+        }
+        if (unticked.length === 0) { return unticked; }
+
+        const keys = unticked.map((id) => collection.makeKey(id));
+        await this.#writes.withDeferredMembership(() => this.#writes.removeDocumentMembership(numericId, keys));
+
+        if (emitEvent) {
+            const covered = tree.pathsCoveredByLayers(unticked);
+            const leaves = covered.filter((p) => !covered.some((q) => q.startsWith(`${p}/`)));
+            this.#writes.emit(EVENTS.DOCUMENT_UNLINKED, createEvent(EVENTS.DOCUMENT_UNLINKED, {
+                id: numericId,
+                document: storedDocument,
+                ...membershipDelta({ context: leaves, directory: [], features: [] }),
+                recursive: true,
+                reason: 'membership',
+            }));
+        }
+        return unticked;
+    }
+
     async unlink(idOrIds, spec = {}) {
         if (Array.isArray(idOrIds)) {
             return await this.unlinkMany(idOrIds, spec);

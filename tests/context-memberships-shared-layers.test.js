@@ -70,6 +70,23 @@ describe('context tree memberships with shared layers', () => {
         expect(linked).toEqual([['/photos/2026/11']]);
     });
 
+    test('removing membership by layer id leaves the document at the root only', async () => {
+        const id = await db.put(note('photo'), at('/photos/2026/11'));
+        await db.link(id, { ...at('/travel/2026'), features: [] });
+        const layers = await db.listDocumentContextLayers(id, tree.id);
+
+        const unlinked = [];
+        db.on('document.unlinked', (event) => unlinked.push(event.changed.context));
+        expect((await db.unlinkContextLayers(id, tree.id, layers)).sort()).toEqual([...layers].sort());
+
+        expect(await db.listDocumentContextLayers(id, tree.id)).toEqual([]);
+        expect(await db.listDocumentTreeMemberships(id, tree.id)).toEqual(['/']);
+        expect(unlinked).toEqual([['/photos/2026/11', '/travel/2026']]);
+
+        await db.linkContextLayers(id, tree.id, layers);
+        expect((await db.list({ ...at('/travel/2026'), idsOnly: true })).map(Number)).toContain(Number(id));
+    });
+
     test('listing layers is refused on a directory tree', async () => {
         const id = await db.put(note('photo'), at('/photos/2026/11'));
         await db.createTree('files', 'directory', { isDefault: false });

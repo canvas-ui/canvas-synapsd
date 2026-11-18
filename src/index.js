@@ -1352,7 +1352,7 @@ class SynapsD extends EventEmitter {
      * Ids of the layers a document holds in a context tree, root excluded.
      * This is the document's whole membership in that tree: pass it to
      * `linkContextLayers` to give another document the same membership or to
-     * put this one back.
+     * put this one back, and to `unlinkContextLayers` to remove it.
      */
     async listDocumentContextLayers(id, treeNameOrId) {
         if (!id) { throw new Error('Document ID required'); }
@@ -1373,6 +1373,10 @@ class SynapsD extends EventEmitter {
 
     async linkContextLayers(id, treeNameOrId, layerIds, options = {}) {
         return this.#writes.withWriteLock(() => this.#membershipWriter.linkContextLayers(id, treeNameOrId, layerIds, options));
+    }
+
+    async unlinkContextLayers(id, treeNameOrId, layerIds, options = {}) {
+        return this.#writes.withWriteLock(() => this.#membershipWriter.unlinkContextLayers(id, treeNameOrId, layerIds, options));
     }
 
     /**
